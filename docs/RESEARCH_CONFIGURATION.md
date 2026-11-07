@@ -90,20 +90,45 @@ saving a configuration does not recover the clock or reset consumption.
 无法核对未闭合区间，这些操作仍可使用。新节点应用配置、实际预算修订和执行仍须通过
 原有时钟与预算校验；保存配置不会恢复时钟或重置消费。
 
-Current instances use protocol 29. H selects a mechanism with the 1-based
-`search_plan.focus.index` into the same payload's `commitments`, on initial and
-revised plans. Null is only a multi-mechanism shallow `screen`. Reusing a mechanism
-requires its canonical `existing_ref` in that payload; omitted mechanisms retain
-breadth. A/W use task-provided exact stable references such as `h001.m1` rather
-than display labels. See the [CLI examples](ROOTLESS_CLI.zh-CN.md#机制编号与精确引用).
-Repair advice reports the remaining repair allowance and prior consumed usage; it
-does not authorize replaying old experiments. New prompts use the explicit remaining
-and consumed-usage field names. Earlier protocol instances are unsupported, without compatibility reading or migration. Never
-change an old instance's settings version to bypass the contract.
+Current instances use protocol 33. An initial H `experiment` without retained,
+authorized nonwaived focus requires a top-level `search_plan` and explicit focus.
+An explicit `search_plan.focus.index` selects the same payload's `commitments` by
+1-based index; `index: null` is only a multi-mechanism shallow `screen`. Omitted or
+null focus preserves an authorized nonwaived focus and allocation. A/W use exact
+stable task references such as `h001.m1`, rather than display labels. H/A worker
+consultations retain the requesting W's selected inputs and materials regardless
+of the consultant's `implementation_selection`, without changing authored raw
+responses. The [architecture](ARCHITECTURE.md#ownership-and-flow) owns these handoff
+rules; see the [CLI examples](ROOTLESS_CLI.zh-CN.md#机制编号与精确引用).
+Repair advice names the exact role, path and expected shape, and distinguishes
+remaining allowance from consumed usage. It does not authorize experiment replay.
+Earlier protocols, including 32, are rejected before scientific interpretation or
+writes; no compatibility reader, migration or settings-version edit is supported.
 
-当前实例采用协议 29；首次 H 与每次修订都以同次 commitments 的 1 起始编号选机制，
-后续 A/W 使用任务给出的稳定精确引用。null screen 保留多机制浅筛，遗漏机制不删除广度。
-补正剩余额度不代表重跑旧实验，新提示显式区分剩余量和既有消费；更早协议实例拒绝读取，不迁移、不手改旧实例版本。
+当前实例采用协议 33。H 的 `experiment` 在没有已保留、获授权且未豁免的 focus 时，
+必须提供顶层 `search_plan` 及显式 focus；显式选择使用同次 commitments 的 1 起始编号，
+`index:null` 只允许多机制浅筛 screen。遗漏或 null focus 保留原获授权 focus 及分配。
+后续 A/W 使用任务给出的稳定精确引用。H/A 的 W 咨询忽略作者 implementation_selection，
+保留请求 W 的所选输入和材料，作者原始回答不改写；完整规则由[架构](ARCHITECTURE.zh-CN.md#责任与数据流)维护。
+补填诊断指出准确角色、路径和预期形状，并区分剩余额度及既有消费，不授权重跑旧实验。
+包括 32 在内的旧协议在解释科学原件或写入前拒绝，不兼容读取、不迁移、不手改旧实例版本。
+
+Ordinary A assesses a concrete high-level question and cannot change W/H focus,
+mechanism dispositions or allocations through planning fields. Further-work routes
+require `decision_request` with a concrete question and change criterion; no full
+portfolio or final-coverage inventory is required. Mechanical checks remain outside
+A's routine work. A frozen macro-supervision request additionally permits
+`supervision_result=continue_existing` with `continue_w` and no new evidence request.
+Explicit W `exploration_rounds`, exact-original counting and A coverage are maintained
+by the common ledger/controller, independently of the agent backend. The architecture
+owns the reporting fields, trigger defaults and purpose-specific contract.
+
+普通 A 只评估具体的高层问题，不通过规划字段改变 W/H focus、机制处置或分配。
+继续研究须给出具体 decision_request 及改变判断的条件，不要求全盘组合或最终覆盖清单；
+常规机械核对不属于 A 的工作。带冻结宏观监督请求的 A 可用
+`supervision_result=continue_existing` 与 `continue_w` 放行原工作，不编造新缺口。
+W 的 `exploration_rounds`、准确原件计数和 A 覆盖边界由公共账本/控制层维护，与 Agent
+后端无关；报告字段、默认触发策略和按目的区分的统一合同由上述架构维护。
 
 ## Declaration fields / 声明字段
 
@@ -122,32 +147,39 @@ argv elements are literal native arguments, so use absolute paths for their inpu
 | top level / 顶层 | `version = 1` (default / 默认 1) |
 | `research` | Required path / 必填路径: `root`, `public_root`; exactly one / 二选一: `objective` (original path / 原件路径), `objective_text` (inline original text / 任务原文); optional / 可选: `user_updates` (path array / 路径数组), `source_restrictions` (existing declaration objects; each `source` is a path / 原声明数组，`source` 为路径) |
 | `project` | Optional exact Git worktree `base_root`; required nonempty relative directory array `editable`; optional arrays `scratch`, `outputs` (default empty). See [declared projects](#declared-projects--声明工程). / 可选工程声明：准确 Git 工作树根 `base_root`、非空相对目录数组 `editable`，以及默认空数组的 `scratch`、`outputs`。 |
-| `agent` | `backend` (`codex` or `protocol`), `launcher` (argv array), `model`, `reasoning_effort`, `service_tier`, `roles`, `native` |
+| `agent` | `backend` (registered provider id; built-ins: `codex`, `protocol`), `launcher` (argv array), `model`, `reasoning_effort`, `service_tier`, `roles`, `native` |
 | `agent.roles.H`, `.W`, `.A`, `.E` | Optional `model`, `reasoning_effort`, `service_tier`; omitted roles/fields inherit the global profile / 省略项继承全局配置 |
 | `permissions` | `workspace`: `read-only`, `workspace-write` (default), or `danger-full-access`; `network`: boolean (default false); `web`: `disabled` (default), `cached`, or `live`; `subagents`: boolean (default false) |
 | `agent.native.sandbox_workspace_write` | Codex-specific / Codex 专用: `writable_roots` (path array), `network_access`, `exclude_tmpdir_env_var`, `exclude_slash_tmp`; network declarations must agree / 网络声明须一致 |
 | `agent.native.features` | Codex-specific / Codex 专用: `fast_mode` (boolean) |
-| `budget` | Required finite / 必填有限值: `max_tokens`, `max_seconds`, `max_steps`; optional / 可选: `max_output_item_bytes`, `max_output_total_bytes`, `candidate_extra_slots`, `portfolio_review_after_cycles`, `node_targets`, `role_shares`, `breadth`, `correction`, `storage` |
-| `budget.node_targets.H`, `.W`, `.A`, `.E` | Complete role targets with `max_observed_tokens` and `max_seconds`; advisory, no increase to totals / 四角色完整目标，软提示，不增加总额 |
+| `budget` | Required finite / 必填有限值: `max_tokens`, `max_seconds`, `max_steps`; optional / 可选: `candidate_extra_slots`, `portfolio_review_after_cycles`, `node_targets`, `role_shares`, `breadth`, `correction`, `storage`; legacy `max_output_item_bytes`, `max_output_total_bytes` remain accepted/frozen without file-byte enforcement / 旧字节字段仍接受并冻结，不限制文件字节 |
+| `budget.node_targets.H`, `.W`, `.A`, `.E` | Complete positive finite role targets with `max_observed_tokens` and `max_seconds`; token targets are advisory, as is W time under its context-window policy; saved legacy fragments retain their time review cadence / 四角色完整正有限目标；token 为建议，W 上下文窗口策略下时间目标也为建议，旧冻结 fragment 保留原时间复核节奏，不增加总额 |
 | `budget.breadth` | `max_w_seconds`, `max_w_observed_tokens`, `max_requested_repairs`; optional positive integer / 可选正整数 `initial_calls` |
 | `budget.correction` | `review_after`, `pause_after` (explicit optional correction policy / 显式可选补正策略) |
-| `budget.storage` | Existing storage-policy object: `version = 1`, `enabled`, and optional positive `max_scan_entries`, `max_files`, `max_file_bytes`, `max_total_bytes`, `max_instance_bytes`; disabled by default. See [managed retention limits](ROOTLESS_CLI.zh-CN.md#受管本地实验). / 既有存储策略对象，默认关闭；启用至少声明一项正整数额度，未列维度不限制。 |
+| `budget.storage` | Existing storage-policy object: `version = 1`, `enabled`, optional positive count limits `max_scan_entries`, `max_files`; disabled by default. Legacy positive `max_file_bytes`, `max_total_bytes`, `max_instance_bytes` remain accepted/frozen without byte enforcement. See [managed retention](ROOTLESS_CLI.zh-CN.md#受管本地实验). / 默认关闭的既有存储策略；启用须有明确正整数项，文件/条目数继续有效，旧字节字段只接受并冻结。 |
 | `executor` | `mode` (`local` or `external`), `config` (existing `executor`/`configuration` object), `resource_policy` (existing cumulative allowance contract) |
 | `delivery` | Existing frozen delivery-policy object; optional adapter paths `adapter.adapter`, `adapter.source_roots` and path-like `adapter.launcher_argv[0]` resolve relative to TOML / 既有交付策略对象，上述路径相对 TOML |
-| `policies` | Boolean / 布尔值: `formal_review`, `execution_authority`, `candidate_audit`, `decision_contract`; existing contract objects / 既有合同对象: `selection`, `resume`, `history_observer`; `worker_context`: `same_session` or `new_context` |
+| `policies` | Boolean / 布尔值: `formal_review`, `execution_authority`, `candidate_audit`, `decision_contract`; existing contract objects / 既有合同对象: `selection`, `resume`, `history_observer`; `worker_context`: `same_session` or `new_context`; `worker_context_windows`: integer 1 or 2 / 整数 1 或 2 |
 | `policies.resume.automatic_recovery` | Independent bounded standard-Codex recovery policy; fields and defaults below. / 独立的标准 Codex 有界自动接续策略，字段及默认值见下文。 |
 | `ui` | `port` (0–65535; default 0), `open_browser` (default false), `approval_secret_file` (host-private path reference / 宿主私有路径引用) |
 
-`budget.max_output_total_bytes` caps the aggregate collected output of each node.
-The same cap applies separately to the combined input materials handed to the next
-node; it does not accumulate output across the research lifetime. Omit it to leave
-this byte cap unset. `budget.candidate_extra_slots` caps the extras beyond the
+`budget.max_output_item_bytes` and `budget.max_output_total_bytes` retain their
+legacy configuration syntax and frozen values, without per-file or aggregate byte
+quotas on originals, input materials, arrays, artifacts, code or logs. The same
+applies to storage and provider file/total/log/result byte fields; the UI does not
+offer them as active file-size controls. Compact handoffs, declared-result documents,
+manifests, control metadata and public views remain bounded. Exact `size_bytes`,
+real truncation detection, finite IO/execution windows, file/entry counts, path
+safety and explicit permissions remain effective. `budget.candidate_extra_slots` caps the extras beyond the
 representatives in W's nomination preview, and applies only when search mechanism
 nominations are enabled. The complete retained candidate pool remains available to
 A. The default is 2 extras.
 
-`budget.max_output_total_bytes` 限制每个节点收集输出的合计体积；交给下一节点的输入材料
-集合也单独受同一上限约束，不累计整个研究的输出。省略时不设此字节限制。
+`budget.max_output_item_bytes`、`budget.max_output_total_bytes` 保留旧语法和冻结值，
+不再对原件、输入材料、数组、成果、代码或日志限制单文件或累计字节；存储和 provider 的
+file/total/log/result 字节字段同样不在 UI 作为有效文件大小控件。紧凑交接、声明结果、manifest、
+控制元数据和公共视图仍有界；准确 `size_bytes`、实际截断检测、有限 IO/执行窗口、文件/条目数、
+路径安全和明确权限继续有效。
 `budget.candidate_extra_slots` 限制 W 提名预览中代表候选之外的额外名额，仅在启用搜索
 机制提名时使用；完整保留的候选池仍可供 A 选择。默认 2 个额外名额。
 
@@ -165,6 +197,76 @@ local 实验，在原生原 home 最多执行两次仅输出补填，并启用�
 未指定节点目标时引用原总上限。
 protocol 必须显式提供 launcher 和 model，不套用 Codex 推理或服务档位默认值。
 自定义 launcher 默认由 external 路径拥有实验执行，除非另行配置。
+
+New standard single-command Codex declarations default to
+`policies.worker_context_windows = 1`; only integers 1 and 2 are accepted. This
+freezes `worker_fragment_policy.max_context_windows`. Same-session fragments keep
+one W job and allowance. Window use is one initial window plus completed
+compactions. Fresh current-window occupancy can advise preparing a checkpoint at 85% of the final allowed window; missing or stale occupancy adds no stop. When a completed compaction
+exceeds the allowed count, the next supported observable boundary seals the partial
+result and starts a new W. It does not automatically
+request A. An explicit `handoff` also starts a new W; `revise_h` and `review` request
+serial H and A consultation respectively, returning to a new W. `decision` requests
+an ordinary A assessment. Ordinary consultation grants no assessment cycle,
+main-line change, recommendation or qualification. Formal independent review
+retains its exact-subject contract and neutral inputs.
+
+`policies.worker_context` still selects `same_session` or `new_context`.
+Same-session resume preserves the count and deduplicates accepted completed
+compactions. Required `PostCompact`/`PostModelRequest` hooks supply small control
+facts through the existing native helper; native stdout carries those facts and
+bounded assistant text, without observing tool/input/output bodies or scanning
+private rollouts. Unavailable required hooks are explicitly unsupported before
+launch, rather than repeatedly starting fresh W jobs with unknown coverage. This
+describes the supported launch path, not every backend. Original-call query,
+collect and reconciliation remain available. Existing owners retain time and
+call state. Context renewal does not reset global active time, tokens,
+steps, execution consumption, permissions or unknown usage. W role/breadth time
+and cumulative-token targets remain advisory; shared and per-experiment limits
+remain binding. Direct API `worker_fragment_policy=None` still disables ordinary
+fragments. Next-new-node configuration revisions preserve already accepted jobs.
+Protocol 29, 30, 31 and 32 instances require their matching old runtime; the current runtime
+rejects them without migration or settings edits.
+
+新标准单命令 Codex 默认 `policies.worker_context_windows = 1`，仅接受整数 1 或 2，
+冻结为 `worker_fragment_policy.max_context_windows`。同 session fragment 保留同一 W
+任务和额度；窗口门禁只计一个初始窗口加已完成压缩次数。当前窗口新鲜占比可在最后允许窗口的 85% 提前提示准备 checkpoint，缺失或过期占比不新增停止条件。完成压缩后超出
+允许次数，在下一受支持的可观察边界封存部分结果并交新 W，不自动交 A。显式 `handoff` 同样交新 W；`revise_h`
+和 `review` 分别请求串行 H/A 咨询，结束后交新 W；`decision` 请求普通 A 正式阶段评估。
+咨询不消费正式 A 周期，不改变主线、推荐或资格；正式独审保持精确 subject 和中性输入。
+
+`policies.worker_context` 仍选择 `same_session` 或 `new_context`。同 session 续接保留
+窗口计数，已接受的完成压缩事件去重。必需的 `PostCompact`/`PostModelRequest` hooks 通过
+既有 native helper 提供小型控制事实；native stdout 只含这些事实和有界助手文字，不观察
+工具/输入/输出正文，不扫描私有 rollout。缺少必需 hooks 时启动前明确 unsupported，不能在
+未知覆盖下反复新建 W；该能力仅适用于受支持启动路径，不保证所有后端。时间和原调用状态
+沿用既有 owner，原调用仍可 query/collect/核对。新 W 不重置全局活动时间、token、步骤、执行消费、
+权限或未知量；W role/breadth 时间及累计 token 目标为建议，真实共享和单实验限制继续
+有效。直接 API `worker_fragment_policy=None` 仍可禁用；下一新节点配置修订保留已接受
+任务。协议 29、30、31、32 实例保留匹配旧 runtime；新版拒绝读取，不迁移、不手改版本。
+
+W may declare new mechanisms through its existing search_plan when sealing a
+result. The current W executes only the frozen catalog; a new W must freeze the
+new catalog before executing those mechanisms under the original admission rules.
+H/A consultation is optional and is not a prerequisite for W mechanism registration.
+`decision` and final judgment retain the ordinary independent A boundaries.
+
+W 可在封存时用既有 search_plan 声明新机制；当前 W 只执行其冻结目录，新机制须由新 W
+冻结新目录后按原准入执行。H/A 咨询可选，不是 W 登记机制的前置条件；`decision` 正式
+阶段评估及最终裁决仍保留独立 A 边界。
+
+Shared research navigation reuses sealed scientific originals and the accepted
+prefix. `indexes.research` links current authored understanding, competing H
+explanations, ordinary A assessments, separate consultations and existing candidate
+and work indexes. Excerpts disclose omissions; complete summary, scientific_result
+and limitations remain readable. It adds no required scientific fields, scientific
+ranking or editable ledger database. Scientific data retain the existing exact
+original reference contract, without a new hashing system.
+
+共享研究导航复用封存科学原件及 accepted prefix；`indexes.research` 链接当前作者理解、
+H 竞争解释、普通 A 评估、单列咨询与既有候选/工作目录。摘录标明遗漏，完整 summary、
+scientific_result、limitations 保持可读，不增加必填科学字段、科学排名或可改 ledger 库。
+科学数据沿用既有精确原件引用，不新增 hash 系统；候选可用不等于有科学资格。
 
 ## Scientific Python dependencies / 科学 Python 依赖
 
@@ -373,8 +475,8 @@ This uses the independent automatic permission, original session and exact respo
 outcome and evidence bindings, and shares `max_continues` with early-stop recovery.
 Required-format and conditional breadth omissions use output repair; that permission alone
 does not authorize scientific work. A repaired valid response can independently
-qualify for work continuation. Valid partial findings, explicit blocks and decision
-handoffs keep their existing route to A. Complete or inapplicable delivery adds no
+qualify for work continuation. Valid partial findings and explicit blocks keep
+their declared stage intent; `decision` requests ordinary A assessment. Complete or inapplicable delivery adds no
 recovery action. An enforced host review keeps its existing priority. Exhausting the
 automatic continue cap or the original budget records a verified partial exit rather
 than inventing completed findings or refunding consumption.
@@ -397,9 +499,9 @@ Codex home 用精确 ID 执行 `exec resume`，仍沿用原 thread 并再次到�
 已完成 W screen 返回的必需 JSON 合法，但精确 `work-evidence.json` 判定仍为 `incomplete` 时，
 可依靠独立自动许可续接原 W 完整任务；沿用原 session，绑定原返回、outcome 和证据快照，
 与提前停止共用 `max_continues`。必需格式和条件广度声明缺失走输出补填，该许可本身不授权科学续工；
-补成合法返回后可另行符合独立续工条件。有效 partial、明确障碍和 decision 交接仍沿原路交 A；
-完整或不适用的交付判定不追加恢复动作。
-强制 host review 仍优先沿原路交 A。continue 次数或原预算耗尽记录可核验的 partial 出口，
+补成合法返回后可另行符合独立续工条件。有效 partial 和明确障碍保留作者的 stage_intent；
+`decision` 交普通 A 正式阶段评估，其他交接或咨询沿其明确路线。完整或不适用的交付判定
+不追加恢复动作。宿主强制边界仍优先于科学续工，不把上下文续接变成自动 A。continue 次数或原预算耗尽记录可核验的 partial 出口，
 不虚构已完成 finding，不退还已用预算。
 
 Both counters and cumulative wait belong to the original task's attempt chain;
@@ -517,38 +619,37 @@ skip-worktree 语义。命名空间启动不逐个打开、hash 或 stat 基础�
 消费，不改写已知终态，也不阻断只读历史元数据查询。
 
 W edits explicit `project/<editable>` drafts mapped to the original base paths.
-The first draft copies only tracked editable code under the existing shared code
-limits. A uniquely selected parent run or compiled implementation supplies its
+The first draft copies only tracked editable code under the existing shared file
+and entry counts, finite deadline and path checks. A uniquely selected parent run or compiled implementation supplies its
 exact retained commit; absent a unique selection, the draft starts from frozen
 base code with that fallback reported. No latest-call or dirty-draft inference is
 used, and rebuilding an existing job preserves its current draft. A fork keeps
 selected commits and current drafts distinct and still depends on the original
 shared base. Each local project run captures all editable roots in one directory
 `code_version`, including only declared code paths; initial seed, capture and
-exports retain the existing code quotas. All editable roots share fixed limits
-of 1 MiB per file, 50 MiB total, 4,096 files and 8,192 scan entries; `[project]`
-currently offers no override. These code-capture limits do not apply to the
+exports share limits of 4,096 files and 8,192 scan entries, without a per-file or
+aggregate code-byte quota; `[project]` currently offers no count override.
+These code-capture counts do not apply to the
 read-only base contents. For a new declared project, `config-check` and `prepare`
 preflight the initial tracked editable seed with file stat metadata and entry
 counts, including editable roots and implicit parent directories, and report limit
-violations during preparation. This quota preflight reads no file contents and
+violations during preparation. This count/identity preflight reads no file contents and
 does not scan untracked/ignored contents. Initial seed retains its limit checks;
 runtime capture checks all actual editable contents, including ordinary
-untracked/ignored entries. Later additions or larger files can still prevent a
-node or call from starting.
+untracked/ignored entries. Later additions can still exceed counts; changed files,
+unsafe paths or an expired deadline can still prevent a node or call from starting.
 
 W 编辑 `project/<editable>` 草稿，并映射到基础工程原路径。初始草稿只复制追踪的 editable
-代码，全部根共享现有代码额度。唯一明确选中的父 run 或 compiled implementation 提供准确
+代码，全部根共享既有文件/条目数、有限期限及路径检查。唯一明确选中的父 run 或 compiled implementation 提供准确
 留存 commit；没有唯一选择时回到冻结基础代码并说明该回退。不按最新调用或未提交草稿
 推断来源，已有 job 重建保留当前草稿。fork 区分准确 commit 与当前草稿，并继续依赖原共享
 基础工程。每次本地 project run 将全部 editable 根聚合为一个目录 `code_version`，只含
-声明代码路径；初始 seed、采集及导出继续受现有代码额度约束。全部 editable 根共享
-固定限制：每文件 1 MiB、总计 50 MiB、4096 个文件、8192 个扫描条目；当前 `[project]`
-没有覆盖项。只读 base 内容不受这些代码采集额度限制。对新声明工程，`config-check` 和
+声明代码路径；初始 seed、采集及导出共享 4096 个文件、8192 个扫描条目，不限制代码
+单文件或累计字节；当前 `[project]` 没有数量覆盖项。只读 base 内容不受这些代码采集数量限制。对新声明工程，`config-check` 和
 `prepare` 用文件 stat 及条目计数预检初始 tracked editable seed，目录计数包含 editable
 根及隐含父目录，超额在准备时报告。预检不读取文件内容，也不扫描 untracked/ignored
 内容。首次 seed 仍检查额度；运行期采集检查全部实际 editable 内容，含 untracked/ignored
-普通条目。后续新增或变大的文件仍可能阻止节点或调用启动。
+普通条目。后续新增可能超过数量，文件变化、不安全路径或期限届满仍可能阻止节点或调用启动。
 
 There is no overlay filesystem. W can write only its declared editable, scratch
 and node-output targets in the base view; other roles see the read-only base, not
@@ -646,9 +747,21 @@ contributor identity or independent review.
 
 ## Backend contract / 后端合同
 
+Every provider implements the complete `Backend` abstract class, including preparation, native options and typed UI fields, permissions, launch/resume, basic observations, terminal evidence, recovery and authorship. Control and UI dispatch through these methods; a new backend must declare unsupported capabilities explicitly. Host time, budgets, scientific conclusions and managed execution interfaces keep their existing owners.
+
+每个 provider 实现完整 `Backend` 抽象类，包括准备、原生选项与 UI 字段定义、权限、启动／续接、基础观测、终态证据、恢复和作者证明。控制层与 UI 通过这些方法调用；新后端明确声明不支持的能力。宿主时间、预算、科学结论和受管执行接口保留既有 owner。
+
+The auxiliary read-only translation service uses the same provider boundary for capability checks, launch arguments/environment and final response acquisition. Saving a launcher preserves its invoked alias; the separate launcher binding still verifies its resolved target.
+
+辅助只读翻译也通过同一 provider 边界检查能力、构造启动参数／环境及取得最终回答。保存 launcher 保留调用入口名称；独立的 launcher 绑定仍核对解析后的准确目标。
+
+The standard Codex path obtains optional occupancy from genuine `thread/tokenUsage/updated`: latest `last.totalTokens / modelContextWindow`, bound to the current thread/turn. Compaction or failed metadata invalidates old occupancy. Completed-compaction counts and per-request token facts still use qualified small hooks. Only the public preview is bounded; the complete scientific final is streamed separately without a framework byte quota. Tool/input bodies do not enter the control observer.
+
+标准 Codex 从真实 `thread/tokenUsage/updated` 采集可选占比，即绑定当前 thread／turn 的 `last.totalTokens / modelContextWindow`；压缩或元数据故障使旧占比失效。完成压缩次数与逐请求 token 事实仍使用已核对的小型 hooks。公开预览保持紧凑，完整科学回答独立流式保存，不设框架字节配额；工具和输入正文不进入控制观测器。
+
 | Backend / 后端 | Transport and limits / 输运与限制 |
 | --- | --- |
-| `codex` | Adapts native `exec` JSON events, model profiles, explicit permissions and usage. Qualified same-session output repair and independently authorized automatic recovery use the frozen original home and policies. Complete participant scope is supported only for a standard single-agent launcher with subagents disabled. / 适配原生 exec、profile、权限和用量；原线程补填及独立授权的自动接续受原 home 与策略约束，完整参与者范围仅限标准单 Agent launcher。 |
+| `codex` | Standard launches own an app-server connection and exact thread/turn event projection; custom launchers retain their declared transport. Model profiles, permissions, original home and finite recovery remain frozen. Complete participant scope requires the qualified single-agent path with subagents disabled. / 标准启动持有 app-server 连接并投影准确 thread／turn 事件，自定义 launcher 保留所声明输运；profile、权限、原 home 与有限恢复保持冻结。完整作者范围须使用已核对的单 Agent 路径并关闭子 Agent。 |
 | `protocol` | Runs the exact supplied argv, sends one JSON request on stdin, reads JSONL events. Permissions are declarations with `enforcement = "hint_only"`; the launcher owns actual access controls. No native session resume or complete native authorship attestation; formal independent review is unavailable. / 精确 argv、stdin JSON、stdout JSONL；权限仅作提示，由 launcher 实施，不支持原线程恢复或完整作者证明，不能正式独审。 |
 
 The protocol request identifies `protocol = "scidiscovery-agent-v1"` and contains
@@ -656,8 +769,8 @@ The protocol request identifies `protocol = "scidiscovery-agent-v1"` and contain
 `session` with `session_id`, `usage` with cumulative invocation `usage`, `result`
 with the scientific JSON object in `result`, and explicit `completed`. Usage counters
 are `input_tokens`, `cached_input_tokens` and `output_tokens`; absent or invalid
-usage remains unknown rather than becoming zero. Optional public `message` and
-`tool` events feed the bounded progress projection. A result alone is not a completed
+usage remains unknown rather than becoming zero. Optional public `message` events feed the bounded text projection; `tool` events
+retain activity without decoding their tool/input/output bodies. A result alone is not a completed
 call: terminal evidence, process exit, cleanup, exact originals and control checks
 still apply. This adapter is an integration boundary; it does not supply or qualify
 a separate vendor harness. New harnesses need their own exact integration evidence.
@@ -704,6 +817,10 @@ reconciliation, never automatic resubmission.
 `start --continue` 显式清除下一节点暂停；`start --resume-step N` 后台恢复精确已知故障
 job，仍通过原冻结续接门槛，不能与 continue 合用，也不增加后端恢复能力。
 `run`/`continue` 仍可前台运行。
+
+A positively proven never-submitted prelaunch failure offers explicit `worker-resume --step N --expected-attempt K` (or `start --resume-step N --expected-attempt K`). It rechecks capabilities on a linked new attempt under the same job/profile/permissions and remaining budgets; repeated submission with the same expected attempt collects the accepted replacement. This is separate from session resume and never permits uncertain submission replay. The technical-pause UI uses the exact same action and attempt binding.
+
+有正面证据证明尚未提交的启动失败，可显式使用上述带 `--expected-attempt` 的命令；它在同一 job、profile、权限和剩余额度下追加关联 attempt 并重查能力。相同 expected attempt 重复提交只收集已接受的替代 attempt。此路径独立于 session 续接，不允许重放未知提交；技术暂停网页按钮使用同一操作及 attempt 绑定。
 `pause` 等已接受工作完成后阻止下一节点，并非立即杀进程；进程失踪须核对原调用，不能重发。
 
 Scientific `budget-amend` requests receive durable operation IDs and apply at a safe
@@ -711,11 +828,13 @@ boundary before another new task, retaining all consumption, reservations and un
 usage. `accepted` is a queued request, not an applied ceiling. Execution-resource
 amendments remain separate and grant no exact-call permission. Soft node/W targets
 request a bounded conclusion without forcing A or rejecting a new managed experiment
-solely for reaching the target. Notices start at 80% of the advisory node token or
+solely for reaching the target. W's context-window gate or saved legacy time review
+cadence remains separate. Notices start at 80% of the advisory node token or
 time target, at token balance no higher than the existing W+A advice for H or A
 advice for W, or at strictly less than 10% of shared active time remaining. Each
 logical node receives one token-risk and one time-risk notice across resumes, at
-most two notices; token advice does not suppress later time advice. Notices arrive
+most two risk notices; ordinary W has a separate context-review notice. Token advice
+does not suppress later time advice. Notices arrive
 at the next supported local tool boundary without interrupting the current request.
 For ordinary A, node targets and unexhausted shared risk advise closing only the
 current assessment, retaining unmet goals and choosing the normal `next_action`
@@ -733,10 +852,12 @@ their completion policy; see [architecture](ARCHITECTURE.md).
 
 科学预算修订先收取持久 operation ID，在下一新任务前的安全边界应用，保留全部消费、
 预留和未知用量。accepted 仅表示排队；执行资源修订另行办理且不授精确调用权限。
-节点/W 软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A。节点建议 token 或时间目标
+节点/W 软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A；W 的上下文窗口门禁或
+旧冻结时间复核节奏另行保留。节点建议 token 或时间目标
 达到 80%、token 余额不高于 H 后续 W+A 或 W 后续 A 的既有建议量、或共享剩余 active time
 严格低于总时限的 10% 时提醒；每逻辑节点的 token、time 风险各一次，跨 resume 去重，最多
-两次，token 提醒不抑制后续 time 提醒；在下一受支持本地工具边界生效，不打断当前请求。
+两次风险提醒，普通 W 另有独立的上下文复核提醒。token 提醒不抑制后续 time 提醒；
+在下一受支持本地工具边界生效，不打断当前请求。
 普通 A 遇到节点目标或尚未耗尽的共享风险时，只收口当前评估并保留未达目标，按证据与
 全局余额选择正常 `next_action`，有依据时仍可 `continue_w`、`revise_h` 或 `extract`；
 节点目标本身不终止研究。仅当共享 token 或共享时间实际耗尽（剩余量 <= 0）时，普通 A

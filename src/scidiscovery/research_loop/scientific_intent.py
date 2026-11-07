@@ -1,97 +1,96 @@
-"""Pure science allocation from a copied fold of exact sealed originals.
+"""Pure H/W scientific intent; A assessments retain the authored direction.
 
 This parser does not publish, rank mechanisms, infer evidence or grant execution.
-The caller supplies one eligible final W assessment, established from the original
-A binding. A preliminary interpretation is committed only after all diagnostics
-are resolved in the original control outcome.
+Optional assessment planning stays in its original and never reallocates work.
 """
 from __future__ import annotations
 
 import copy
 
 
+def focus_requirement(job):
+    """Describe the consumed author choice, never supply a scientific default."""
+    producer=job['role'] in {'H','W'}
+    path='search_plan.focus' if producer else 'search_review.next_focus'
+    shape=('{index:1-based commitment index|null,action:screen|improve|repair|validate}; index:null requires screen'
+        if producer else '{mechanism_ref:exact listed ref|null,action:screen|improve|repair|validate}; null requires screen')
+    return path,shape
+
+
+def focus_diagnostic(job, *, code='science_task_action_required'):
+    path,shape=focus_requirement(job)
+    expected=('top-level search_plan with commitments:[{label,existing_ref?}] and focus:'+shape
+        if job['role'] in {'H','W'} else shape)
+    return dict(code=code,subject=path,expected=expected,
+        message=f'Correct {job["role"]} output {path}: expected {expected}')
+
+
 def resolve_discriminating_work(state,job,payload):
-    """Sparse author decisions over retained scientific intent and exact responses."""
-    rows=copy.deepcopy(state['order'].get('discriminating_work',[]))
-    review=payload.get('portfolio_review')
-    if job['role']!='A' or payload.get('next_action')=='wait' or not isinstance(review,dict):return rows
-    by_ref={row['work_ref']:row for row in rows}
-    updates=review.get('work_updates',[])
-    for update in updates if isinstance(updates,list) else []:
-        if not isinstance(update,dict):continue
-        row=by_ref.get(update.get('work_ref')) if isinstance(update.get('work_ref'),str) else None
-        action=update.get('action')
-        if row is None or row['status']=='withdrawn' or not isinstance(action,str) or action not in {'execute','defer','withdraw'}:continue
-        row['status']={'execute':'executed','defer':'deferred','withdraw':'withdrawn'}[action]
-        row['updates'].append(dict(copy.deepcopy(update),source_a=job['step']))
-        if action=='execute':row['executions'].append(dict(source_a=job['step'],response=None))
-    work=review.get('discriminating_work')
-    if (isinstance(work,dict) and work.get('existing_ref') is None
-            and isinstance(work.get('mechanism_refs'),list) and isinstance(work.get('question'),str)
-            and isinstance(work.get('next_action'),str)):
-        executed=work['next_action']==payload.get('next_action')
-        rows.append(dict(work_ref=f'A{job["step"]:03d}-D001',source_a=job['step'],
-            declaration_pointer='/portfolio_review/discriminating_work',
-            mechanism_refs=copy.deepcopy(work['mechanism_refs']),question=work['question'],
-            change_criterion=work.get('change_criterion') if isinstance(work.get('change_criterion'),str) else work['question'],
-            next_action=work['next_action'],status='executed' if executed else 'deferred',
-            updates=[dict(source_a=job['step'],action='execute' if executed else 'defer',reason=review.get('reason',''),
-                deferral=copy.deepcopy(review.get('deferral')))],
-            executions=[dict(source_a=job['step'],response=None)] if executed else []))
-    return rows
+    """Retain prior work facts; optional A planning is advisory only."""
+    return copy.deepcopy(state['order'].get('discriminating_work',[]))
 
 
 def resolve_intent(state, job, payload, *, assessed=None):
+    """Consume H/W choices while an A assessment preserves their authority."""
+    if job['role']=='A':
+        return dict(focus=copy.deepcopy(state.get('focus')),
+            allocation=copy.deepcopy(state['order'].get('allocation')),
+            unfinished_plan=copy.deepcopy(state['order']['remaining']),
+            seen_w=set(state['order']['seen_w']),diagnostics=[],
+            discriminating_work=resolve_discriminating_work(state,job,payload))
+    return _resolve_producer_intent(state,job,payload,assessed=assessed)
+
+
+def _resolve_producer_intent(state, job, payload, *, assessed=None):
     mechanisms=state['mechanisms'];authorized=state['authorized']
     remaining=copy.deepcopy(state['order']['remaining'])
     seen=set(state['order']['seen_w'])
-    role=job['role'];action=payload.get('next_action')
-    choice=payload.get('search_plan') if role=='H' else payload.get('search_review')
+    role=job['role'];producer=role in {'H','W'};action=payload.get('next_action')
+    choice=payload.get('search_plan') if producer else payload.get('search_review')
     choice=choice if isinstance(choice,dict) else {}
-    declared=choice.get('focus' if role=='H' else 'next_focus')
-    key='index' if role=='H' else 'mechanism_ref'
+    declared=choice.get('focus' if producer else 'next_focus')
+    key='index' if producer else 'mechanism_ref'
     invalid=declared is not None and (not isinstance(declared,dict) or not isinstance(declared.get('action'),str) or declared['action'] not in {'screen','improve','repair','validate'}
         or key not in declared or 'label' in declared)
     if declared is not None and not invalid:
         name=declared[key]
-        if role=='H':
+        if producer:
             commitments=choice.get('commitments',[])
             invalid=name is not None and (type(name) is not int or not isinstance(commitments,list) or not 1<=name<=len(commitments))
         else:invalid=name is not None and not isinstance(name,str)
     if invalid:declared=None
-    selected=None;diagnostics=[dict(code='science_choice_unresolved',subject='focus')] if invalid else []
+    selected=None;diagnostics=[focus_diagnostic(job,code='science_choice_unresolved')] if invalid else []
     if declared is not None and declared[key] is not None:
         name=declared[key]
-        if role=='H':
+        if producer:
             item=choice['commitments'][name-1]
-            name=item.get('existing_ref') or f'h{job["step"]:03d}.m{name}'
+            name=item.get('existing_ref') or f'{role.lower()}{job["step"]:03d}.m{name}'
         selected=name if name in authorized else None
         if selected is None:
-            diagnostics.append(dict(code='science_focus_unauthorized',subject=name))
+            path,_=focus_requirement(job)
+            diagnostics.append(dict(code='science_focus_unauthorized',subject=name,expected='an authorized mechanism',
+                message=f'Correct {role} output {path}: {name} is not an authorized mechanism'))
         elif mechanisms[selected]['status']=='waived':
-            diagnostics.append(dict(code='science_focus_waived',subject=selected))
-        elif not (payload.get('route_reason') or '').strip():
-            diagnostics.append(dict(code='science_focus_reason_required',subject=selected))
+            path,_=focus_requirement(job)
+            diagnostics.append(dict(code='science_focus_waived',subject=selected,expected='a non-waived mechanism',
+                message=f'Correct {role} output {path}: {selected} is waived; choose a non-waived mechanism'))
+        elif role!='W' and job.get('purpose')!='worker_consultation' and not (payload.get('route_reason') or '').strip():
+            diagnostics.append(dict(code='science_focus_reason_required',subject='route_reason',expected='a nonblank string',
+                message=f'Correct {role} output route_reason: expected a nonblank scientific reason for the chosen focus'))
     if declared is not None and declared[key] is None and declared['action']!='screen':
-        diagnostics.append(dict(code='science_focus_required',subject=declared['action']))
-    repair=declared is not None and declared['action']=='repair'
-    if role=='A' and action not in {'audit','formal_review','extract','wait'} and assessed is not None:
-        identity=assessed['identity']
-        if identity not in seen:
-            allocation=assessed.get('allocation')
-            same_repair=repair and selected in (assessed.get('mechanism_refs') or [assessed['mechanism_ref']])
-            if not same_repair:
-                if assessed.get('breadth'):
-                    disposed={row['mechanism_ref'] for row in choice.get('dispositions',[]) if isinstance(row,dict) and isinstance(row.get('mechanism_ref'),str) and isinstance(row.get('status'),str) and row['status'] in {'screened','deferred','waived'} and mechanisms.get(row['mechanism_ref'],{}).get('status')==row['status']}
-                    remaining=[item for item in remaining if item['mechanism_ref'] not in disposed]
-                elif allocation is not None:
-                    remaining=[item for item in remaining if item!=allocation]
-                seen.add(identity)
+        diagnostics.append(focus_diagnostic(job,code='science_focus_required'))
+    retained=state.get('focus')
+    keep=(declared is None and not diagnostics and retained is not None and retained['mechanism_ref'] in authorized
+        and mechanisms[retained['mechanism_ref']]['status']!='waived')
+    if keep:selected=retained['mechanism_ref']
     remaining=[item for item in remaining if mechanisms[item['mechanism_ref']]['status']!='waived']
     focus=None;allocation=None
-    if action in {'experiment','continue_w'}:
+    if keep:
+        focus=copy.deepcopy(retained)
+        allocation=next((item for item in remaining if item['mechanism_ref']==retained['mechanism_ref']),None)
+    if action in {'experiment','continue_w'} or producer and declared is not None and (role=='W' or job.get('purpose')=='worker_consultation'):
         if declared is None:
-            if not diagnostics:diagnostics.append(dict(code='science_task_action_required',subject='W scientific task'))
+            if focus is None and not diagnostics:diagnostics.append(focus_diagnostic(job))
         elif selected is None and not diagnostics and declared['action']=='screen':
             available=[item for item in remaining if item['mechanism_ref'] in authorized]
             if not available:
@@ -103,7 +102,7 @@ def resolve_intent(state, job, payload, *, assessed=None):
             focus=dict(mechanism_ref=selected,action=declared['action'])
         if focus is not None:
             allocation=next((item for item in remaining if item['mechanism_ref']==selected),None)
-    elif role not in {'H','A'} or action in {'audit','formal_review','extract','wait'}:
+    elif job.get('purpose')=='worker_consultation' or role not in {'H','A'} or action in {'audit','formal_review','extract','wait'}:
         focus=copy.deepcopy(state.get('focus'))
         allocation=copy.deepcopy(state['order'].get('allocation'))
     return dict(focus=focus,allocation=allocation,unfinished_plan=remaining,seen_w=seen,diagnostics=diagnostics,

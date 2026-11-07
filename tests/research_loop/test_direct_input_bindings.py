@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from scidiscovery.operations.execution import LocalFileDescriptor
-from scidiscovery.research_loop import (atomic_files, contracts as c, controller,
+from scidiscovery.research_loop import (accepted_budget, atomic_files, budget, contracts as c, controller,
     experiment_client, experiments as e, originals, qualification as q,
     shared_input_views, shared_originals)
 from scidiscovery.research_loop.protocol import stage_scope
@@ -102,18 +102,25 @@ def test_selected_material_rejects_same_size_replacement_from_private_seal(tmp_p
     root,_=direct_instance(tmp_path);stopped_seals(monkeypatch)
     _,work,record=finish(root,1,'H',[],action='experiment',files={'answer.txt':'one exact answer'})
     seal=c.read(record/'result-identity.json');private=seal['materials'][0]
-    saved=dict(private);public=c._public_materials(root,[private])[0]
+    saved=dict(private);public=c._public_materials([private])[0]
     assert private['file_stat']==e.proof(work/'artifacts/answer.txt')['file_stat']
-    assert set(public)=={'source','original_source','path','size_bytes'}
+    assert set(public)=={'source','path','size_bytes'}
     successor=c.build_job(root,2,'W',[1])
     assert successor['direct_materials']==[public]
+    mounts=shared_input_views.mount_arguments(root,successor,c.workspace(root,2),include_skills=False)
+    assert any(mounts[index:index+3]==['--ro-bind',public['source'],str(c.workspace(root,2)/public['path'])]
+        for index in range(len(mounts)-2))
     provenance=c.read(root/seal['source_provenance']['path'])
     assert provenance['materials']==[public]
     assert set(c.file_ref(Path(public['source'])))=={'path','size_bytes'}
     q._check(e.proof(public['source']))
     replace_equal_bytes(public['source'])
+    # Projection consumes an accepted descriptor; actual material admission owns
+    # the current original-file identity check.
+    assert c._public_materials([private])==[public]
     for consume in (lambda:originals.material_path(root,public),
-            lambda:c._public_materials(root,[private]),lambda:q.output_status(root,1,public),
+            lambda:shared_input_views.mount_arguments(root,successor,c.workspace(root,2),include_skills=False),
+            lambda:q.output_status(root,1,public),
             lambda:q._check(dict(path=public['source'],size_bytes=public['size_bytes'],file_stat=private['file_stat']))):
         with pytest.raises(ValueError,match='changed|identity|original'):consume()
     assert c.read(record/'result-identity.json')['materials']==[saved]
@@ -125,12 +132,14 @@ def test_selected_material_rejects_same_size_replacement_from_private_seal(tmp_p
 def test_bound_compiled_package_without_code_version_uses_actual_original(tmp_path,monkeypatch):
     root,_=direct_instance(tmp_path);stopped_seals(monkeypatch)
     job=c.build_job(root,1,'W',[]);work=c.workspace(root,1)
+    compiled=[]
     class Compiler:
         def capabilities(self):
             return (e.AdapterCapability(key='implementation_authoring',kind='implementation_authoring',
                 schema_id='fixture.implementation.v1',payload_schema_version=1,media_type='application/json',
                 content=b'{}',public_summary={}),)
         def compile_implementation(self,source,aliases,output):
+            compiled.append(output)
             c.write(output,dict(source='a bounded generated package',inputs=aliases));output.chmod(0o400)
             return dict(status='compiled',path=str(output),qualification='unreviewed')
     compiler=Compiler()
@@ -140,7 +149,18 @@ def test_bound_compiled_package_without_code_version_uses_actual_original(tmp_pa
     config['execution_interface']=interface
     source=work/'work/author.json';c.write(source,{'bounded':'author input'})
     client=work/'artifacts/package.json'
+    record=c.host_record(work)
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'))
+    anchor=budget.accept_node(root,job)
+    if anchor is not None:intent['budget_slice']=anchor
+    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
+    with pytest.raises(e.IntegrityError,match='exact accepted native attempt'):
+        e.compile_implementation(config,compiler,source,{},client)
+    assert compiled==[] and not client.exists()
+    config['native_attempt']=dict(number=0,execution_key=intent['task_ref'])
     e.compile_implementation(config,compiler,source,{},client)
+    assert len(compiled)==1
     package=experiment_client.payload_path(config,client);saved=e.proof(package)
     descriptor=LocalFileDescriptor(name='0001-package',local_path=str(package),
         size_bytes=saved['size_bytes'],media_type='application/json')
@@ -165,10 +185,19 @@ def test_provenance_status_uses_controls_without_reopening_ancestor_science(tmp_
     private=c.read(first_record/'result-identity.json')['materials'][0]
     with pytest.raises((OSError,ValueError),match='original|file|No such|changed'):
         originals.material_path(root,private)
-    # The saved provenance control remains necessary even when prior bodies
-    # are not consumed by this status query.
+    # The accepted W output carries its inherited restriction. A query of that
+    # exact output does not reopen its ancestor's proof or scientific bytes.
     proof=c.read(first_record/'result-identity.json')['source_provenance']
     (root/proof['path']).unlink()
+    assert q.output_status(root,2)==before
+    current_job=c.read_job(root/'jobs/002.json')
+    current_seal=c.read(second_record/'result-identity.json')
+    q.validate_outputs(root,current_job,current_seal)
+    # The current output's own exact proof remains required at consumption.
+    current_proof=current_seal['source_provenance']
+    (root/current_proof['path']).unlink()
     with pytest.raises((OSError,ValueError),match='original|receipt|file|No such|identity'):
         q.output_status(root,2)
+    with pytest.raises((OSError,ValueError),match='original|receipt|file|No such|identity'):
+        q.validate_outputs(root,current_job,current_seal)
     assert (second_record/'result-identity.json').is_file()

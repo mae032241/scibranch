@@ -10,6 +10,15 @@ from . import contracts as c, history, search
 MAX_DIAGNOSTICS = 8
 MAX_AUTHOR_CORRECTIONS = 2
 
+
+class ScientificAdmissionRefused(ValueError):
+    """Preserve a refused W continuation without inventing an H correction."""
+    def __init__(self, reason, *, next_role):
+        super().__init__(reason)
+        self.reason=reason
+        self.next_role=next_role
+
+
 def author_choices(root,job,payload,*,inventory):
     """The same prospective consumers serve sealing and original-output repair."""
     if inventory.root!=Path(root) or inventory.job!=job:
@@ -25,7 +34,14 @@ def author_choices(root,job,payload,*,inventory):
     if repair:
         from .output_repair import OutputRepairRequired
         row=repair[0]
-        detail=(row['message']+'. Correct only the diagnosed field.' if row.get('expected') is not None else
+        if (row['code'] in {'science_choice_unresolved','scientific_field_unresolved'}
+                and row.get('subject') in {'focus','next_focus','search_plan','search_review'}):
+            from .scientific_intent import focus_diagnostic
+            row=focus_diagnostic(job,code=row['code'])
+        detail=(f'Correct {job["role"]} output implementation_selection: use an array of exact current/history input IDs; [] clears; '
+            'null keeps only an already resolved selection. Unresolved choice: '+str(row.get('subject',''))[:96]+'.'
+            if row['code']=='implementation_unresolved' else
+            row['message']+'. Correct only the diagnosed field.' if row.get('expected') is not None else
             'Correct '+str(row.get('subject','scientific action'))[:128]+': '+row['code']+
             '. Change only the diagnosed choice using the required declared choice/action fields.')
         raise OutputRepairRequired(row['code'], detail+
@@ -40,18 +56,17 @@ def outcome(root,job,payload,*,inventory):
     from . import formal_review
     formal_review.validate_choice(root,job,payload,inventory=inventory)
     interpretation,selection=author_choices(root,job,payload,inventory=inventory)
-    search.require_portfolio_review(root,job,payload,interpretation=interpretation)
-    from . import candidate_nominations
-    candidate_nominations.require_final_coverage(root,job,payload)
     diagnostics=interpretation['diagnostics']
     from . import decision
+    decision.require_request(job,payload)
     requests=decision._assess_from_facts(root,job,payload,
         policy=inventory.policy,interpretation=interpretation,head=inventory.head)
     delivery=None
     if job['role']=='W':
         from . import worker_delivery
         delivery=worker_delivery.require_delivery(root,job,payload,inventory.record,inventory=inventory)
-    rows=[*diagnostics,*selection,*requests,*history.validate_recommendation(job,payload,root=root)]
+    recommendations=[] if job.get('purpose')=='worker_consultation' else history.validate_recommendation(job,payload,root=root)
+    rows=[*diagnostics,*selection,*requests,*recommendations]
     rows.extend(search.optional_reference_diagnostics(root,job,payload))
     rows.extend(row for row in c.scientific_diagnostics(job,payload) if row not in rows)
     return dict(**(dict(stage_end_reason='continuation_unavailable') if job['role']=='W' and payload.get('stage_intent')=='continue' and not job.get('worker_fragment_policy') else {}),
@@ -269,6 +284,8 @@ def effective_route(root, step, result, job, route):
                            search=None if repair is not None else search.bind(root, step + 1, 'W', protocol, write_pages=False, unified=True))
             code = search.launch_reason(root, planned)
         if code is not None:
+            if job.get('purpose')=='worker_consultation' or job['role']=='W':
+                raise ScientificAdmissionRefused(code,next_role=role)
             source = _source(root, step)
             request = dict(root=previous['root'] if previous else source, source=source,
                            reason=previous['reason'] if previous else code)

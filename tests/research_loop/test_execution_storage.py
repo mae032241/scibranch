@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from execution_fixtures import execution_registry, remote_registry
+from execution_fixtures import DifferentExternalIdentity, execution_registry, remote_registry
 from test_direct_public_collect import fixed_code, fragment, inode, terminal_code
 from test_mutable_run_inputs import _code, _configuration, _prepare
 from test_history_handoff import finish
@@ -31,15 +31,25 @@ def test_calls_and_history_share_bytes_without_merging_scientific_sources(tmp_pa
     root,job,config,_=case(tmp_path,monkeypatch)
     raw=b'opaque retained material\n'*32768
     copies=[];copy=atomic_files.copy_original
+    produced=[];submit=DifferentExternalIdentity.submit
+    def submitted(adapter,descriptor):
+        artifact=adapter.artifact_path(descriptor.name)
+        assert not artifact.exists(), 'Each synthetic call creates its original once'
+        result=submit(adapter,descriptor)
+        assert artifact.stat().st_mode & 0o777 == 0o400
+        produced.append((descriptor.name,e.proof(artifact)))
+        return result
     def counted(source,target,**options):
         if options['size_bytes']==len(raw):copies.append(options['size_bytes'])
         return copy(source,target,**options)
+    monkeypatch.setattr(DifferentExternalIdentity,'submit',submitted)
     monkeypatch.setattr(atomic_files,'copy_original',counted)
     calls=[]
-    for label in ('P','Q'):
-        payload=c.workspace(root,2)/'work'/label
+    for number,label in enumerate(('P','Q'),1):
+        payload=c.workspace(root,2)/'code'/label
+        payload.parent.mkdir(exist_ok=True)
         payload.write_bytes(raw)
-        result=e.dispatch(config,payload,new=True,mechanism=label)
+        result=e.dispatch(config,payload,new=True,mechanism=number)
         directory=e.Records(config).directory(result['call_id'])
         observed=c.read(directory/'execution-observation.json')
         calls.append(observed)
@@ -47,31 +57,42 @@ def test_calls_and_history_share_bytes_without_merging_scientific_sources(tmp_pa
     assert calls[0]['call_id']!=calls[1]['call_id']
     assert first['source']['path']!=second['source']['path']
     assert _inode(Path(first['path']))!=_inode(Path(second['path']))
-    archived=history._proof(root,Path(first['path']).relative_to(root).as_posix())
+    assert Path(first['path']).stat().st_mode & 0o777 == 0o400
+    archived=history._proof(root,Path(first['path']).relative_to(root).as_posix(),
+        source_kind='managed_frozen')
     original=root/archived['snapshot']
     assert _inode(original)==_inode(Path(first['path']))
     from scidiscovery.research_loop import managed_wait
+    retained_inodes={call['call_id']:_inode(Path(call['outputs'][0]['path'])) for call in calls}
     managed_wait.wake_packet(root,job,dict(execution_wake=dict(observations=[
         e.proof(e.Records(config).directory(call['call_id'])/'execution-observation.json') for call in calls])))
-    for number,call in enumerate(calls,1):
-        wake=c.workspace(root,2)/f'work/execution-results/{number:03d}/outputs'/call['outputs'][0]['name']
-        assert _inode(wake)==_inode(Path(call['outputs'][0]['path']))
+    packet=c.read(c.workspace(root,2)/'work/execution-results.json')
+    assert len(packet['executions'])==len(calls)
+    for view,call in zip(packet['executions'],calls):
+        name=call['outputs'][0]['name']
+        assert view['outputs']==[dict(name=name,
+            path=f'work/execution-results/{call["call_id"]}/outputs/{name}')]
+        assert _inode(Path(call['outputs'][0]['path']))==retained_inodes[call['call_id']]
     finish(root,2,'W',[1],preserve_native_intent=True,mechanism_findings=[
         dict(mechanism=label,basis='observed',finding='Synthetic retained observation.') for label in ('P','Q')])
     successor=c.build_job(root,3,'A',[1,2])
     materials=[row for row in successor['direct_materials'] if row['size_bytes']==len(raw)]
     assert len(materials)==2 and len({row['path'] for row in materials})==2
-    first_view=c.workspace(root,3)/materials[0]['path']
-    sibling=c.workspace(root,3)/materials[1]['path']
-    assert _inode(first_view)!=_inode(sibling)
-    assert {_inode(first_view),_inode(sibling)}=={_inode(Path(call['outputs'][0]['path'])) for call in calls}
-    assert first_view.stat().st_mode & 0o777 == 0o400
+    # Parent input paths are native-view references; source binds the retained
+    # original consumed by the mount projection, without a host input alias.
+    first_input,sibling=[Path(row['source']) for row in materials]
+    assert first_input!=sibling and _inode(first_input)!=_inode(sibling)
+    assert {_inode(first_input),_inode(sibling)}==set(retained_inodes.values())
+    assert all(path.stat().st_mode & 0o777 == 0o400 for path in (first_input,sibling))
     scratch=c.workspace(root,3)/'work/editable-material'
-    scratch.write_bytes(first_view.read_bytes())
+    scratch.write_bytes(first_input.read_bytes())
     scratch.write_bytes(b'changed working file')
     assert _inode(scratch)!=_inode(original)
-    assert original.read_bytes()==first_view.read_bytes()==sibling.read_bytes()==raw
-    assert copies==[len(raw),len(raw)], 'Distinct calls retain distinct mutable original slots'
+    assert original.read_bytes()==first_input.read_bytes()==sibling.read_bytes()==raw
+    assert [call for call,_ in produced]==[call['call_id'] for call in calls]
+    assert {item['path']:item['file_stat'] for _,item in produced}=={
+        call['outputs'][0]['path']:call['outputs'][0]['file_stat'] for call in calls}
+    assert copies==[], 'Producer-frozen originals must not be copied again for observation or handoff'
     # Canonical verification still binds both original call identities.
     for call in calls:e.verify_observation(call,lambda item:Path(item['path']))
 
@@ -190,7 +211,7 @@ def test_disabled_limits_preserve_values_without_scanning_instance_usage(tmp_pat
 
 
 @pytest.mark.parametrize('dimension',[
-    'max_scan_entries','max_files','max_file_bytes','max_total_bytes'])
+    'max_scan_entries','max_files'])
 def test_explicit_scan_limits_reject_before_retaining_files(tmp_path,dimension):
     root=tmp_path/'inputs';root.mkdir()
     (root/'a').write_bytes(b'aa');(root/'b').write_bytes(b'bb')
@@ -200,35 +221,34 @@ def test_explicit_scan_limits_reject_before_retaining_files(tmp_path,dimension):
     assert not list(root.glob('.scid-*'))
 
 
-def test_instance_limit_serializes_concurrent_imports_and_counts_partial(tmp_path,monkeypatch):
+def test_legacy_instance_limit_allows_concurrent_imports_without_usage_admission(tmp_path,monkeypatch):
     root=tmp_path/'instance';root.mkdir()
     sources=[]
     for index in range(2):
         source=tmp_path/f'source-{index}';source.write_bytes(bytes([index])*65536);sources.append(source)
-    limits=dict(enabled=True,max_instance_bytes=65536)
+    limits=dict(enabled=True,max_file_bytes=1,max_total_bytes=1,max_instance_bytes=1)
     finish_copy=atomic_files._finish
     observed=[]
     def observe_partial(output,mode):
-        # The entire private partial is charged before it can become an original.
         output.flush()
-        observed.append(storage.usage(root))
+        observed.append(output.tell())
         finish_copy(output,mode)
     monkeypatch.setattr(atomic_files,'_finish',observe_partial)
+    monkeypatch.setattr(storage,'usage',lambda *a,**k:pytest.fail('Byte quota scanned instance usage'))
     start=threading.Barrier(2);results=[]
     def retain(source):
         start.wait()
-        try:results.append(shared.retain(root,source,source_kind='mutable',policy=limits,**_identity(source)))
-        except storage.StorageQuotaExceeded:results.append('limited')
+        results.append(shared.retain(root,source,source_kind='mutable',policy=limits,**_identity(source)))
     threads=[threading.Thread(target=retain,args=(source,)) for source in sources]
     for thread in threads:thread.start()
     for thread in threads:thread.join(timeout=10)
     assert all(not thread.is_alive() for thread in threads)
-    assert len([value for value in results if value=='limited'])==1
-    assert observed==[65536] and storage.usage(root)==65536
-    assert len(list((root/'host-history/objects').iterdir()))==1
+    assert len(results)==2 and observed==[65536,65536]
+    assert {path.read_bytes() for path in results}=={source.read_bytes() for source in sources}
+    assert len(list((root/'host-history/objects').iterdir()))==2
 
 
-def test_fork_selected_input_materialization_enforces_frozen_instance_quota(tmp_path,monkeypatch):
+def test_fork_retains_new_original_despite_legacy_frozen_instance_quota(tmp_path,monkeypatch):
     from test_fork_source import completed_source
     from scidiscovery.research_loop import fork_service, fork_runtime
     limits=dict(enabled=True,max_instance_bytes=4*1024*1024)
@@ -243,23 +263,15 @@ def test_fork_selected_input_materialization_enforces_frozen_instance_quota(tmp_
     preview=fork_service.preview(parent,2,child,budget=budget)
     fork_service.create(parent,2,child,budget=budget,
         expected_preview_id=preview['preview_id'],operation_id='quota-bootstrap')
-    # A shared input consumes no additional payload bytes, even at the frozen
-    # physical limit. A new independent freeze still requires real capacity.
-    source=next(path for path in (child/'host-runtime/fork/inherited').rglob('*') if path.is_file() and path.stat().st_size)
-    identity=_identity(source)
-    original=shared.retain(child,source,source_kind='managed_frozen',policy=limits,**identity)
-    exact_limit=dict(limits,max_instance_bytes=storage.usage(child))
-    target=child/'project/nodes/002/inputs/quota-alias'
-    shared.link(original,target,root=child,policy=exact_limit,**identity)
-    assert _inode(target)==_inode(source) and storage.usage(child)==exact_limit['max_instance_bytes']
     mutable=tmp_path/'new-material';mutable.write_bytes(b'a new independent input')
-    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
-        shared.retain(child,mutable,source_kind='mutable',policy=exact_limit,**_identity(mutable))
+    original=shared.retain(child,mutable,source_kind='mutable',
+        policy=dict(limits,max_instance_bytes=1),**_identity(mutable))
+    assert original.read_bytes()==mutable.read_bytes() and _inode(original)!=_inode(mutable)
 
 
 @pytest.mark.process_e2e
-def test_post_launch_quota_exhaustion_retains_identity_and_cleans_original_process(tmp_path,monkeypatch,execution_registry):
-    limits=dict(enabled=True,max_instance_bytes=4*1024*1024)
+def test_legacy_byte_quota_cannot_fail_a_launched_process(tmp_path,monkeypatch,execution_registry):
+    limits=dict(enabled=True,max_file_bytes=1,max_total_bytes=1,max_instance_bytes=1)
     prepare=controller.prepare
     def configure_storage(*args,**options):
         return prepare(*args,storage_policy=limits,**options)
@@ -267,29 +279,25 @@ def test_post_launch_quota_exhaustion_retains_identity_and_cleans_original_proce
         setup.setattr(controller,'prepare',configure_storage)
         root,job,config,_=case(tmp_path,monkeypatch,executor='local_execution:command')
     payload=c.workspace(root,2)/'work/quota.py'
-    payload.write_text('import time\nprint("retained identity",flush=True)\ntime.sleep(60)\n')
+    payload.write_text('print("retained identity",flush=True)\n')
     from scidiscovery.research_loop import local_experiments
     popen=local_experiments.subprocess.Popen
     started=[]
-    def fill_after_launch(*args,**options):
+    def capture_launch(*args,**options):
         process=popen(*args,**options);started.append(process)
-        filler=root/'quota-filled-after-launch'
-        with filler.open('wb') as stream:
-            stream.truncate(limits['max_instance_bytes']-storage.usage(root))
         return process
-    monkeypatch.setattr(local_experiments.subprocess,'Popen',fill_after_launch)
+    monkeypatch.setattr(local_experiments.subprocess,'Popen',capture_launch)
     result=e.dispatch(config,payload,new=True,mechanism='P')
     assert len(started)==1 and started[0].poll() is not None
     directory=e.Records(config).directory(result['call_id'])
     identity=c.read(directory/'process.json');terminal=c.read(directory/'terminal.json')
     assert identity['pid']==started[0].pid
     assert not runtime.process_matches(identity,identity['task_ref'])
-    assert terminal['cleanup_confirmed'] and terminal['storage_limit_reached']
-    assert terminal['transport_complete'] is False
-    assert c.read(directory/'completed.json')['status']=='unknown'
+    assert terminal['cleanup_confirmed'] and not terminal.get('storage_limit_reached',False)
+    assert terminal['transport_complete'] is True
+    assert c.read(directory/'completed.json')['status']=='known_success'
     assert e.Records(config).external(result['call_id'])==result['call_id']
-    again=e.dispatch(config,payload,new=True,mechanism='P')
-    assert again['status']=='unknown' and again['call_id']==result['call_id'] and len(started)==1
+    assert result['status']=='known_success'
 
 
 def test_interrupted_import_leaves_no_final_or_reused_partial(tmp_path,monkeypatch):
@@ -305,7 +313,9 @@ def test_interrupted_import_leaves_no_final_or_reused_partial(tmp_path,monkeypat
     original=shared.retain(root,source,source_kind='mutable',**identity)
     assert original.read_bytes()==source.read_bytes()
     original.chmod(0o600);original.write_bytes(b'corrupt')
-    with pytest.raises(ValueError):shared.retain(root,source,source_kind='mutable',**identity)
+    replacement=shared.retain(root,source,source_kind='mutable',**identity)
+    assert replacement!=original and _inode(replacement)!=_inode(original)
+    assert replacement.read_bytes()==source.read_bytes()
     assert original.read_bytes()==b'corrupt'
 
 
@@ -328,14 +338,28 @@ def test_mutable_readonly_source_with_open_writer_freezes_independently(tmp_path
     finally:os.close(descriptor)
 
 
-def test_stream_capacity_rejects_before_creating_a_partial(tmp_path):
+def test_stream_preserves_original_bytes_despite_legacy_byte_limits(tmp_path):
     root=tmp_path/'instance';root.mkdir()
     raw=b'new bytes'
-    def forbidden():pytest.fail('Quota rejection began writing the projection')
-    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
-        shared.publish_stream(root,forbidden,size_bytes=len(raw),
-                              policy=dict(enabled=True,max_instance_bytes=1))
-    assert not (root/'host-history/objects').exists()
+    original=shared.publish_stream(root,lambda:iter((raw[:2],raw[2:])),size_bytes=len(raw),
+        policy=dict(enabled=True,max_file_bytes=1,max_total_bytes=1,max_instance_bytes=1))
+    assert original.read_bytes()==raw and original.stat().st_size==len(raw)
+    with pytest.raises(ValueError):
+        shared.publish_stream(root,lambda:iter((raw,)),size_bytes=len(raw)-1)
+
+
+def test_legacy_instance_bytes_do_not_measure_undeclared_stream_twice(tmp_path):
+    root=tmp_path/'instance';root.mkdir()
+    calls=[]
+    def blocks():
+        calls.append(True)
+        assert len(calls)==1, 'Generated originals require one publication pass'
+        yield b'first'
+        yield b'second'
+    original=shared.publish_stream(root,blocks,
+        policy=dict(enabled=True,max_file_bytes=1,max_total_bytes=1,max_instance_bytes=1))
+    assert calls==[True] and original.read_bytes()==b'firstsecond'
+    assert original.stat().st_size==11
 
 
 def test_stream_uses_original_deadline_during_publication(tmp_path):
@@ -391,7 +415,7 @@ def test_usage_missing_root_is_not_zero(tmp_path):
     with pytest.raises(FileNotFoundError):storage.usage(tmp_path/'missing')
 
 
-def test_exact_same_root_aliases_allow_zero_growth_over_quota_without_admitting_new_bytes(tmp_path,monkeypatch):
+def test_exact_same_root_aliases_preserve_identity_without_legacy_byte_quota(tmp_path,monkeypatch):
     root=tmp_path/'instance';root.mkdir()
     raw=b'previously retained bytes'
     identity=dict(size_bytes=len(raw))
@@ -410,14 +434,13 @@ def test_exact_same_root_aliases_allow_zero_growth_over_quota_without_admitting_
         outside=tmp_path/'outside';outside.write_bytes(raw);outside.chmod(0o400)
         with pytest.raises(ValueError,match='escaped'):
             shared.link(outside,root/'views/external',root=root,policy=limits,**identity)
-    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
-        shared.publish_bytes(root,b'x',policy=limits)
-    # Zero growth is proven only by strict link, not inferred by mutation(0).
-    with pytest.raises(storage.StorageQuotaExceeded,match='max_instance_bytes'):
-        with storage.mutation(root,0,policy=limits):pytest.fail('Generic zero-growth mutation bypassed admission')
+    assert shared.publish_bytes(root,b'x',policy=limits).read_bytes()==b'x'
+    with storage.mutation(root,0,policy=limits):
+        pass
 
 
-def test_accepted_script_and_snapshot_entry_share_one_first_freeze(tmp_path,monkeypatch,remote_registry):
+@pytest.mark.parametrize('change_source',[False,True])
+def test_accepted_script_and_snapshot_entry_share_one_first_freeze(tmp_path,monkeypatch,remote_registry,change_source):
     from scidiscovery.research_loop.protocol import CURRENT
     scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_ref=dict(path='/fixture/jobs/002.json'),
         execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'),mechanism_ref=None)
@@ -431,9 +454,17 @@ def test_accepted_script_and_snapshot_entry_share_one_first_freeze(tmp_path,monk
     copy=atomic_files.copy_original;copies=[]
     def counted(source,target,**options):
         copies.append(options['size_bytes'])
-        return copy(source,target,**options)
+        result=copy(source,target,**options)
+        if change_source:Path(source).write_bytes(b'x'*identity['size_bytes'])
+        return result
     monkeypatch.setattr(atomic_files,'copy_original',counted)
     records=e.Records(config)
+    if change_source:
+        with pytest.raises(ValueError):
+            records.accept(descriptor,metadata,config['execution_interface'])
+        assert not (records.root/'calls'/descriptor.name).exists()
+        assert copies==[identity['size_bytes']]
+        return
     accepted=records.accept(descriptor,metadata,config['execution_interface'])
     directory=records.directory(descriptor.name)
     assert copies==[identity['size_bytes']]

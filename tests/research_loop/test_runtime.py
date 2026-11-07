@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts, controller, runtime
+from scidiscovery.research_loop import accepted_budget, budget, contracts, controller, runtime
 from scidiscovery.research_loop.cli import status
 
 
@@ -143,7 +143,7 @@ def test_intent_before_runner_start_is_unknown_and_never_replayed(local):
     root, work, record, launch, until = local
     contracts.build_job(root, 1, 'H', [])
     assert runtime.node_state(root, 1) == 'unstarted'
-    contracts.write(record / 'native-intent.json', dict(step=1,
+    accepted_budget.accept_native(root, 1, record, dict(step=1,
         task_ref=contracts.record_ref(root / 'jobs/001.json')))
     assert runtime.node_state(root, 1) == 'unknown'
     assert controller.run(root)['status'] == 'native_outcome_unsealed'
@@ -207,30 +207,77 @@ def test_direct_runner_entry_rejects_duplicate_and_retained_execution(local):
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 
-@pytest.mark.parametrize('budget,reason', [('wall', 'wall_limit'), ('tokens', 'token_limit'), ('unknown', 'usage_unknown')])
+@pytest.mark.parametrize('budget,reason', [('wall', 'wall_limit'), ('tokens', 'token_limit')])
 def test_actual_native_boundary_rechecks_budget_without_submitting(local, monkeypatch, budget, reason):
-    from scidiscovery.research_loop import native
+    from scidiscovery.research_loop import budget as control_budget, native, profiles
+    from test_history_handoff import finish
+    from test_soft_node_budget import start_clock
     root, work, record, launch, until = local
     settings = contracts.settings(root)
     settings.pop('time_budget_basis')  # This fixture checks the legacy absolute deadline.
     contracts.write(root / 'settings.json', settings)
     contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
-    contracts.build_job(root, 1, 'H', [])
-    contracts.write(record / 'native-intent.json', dict(step=1, task_ref=contracts.record_ref(root / 'jobs/001.json')))
-    contracts.write(root / 'host-started.json', dict(at_unix=0 if budget == 'wall' else time.time()))
-    if budget != 'wall':
-        value = dict(input_tokens=1000 if budget == 'tokens' else 0, cached_input_tokens=0,
-            output_tokens=0, observed_tokens=1000 if budget == 'tokens' else 0,
-            unknown_steps=[1] if budget == 'tokens' else [1, 2])
-        monkeypatch.setattr(native, 'usage', lambda _: value)
+    start_clock(root, 'source boundary fixture starts accepted clock')
+    # Publish historical accounting through the same fixture writer and seal
+    # owner as other process-free science fixtures, before accepting this call.
+    prior = record
+    write = contracts.write
+    def fixture_write(path, value):
+        if Path(path) == prior / 'usage.json':
+            if budget == 'tokens':
+                value = dict(input_tokens=1000, cached_input_tokens=0, output_tokens=0)
+        return write(path, value)
+    with monkeypatch.context() as fixture:
+        fixture.setattr(contracts, 'write', fixture_write)
+        finish(root, 1, 'H', [], action='analyze')
+    job = contracts.build_job(root, 2, 'A', [1])
+    work = contracts.workspace(root, 2)
+    record = contracts.host_record(work)
+    accepted_budget.accept_native(root, 2, record,
+        dict(step=2, task_ref=contracts.record_ref(root / 'jobs/002.json'),
+            **profiles.binding(settings, job)))
+    if budget == 'wall':
+        stamp = control_budget.clock_stamp()
+        stamp['at_unix'] += settings['max_seconds'] + 1
+        stamp['at_boottime'] += settings['max_seconds'] + 1
+        monkeypatch.setattr(control_budget, 'clock_stamp', lambda: stamp)
     monkeypatch.setattr(native.subprocess, 'Popen', lambda *a, **kw: pytest.fail('budget must prevent submission'))
-    native.run_native(root, 1)
+    native.run_native(root, 2)
     outcome = contracts.read(record / 'native-outcome.json')
     assert outcome['stop_reason'] == reason
     assert outcome['native_started'] is False
-    assert status(root)['nodes'][0]['state'] == 'native_not_submitted'
+    assert status(root)['nodes'][-1]['state'] == 'native_not_submitted'
+    assert contracts.read(record / 'usage.json') == dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     assert not (record / 'native-process.json').exists()
     assert not (record / 'science-output.json').exists()
+
+
+def test_historical_billing_unknown_preserves_missing_meter_and_allows_ordinary_admission(local, monkeypatch):
+    from scidiscovery.research_loop import budget as control_budget, native
+    from test_history_handoff import finish
+    from test_soft_node_budget import start_clock
+    root, work, prior, launch, until = local
+    monkeypatch.setattr(native.subprocess, 'Popen',
+        lambda *a, **kw: pytest.fail('source admission fixture must not submit native work'))
+    start_clock(root, 'billing observation fixture starts accepted clock')
+    write = contracts.write
+    def fixture_write(path, value):
+        if Path(path) == prior / 'usage.json':
+            return  # Publish no historical billing observation.
+        return write(path, value)
+    with monkeypatch.context() as fixture:
+        fixture.setattr(contracts, 'write', fixture_write)
+        finish(root, 1, 'H', [], action='analyze')
+    job = contracts.build_job(root, 2, 'A', [1])
+    usage = native.usage(root)
+    assert usage['unknown_steps'] == [1]
+    assert usage['blocking_unknown_count'] == 0
+    assert not (prior / 'usage.json').exists()
+    assert control_budget.final_a_usage_unknown(None, usage, ignore_step=2) is False
+    assert control_budget.node_admission(root, job, ignore_step=2) is None
+    record = contracts.host_record(contracts.workspace(root, 2))
+    assert not (record / 'native-intent.json').exists()
+    assert not (record / 'native-process.json').exists()
 
 
 def _leave_child_alive(root):

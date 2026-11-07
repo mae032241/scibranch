@@ -1498,7 +1498,8 @@ def load_records_from_source_facts(root, sources, *, source_facts, write_cache=T
         return owner.origin_identity
     def recommendation_for(job,payload):
         value=payload.get('candidate_recommendation')
-        if job['role']!='A' or payload.get('next_action')=='audit' or not isinstance(value,str):return None
+        if (job['role']!='A' or job.get('purpose')=='worker_consultation'
+                or payload.get('next_action')=='audit' or not isinstance(value,str)):return None
         prefix=job['history']['prefix']
         def eligible(keys):
             return {key for key in keys if prefix['count']>0
@@ -1661,6 +1662,8 @@ def validate(root, work, binding):
 
 
 def validate_recommendation(job, payload, *, root=None):
+    if job.get('purpose')=='worker_consultation':
+        return []  # Consultation text is retained, never consumed as a recommendation.
     recommendation = payload.get('candidate_recommendation')
     if job.get('handoff_protocol', 1) >= 9 and payload.get('next_action') == 'audit':
         return []  # An unavailable audit request preserves science and returns a host diagnostic.

@@ -134,17 +134,26 @@ def test_exact_review_to_ui_receipt_rejects_forgery_and_never_dispatches(tmp_pat
 
 def declared_request(tmp_path):
     """Permission documents only; these declarations claim no scientific qualification."""
+    from scidiscovery.research_loop import accepted_budget, material_references, originals
     root,secret_file=prepare(tmp_path)
     secret=secret_file.read_bytes();authority.bind_secret(root,secret)
-    material=dict(path='artifacts/subject.py',source=str(tmp_path/'missing-scientific-original.py'),
+    material=dict(path='inputs/parents/001/artifacts/subject.py',source=str(tmp_path/'missing-scientific-original.py'),
         size_bytes=17)
+    # Publish synthetic producer metadata only; neither the scientific body nor
+    # the declared implementation or qualification receipt exists in this fixture.
+    producer=dict(step=1,role='W',material_refs=[],selected_inputs=[])
+    q._save(root,root/'jobs/001.json',producer)
+    seal=dict(job_ref=dict(path=str(root/'jobs/001.json')),
+        raw_ref=dict(path=str(root/'native-evidence/001/science-output.json')),materials=[material])
+    producer_seal=q._save(root,root/'native-evidence/001/result-identity.json',seal)
+    sources={1:dict(owner=originals.node(root,1),job=producer,seal=seal)}
     review_ref=dict(path='qualification/reviews/declared.json',size_bytes=31)
-    job=dict(step=2,role='W',direct_materials=[material],selected_inputs=[],execution_qualifications=[review_ref])
+    job=dict(step=2,role='W',material_refs=material_references.references([material],sources=sources),
+        selected_inputs=[],execution_qualifications=[review_ref])
     job_ref=q._save(root,root/'jobs/002.json',job)
-    from scidiscovery.research_loop import accepted_budget
     accepted_budget.accept_job(root,2,job)
     native_ref=q._save(root,root/'native-evidence/002/native-intent.json',dict(step=2,task_ref=q.control_reference(root,job_ref)))
-    subject=dict(producer_step=1,producer_seal=dict(path='native-evidence/001/result-identity.json',size_bytes=19),material=material)
+    subject=dict(producer_step=1,producer_seal=producer_seal,material=material)
     grant=q._save(root,root/'host-runtime/permission-fixture-grant.json',dict(scope='Declared permission owner only'))
     arguments=dict(step=2,native_intent=native_ref,call_id='0001-'+'d'*32,subject=subject,review_ref=review_ref,
         target=dict(configuration_files=[]),policy=dict(outcome='require_human_approval'),

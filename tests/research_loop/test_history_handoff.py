@@ -81,7 +81,8 @@ def fixture_final_coverage(root, job, payload, value=AUTO_COVERAGE):
     payload['final_coverage'] = value
 
 
-def finish(root, step, role, parents, text='A bounded scientific finding', action='wait', files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE, stage_intent='review'):
+def finish(root, step, role, parents, text='A bounded scientific finding', action='wait', files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE, stage_intent='decision'):
+    # These route fixtures request ordinary A assessment; review is W consultation.
     path = root / 'jobs' / f'{step:03d}.json'
     previous = contracts.read(path) if path.exists() else {}
     job = contracts.build_job(root, step, role, parents, previous.get('instruction', ''),
@@ -104,7 +105,11 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
                 reason='Fixture declares no scientific candidate suitability; the retained pool remains available to A.')
                 for row in job['candidate_nomination_mechanisms'] if row['status']!='waived'])
         payload.update(stage_intent=stage_intent,mechanism_findings=mechanism_findings,candidate_nominations=candidate_nominations)
-    if role=='A':payload.update(decision_request=None,portfolio_review=None)
+    if role=='A':
+        payload.update(decision_request=(dict(decision='mechanism',
+            question='Does the retained fixture evidence address the original scientific question?',
+            change_criterion='A relevant retained observation resolving the stated evidence gap changes the assessment.')
+            if action in {'continue_w','revise_h','extract'} and job.get('purpose') is None else None),portfolio_review=None)
     if role in {'H', 'A'}:
         payload.update(next_action=action, route_reason='Exact scientific question')
     fixture_portfolio_review(root, job, payload, portfolio_review)
@@ -143,7 +148,7 @@ def test_real_scientific_route_reuses_only_selected_file_without_ancestry(scene,
     stopped_seals(monkeypatch)
     def execute(root, step):
         role = ('H', 'W', 'A', 'H', 'W', 'A')[step - 1]
-        job = contracts.read(root / 'jobs' / f'{step:03d}.json')
+        job = contracts.read_job(root / 'jobs' / f'{step:03d}.json')
         action = 'experiment' if role == 'H' else 'revise_h' if step == 3 else 'finish'
         text = MARKED if step == 4 else f'Ordinary [citation]({REUSED})' if step == 3 else 'Bounded finding'
         files = {'candidate.py': 'def predict(): return 42\n', 'unused.txt': 'Private to old direct handoff'} if step == 2 else None
@@ -227,7 +232,7 @@ def test_changed_bound_reuse_is_rejected(scene, changed):
     _, work, record = finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
     if changed == 'receipt':
         seal = contracts.read(record / 'result-identity.json')
-        seal['selected_inputs'][0]['material']['source'] = str(scene.parent / 'foreign/candidate.py')
+        seal['selected_inputs'][0]['material_ref']['list_ref']['path'] = str(scene.parent / 'foreign/result-identity.json')
         contracts.write(record / 'result-identity.json', seal)
     else:
         path = contracts.workspace(scene, 2) / 'artifacts/candidate.py'
@@ -308,11 +313,14 @@ def test_current_prepared_packets_are_idempotent_and_old_write_schema_is_rejecte
 
 @pytest.mark.parametrize('origin', ['foreign', 'future'])
 def test_selected_original_requires_same_instance_and_preceding_node(scene, origin):
+    from scidiscovery.research_loop import originals
     source(scene)
-    job = contracts.build_job(scene, 3, 'A', [2])
-    row = next(row for row in job['direct_materials'] if row['path'] == REUSED)
-    job['selected_inputs'] = [dict(label='W002-I001', material=row)]
+    finish(scene, 3, 'A', [2], selection=['W002-I001'])
+    job = contracts.build_job(scene, 4, 'H', [3])
+    row = dict(job['selected_inputs'][0]['material'])
     row['source'] = (str(scene.parent / 'foreign/project/nodes/002/artifacts/candidate.py')
-                     if origin == 'foreign' else str(contracts.workspace(scene, 4) / 'artifacts/candidate.py'))
-    with pytest.raises(ValueError, match='original instance node|exact preceding node|exact producer seal'):
-        contracts.selected_inputs(contracts.workspace(scene, 3), {'scientific_result': MARKED, 'implementation_selection': None}, job)
+                     if origin == 'foreign' else str(contracts.workspace(scene, 5) / 'artifacts/candidate.py'))
+    # The selection consumer receives an accepted value. Material admission
+    # still rejects replacing its exact producer with foreign or future bytes.
+    with pytest.raises(ValueError, match='original|exact producer|identity|changed'):
+        originals.material_path(scene, row)

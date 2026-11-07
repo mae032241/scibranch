@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import cli, contracts as c, protocol, research_config
+from scidiscovery.research_loop import backends, cli, contracts as c, protocol, research_config
 
 
 def declaration(tmp_path, extra='', *, root='instance'):
@@ -74,6 +74,16 @@ def output(capsys):
     return json.loads(capsys.readouterr().out)
 
 
+def test_legacy_output_byte_fields_roundtrip_without_capacity_relationship(tmp_path):
+    path=declaration(tmp_path,'max_output_item_bytes = 8\nmax_output_total_bytes = 1\n')
+    settings=research_config.prepare(path,validate_only=True)
+    assert settings['max_output_item_bytes']==8 and settings['max_output_total_bytes']==1
+    document=research_config.to_document(tmp_path/'instance',settings)
+    parsed=research_config.from_document(document,base=tmp_path)
+    assert parsed['max_output_item_bytes']==8 and parsed['max_output_total_bytes']==1
+    assert settings['max_output_item_bytes']==8 and settings['max_output_total_bytes']==1
+
+
 @pytest.mark.parametrize('value',[0,1,'true',None])
 def test_execution_wake_permission_requires_boolean(value):
     from scidiscovery.research_loop import continuation
@@ -103,7 +113,7 @@ def test_standard_defaults_separate_automatic_recovery_from_output_only(tmp_path
     binary = tmp_path / 'codex'
     binary.write_text('not invoked')
     home = tmp_path / 'inherited-home'
-    monkeypatch.setattr(research_config.shutil, 'which', lambda executable: str(binary))
+    monkeypatch.setattr(backends.shutil, 'which', lambda executable: str(binary))
     monkeypatch.setenv('CODEX_HOME', str(home))
     options = normalization_options(tmp_path, native_options=dict(network=False, web='cached'))
     prepared = research_config.normalize(options)
@@ -118,7 +128,39 @@ def test_standard_defaults_separate_automatic_recovery_from_output_only(tmp_path
     assert research_config.normalize(options)['resume_policy']['automatic_recovery']['max_retries'] == 3
 
 
-@pytest.mark.parametrize('mode', ['legacy', 'disabled', 'custom', 'protocol', 'fragment'])
+def test_new_standard_worker_context_windows_default_and_explicit_roundtrip(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import checkpoint
+    monkeypatch.setattr(backends.shutil, 'which', lambda executable: str(tmp_path / 'codex'))
+    prepared = research_config.normalize(normalization_options(tmp_path))
+    assert prepared['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1)
+    path = declaration(tmp_path, '\n[policies]\nworker_context="new_context"\nworker_context_windows=1\n')
+    parsed = research_config.load(path)
+    assert parsed['worker_fragment_policy'] == dict(context='new_context', max_context_windows=1)
+    assert checkpoint.policy(parsed['worker_fragment_policy']) == parsed['worker_fragment_policy']
+    explicit=research_config.normalize(normalization_options(tmp_path,
+        worker_fragment_policy=dict(context='new_context',max_context_windows=2)))
+    assert explicit['worker_fragment_policy']==dict(context='new_context',max_context_windows=2)
+    for invalid in (0, 3, True, '2', None):
+        with pytest.raises(ValueError, match='context windows'):
+            checkpoint.policy(dict(context='same_session', max_context_windows=invalid))
+    assert checkpoint.policy(dict(context='same_session')) == dict(context='same_session')
+
+
+@pytest.mark.parametrize('maximum', [None, 1, 2])
+def test_worker_context_projection_preserves_legacy_absence(tmp_path, maximum):
+    settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
+        native_launcher_argv=['codex'], model='model', handoff_protocol=protocol.CURRENT,
+        node_budget_mode='soft', final_a_completion_policy=dict(version=1),
+        max_tokens=1000, max_seconds=120, max_steps=8,
+        worker_fragment_policy=dict(context='same_session'))
+    if maximum is not None:
+        settings['worker_fragment_policy']['max_context_windows'] = maximum
+    document = research_config.to_document(tmp_path / 'instance', settings)
+    assert ('worker_context_windows' in document['policies']) is (maximum is not None)
+    assert research_config.from_document(document, base=tmp_path)['worker_fragment_policy'] == settings['worker_fragment_policy']
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'disabled', 'custom', 'protocol'])
 def test_automatic_recovery_defaults_do_not_expand_explicit_or_custom_launchers(tmp_path, monkeypatch, mode):
     options = normalization_options(tmp_path)
     legacy = dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn',
@@ -131,9 +173,7 @@ def test_automatic_recovery_defaults_do_not_expand_explicit_or_custom_launchers(
         options['launcher'] = ['codex', '--declared-argument']
     elif mode == 'protocol':
         options.update(native_backend='protocol', model='declared-model')
-    else:
-        options['worker_fragment_policy'] = dict(context='same_session')
-    monkeypatch.setattr(research_config.shutil, 'which', lambda executable: pytest.fail('must retain explicit launcher'))
+    monkeypatch.setattr(backends.shutil, 'which', lambda executable: pytest.fail('must retain explicit launcher'))
     prepared = research_config.normalize(options)
     assert prepared.get('resume_policy') == options.get('resume_policy')
     assert prepared['launcher'] == options['launcher']
@@ -315,24 +355,36 @@ approval_secret_file = "private/operator.key"
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('command', ['config-check', 'prepare'])
-def test_cli_rejects_oversized_initial_editable_seed_before_instance_creation(tmp_path, capsys, command):
+def test_cli_accepts_initial_editable_seed_above_legacy_byte_limit(tmp_path, capsys, monkeypatch, command):
     from scidiscovery.research_loop import code_versions
+    monkeypatch.setitem(code_versions.DEFAULT_LIMITS,'max_file_bytes',8)
     base = tmp_path / 'base'
     (base / 'src').mkdir(parents=True)
-    with (base / 'src/main.py').open('wb') as stream:
-        stream.truncate(code_versions.DEFAULT_LIMITS['max_file_bytes'] + 1)
+    seed=b'# code seed above the legacy byte quota\n'
+    (base/'src/main.py').write_bytes(seed)
     environment = dict(PATH=os.defpath, HOME=os.devnull, GIT_CONFIG_NOSYSTEM='1',
         GIT_CONFIG_GLOBAL=os.devnull, GIT_AUTHOR_NAME='Test', GIT_AUTHOR_EMAIL='test@example.invalid',
         GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.invalid', LC_ALL='C')
     for arguments in [('init', '--quiet', '--template='), ('add', '--', 'src/main.py'),
-                      ('commit', '--quiet', '-m', 'oversized editable seed')]:
+                      ('commit', '--quiet', '-m', 'editable seed above legacy byte quota')]:
         subprocess.run(['git', '-C', str(base), *arguments], env=environment,
             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-    config = declaration(tmp_path, '\n[project]\nbase_root = ' + json.dumps(str(base)) + '\neditable = ["src"]\n')
+    launcher=tmp_path/'codex';launcher.write_text('# synthetic launcher identity; never executed\n');launcher.chmod(0o700)
+    monkeypatch.setenv('CODEX_HOME',str(tmp_path/'native-home'))
+    config = declaration(tmp_path, '\n[project]\nbase_root = ' + json.dumps(str(base)) + '\neditable = ["src"]\n'
+        '\n[permissions]\nworkspace = "workspace-write"\nnetwork = false\nweb = "disabled"\nsubagents = false\n'
+        '\n[agent.native.sandbox_workspace_write]\nwritable_roots = []\nnetwork_access = false\n'
+        'exclude_tmpdir_env_var = false\nexclude_slash_tmp = false\n')
+    config.write_text(config.read_text().replace('launcher = ["never-launched"]',
+        'launcher = '+json.dumps([str(launcher)])))
     original = config.read_bytes()
-    assert cli.main([command, '--config', str(config)]) == 1
-    assert 'max_file_bytes' in output(capsys)['error']
-    assert not (tmp_path / 'instance').exists()
+    assert cli.main([command, '--config', str(config)]) == 0
+    result=output(capsys)
+    if command=='prepare':
+        assert result['status']=='prepared' and (tmp_path/'instance').is_dir()
+    else:
+        assert result['source']=='research_config' and not (tmp_path/'instance').exists()
+    assert (base/'src/main.py').read_bytes()==seed
     assert config.read_bytes() == original
 
 
@@ -418,3 +470,112 @@ def test_policy_preview_rejects_authority_without_review_before_creation(tmp_pat
     assert cli.main(['config-check', '--config', str(config)]) == 1
     assert 'requires the explicit formal review contract' in output(capsys)['error']
     assert not (tmp_path / 'instance').exists()
+
+
+def test_registered_provider_owns_preparation_contract_without_codex_fallback(tmp_path, monkeypatch):
+    from pathlib import Path
+    from scidiscovery.research_loop import continuation, configuration_form, public_output, skill_supply
+    binary=tmp_path/'codex';binary.write_text('never invoked');binary.chmod(0o700)
+    public=tmp_path/'public';public.mkdir()
+    source=tmp_path/'library';manual=source/'chosen'/'SKILL.md';manual.parent.mkdir(parents=True)
+    manual.write_text('---\nname: chosen\ndescription: Provider selection fixture\n---\nExact fixture.\n')
+    calls=[]
+    class Independent(backends.Protocol):
+        name='independent_fixture'
+        supports_resume=True
+        @staticmethod
+        def default_launcher(): return [str(binary)]
+        @staticmethod
+        def profile_defaults():
+            return dict(model='independent-model',reasoning_effort='independent-effort',service_tier='independent-tier')
+        @staticmethod
+        def default_home():
+            calls.append('home');return tmp_path/'independent-home'
+        @staticmethod
+        def declaration_options(options,*,base):
+            return dict(resource=str((Path(base)/options['resource']).resolve()))
+        @staticmethod
+        def validate_configuration(options):
+            return dict(backends.Protocol.validate_configuration({}),**options)
+        def default_resume_policy(self):
+            calls.append('resume_default')
+            return dict(launcher=[str(binary)],policy=dict(max_attempts=1,
+                protocol='independent_resume_v1',usage_scope='turn'))
+        def validate_resume_policy(self,value):
+            calls.append('resume_validate')
+            if value['protocol']!='independent_resume_v1' or value['usage_scope']!='turn':
+                raise ValueError('Independent resume protocol required')
+        def default_experiment_mode(self): return 'external'
+        def public_options(self,options): return dict(network=options['network'])
+        @staticmethod
+        def configuration_fields(): return (dict(path='agent.native.resource',label='Provider resource'),)
+        def skill_loading_contract(self,launcher,*,retained=None):
+            calls.append('skills')
+            value=dict(kind='independent_fixture_cwd',version=1)
+            if retained is not None and retained!=value:raise ValueError('Changed provider Skill contract')
+            return value
+    monkeypatch.setitem(backends._PROVIDERS,Independent.name,Independent)
+    def forbidden(*args,**kwargs):
+        raise AssertionError('Provider-neutral preparation invoked Codex')
+    for method in ('default_launcher','profile_defaults','declaration_options','default_home',
+            'default_resume_policy','validate_resume_policy','default_experiment_mode','skill_loading_contract','public_options','configuration_fields'):
+        monkeypatch.setattr(backends.Codex,method,forbidden)
+    monkeypatch.setattr(skill_supply,'source_root',lambda:source)
+    document=dict(version=1,research=dict(root='instance',public_root='public',objective_text='Keep original scope.'),
+        agent=dict(backend=Independent.name,native=dict(resource='provider-data'),roles=dict(H=dict(skill_set='selected'))),
+        skills=dict(sets=dict(selected=dict(items=['chosen']))),
+        budget=dict(max_tokens=1000,max_seconds=120,max_steps=8,
+            node_targets={role:dict(max_observed_tokens=500,max_seconds=60) for role in 'HWAE'}))
+    options=research_config.from_document(document,base=tmp_path)
+    normalized=research_config.normalize(options)
+    assert normalized['launcher']==[str(binary)]
+    assert normalized['model']=='independent-model'
+    assert normalized['reasoning_effort']=='independent-effort'
+    assert normalized['service_tier']=='independent-tier'
+    assert 'worker_fragment_policy' not in normalized
+    settings=research_config.prepare(validate_only=True,**options)
+    assert settings['experiment_mode']=='external'
+    assert settings['resume_policy']['protocol']=='independent_resume_v1'
+    assert settings['native_options']['resource']==str(tmp_path/'provider-data')
+    assert settings['skills']['launcher']==dict(kind='independent_fixture_cwd',version=1)
+    exported=research_config.to_document(tmp_path/'instance',settings)
+    assert exported['agent']['native']==dict(resource=str(tmp_path/'provider-data'))
+    assert public_output.settings_view(settings)['native_options']==dict(network=False)
+    clean=public_output.cleaner(tmp_path/'instance',settings)
+    assert clean(str(tmp_path/'independent-home'))=='[private]'
+    assert clean(str(tmp_path/'provider-data'))=='[private]'
+    assert {'home','resume_default','resume_validate','skills'}<=set(calls)
+    assert Independent.name in configuration_form.render(configuration_form.imported(document,base=tmp_path))
+    # Provider validation cannot waive the control-owned finite recovery budget.
+    with pytest.raises(ValueError,match='explicit finite attempts'):
+        continuation.policy(dict(max_attempts=3,protocol='independent_resume_v1',usage_scope='turn'),
+            [str(binary)],backend=Independent.name)
+    assert not (tmp_path/'instance').exists()
+
+
+def test_cli_accepts_registered_backend_before_preparation(tmp_path,monkeypatch,capsys):
+    class Independent(backends.Protocol):
+        name='cli_provider_fixture'
+    monkeypatch.setitem(backends._PROVIDERS,Independent.name,Independent)
+    requests=[]
+    def prepare(**options):
+        requests.append(options)
+        return dict(goal_id='fixture-goal')
+    monkeypatch.setattr(research_config,'prepare',prepare)
+    assert cli.main(['prepare','--root',str(tmp_path/'instance'),
+        '--objective',str(tmp_path/'objective.md'),'--public-root',str(tmp_path/'public'),
+        '--native-launcher-json','["never-invoked"]','--native-backend',Independent.name,
+        '--max-tokens','1000','--max-seconds','60','--max-steps','3'])==0
+    assert requests[0]['native_backend']==Independent.name
+    assert json.loads(capsys.readouterr().out)['status']=='prepared'
+
+
+def test_launcher_declaration_preserves_invoked_symlink_identity(tmp_path):
+    target=tmp_path/'native.js';target.write_text('Fixture executable.');target.chmod(0o700)
+    invoked=tmp_path/'codex';invoked.symlink_to(target)
+    document=dict(version=1,research=dict(root='instance',public_root='public',objective_text='Fixture'),
+        agent=dict(launcher=['./codex','literal-argument']),
+        budget=dict(max_tokens=1000,max_seconds=60,max_steps=3))
+    options=research_config.from_document(document,base=tmp_path)
+    assert options['launcher']==[str(invoked),'literal-argument']
+    assert invoked.resolve()==target

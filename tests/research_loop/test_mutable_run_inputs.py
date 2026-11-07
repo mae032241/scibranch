@@ -31,7 +31,8 @@ def _prepare(config, source, *, directory=None, adapter=None):
         adapter=LocalExecution({key:value for key,value in config.items() if key!='execution_interface'},
             frozen_interface=config['execution_interface'])
     return e._prepare_descriptor(config,payload,adapter,records,
-        [path.name for path in records.calls()],command_options=options,_source_script=str(source))
+        [path.name for path in records.calls()],command_options=options,_source_script=str(source),
+        client_facts=experiment_client.load_client_facts(config))
 
 
 class _Adapter:

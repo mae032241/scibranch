@@ -57,7 +57,7 @@ if role=='H':
   if config['fault']=='author-selection' and not resume:payload['implementation_selection']=['W999-I001']
  if config['fault'] in {'caller-no-search','caller-compile-no-search','caller-command-no-search'}:payload['next_action']='experiment'
 elif role=='W':
- payload.update(stage_intent='review',mechanism_findings=None)
+ payload.update(stage_intent='decision',mechanism_findings=None)
  task=json.loads((work/'science-task.json').read_text())
  mechanisms=task.get('candidate_nomination_mechanisms',[])
  if config['fault'] in {'caller-no-search','caller-compile-no-search','caller-command-no-search'}:
@@ -102,7 +102,7 @@ elif role=='W':
    script.write_text('from pathlib import Path\nfor i,path in enumerate('+repr(artifacts)+'): Path(path).write_text("original model "+str(i))\nPath("artifacts/result.json").write_text('+repr(json.dumps(declared))+')\n')
    outcome=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
     '--submission-directory',str(work/SUBMISSION_DIRECTORY),'run','--experiment-dir',str(directory),
-    '--script',str(script),'--mechanism','h001.m1'],capture_output=True,text=True)
+    '--script',str(script),'--mechanism','1'],capture_output=True,text=True)
    assert outcome.returncode==0,(outcome.stdout,outcome.stderr)
    result=json.loads(outcome.stdout);assert result['status']=='known_success'
    locator_file.write_text(json.dumps(dict(call_id=result['call_id'],artifact=artifacts[0])))
@@ -114,7 +114,10 @@ elif role=='W':
    copied=work/'artifacts/experiments'/locator['call_id']/'artifacts'/output_name
    if not resume:
     copied.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(original,copied)
-    assert copied.read_bytes()==original.read_bytes() and not copied.samefile(original)
+    retained_bytes=original.read_bytes()
+    assert not copied.samefile(original)
+    copied.write_bytes(retained_bytes+b'\nConflicting authored fixture publication.\n')
+    assert copied.read_bytes()!=retained_bytes and original.read_bytes()==retained_bytes
    else:
     assert 'Fix diagnosed JSON/layout only' in prompt and 'deliverable_path_collision' in prompt
     assert 'Remove redundant copies' in prompt
@@ -135,7 +138,7 @@ elif role=='W':
    declared=dict(version=1,metrics=[],outputs=[dict(path='artifacts/new-managed-effect.txt')])
    script.write_text('from pathlib import Path\nPath("artifacts/new-managed-effect.txt").write_text("unexpected new effect")\nPath('+repr(str(work/'artifacts/output-repair-new-effect.txt'))+').write_text("unexpected new effect")\nPath("artifacts/result.json").write_text('+repr(json.dumps(declared))+')\n')
    probe('run',['run','--experiment-dir',str(directory),'--script',str(script),
-    '--mechanism','h001.m1'])
+    '--mechanism','1'])
   payload['mechanism_findings']=[dict(mechanism='h001.m1',basis='observed',finding='One retained fixture observation; target suitability remains for A.')]
   value=dict(representatives=[dict(mechanism_ref=mechanisms[0]['mechanism_ref'],candidate=locator,reason='A retained model for this scientific mechanism.')],extras=[],gaps=[])
   if completed_work:
@@ -170,7 +173,7 @@ elif role=='W':
     script.write_text('from pathlib import Path\nPath("artifacts/analysis.txt").write_text("A different assigned bounded observation")\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[dict(path='artifacts/analysis.txt')])))+')\n')
     outcome=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.worker_execution_bridge',
      '--submission-directory',str(work/SUBMISSION_DIRECTORY),'run','--experiment-dir',str(directory),
-     '--script',str(script),'--mechanism','h001.m2'],capture_output=True,text=True)
+     '--script',str(script),'--mechanism','2'],capture_output=True,text=True)
     assert outcome.returncode==0,(outcome.stdout,outcome.stderr)
     result=json.loads(outcome.stdout);assert result['status']=='known_success'
     second.write_text(json.dumps(dict(call_id=result['call_id'])))
@@ -183,7 +186,7 @@ elif role=='W':
     directory=work/'experiments/second';directory.mkdir(parents=True,exist_ok=True)
     script=work/'code/second.py'
     script.write_text('from pathlib import Path\nPath("artifacts/analysis.txt").write_text("A different assigned bounded observation")\nPath("artifacts/result.json").write_text('+repr(json.dumps(dict(version=1,metrics=[],outputs=[dict(path='artifacts/analysis.txt')])))+')\n')
-    requested_mechanism='h001.m1' if 'caller-improve' in config['fault'] else 'h001.m2'
+    requested_mechanism='1' if 'caller-improve' in config['fault'] else '2'
     requested_ref='h001.m1' if 'caller-improve' in config['fault'] else 'h001.m2'
     arguments=['run','--experiment-dir',str(directory),'--script',str(script),'--mechanism',requested_mechanism]
     if not resume:
@@ -200,7 +203,7 @@ elif role=='W':
      response=json.loads(accepted.stdout)
      assert accepted.returncode==0 and response['status']=='known_success',(accepted.stdout,accepted.stderr)
      second.write_text(json.dumps(dict(call_id=response['call_id'])))
-     payload['mechanism_findings'].append(dict(mechanism=requested_mechanism,basis='observed',finding='The corrected request yielded the retained assigned observation.'))
+     payload['mechanism_findings'].append(dict(mechanism=requested_ref,basis='observed',finding='The corrected request yielded the retained assigned observation.'))
     elif config['fault']=='completed-caller-blocked':
      payload['mechanism_findings'].append(dict(mechanism='h001.m2',basis='blocked',finding='The command options were refused before this required observation started.'))
     else:payload['stage_intent']='decision'
@@ -238,7 +241,7 @@ raise SystemExit(7 if config['fault']=='failed' and role=='A' else 0)
 '''
 
 
-def cli(root,*arguments,env,trace_timeout=False):
+def cli(root,*arguments,env,trace_timeout=False,timeout=40):
     entry=[sys.executable,'-m','scidiscovery.research_loop.cli']
     if trace_timeout:
         # The same CLI under a bounded diagnostic wrapper; no timeout increase.
@@ -255,7 +258,7 @@ sys.argv=["scid-research",*sys.argv[1:]]
 runpy.run_module("scidiscovery.research_loop.cli",run_name="__main__")''']
     try:
         completed=subprocess.run([*entry,*arguments,'--root',str(root)],
-            env=env,capture_output=True,text=True,timeout=40)
+            env=env,capture_output=True,text=True,timeout=timeout)
     except subprocess.TimeoutExpired as error:
         stderr=error.stderr or b''
         if isinstance(stderr,bytes):stderr=stderr.decode('utf-8',errors='replace')
@@ -318,7 +321,7 @@ def nomination_diagnostic(root, result, *, fault, fragment=False):
     return rendered
 
 
-def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False,automatic=None,max_tokens=None,a_screened=False,output_repair_probe=False,layout_input_tokens=2040301):
+def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,final=False,fragment=False,automatic=None,max_tokens=None,a_screened=False,output_repair_probe=False,layout_input_tokens=2040301,max_seconds=60):
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Retain scientific uncertainty.')
     home=tmp_path/'inherited-home';home.mkdir()
     configuration='[sandbox_workspace_write]\nnetwork_access=true\nexclude_tmpdir_env_var=true\n'
@@ -347,7 +350,7 @@ def prepare_cli(tmp_path,*,fault='missing',custom=False,explicit_false=False,fin
     launcher=[sys.executable,str(program)] if custom else [str(binary/'codex') if explicit_false or fragment or automatic is not None else 'codex']
     arguments=['prepare','--objective',str(objective),'--public-root',str(public),
         '--native-launcher-json',json.dumps(launcher),
-        '--max-tokens',str(max_tokens) if max_tokens is not None else '1' if final else '1000','--max-seconds','60','--max-steps','1' if final else '6',
+        '--max-tokens',str(max_tokens) if max_tokens is not None else '1' if final else '1000','--max-seconds',str(max_seconds),'--max-steps','1' if final else '6',
         '--search-policy',str(search)]
     if explicit_false:
         policy=tmp_path/'resume.json';c.write(policy,dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',output_repair=False))

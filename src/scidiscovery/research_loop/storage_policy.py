@@ -1,4 +1,4 @@
-"""Opt-in bounds on managed scanning and retention, not a filesystem quota."""
+"""Opt-in file/entry counts and finite IO; byte fields are legacy syntax."""
 from contextlib import contextmanager
 from contextvars import ContextVar
 import fcntl
@@ -10,6 +10,7 @@ import time
 
 DIMENSIONS = ('max_scan_entries', 'max_files', 'max_file_bytes',
               'max_total_bytes', 'max_instance_bytes')
+_BYTE_DIMENSIONS = frozenset(('max_file_bytes', 'max_total_bytes', 'max_instance_bytes'))
 _writers = ContextVar('managed_storage_writers', default=frozenset())
 _policies = ContextVar('managed_storage_policies', default={})
 
@@ -66,7 +67,8 @@ class Inventory:
     def limit(self, name, amount):
         check(self.context)
         limit = self.policy[name]
-        if self.policy['enabled'] and limit is not None and amount > limit:
+        if (name not in _BYTE_DIMENSIONS and self.policy['enabled']
+                and limit is not None and amount > limit):
             raise StorageQuotaExceeded('Managed storage limit exceeded: ' + name)
 
     def entry(self):
@@ -188,20 +190,15 @@ def writer_lock(root, *, context=None):
 
 @contextmanager
 def mutation(root, growth, *, policy=None, context=None, target=None):
-    """Reserve surviving partial bytes under the common storage writer lock."""
+    """Publish under the writer lock without admitting by legacy byte quotas."""
     if type(growth) is not int or growth<0:
         raise ValueError('Managed storage growth must be a nonnegative integer')
     if root is None:
         yield
         return
     root = Path(root)
-    policy = for_root(root) if policy is None else configuration(policy)
-    if not policy['enabled'] or policy['max_instance_bytes'] is None:
-        yield
-        return
+    if policy is not None:
+        configuration(policy)
     context = context or Deadline(65)
     with writer_lock(root, context=context):
-        required=0 if target is not None and Path(target).exists() else growth
-        if usage(root,context=context)+required>policy['max_instance_bytes']:
-            raise StorageQuotaExceeded('Managed storage limit exceeded: max_instance_bytes')
         yield

@@ -39,8 +39,10 @@ def test_only_current_role_literal_is_delivered_and_retained_bytes_are_stable(tm
         if role in {'H', 'W'}:
             assert prompt.count(guidance.STAGE_PLANNING[role]) == 1
         if role == 'H':
-            assert 'Assign bounded scientific work packages, not single experiments' in prompt
-            assert 'differing predictions, fair controls, sufficient evidence' in prompt
+            assert 'H explores revisable high-level scientific methods/directions' in prompt
+            assert 'Keep original task constraints/counts/commitments fixed' in prompt
+            assert 'minimal_test' not in prompt
+            assert 'task acceptance' not in prompt
             assert 'No downstream budget/call/audit caps' in prompt
         assert 'scientific_work_unit' not in schema['properties']
         originals={p:p.read_bytes() for p in (root/'jobs'/f'{step:03d}.json',work/'science-task.json',record/'result-identity.json')}
@@ -59,7 +61,7 @@ def test_old_job_without_guidance_is_not_rewritten(tmp_path):
 
 
 @pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
-@pytest.mark.parametrize('gate,role', [('author', 'H'), ('author', 'W'), ('formal_review', 'A')])
+@pytest.mark.parametrize('gate,role', [('author', 'H'), ('author', 'W'), ('author', 'A'), ('formal_review', 'A')])
 def test_author_and_formal_review_requests_exclude_ordinary_batch_planning(tmp_path, backend_name, gate, role):
     root = prepare(tmp_path)
     job = c.build_job(root, 1, role, [])
@@ -77,7 +79,9 @@ def test_author_and_formal_review_requests_exclude_ordinary_batch_planning(tmp_p
     assert all(text not in prompt + instruction for text in guidance.STAGE_PLANNING.values())
     if gate == 'author':
         assert 'Completed originals only' in prompt
-        assert 'stage_intent=review/decision, never continue' in prompt
+        assert 'stage_intent=decision' in prompt
+        assert 'no consultation, handoff or continued work' in prompt
+        assert 'no experiment/training/refinement/submission/replay/backend query/collection' in prompt
     else:
         assert 'Do not edit the subject' in prompt
 

@@ -185,7 +185,8 @@ def test_job_and_resume_intent_retain_binding_not_latest_configuration(tmp_path)
     first = c.build_job(root, 1, 'H', [])
     original = configuration_updates.for_job(root, first)
     intent = dict(task_ref=c.record_ref(root / 'jobs/001.json'), **profiles.binding(original, first))
-    c.write(execution.origin(root, 1) / 'native-intent.json', intent)
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_native(root, 1, execution.origin(root, 1), intent)
     document = research_config.to_document(root)
     document['agent']['roles']['H']['skill_set'] = 'second'
     configuration_updates.submit(root, document, expected_revision=0)

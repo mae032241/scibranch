@@ -381,7 +381,8 @@ def arbiter_instance(tmp_path, monkeypatch, *, role='W', output_only=True):
     monkeypatch.setattr(budget, 'final_a_barrier', lambda *_:None)
     monkeypatch.setattr(budget, 'closeout_state', lambda *_:dict(begin=None))
     monkeypatch.setattr(correction, 'gate', lambda *_:None)
-    monkeypatch.setattr(backends, 'selected', lambda *_:SimpleNamespace(name='codex', standard=True))
+    backend = backends.Codex(dict(native_launcher_argv=['codex']))
+    monkeypatch.setattr(backends, 'selected', lambda *_:backend)
     monkeypatch.setattr(continuation, 'automatic_source', lambda *_:c.read(record / 'native-outcome.json'))
     monkeypatch.setattr(continuation, '_automatic_session', lambda *_:dict(thread_id='original'))
     monkeypatch.setattr(execution_recovery, 'pending', lambda *_:False)
@@ -427,37 +428,58 @@ def test_known_completed_fragment_or_missing_output_returns_to_existing_flow(tmp
     assert continuation.automatic_decision(root, 1)['action'] == 'none'
 
 
-@pytest.mark.parametrize('scope', ['author_closeout','execution_wake','output_repair','work_repair'])
+@pytest.mark.parametrize('scope', ['author_closeout','output_repair','work_repair'])
 def test_narrow_original_scope_does_not_acquire_full_task_recovery(tmp_path, monkeypatch, scope):
     root, record = arbiter_instance(tmp_path, monkeypatch)
-    original = (dict(continuation_kind=scope) if scope in {'author_closeout','execution_wake'}
+    original = (dict(continuation_kind=scope) if scope == 'author_closeout'
         else {scope:dict(code='retained_narrow_scope')})
     c.write(record / 'native-intent.json', original)
     assert continuation.automatic_decision(root, 1)['reason'] == 'automatic_recovery_special_scope_unavailable'
 
 
-def test_raw_failure_projection_is_rechecked_without_reading_agent_text(tmp_path, monkeypatch):
+@pytest.mark.parametrize('code,category', [('rate_limit_exceeded','temporary'),
+    ('insufficient_quota','permanent'), ('unclassified','unknown')])
+def test_current_writer_failure_facts_ignore_opaque_tool_body(tmp_path, monkeypatch, code, category):
+    from scidiscovery.research_loop.native_usage import stream_binding
     root = tmp_path;record = root / 'record';record.mkdir()
     backend = backends.Codex(dict(native_launcher_argv=['codex']))
     monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
     monkeypatch.setattr(backends, 'selected', lambda *_:backend)
     c.write(record / 'native-intent.json', {})
-    event = dict(type='turn.failed', error=dict(code='rate_limit_exceeded', status=429))
-    import json
-    raw = (json.dumps(dict(type='item.completed', item=dict(type='agent_message', text='insufficient_quota')))
-        + '\n' + json.dumps(event) + '\n').encode()
+    event = dict(type='turn.failed', error=dict(code=code))
+    # The producer's tagged selector must not JSON-decode this behavioral body.
+    raw = (b'{"type":"item.completed","item":{"type":"command_execution","output":'
+        + b'opaque non-JSON private tool body' * 4096 + b'} }\n'
+        + json.dumps(event).encode() + b'\n')
     (record / 'native.jsonl').write_bytes(raw)
-    c.write(record / 'native-outcome.json', dict(native_failure=recovery.classify(event),
-        terminal_observed=False,native_activity_observed=True,thread_id=None))
-    assert continuation.automatic_source(root, 1, record)['native_failure']['category'] == 'temporary'
+    original_loads=json.loads
+    def controls_only(value,*args,**kwargs):
+        assert b'opaque non-JSON private tool body' not in (value.encode() if isinstance(value,str) else value)
+        return original_loads(value,*args,**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(json,'loads',controls_only)
+        projected=[backend.event(value) for value in backend.event_selector(
+            source=record/'native.jsonl').feed(raw,final=True)]
+    facts=dict(native_failure=recovery.combine([value['failure'] for value in projected if 'failure' in value]),
+        terminal_observed=any(value.get('completed') for value in projected),
+        native_activity_observed=any(value.get('activity') for value in projected),thread_id=None,
+        native_stream=stream_binding(record/'native.jsonl'))
+    c.write(record / 'native-outcome.json', facts)
+    assert continuation.automatic_source(root, 1, record)['native_failure']['category'] == category
+    assert facts['native_activity_observed'] is True
     assert (record / 'native.jsonl').read_bytes() == raw
-    event['error']['code'] = 'insufficient_quota'
-    (record / 'native.jsonl').write_text(json.dumps(event) + '\n')
-    with pytest.raises(ValueError, match='failure evidence changed'):
+    (record / 'native.jsonl').write_text(json.dumps(dict(type='turn.failed',error=dict(code='other'))) + '\n')
+    with pytest.raises(ValueError, match='stream changed'):
         continuation.automatic_source(root, 1, record)
 
 
-def test_retained_diagnostic_uses_current_json_schema_interpretation_without_rewriting_originals(tmp_path, monkeypatch):
+def test_execution_wake_retains_the_original_full_task_recovery_grant(tmp_path, monkeypatch):
+    root, record = arbiter_instance(tmp_path, monkeypatch)
+    c.write(record / 'native-intent.json', dict(continuation_kind='execution_wake'))
+    assert continuation.automatic_decision(root, 1)['action'] == 'retry'
+
+
+def test_legacy_json_schema_diagnostic_without_compact_facts_is_unavailable(tmp_path, monkeypatch):
     record = tmp_path / 'record';record.mkdir()
     backend = backends.Codex(dict(native_launcher_argv=['codex']))
     monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
@@ -469,15 +491,13 @@ def test_retained_diagnostic_uses_current_json_schema_interpretation_without_rew
     c.write(record / 'native-outcome.json', dict(native_failure=old_projection,
         terminal_observed=False, native_activity_observed=False, thread_id=None))
     retained = {name:(record / name).read_bytes() for name in ('native.jsonl', 'native-outcome.json')}
-    current = continuation.automatic_source(tmp_path, 1, record)
-    assert current['native_failure']['category'] == 'permanent'
-    assert decide(current, available=False)['reason'] == 'automatic_recovery_permanent_failure'
+    with pytest.raises(continuation.ResumeUnavailable, match='native_compact_control_facts_unavailable'):
+        continuation.automatic_source(tmp_path, 1, record)
     assert all((record / name).read_bytes() == raw for name, raw in retained.items())
-    saved = c.read(record / 'native-outcome.json')
-    assert decide(saved, available=False)['reason'] == 'automatic_recovery_unknown_failure'
+    assert decide(c.read(record / 'native-outcome.json'), available=False)['reason'] == 'automatic_recovery_unknown_failure'
 
 
-def test_retained_unknown_routing_diagnostic_is_interpreted_from_native_originals(tmp_path, monkeypatch):
+def test_legacy_unknown_routing_diagnostic_without_compact_facts_is_unavailable(tmp_path, monkeypatch):
     record = tmp_path / 'record';record.mkdir()
     backend = backends.Codex(dict(native_launcher_argv=['codex']))
     monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
@@ -493,20 +513,13 @@ def test_retained_unknown_routing_diagnostic_is_interpreted_from_native_original
         returncode=1, native_activity_observed=True, usage=dict(unknown_steps=[1]))
     c.write(record / 'native-outcome.json', saved)
     originals = {name:(record / name).read_bytes() for name in ('native-intent.json', 'native-outcome.json', 'native.jsonl')}
-    current = continuation.automatic_source(tmp_path, 1, record)
-    assert current == dict(saved, native_failure=recovery.combine([recovery.classify(event)
-        for event in events if event['type'] in {'error', 'turn.failed'}]))
-    assert decide(current)['action'] == 'retry' and recovery.recoverable_source(current)
-    assert current['usage'] == saved['usage'] and current['native_failure']['not_accepted'] is False
-    assert decide(current, available=False)['reason'] == 'automatic_recovery_session_unavailable'
+    with pytest.raises(continuation.ResumeUnavailable, match='native_compact_control_facts_unavailable'):
+        continuation.automatic_source(tmp_path, 1, record)
     assert all((record / name).read_bytes() == raw for name, raw in originals.items())
-    for field, changed in (('terminal_observed', True), ('native_activity_observed', False), ('thread_id', 'other')):
-        c.write(record / 'native-outcome.json', dict(saved, **{field:changed}))
-        with pytest.raises(ValueError, match='failure evidence changed'):
-            continuation.automatic_source(tmp_path, 1, record)
+    assert decide(saved)['reason'] == 'automatic_recovery_unknown_failure'
 
 
-def test_retained_unknown_capacity_diagnostic_is_interpreted_from_native_originals(tmp_path, monkeypatch):
+def test_legacy_unknown_capacity_diagnostic_without_compact_facts_is_unavailable(tmp_path, monkeypatch):
     record = tmp_path / 'record';record.mkdir()
     backend = backends.Codex(dict(native_launcher_argv=['codex']))
     monkeypatch.setattr(configuration_updates, 'for_step', lambda *_:{})
@@ -535,20 +548,11 @@ def test_retained_unknown_capacity_diagnostic_is_interpreted_from_native_origina
     c.write(record / 'native-outcome.json', saved)
     originals = {path:path.read_bytes() for path in (record / 'native-intent.json',
         record / 'native-outcome.json', record / 'native.jsonl', session)}
-    current = continuation.automatic_source(tmp_path, 5, record)
-    assert current == dict(saved, native_failure=recovery.combine([recovery.classify(event)
-        for event in events if event['type'] in {'error', 'turn.failed'}]))
-    decided = decide(current)
-    assert decided['action'] == 'retry' and decided['startup_retry'] is False
-    assert decided['delay_seconds'] == 30. and recovery.recoverable_source(current)
-    assert current['native_failure']['not_accepted'] is False
+    with pytest.raises(continuation.ResumeUnavailable, match='native_compact_control_facts_unavailable'):
+        continuation.automatic_source(tmp_path, 5, record)
     assert decide(saved)['reason'] == 'automatic_recovery_unknown_failure'
     assert not (record / 'usage.json').exists()
     assert all(path.read_bytes() == raw for path, raw in originals.items())
-    for field, changed in (('terminal_observed', True), ('native_activity_observed', False), ('thread_id', 'other')):
-        c.write(record / 'native-outcome.json', dict(saved, **{field:changed}))
-        with pytest.raises(ValueError, match='failure evidence changed'):
-            continuation.automatic_source(tmp_path, 5, record)
 
 
 @pytest.mark.parametrize('event,category', [
@@ -563,9 +567,10 @@ def test_saved_temporary_diagnostic_cannot_grant_recovery_without_current_native
     c.write(record / 'native-intent.json', {})
     (record / 'native.jsonl').write_text(json.dumps(event) + '\n')
     c.write(record / 'native-outcome.json', dict(outcome(), thread_id=None))
-    current = continuation.automatic_source(tmp_path, 1, record)
-    assert current['native_failure']['category'] == category
-    assert decide(current)['action'] == 'stop'
+    originals={path:path.read_bytes() for path in (record/'native.jsonl',record/'native-outcome.json')}
+    with pytest.raises(continuation.ResumeUnavailable, match='native_compact_control_facts_unavailable'):
+        continuation.automatic_source(tmp_path, 1, record)
+    assert all(path.read_bytes()==raw for path,raw in originals.items())
 
 
 def format_error(**changes):
@@ -588,7 +593,8 @@ def test_format_negotiation_requires_structured_format_parameter(change):
 @pytest.mark.parametrize('activity', [None,dict(type='item.started',item=dict(type='agent_message')),
     dict(type='item.completed',item=dict(type='mcp_tool_call')),dict(type='turn.completed'),
     dict(type='unknown.event'),'malformed'])
-def test_positive_original_format_rejection_is_separate_from_immutable_old_diagnostic(tmp_path, monkeypatch, activity):
+def test_current_writer_format_rejection_requires_no_other_native_activity(tmp_path, monkeypatch, activity):
+    from scidiscovery.research_loop.native_usage import stream_binding
     record=tmp_path/'record';record.mkdir()
     backend=backends.Codex(dict(native_launcher_argv=['codex']))
     monkeypatch.setattr(configuration_updates,'for_step',lambda *_:{})
@@ -597,24 +603,30 @@ def test_positive_original_format_rejection_is_separate_from_immutable_old_diagn
     events=[dict(type='thread.started',thread_id='original'),dict(type='turn.started')]
     if activity is not None:events.append(activity)
     events.extend([format_error(),dict(type='turn.failed',error=dict(message=format_error()['message']))])
-    (record/'native.jsonl').write_text('\n'.join(json.dumps(event) if event!='malformed' else '{'
-        for event in events)+'\n')
+    raw=('\n'.join(json.dumps(event) if event!='malformed' else '{' for event in events)+'\n').encode()
+    (record/'native.jsonl').write_bytes(raw)
+    selected=backend.event_selector(source=record/'native.jsonl').feed(raw,final=True)
+    projected=[backend.event(event) for event in selected]
+    observations=[backend.format_observation(event) for event in selected]
+    rejected=False;candidate=True
+    for observation in observations:
+        if observation=='rejection':rejected=True
+        elif observation!='startup' or rejected:candidate=False
     c.write(record/'native-outcome.json',dict(returncode=7,stop_reason='native_failure_event',
-        cleanup='observed_group_cleaned',native_failure=recovery.classify(dict(type='error')),
-        terminal_observed=False,native_activity_observed=True,thread_id='original'))
+        cleanup='observed_group_cleaned',native_failure=recovery.combine(
+            [event['failure'] for event in projected if 'failure' in event]),
+        terminal_observed=any(event.get('completed') for event in projected),
+        native_activity_observed=any(event.get('activity') for event in projected),thread_id='original',
+        native_format_rejected=bool(candidate and rejected),native_stream=stream_binding(record/'native.jsonl')))
     originals={name:(record/name).read_bytes() for name in ('native.jsonl','native-outcome.json','native-intent.json')}
     value=continuation.format_source(tmp_path,1,record)
     assert (value is not None) is (activity is None)
     if value is not None:
-        assert value['format_rejected'] is True and value['native_failure']['category']=='unknown'
-    assert all((record/name).read_bytes()==raw for name,raw in originals.items())
-    if isinstance(activity,dict) and activity.get('type')=='turn.completed':
-        with pytest.raises(ValueError,match='failure evidence changed'):
-            continuation.automatic_source(tmp_path,1,record)
-    else:
-        current=continuation.automatic_source(tmp_path,1,record)
-        assert current['native_failure']['category']=='permanent'
-        assert decide(current)['reason']=='automatic_recovery_permanent_failure'
+        assert value['format_rejected'] is True and value['native_failure']['category']=='permanent'
+    current=continuation.automatic_source(tmp_path,1,record)
+    assert current['native_failure']['category']=='permanent'
+    assert decide(current)['action'] not in {'retry','continue'}
+    assert all((record/name).read_bytes()==original for name,original in originals.items())
 
 
 def test_format_fallback_is_once_and_spends_existing_retry_budget():
@@ -1324,3 +1336,18 @@ def test_final_ordinary_prompt_failure_preserves_protected_scope_and_exact_origi
     assert controller.closeout(root)['status']!='final_a_completed'
     assert execution.records(root,1)==[first] and not (root/'jobs/002.json').exists()
     assert all(path.read_bytes()==raw for path,raw in {**schemas,**retained}.items())
+
+
+def test_recovery_reuses_exact_writer_facts_without_decoding_behavior_history(tmp_path,monkeypatch):
+    from pathlib import Path
+    from scidiscovery.research_loop.native_usage import stream_binding
+    path=tmp_path/'native.jsonl';path.write_bytes(b'opaque command output, not control JSON\n')
+    value=dict(terminal_observed=False,native_activity_observed=True,native_failure=failure(),
+        thread_id='original',native_stream=stream_binding(path))
+    policy=dict(native_backend='codex',native_launcher_argv=['codex'])
+    with monkeypatch.context() as patch:
+        patch.setattr(Path,'open',lambda *a,**k:pytest.fail('Recovery must not reopen native history'))
+        assert continuation._automatic_source_from_facts(tmp_path,policy=policy,intent={},outcome=value)==value
+    path.write_bytes(b'changed original bytes')
+    with pytest.raises(ValueError,match='stream changed'):
+        continuation._automatic_source_from_facts(tmp_path,policy=policy,intent={},outcome=value)

@@ -32,37 +32,36 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
             continue
         job = contracts.read(job_path)
         protocol.require_job_format(job)
+        record=execution.record(root,step)
+        outcome=(contracts.native_outcome(record) if (record/'native-outcome.json').exists() else None)
+        if outcome is not None and not isinstance(outcome,dict):
+            raise history.ObserverIntegrityError('Native status original outcome is malformed')
         state = runtime.node_state(root, step)
         state = {'sealed': 'seal_present_unverified', 'terminal': 'native_outcome_unsealed',
                  'unstarted': 'prepared'}.get(state, state)
         if state == 'native_outcome_unsealed':
-            outcome = contracts.native_outcome(execution.record(root, step))
-            if not isinstance(outcome, dict):
-                raise history.ObserverIntegrityError('Native status original outcome is malformed')
-            if outcome.get('native_started') is False:
+            if outcome is not None and outcome.get('native_started') is False:
                 state = 'native_not_submitted'
         node = dict(step=step, role=job['role'], state=state)
         if not live_feedback:
-            outcome_path = execution.record(root, step) / 'native-outcome.json'
-            if outcome_path.exists():
-                outcome = contracts.native_outcome(outcome_path.parent)
-                if not isinstance(outcome, dict):
-                    raise history.ObserverIntegrityError('Native status original outcome is malformed')
+            if outcome is not None:
                 node.update(stop_reason=outcome.get('stop_reason'), returncode=outcome.get('returncode'))
-        config_path=execution.record(root,step)/'experiment-config.json'
+        config_path=record/'experiment-config.json'
         if config_path.exists() and 'experiment_mode' in job:
             selected=contracts.read(contracts.regular(config_path))['execution_interface']
             node['execution']=dict(executor=selected['executor'],capabilities=selected['capabilities'],
                 result_protocol=selected['result_protocol'])
         if settings.get('node_budget_policy') is not None:
-            record = execution.record(root, step)
             intent = contracts.read(record / 'native-intent.json') if (record / 'native-intent.json').exists() else {}
-            outcome = contracts.native_outcome(record) if (record / 'native-outcome.json').exists() else {}
-            if not isinstance(intent, dict) or not isinstance(outcome, dict):
+            if not isinstance(intent, dict):
                 raise history.ObserverIntegrityError('Native budget status originals are malformed')
-            node.update(**(dict(node_budget_mode='soft') if budget.node_mode(root)=='soft' else {}), budget_slice=intent.get('budget_slice'), budget_report=outcome.get('budget_slice'), stop_reason=outcome.get('stop_reason'))
-        if settings.get('resume_policy') is not None:
+            node.update(**(dict(node_budget_mode='soft') if budget.node_mode(root)=='soft' else {}), budget_slice=intent.get('budget_slice'), budget_report=(outcome or {}).get('budget_slice'), stop_reason=(outcome or {}).get('stop_reason'))
+        if settings.get('resume_policy') is not None or record != execution.origin(root,step):
             node['continuations'] = len(execution.records(root, step)) - 1
+        if outcome is not None and state != 'seal_present_unverified':
+            from . import continuation
+            stopped=continuation.technical_stop(root,job,record,outcome)
+            if stopped is not None:node.update(technical_stop=stopped,stage=stopped['stage'])
         if live_feedback and job.get('live_feedback_version') == 1 and state != 'seal_present_unverified':
             node['live_feedback'] = feedback.live(root, job)
         nodes.append(node)
@@ -73,7 +72,11 @@ def status(root: Path, *, after=0, limit=None, live_feedback=True):
         page = dict(after=after, next_after=last if more else None)
     closeout = budget.closeout_state(root)
     from . import delivery
+    technical=(nodes[-1].get('technical_stop') if nodes else None)
     return dict(instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
+                **(dict(technical_stop=technical,stage=technical['stage'],
+                    pending_step=technical['pending_step'],pending_role=technical['pending_role'],
+                    repair_scope=technical['repair_scope'],supported_actions=technical['supported_actions']) if technical else {}),
                 paused=(root / 'pause.request').exists(), nodes=nodes, usage=native.usage(root),
                 goal_completion='not_asserted', budget=budget.status_snapshot(root),
                 correction=correction.project(root, before_step=closeout['begin']['source_cutoff'] + 1 if closeout['begin'] else None),

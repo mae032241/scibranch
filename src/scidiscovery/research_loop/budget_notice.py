@@ -1,11 +1,12 @@
 """Bounded budget advice at a native tool boundary; never an execution grant.
 
 This file is also the staged hook executable. Its hook path uses only stdlib,
-one fixed current hint and one exclusive marker per logical node and dimension.
+one fixed current hint and one exclusive marker per logical node and notice.
 """
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -21,9 +22,20 @@ import time
 
 SCOPE = 'advice_only_not_authorization_or_scientific_evidence'
 MAX_NOTICE_BYTES = 200
+WORKER_PROGRESS_TEXT = ('W time handoff due. Reconcile in-flight originals; never replay unknown calls. '
+    'Save partial results for a fresh W. Direction supervision follows ledger/control due state.')
+WORKER_CONTEXT_TEXT = ('W context handoff due. Reconcile originals; never replay unknown calls. '
+    'Save partial results for a fresh W. Direction supervision follows ledger/control due state. Native may overshoot.')
+WORKER_CONTEXT_UNKNOWN_TEXT = ('W context observation lost; windows are a lower bound. Reconcile originals; '
+    'never replay unknown calls. Save partial results for a fresh W. Direction supervision follows ledger/control due state.')
+WORKER_CONTEXT_NEAR_TEXT = ('W final context window is at least 85% full. Prepare a safe checkpoint; reconcile originals, never replay unknown calls. '
+    'Advice only; original permissions and count-based handoff still hold.')
+WORKER_DIRECTION_TEXT = ('W direction review due. Finish/reconcile bounded existing work; never replay unknown calls. '
+    'Save a checkpoint and return for independent A. No new work or scientific verdict; permissions hold.')
 HELPER = '.scid-budget-notice.py'
 EMPTY_CONFIG = '.scid-budget-notice-empty-config.toml'
 VISIBLE = 'scid-budget-hook-visible-v1'
+METADATA = '.native-metadata-'
 UNAVAILABLE_REASONS = {'not_preflighted', 'unsupported_backend', 'undeclared_native_permissions',
     'unsupported_namespace', 'hook_preflight_unavailable', 'hook_trust_unqualified', 'helper_unavailable'}
 
@@ -61,6 +73,9 @@ def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, t
     elif final_return:
         text = (risk+' Complete accepted final return now from existing results; retain gaps. '
             'No extra FINAL/new work; permissions hold; unknown usage != 0.')
+    elif job.get('purpose')=='worker_consultation':
+        text=(risk+' Return bounded advice for the exact W request now; retain evidence gaps. '
+            'No verdict/new work/grant; original permissions and shared budgets hold; unknown usage != 0.')
     elif job['role'] == 'A' and not (job.get('purpose') == 'closeout' or job.get('final_report') or job.get('final_only')):
         if shared_expired or shared_reached or shared_exhausted:
             cause = 'shared'
@@ -72,6 +87,11 @@ def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, t
             text = (risk+' A: end this assessment; retain unmet goals. '
                 'Choose normal next_action by evidence/shared balance. '
                 'Soft targets do not end research; permissions hold; unknown usage != 0.')
+    elif (job['role'] == 'W' and not (job.get('purpose') == 'closeout'
+            or job.get('final_report') or job.get('final_only'))
+            and not (shared_reached or shared_risk or shared_expired or shared_exhausted)):
+        text = (risk+' W: retain progress/best/residuals; continue useful work until safe handoff is due. '
+            'Soft token targets alone do not require A; permissions hold; unknown usage != 0.')
     elif followup_tokens:
         roles = '+'.join(followup_tokens)
         text = (risk+f' Wrap up for suggested {roles} token targets. '
@@ -94,6 +114,78 @@ def _finite(value):
         return False
 
 
+def worker_progress_due(job, intent, *, active_seconds, target_seconds, fragment_enabled=False,
+        author=False, final_return=False, max_context_windows=None, context_observation=None):
+    """Use loaded cadence and scope only; never infer scientific progress."""
+    if (not fragment_enabled or job.get('role') != 'W' or author or final_return
+            or intent.get('continuation_kind') == 'author_closeout'
+            or (intent.get('budget_slice') or {}).get('final_return') is not None
+            or job.get('formal_review') or job.get('purpose') == 'closeout'
+            or job.get('final_report') or job.get('final_only')):
+        return False
+    if max_context_windows is not None:
+        return worker_context_reason(max_context_windows, context_observation) is not None
+    return (_finite(active_seconds) and _finite(target_seconds)
+        and target_seconds > 0 and active_seconds >= target_seconds)
+
+
+def worker_context_reason(maximum, observation):
+    """One initial window plus completed native compactions; no fullness scan."""
+    observation = observation if isinstance(observation, dict) else {}
+    windows = observation.get('context_windows') or {}
+    started = windows.get('windows_started')
+    if type(started) is int and started > maximum:
+        return 'worker_context_review_due'
+    if windows.get('reason') == 'context_capability_unavailable':
+        return None  # Optional provider telemetry cannot schedule fresh W loops.
+    if windows.get('coverage') == 'unknown':
+        return 'worker_context_observation_unknown'
+    if windows.get('coverage') != 'live' or type(started) is not int:
+        return None  # The first native session/report has not arrived yet.
+    return None
+
+
+def worker_progress_notice(job, intent, **facts):
+    """Render the already-loaded logical W review cadence, never a work grant."""
+    if intent.get('output_repair') or intent.get('work_repair'):
+        return None
+    due = worker_progress_due(job, intent, **facts)
+    if not due:
+        # Reuse the cadence's scope checks without making fullness an admission
+        # condition. Optional telemetry loss must never create a handoff reason.
+        eligible = dict(facts, max_context_windows=None, active_seconds=1, target_seconds=1)
+        if (not worker_progress_due(job, intent, **eligible)
+                or not worker_context_near(facts.get('max_context_windows'), facts.get('context_observation'))):
+            return None
+        return dict(cause='node', text=WORKER_CONTEXT_NEAR_TEXT)
+    reason = worker_context_reason(facts['max_context_windows'], facts.get('context_observation')) if facts.get('max_context_windows') is not None else None
+    return dict(cause='node', text=(WORKER_CONTEXT_UNKNOWN_TEXT if reason == 'worker_context_observation_unknown'
+        else WORKER_CONTEXT_TEXT if reason else WORKER_PROGRESS_TEXT))
+
+
+def worker_context_near(maximum, observation):
+    """Optional last-window advice from current native occupancy, never billing."""
+    observation = observation if isinstance(observation, dict) else {}
+    windows = observation.get('context_windows') or {}
+    current = observation.get('context') or {}
+    if not isinstance(windows, dict) or not isinstance(current, dict):
+        return False
+    used, capacity = current.get('total_tokens'), current.get('model_context_window')
+    return (type(maximum) is int and maximum > 0
+        and windows.get('coverage') == 'live' and type(windows.get('windows_started')) is int
+        and windows['windows_started'] == maximum
+        and current.get('status') == 'last_reported' and current.get('current_window') is True
+        and _finite(current.get('observed_at'))
+        and type(used) is int and 0 <= used <= 2 ** 53 - 1
+        and type(capacity) is int and 0 < capacity <= 2 ** 53 - 1
+        and used * 100 >= capacity * 85)
+
+
+def worker_direction_notice(review):
+    """Render the producer's independent direction checkpoint, without reads."""
+    return dict(cause='node', text=WORKER_DIRECTION_TEXT) if review is not None else None
+
+
 def published_notices(value):
     """Accept the bounded current host projection from its sole producer."""
     if not isinstance(value, dict) or value.get('scope') != SCOPE:
@@ -101,12 +193,12 @@ def published_notices(value):
     if not _finite(value.get('updated_at_unix')) or value.get('inflight_usage_unknown') is not True:
         return None
     notices = value.get('closeout_notices')
-    if not isinstance(notices, dict) or not notices or not set(notices).issubset({'token', 'time'}):
+    if not isinstance(notices, dict) or not notices or not set(notices).issubset({'token', 'time', 'progress', 'review'}):
         return None
     # Shared risk also includes the producer's follow-up advice and time ratio.
     # The hook consumes that bounded projection; it does not reload settings or
     # reconstruct the producer's plan to decide whether advice is warranted.
-    for notice in notices.values():
+    for dimension, notice in notices.items():
         if not isinstance(notice, dict) or set(notice) != {'cause', 'text'}:
             return None
         if notice.get('cause') not in {'node', 'shared'} or not isinstance(notice.get('text'), str):
@@ -115,6 +207,15 @@ def published_notices(value):
             return None
         if notice['cause'] == 'node' and value.get('target_state') not in {'near', 'reached'}:
             return None
+        if dimension == 'review' and (notice != dict(cause='node', text=WORKER_DIRECTION_TEXT)
+                or value.get('target_state') != 'reached'):
+            return None
+        if dimension == 'progress':
+            early = notice == dict(cause='node', text=WORKER_CONTEXT_NEAR_TEXT)
+            if (not early and (notice not in [dict(cause='node', text=text)
+                    for text in (WORKER_PROGRESS_TEXT, WORKER_CONTEXT_TEXT, WORKER_CONTEXT_UNKNOWN_TEXT)]
+                    or value.get('target_state') != 'reached')):
+                return None
     return notices
 
 
@@ -142,7 +243,7 @@ def hook_output(work, attempt):
     try:
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            for dimension in ('time', 'token'):
+            for dimension in ('time', 'token', 'review', 'progress'):
                 if dimension not in notices:
                     continue
                 try:
@@ -159,11 +260,124 @@ def hook_output(work, attempt):
     return None
 
 
+def metadata_path(work, attempt):
+    return Path(work) / 'work' / (METADATA + str(attempt) + '.json')
+
+
+def read_metadata(path):
+    """Read the compact current hook projection, never its transcript pointer."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError('Native metadata is not an ordinary file')
+        data = stream.read(16385)
+    if len(data) > 16384:
+        raise ValueError('Native metadata projection is invalid')
+    value = json.loads(data)
+    if not isinstance(value, dict) or value.get('version') != 1:
+        raise ValueError('Native metadata projection is invalid')
+    return value
+
+
+def _publish_metadata(path, value):
+    temporary = path.with_name(path.name + '-' + os.urandom(8).hex())
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(value, stream, separators=(',', ':'))
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try: temporary.unlink()
+        except FileNotFoundError: pass
+
+
+def start_metadata(work, attempt, *, session=None):
+    """Initialize once before this exact native submission; never reset a receipt."""
+    path = metadata_path(work, attempt)
+    if path.exists() or path.is_symlink():
+        raise ValueError('Native metadata attempt already exists')
+    value = dict(version=1, attempt=attempt, cwd=str(work), session_id=session,
+        transcript_path=None, compactions=0, calls=dict(completed=0, failed=0, cancelled=0),
+        tokens=dict(input_tokens=0, cached_input_tokens=0, output_tokens=0), reported_calls=0,
+        usage_unknown=False, pending=False, pending_started_at=None, acknowledged=0, fault=None)
+    _publish_metadata(path, value)
+    return path
+
+
+def record_metadata(work, attempt, event=None, *, reader=None):
+    """One synchronous native delivery updates only compact invocation facts.
+
+    No hook retry is configured. Native supplies no compaction event ID, so a
+    replay cannot be invented or deduplicated by guessing from a turn ID.
+    """
+    path = metadata_path(work, attempt)
+    lock = os.open(path.with_suffix('.lock'), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        value = read_metadata(path)
+        if value.get('pending') is not False or value.get('fault') is not None:
+            value['fault'] = 'native_metadata_delivery_incomplete'
+            _publish_metadata(path, value)
+            raise ValueError('Native metadata delivery is already incomplete')
+        value['pending'] = True
+        value['pending_started_at'] = time.monotonic()
+        _publish_metadata(path, value)
+        try:
+            event = reader() if reader is not None else event
+        except BaseException:
+            value['fault'] = 'native_metadata_input_unavailable'
+            _publish_metadata(path, value)
+            raise
+        valid = (isinstance(event, dict) and event.get('cwd') == str(work)
+            and isinstance(event.get('session_id'), str) and re.fullmatch(r'[A-Za-z0-9_-]{1,256}', event['session_id'])
+            and value.get('attempt') == attempt and value.get('cwd') == str(work)
+            and value.get('session_id') in (None, event['session_id']))
+        if not valid:
+            value['fault'] = 'native_metadata_binding_invalid'
+        else:
+            value['session_id'] = event['session_id']
+            transcript = event.get('transcript_path')
+            if transcript is not None:
+                if (not isinstance(transcript, str) or not Path(transcript).is_absolute()
+                        or value.get('transcript_path') not in (None, transcript)):
+                    value['fault'] = 'native_metadata_binding_invalid'
+                else:
+                    value['transcript_path'] = transcript
+            kind = event.get('hook_event_name')
+            if kind == 'PostCompact' and event.get('trigger') in ('auto', 'manual'):
+                value['compactions'] += 1
+            elif kind == 'PostModelRequest' and event.get('status') in value['calls']:
+                value['calls'][event['status']] += 1
+                usage = event.get('token_usage')
+                fields = ('input_tokens', 'cached_input_tokens', 'output_tokens')
+                if (not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in fields)
+                        or usage['cached_input_tokens'] > usage['input_tokens']):
+                    value['usage_unknown'] = True
+                else:
+                    for key in fields: value['tokens'][key] += usage[key]
+                    value['reported_calls'] += 1
+            else:
+                value['fault'] = 'native_metadata_event_invalid'
+        value['pending'] = False
+        value['pending_started_at'] = None
+        value['acknowledged'] += 1
+        _publish_metadata(path, value)
+    finally:
+        os.close(lock)
+
+
 def definition(work, attempt, *, python=None):
     command = shlex.join([python or sys.executable, str(Path(work) / 'work' / HELPER),
         '--work', str(work), '--attempt', str(attempt)])
-    return dict(PostToolUse=[dict(hooks=[dict(type='command', command=command, timeout=5,
-        additionalContextLimit=0, **{'async': False})])])
+    def handler(argv, *, additional_context=False):
+        hook = dict(type='command', command=argv, timeout=5, **{'async': False})
+        # Metadata-only events cannot emit context; Codex warns even for zero.
+        if additional_context:
+            hook['additionalContextLimit'] = 0
+        return [dict(hooks=[hook])]
+    return dict(PostToolUse=handler(command, additional_context=True), PostModelRequest=handler(command + ' --metadata'),
+        PostCompact=handler(command + ' --metadata'))
 
 
 def stage_helper(work):
@@ -173,8 +387,6 @@ def stage_helper(work):
     temporary = directory / (HELPER + '-' + os.urandom(8).hex())
     try:
         source = Path(__file__).read_bytes()
-        if len(source) > 32768:
-            raise ValueError('Budget hook helper exceeds its staging bound')
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
         with os.fdopen(fd, 'wb') as stream:
             stream.write(source)
@@ -194,14 +406,16 @@ def stage_helper(work):
 
 
 def inventory(value, work):
-    """Validate one bounded hooks/list result without accepting warnings."""
+    """Validate required definitions and trust; warnings alone grant no facts."""
     if not isinstance(value, dict) or set(value) != {'data'} or not isinstance(value['data'], list) or len(value['data']) != 1:
         raise ValueError('Hook inventory is unavailable')
     entry = value['data'][0]
     if (not isinstance(entry, dict) or set(entry) != {'cwd', 'hooks', 'warnings', 'errors'}
-            or entry['cwd'] != str(work) or entry['warnings'] != [] or entry['errors'] != []
+            or entry['cwd'] != str(work) or not isinstance(entry['warnings'], list)
+            or len(entry['warnings']) > 128 or any(not isinstance(item,str) for item in entry['warnings'])
+            or entry['errors'] != []
             or not isinstance(entry['hooks'], list) or len(entry['hooks']) > 128):
-        raise ValueError('Hook inventory has warnings, errors or an unsupported shape')
+        raise ValueError('Hook inventory has errors or an unsupported shape')
     hooks = {}
     for hook in entry['hooks']:
         if (not isinstance(hook, dict) or not isinstance(hook.get('key'), str) or hook['key'] in hooks
@@ -220,23 +434,30 @@ def validate_hook_trust(before, after, declared, work):
     if any(candidate.get(key) != hook for key, hook in original.items()):
         raise ValueError('Existing native hooks changed')
     added = [hook for key, hook in candidate.items() if key not in original]
-    if len(added) != 1:
-        raise ValueError('Internal hook is absent or duplicated')
-    own = added[0]
-    handler = declared['PostToolUse'][0]['hooks'][0]
-    if (own.get('source') != 'sessionFlags' or own.get('sourcePath') != '/<session-flags>/config.toml'
-            or not re.fullmatch(r'/<session-flags>/config\.toml:post_tool_use:[0-9]+:[0-9]+', own['key'])
-            or own.get('eventName') != 'postToolUse' or own.get('matcher') is not None
-            or own['enabled'] is not True or own['isManaged'] is not False
-            or own['trustStatus'] not in {'untrusted', 'trusted'}
-            or own.get('handlerType') != 'command' or own.get('command') != handler['command']
-            or own.get('async', False) is not False or own.get('timeoutSec') != handler['timeout']
-            or own.get('additionalContextLimit') != handler['additionalContextLimit']
-            or own.get('statusMessage') is not None or own.get('pluginId') is not None
-            or own.get('environmentId') is not None):
-        raise ValueError('The internal hook definition did not qualify')
+    expected = dict(PostToolUse=('post_tool_use', 'postToolUse'),
+        PostModelRequest=('post_model_request', 'postModelRequest'), PostCompact=('post_compact', 'postCompact'))
+    if len(added) != len(declared) or set(declared) != set(expected):
+        raise ValueError('Internal hooks are absent or duplicated')
+    own_keys = set()
+    for name, (key_name, event_name) in expected.items():
+        matches = [hook for hook in added if hook.get('eventName') == event_name]
+        if len(matches) != 1:
+            raise ValueError('Internal metadata hook is absent or duplicated')
+        own = matches[0]
+        handler = declared[name][0]['hooks'][0]
+        if (own.get('source') != 'sessionFlags' or own.get('sourcePath') != '/<session-flags>/config.toml'
+                or not re.fullmatch(r'/<session-flags>/config\.toml:' + key_name + r':[0-9]+:[0-9]+', own['key'])
+                or own.get('matcher') is not None or own['enabled'] is not True or own['isManaged'] is not False
+                or own['trustStatus'] not in {'untrusted', 'trusted'}
+                or own.get('handlerType') != 'command' or own.get('command') != handler['command']
+                or own.get('async', False) is not False or own.get('timeoutSec') != handler['timeout']
+                or own.get('additionalContextLimit') != handler.get('additionalContextLimit')
+                or own.get('statusMessage') is not None or own.get('pluginId') is not None
+                or own.get('environmentId') is not None):
+            raise ValueError('The internal hook definition did not qualify')
+        own_keys.add(own['key'])
     for key, hook in candidate.items():
-        if key == own['key'] or not hook['enabled']:
+        if key in own_keys or not hook['enabled']:
             continue
         if hook['trustStatus'] != 'trusted' and not (hook['trustStatus'] == 'managed' and hook['isManaged']):
             raise ValueError('Another enabled hook is not already trusted or managed')
@@ -316,6 +537,7 @@ def main(argv=None):
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--attempt', type=int, required=True)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--metadata', action='store_true')
     args = parser.parse_args(argv)
     if not args.work.is_absolute() or not 0 <= args.attempt <= 1_000_000:
         return 0
@@ -325,6 +547,12 @@ def main(argv=None):
                 and not stat.S_IMODE(Path(__file__).stat().st_mode) & 0o222
                 and (args.work / 'work/budget-status.json').is_file()):
             print(VISIBLE)
+        return 0
+    if args.metadata:
+        try:
+            record_metadata(args.work, args.attempt, reader=lambda: json.load(sys.stdin))
+        except (OSError, ValueError, TypeError, KeyError):
+            return 1  # Preserve failed delivery; no resubmission or inferred count.
         return 0
     output = hook_output(args.work, args.attempt)
     if output is not None:

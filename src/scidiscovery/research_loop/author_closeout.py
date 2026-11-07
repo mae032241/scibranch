@@ -6,7 +6,7 @@ The old outcome, incomplete meter and every accepted experiment remain original.
 import json
 from pathlib import Path
 
-from . import configuration_updates
+from . import budget_limits, configuration_updates
 from . import contracts as c
 
 
@@ -686,8 +686,8 @@ def start(root, step, *, max_tokens, max_seconds, authorization_note):
             raise ValueError('Original author writer is live or its identity is unavailable')
     meter=native.usage(root);limits=budget.snapshot(root)
     reserve=budget.delivery_reserve(settings) or dict(tokens=0,seconds=0,steps=0)
-    if (limits['max_tokens']-meter.get('accounted_tokens',meter['observed_tokens'])<=reserve['tokens']
-            or limits['seconds_remaining']<max_seconds+reserve['seconds']
+    if (budget_limits.reached(budget_limits.remaining(limits['max_tokens'],meter.get('accounted_tokens',meter['observed_tokens'])),reserve['tokens'])
+            or limits['seconds_remaining'] is not None and limits['seconds_remaining']<max_seconds+reserve['seconds']
             or budget.effective_max_steps(root)-budget.used_steps(root)<1+reserve['steps']):
         raise ValueError('Finite author closeout and delivery reserve exceed remaining authorization')
     facts=terminal_facts(root,step)
@@ -859,8 +859,8 @@ def start_successor(root, step, *, max_tokens, max_seconds, authorization_note,
     if budget.execution_blocked(root):raise ValueError('Author successor requires stopped original execution')
     meter=native.usage(root);limits=budget.snapshot(root)
     reserve=budget.delivery_reserve(settings) or dict(tokens=0,seconds=0,steps=0)
-    if (limits['max_tokens']-meter.get('accounted_tokens',meter['observed_tokens'])<=reserve['tokens']
-            or limits['seconds_remaining']<max_seconds+reserve['seconds']
+    if (budget_limits.reached(budget_limits.remaining(limits['max_tokens'],meter.get('accounted_tokens',meter['observed_tokens'])),reserve['tokens'])
+            or limits['seconds_remaining'] is not None and limits['seconds_remaining']<max_seconds+reserve['seconds']
             or budget.effective_max_steps(root)-budget.used_steps(root)<1+reserve['steps']):
         raise ValueError('Finite author successor and delivery reserve exceed remaining authorization')
     require_successor_eligibility(root,permit)

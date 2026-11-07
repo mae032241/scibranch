@@ -21,9 +21,12 @@ NATIVE_ORIGINALS = ('native-intent.json', 'native-outcome.json', 'usage.json',
 
 
 def policy(value):
-    if (not isinstance(value, dict) or set(value) != {'context'}
+    if (not isinstance(value, dict) or set(value) - {'context', 'max_context_windows'} or 'context' not in value
             or value['context'] not in {'same_session', 'new_context'}):
         raise ValueError('W fragments require one explicit same_session or new_context strategy')
+    if 'max_context_windows' in value and (type(value['max_context_windows']) is not int
+            or value['max_context_windows'] not in (1, 2)):
+        raise ValueError('W context windows must be 1 or 2')
     return dict(value)
 
 
@@ -31,9 +34,15 @@ def enabled(root, job):
     return enabled_for_policy(job,settings=configuration_updates.for_job(root,job))
 
 
+def ordinary_worker(job):
+    return (job['role'] == 'W' and not job.get('formal_review')
+            and not job.get('final_only') and not job.get('final_report')
+            and job.get('purpose') != 'closeout')
+
+
 def enabled_for_policy(job,*,settings):
     value = settings.get('worker_fragment_policy')
-    if value is None or job['role'] != 'W':
+    if value is None or not ordinary_worker(job):
         return False
     policy(value)
     return True
@@ -307,7 +316,7 @@ def brief(root, job, record):
 
 
 def disposition(science, *, review_requested=False):
-    """Interpret only the W intent; host review can end a continuing stage.
+    """Interpret explicit W intent; host cadence can seal a partial W handoff.
 
     This internal seam is enabled by the final U3 schema, not a protocol upgrade
     or alternate execution contract by itself.
@@ -315,6 +324,6 @@ def disposition(science, *, review_requested=False):
     if science is None:
         return 'repair'
     intent = science.get('stage_intent')
-    if intent not in {'continue', 'review','decision'}:
-        raise OutputRepairRequired('stage_intent_invalid', 'Express whether to continue this mechanism or request independent A review.')
-    return 'review' if review_requested or intent in {'review','decision'} else 'continue'
+    if intent not in {'continue','handoff','revise_h','review','decision'}:
+        raise OutputRepairRequired('stage_intent_invalid', 'Use continue, handoff, revise_h, review or decision for the exact intended route.')
+    return ('handoff' if review_requested and intent=='continue' else intent)

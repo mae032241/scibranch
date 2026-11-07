@@ -1,4 +1,4 @@
-"""Installation-owned Skill bundles and exact, rebuildable Codex projections.
+"""Installation-owned Skill bundles and exact, rebuildable native projections.
 
 This selects only framework-managed Skills. Native user/system/plugin sources
 remain inherited; readonly modes are a soft boundary for trusted same-user code.
@@ -16,6 +16,10 @@ from . import contracts as c
 
 _NAME = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\Z')
 _CATALOG_LIMIT = 256
+
+def _default_backend():
+    from . import backends
+    return backends.DEFAULT_BACKEND
 def _name(value):
     if not isinstance(value, str) or not _NAME.fullmatch(value):
         raise ValueError('Skill and set names must be simple directory names')
@@ -166,9 +170,7 @@ def _provider(entry, module):
         entry_point=entry.value, native_launcher_module=module, contract_version=1)
 
 
-def _launcher_contract(backend, launcher, retained=None):
-    if backend != 'codex':
-        raise ValueError('Custom native backend has no Skill loading contract')
+def codex_skill_loading_contract(launcher, retained=None):
     standard = len(launcher) == 1 and Path(launcher[0]).name == 'codex'
     if standard:
         value = dict(kind='codex_node_cwd', version=1)
@@ -195,14 +197,14 @@ def _launcher_contract(backend, launcher, retained=None):
     return value
 
 
-def native_launcher_contract(backend, launcher, *, retained=...):
+def codex_native_launcher_contract(launcher, *, retained=...):
     """Freeze the existing registered final scientific namespace owner.
 
     Other local argv remain eligible for the common outer. An existing exact
     declaration is verified even when the selected Skill inventory is empty.
     """
     value=None
-    if backend=='codex' and not (len(launcher)==1 and Path(launcher[0]).name=='codex'):
+    if not (len(launcher)==1 and Path(launcher[0]).name=='codex'):
         try:module=_launcher_module(launcher)
         except ValueError:module=None
         if module is not None:
@@ -210,10 +212,22 @@ def native_launcher_contract(backend, launcher, *, retained=...):
             matches=[entry for entry in entries if _provider(entry,module) is not None]
             if len(matches)>1:raise ValueError('Native namespace launcher requires one exact registered provider')
             if matches:
-                value=_launcher_contract(backend,launcher,retained if retained is not ... else None)
+                value=codex_skill_loading_contract(launcher,retained if retained is not ... else None)
     if retained is not ... and value!=retained:
         raise ValueError('Frozen native namespace launcher identity changed; create a new instance')
     return value
+
+
+def native_launcher_contract(backend, launcher, *, retained=...):
+    from . import backends
+    return backends.selected(dict(native_backend=backend,native_launcher_argv=launcher)).launcher_contract(
+        launcher,retained=retained)
+
+
+def _launcher_contract(backend, launcher, retained=None):
+    from . import backends
+    return backends.selected(dict(native_backend=backend,native_launcher_argv=launcher)).skill_loading_contract(
+        launcher,retained=retained)
 
 
 def namespace_launcher(settings):
@@ -221,7 +235,7 @@ def namespace_launcher(settings):
     capabilities=settings.get('native_capabilities',{})
     if 'native_launcher_contract' not in capabilities:
         raise ValueError('Frozen native namespace launcher contract is missing')
-    return native_launcher_contract(settings.get('native_backend','codex'),settings['native_launcher_argv'],
+    return native_launcher_contract(settings.get('native_backend',_default_backend()),settings['native_launcher_argv'],
         retained=capabilities['native_launcher_contract'])
 
 
@@ -265,12 +279,12 @@ def validate(root, settings):
         return None
     _current_binding(declared)
     if declared.get('launcher') is not None:
-        _launcher_contract(settings.get('native_backend', 'codex'), settings['native_launcher_argv'], declared['launcher'])
+        _launcher_contract(settings.get('native_backend', _default_backend()), settings['native_launcher_argv'], declared['launcher'])
     items = _selected(declared['sets'], settings.get('role_profiles'), settings.get('worker_profiles'))
     if items and declared.get('launcher') is None:
         # A profile edit may select a previously unused set, but cannot evade the
         # existing backend/launcher contract established for native discovery.
-        _launcher_contract(settings.get('native_backend', 'codex'), settings['native_launcher_argv'])
+        _launcher_contract(settings.get('native_backend', _default_backend()), settings['native_launcher_argv'])
     for item in items:
         _metadata(Path(declared['root']) / item)
     return declared

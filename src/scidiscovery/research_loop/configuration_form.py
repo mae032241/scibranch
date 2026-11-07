@@ -13,7 +13,7 @@ import json
 import math
 from pathlib import Path
 
-from . import research_config, skill_supply
+from . import research_config, skill_supply, backends
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class Field:
     choices: tuple = ()
     required: bool = False
     placeholder: str = ''
+    description: str = ''
 
 
 # Every declaration leaf is here, or inside an explicitly structured extension.
@@ -39,7 +40,7 @@ FIELDS = [
     Field('project.scratch', '临时工作相对目录', 'strings'),
     Field('project.outputs', '工程输出相对目录', 'strings'),
     Field('skills.sets', '可选择的研究技能集合', 'table'),
-    Field('agent.backend', 'Agent 后端', choices=('codex', 'protocol'), placeholder='codex'),
+    Field('agent.backend', 'Agent 后端', choices=backends.names(), placeholder=backends.DEFAULT_BACKEND),
     Field('agent.launcher', '启动命令参数（逐项）', 'strings'),
     Field('agent.model', '全局模型', placeholder=research_config.DEFAULT_MODEL),
     Field('agent.reasoning_effort', '全局推理力度', placeholder=research_config.DEFAULT_REASONING_EFFORT),
@@ -47,10 +48,7 @@ FIELDS = [
     *[Field(f'agent.roles.{role}.{key}', f'{role} 角色{label}')
       for role in 'HWAE' for key, label in [('model', '模型'), ('reasoning_effort', '推理力度'), ('service_tier', '服务档位'), ('worker', '命名研究者'), ('skill_set', '技能集合')]],
     Field('agent.workers', '命名研究者配置', 'table'),
-    Field('agent.native.sandbox_workspace_write.writable_roots', '原生额外可写目录', 'strings'),
-    *[Field(f'agent.native.sandbox_workspace_write.{key}', label, 'boolean') for key, label in [
-        ('network_access', '原生 sandbox 联网'), ('exclude_tmpdir_env_var', '排除 TMPDIR'), ('exclude_slash_tmp', '排除 /tmp')]],
-    Field('agent.native.features.fast_mode', '原生快速模式', 'boolean'),
+    Field('agent.native', '后端原生选项', 'table'),
     Field('permissions.workspace', '文件系统权限', choices=('read-only', 'workspace-write', 'danger-full-access')),
     Field('permissions.network', '网络权限', 'boolean'),
     Field('permissions.web', '网页检索权限', choices=('disabled', 'cached', 'live')),
@@ -58,8 +56,6 @@ FIELDS = [
     Field('budget.max_tokens', '总 tokens 预算', 'integer', required=True),
     Field('budget.max_seconds', '总活动时间（秒）', 'number', required=True),
     Field('budget.max_steps', '总节点步数', 'integer', required=True),
-    Field('budget.max_output_item_bytes', '单项输出字节上限', 'integer'),
-    Field('budget.max_output_total_bytes', '单节点输出合计字节上限', 'integer'),
     Field('budget.candidate_extra_slots', 'W 提名预览额外名额', 'integer'),
     Field('budget.portfolio_review_after_cycles', '组合复核周期数', 'integer'),
     *[Field(f'budget.node_targets.{role}.{key}', f'{role} 节点软目标：{label}', kind)
@@ -89,6 +85,16 @@ FIELDS = [
 ]
 
 
+def _fields(backend_name):
+    # Providers describe their own native controls. Unknown declarations remain
+    # editable as a generic table and are rejected by preparation validation.
+    provider_fields=backends.provider(backend_name).configuration_fields() if backend_name in backends.names() else ()
+    result=[field for field in FIELDS if not provider_fields or field.path!='agent.native']
+    result=[Field(field.path,field.label,field.kind,backends.names(),field.required,field.placeholder,
+        field.description) if field.path=='agent.backend' else field for field in result]
+    return result+[Field(**field) for field in provider_fields]
+
+
 # These are the actual policy schemas; unknown imported keys remain in the
 # expert tree. No value is inserted merely because this section is displayed.
 GROUP_FIELDS = {
@@ -100,12 +106,12 @@ GROUP_FIELDS = {
     ],
     'policies.resume': [
         Field('policies.resume.max_attempts', '同一原调用最多恢复次数', 'integer', placeholder='1 或 2'),
-        Field('policies.resume.protocol', '恢复协议', choices=('codex_exec_resume',)),
+        Field('policies.resume.protocol', '恢复协议'),
         Field('policies.resume.usage_scope', '用量计量范围', choices=('turn',)),
         Field('policies.resume.output_repair', '允许修复输出格式', 'boolean'),
         Field('policies.resume.output_only', '恢复时只修复输出', 'boolean'),
-        Field('policies.resume.native_home', '冻结的 Codex 主目录（绝对路径）'),
-        Field('policies.resume.automatic_recovery.enabled', '允许有界自动接续当前任务', 'boolean', placeholder='标准 Codex 新配置默认允许'),
+        Field('policies.resume.native_home', '冻结的原生主目录（绝对路径）'),
+        Field('policies.resume.automatic_recovery.enabled', '允许有界自动接续当前任务', 'boolean', placeholder='依后端能力与声明决定'),
         Field('policies.resume.automatic_recovery.max_continues', '提前停止的 continue 上限（次）', 'integer', placeholder='2'),
         Field('policies.resume.automatic_recovery.max_retries', '临时服务故障 retry 上限（次）', 'integer', placeholder='3'),
         Field('policies.resume.automatic_recovery.initial_backoff_seconds', '首次服务退避（秒）', 'number', placeholder='30'),
@@ -320,12 +326,24 @@ def _skill_picker(fields, document, *, fixed_sets=None):
 
 def parse(fields, *, base, _fixed_skill_sets=None):
     """Parse only typed visible controls, retaining all extra imported data."""
-    scalar_fields = FIELDS + [field for group in GROUP_FIELDS.values() for field in group]
-    allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text'} | {'cfg.'+f.path for f in FIELDS if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in FIELDS if f.kind in ('table', 'array', 'strings')}
+    selected_backend=_single(fields,'cfg.agent.backend') or backends.DEFAULT_BACKEND
+    rendered_backend=_single(fields,'rendered_backend',selected_backend)
+    form_fields = _fields(rendered_backend)
+    saved_native=_single(fields,'native_drafts','{}')
+    try:
+        native_drafts=json.loads(saved_native) if len(saved_native)<=256_000 else None
+    except (ValueError,TypeError,RecursionError):
+        native_drafts=None
+    if (not isinstance(native_drafts,dict) or len(native_drafts)>64
+            or any(not isinstance(name,str) or not name or not isinstance(value,(dict,type(None)))
+                for name,value in native_drafts.items())):
+        raise ValueError('后端原生设置草稿无效，请重新打开配置表单')
+    scalar_fields = form_fields + [field for group in GROUP_FIELDS.values() for field in group]
+    allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text', 'rendered_backend', 'native_drafts'} | {'cfg.'+f.path for f in form_fields if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}
     for name in fields:
         parts = name.split('.')
         picker = (len(parts) == 3 and parts[0] == 'skill_picker' and parts[1] in {'choice', 'baseline'} and parts[2] in 'HWAE' and len(parts[2]) == 1) or (len(parts) == 4 and parts[:2] == ['skill_picker', 'item'] and parts[2] in 'HWAE' and len(parts[2]) == 1 and parts[3].isdecimal())
-        if name not in allowed and not picker and not any(name == 'cfg.'+f.path or (name.startswith('cfg.'+f.path+'.') and name[len('cfg.'+f.path+'.'):].isdecimal()) for f in FIELDS if f.kind == 'strings') and not (len(parts) == 3 and parts[0] == 'node' and parts[1].isdecimal() and parts[2] in {'kind','parent','key','value'}):
+        if name not in allowed and not picker and not any(name == 'cfg.'+f.path or (name.startswith('cfg.'+f.path+'.') and name[len('cfg.'+f.path+'.'):].isdecimal()) for f in form_fields if f.kind == 'strings') and not (len(parts) == 3 and parts[0] == 'node' and parts[1].isdecimal() and parts[2] in {'kind','parent','key','value'}):
             raise ValueError('不支持的表单字段：'+name)
     result = blank(base=base)
     result['task_mode'] = _single(fields, 'task_mode', 'text')
@@ -369,7 +387,7 @@ def parse(fields, *, base, _fixed_skill_sets=None):
             else:
                 value.append(item)
         return value
-    for field in FIELDS:
+    for field in form_fields:
         if field.kind == 'strings':
             prefix = 'cfg.'+field.path
             items = [_single(fields, name) for name in fields if name.startswith(prefix+'.')]
@@ -412,7 +430,7 @@ def parse(fields, *, base, _fixed_skill_sets=None):
     merge(result['document'], extras)
     # Disabled groups' children are deliberately omitted. Reject stray topology.
     allowed = {identity for identity, node in nodes.items() if node['parent'].startswith('@') and
-               node['parent'][1:] in {f.path for f in FIELDS if f.kind in ('table', 'array', 'strings')}}
+               node['parent'][1:] in {f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}}
     pending = set(allowed)
     while pending:
         parent = pending.pop()
@@ -423,6 +441,17 @@ def parse(fields, *, base, _fixed_skill_sets=None):
     if set(nodes) - used - allowed:
         raise ValueError('结构字段没有有效的父对象')
     _skill_picker(fields, result['document'], fixed_sets=_fixed_skill_sets)
+    if selected_backend!=rendered_backend:
+        # Native extensions belong to the provider whose controls produced
+        # them. Switching renders the new schema before any preparation call.
+        native_drafts[rendered_backend]=_get(result['document'],'agent.native')
+        _delete(result['document'],'agent.native')
+        restored=native_drafts.pop(selected_backend,None)
+        if restored is not None:_put(result['document'],'agent.native',restored)
+        result['native_drafts']=native_drafts
+        errors.append('后端已切换；原生设置按原后端保留。请检查当前后端的设置后再次提交。')
+    elif native_drafts:
+        result['native_drafts']=native_drafts
     if errors:
         raise FormError('；'.join(errors), result)
     return result
@@ -467,6 +496,7 @@ def _kind(value):
 def render(draft, *, edit=False):
     """Render a guided form; hidden steps retain successful, typed controls."""
     document = draft['document']
+    form_fields=_fields(_get(document,'agent.backend',backends.DEFAULT_BACKEND))
     extras = copy.deepcopy(document)
     _delete(extras, 'research.objective_text')
     if edit:
@@ -495,7 +525,7 @@ def render(draft, *, edit=False):
     labels = {
         'research.root': '新研究保存到哪里', 'research.public_root': '研究可使用的材料目录',
         'research.objective': '任务文件路径', 'agent.model': '研究使用的模型',
-        'agent.reasoning_effort': '推理力度', 'agent.service_tier': '服务档位',
+        'agent.reasoning_effort': '留空时采用所选后端声明的默认推理力度。也可填写该模型和后端支持的其他值。',
         'budget.max_tokens': '模型用量（tokens）', 'budget.max_seconds': '活动时间（秒）',
         'budget.max_steps': '节点上限（步）', 'permissions.workspace': '文件读写范围',
         'permissions.network': '允许程序联网', 'permissions.web': '网页检索方式',
@@ -519,9 +549,9 @@ def render(draft, *, edit=False):
         'research.root': '将在服务器上新建此目录，保存任务、研究记录和结果。请选择尚不存在的目录；不能覆盖已有研究。',
         'research.public_root': '填写服务器上已存在的目录，放入允许研究使用的文件。即使暂时没有材料，也需先准备一个空目录。这里不会上传浏览器中的文件。',
         'research.objective': '读取服务器上的现有文本文件；原文会作为本次任务保存。',
-        'agent.model': 'Codex 留空使用 '+research_config.DEFAULT_MODEL+'；其他后端必须填写模型。各研究角色未单独指定时沿用此模型。',
-        'agent.reasoning_effort': 'Codex 留空使用 '+research_config.DEFAULT_REASONING_EFFORT+'。建议值仅供填写参考；也可输入所选模型支持的其他值。其他后端留空不声明。',
-        'agent.service_tier': 'Codex 留空使用 '+research_config.DEFAULT_SERVICE_TIER+'。也可输入后端支持的自定义档位；其他后端留空不声明。',
+        'agent.model': '留空时采用所选后端声明的默认模型；没有默认值的后端必须填写。各研究角色未单独指定时沿用此模型。',
+        'agent.reasoning_effort': '留空时采用所选后端声明的默认推理力度。也可填写该模型和后端支持的其他值。',
+        'agent.service_tier': '留空时采用所选后端声明的默认服务档位。也可填写该后端支持的其他值。',
         'budget.max_tokens': '单位：tokens，模型处理文本的用量，不是金额。必须由你填写；实际费用取决于模型及服务计价。',
         'budget.max_seconds': '单位：秒。累计研究活动时间，不是从创建起计算的日历时间；暂停等待不会自动恢复预算。',
         'budget.max_steps': '单位：步。约束研究节点及计入预算的恢复、操作、审计等工作；与时间、tokens 分别限制。',
@@ -539,16 +569,10 @@ def render(draft, *, edit=False):
         'project.scratch': '可选的临时工作目录，每项为规范相对目录；不与可修改目录或输出目录交叠。',
         'project.outputs': '可选的输出目录，每项为规范相对目录；保留原调用的输出采集与封存条件。',
         'skills.sets': '按集合名称填写对象，每个集合包含 items 文本数组。只有角色或命名研究者用 skill_set 明确选择该集合时才启用。插件提供的可选技能不会自动启用。',
+        'agent.native': '可选：按所选后端说明声明原生扩展选项；键名、类型和相对路径由该后端验证。',
         'agent.workers': '命名研究者的模型和可选 skill_set 声明；技能集合名称必须来自本次研究已声明的集合。',
-        'agent.backend': '留空使用 Codex。Protocol 用于已接入的自定义后端，需要明确填写模型和启动命令；不自动补推理力度或服务档位。',
-        'agent.launcher': '留空由 Codex 使用 codex。自定义时第一项是可执行程序，之后每项是一个独立参数；不按空格拆分。',
-        'agent.native.sandbox_workspace_write.writable_roots': '仅 Codex 的可写工作目录模式使用。每项是允许额外写入的服务器目录，不会自动开放其他路径。',
-        'agent.native.sandbox_workspace_write.network_access': '仅 Codex；需与上方程序联网声明一致，否则检查失败。通常直接设置上方联网权限即可。',
-        'agent.native.sandbox_workspace_write.exclude_tmpdir_env_var': '仅 Codex；允许临时目录写入时是否排除 TMPDIR 指定目录。留空由后端原生配置决定。',
-        'agent.native.sandbox_workspace_write.exclude_slash_tmp': '仅 Codex；是否从额外可写目录中排除 /tmp。留空由后端原生配置决定。',
-        'agent.native.features.fast_mode': '仅 Codex；覆盖原生 fast_mode 功能开关。留空不覆盖原生配置。',
-        'budget.max_output_item_bytes': '单位：字节，限制单项研究输出。留空不设置这项体积限制；用于防止单个文件过大。',
-        'budget.max_output_total_bytes': '单位：字节，限制每个节点收集输出的合计体积；交给下一节点的输入材料集合也单独受此上限约束。留空不设此限制。',
+        'agent.backend': '留空使用默认后端。可选择已注册后端；检查时验证其模型、启动程序及能力声明。',
+        'agent.launcher': '留空采用所选后端的默认启动命令；没有默认值时必须填写。第一项是可执行程序，之后每项是一个独立参数；不按空格拆分。',
         'budget.candidate_extra_slots': '单位：个，限制 W 提名预览中代表候选之外的额外名额，仅在启用搜索机制提名时使用；完整候选池仍保留。留空默认 2。',
         'budget.portfolio_review_after_cycles': '单位：研究周期，达到次数后提醒重新比较候选组合；不自动决定换路线或触发正式审核。留空不单独声明这项策略。',
         'budget.role_shares': '为实验保留用量，限制可选的方向讨论与复核占比。启用时须明确四项参数及全部角色阶段预算；不增加总预算。',
@@ -562,7 +586,7 @@ def render(draft, *, edit=False):
         'budget.breadth.initial_calls': '单位：次。首次探索允许的已登记实验调用机会；可选，不能表示科学覆盖已完成。',
         'budget.correction.review_after': '单位：次。持续未取得进展达到此阈值时复核；需与暂停阈值一起填写。',
         'budget.correction.pause_after': '单位：次。补正达到此阈值时暂停；需与复核阈值一起填写。',
-        'executor.mode': '标准 Codex 启动留空使用本地执行；自定义启动通常由外部承担。指定插件时采用本地执行；检查页显示实际配置。实验仍需满足授权与插件条件。',
+        'executor.mode': '留空采用所选后端声明的实验执行归属。指定执行插件时采用本地执行；检查页显示实际配置，实验仍需满足授权与插件条件。',
         'executor.config.executor': '填写已安装插件公开的绑定名称，例如 plugin:binding。创建配置不会运行实验或安装插件。',
         'executor.config.config_file': '服务器上的插件配置文件路径。通常优先使用插件提供的配置文件；相对路径按当前声明目录解析。',
         'executor.config.configuration': '仅对明确支持内联配置的插件使用。键名与类型以该插件说明为准。',
@@ -574,14 +598,14 @@ def render(draft, *, edit=False):
         'policies.decision_contract': '是否声明科学决策合同；研究结论仍由科学角色作出。',
         'policies.worker_context': 'same_session 保留同一会话，new_context 使用新上下文。此高级合同还需原调用恢复和全部角色阶段预算。',
         'policies.selection': '用于生产交付的候选选择合同；需已配置相应执行、观察与交付条件。',
-        'policies.resume': '恢复已知原调用，不重新提交未知外部实验，不恢复已消耗预算。标准单命令 Codex 新配置默认允许有界同会话自动接续与输出补填；显式旧策略未声明自动接续时保留原义。自定义时需冻结启动程序及全部角色阶段预算。',
+        'policies.resume': '恢复已知原调用，不重新提交未知外部实验，不恢复已消耗预算。后端可为新配置声明有界恢复默认值；已有显式策略保持原义。自定义时需冻结启动程序及全部角色阶段预算。',
         'policies.resume.max_attempts': '仅支持 1 或 2 次。次数针对同一原调用；不是重新开始研究。',
-        'policies.resume.protocol': '当前合同只支持 codex_exec_resume，且需要支持恢复的 Codex 后端。',
+        'policies.resume.protocol': '填写所选后端支持的原调用恢复协议；检查时验证协议与能力。',
         'policies.resume.usage_scope': '当前合同要求 turn：按一次调用计量用量，保留原始预算消耗。',
         'policies.resume.output_repair': '允许在有明确失败边界时恢复以修复输出格式；不豁免其他恢复条件。',
         'policies.resume.output_only': '启用需同时允许修复输出；此授权仅允许输出补填。自动接续当前未完成任务须由下方独立策略明确允许。',
         'policies.resume.native_home': '仅在“只修复输出”启用时使用，必须是规范绝对路径。这里只保存路径引用。',
-        'policies.resume.automatic_recovery.enabled': '独立允许标准 Codex 同会话接续未完成任务，以及原请求明确尚未开始时的有限启动重试。不会新开上下文、扩大权限或重新提交未知外部调用。已有显式策略留空不新增此授权。',
+        'policies.resume.automatic_recovery.enabled': '独立允许支持的后端在原会话接续未完成任务，以及原请求明确尚未开始时的有限启动重试。不会新开上下文、扩大权限或重新提交未知外部调用。已有显式策略留空不新增此授权。',
         'policies.resume.automatic_recovery.max_continues': '单位：次。同一任务的原 attempt 链中，提前停止后最多追加的同会话工作次数；与临时故障重试分别累计，推进和重启均不清零。0 禁用此类接续。',
         'policies.resume.automatic_recovery.max_retries': '单位：次。同一任务的原 attempt 链中，对明确可恢复的临时限流、容量或连接故障最多重试次数；永久错误和未知原因不重试，推进和重启均不清零。0 禁用此类重试。',
         'policies.resume.automatic_recovery.initial_backoff_seconds': '单位：秒。首次服务退避的有限时长；后续指数增长，仍受单次及累计等待上限约束。',
@@ -605,9 +629,11 @@ def render(draft, *, edit=False):
     choice_labels = {'true':'允许', 'false':'不允许', 'read-only':'只读文件',
         'workspace-write':'可写工作目录', 'danger-full-access':'不限制文件访问',
         'disabled':'禁用网页检索', 'cached':'仅使用缓存', 'live':'实时检索',
-        'local':'由本地执行插件执行', 'external':'由外部执行', 'codex':'Codex（默认）', 'protocol':'自定义协议后端',
+        'local':'由本地执行插件执行', 'external':'由外部执行',
         'same_session':'沿用同一会话', 'new_context':'使用新上下文',
-        'codex_exec_resume':'Codex 原调用恢复', 'turn':'按单次调用计量'}
+        'turn':'按单次调用计量'}
+
+    hints.update({field.path:field.description for field in form_fields if field.description})
 
     def control(field, *, advanced=False, matrix=False):
         value = _get(document, field.path)
@@ -657,7 +683,7 @@ def render(draft, *, edit=False):
                 '<label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>使用这组自定义设置（关闭后不保存本组）</label>'+hint+'<noscript><p class="note">填写前请先启用本组；未启用时，本组内容不会保存。</p></noscript>'+contents+('</fieldset>' if known else '</details>')
         text = '' if value is None else (str(value).lower() if type(value) is bool else str(value))
         if field.choices or field.kind == 'boolean':
-            choices = list(field.choices or ('true','false'))
+            choices = list(backends.names() if field.path=='agent.backend' else field.choices or ('true','false'))
             choices += [text] if text and text not in choices else []
             widget = '<select id="'+identity+'" name="cfg.'+field.path+'"'+described+'><option value="">未声明 / 沿用默认'+('（'+escape(field.placeholder)+'）' if field.placeholder else '')+'</option>'+''.join(
                 '<option value="'+escape(choice,quote=True)+'"'+(' selected' if text==choice else '')+'>'+escape(choice_labels.get(choice,choice))+'</option>' for choice in choices)+'</select>'
@@ -671,7 +697,7 @@ def render(draft, *, edit=False):
             widget += '<label class="check-label"><input type="checkbox" name="present.'+field.path+'" value="yes" checked>保留已导入的空文本（取消则省略）</label>'
         return '<div class="config-field"'+attributes+'><label'+(' class="config-sr-only"' if matrix else '')+' for="'+identity+'">'+label+metadata+'</label>'+widget+hint+'</div>'
 
-    by_path = {field.path: field for field in FIELDS}
+    by_path = {field.path: field for field in form_fields}
     def fields(paths, *, advanced=False):
         return ''.join(control(by_path[path], advanced=advanced) for path in paths)
 
@@ -800,7 +826,7 @@ def render(draft, *, edit=False):
         ('补充任务与材料约束','research','已有全局补充原文、材料来源限制。'),
         ('已有工程','project','可选：在准确 Git 工程路径使用声明目录；创建时冻结工程身份，权限与执行条件仍需满足。'),
         ('研究技能集合','skills','可选：声明具名技能集合，再由角色或命名研究者明确选择。插件声明不会自动启用技能。'),
-        ('后端接入与原生设置','agent','日常使用 Codex 可保持留空。更换后端、启动程序或原生环境时才需设置。'),
+        ('后端接入与原生设置','agent','采用默认后端时可保持留空。更换后端、启动程序或原生环境时按其声明设置。'),
         ('探索节奏与用量分配','budget','设置实验探索切片、角色份额、补正阈值与输出体积限制；这些设置不增加总预算。'),
         ('实验执行插件与资源','executor','仅在本次研究需要实验执行时接入。配置本身不会授予实验执行许可。'),
         ('结果交付适配器','delivery','仅在需要向明确外部目标交付时配置，按适配器说明准备。'),
@@ -811,7 +837,7 @@ def render(draft, *, edit=False):
     for title, prefix, explanation in categories:
         if edit and prefix in {'research', 'ui', 'version', 'project', 'skills'}:
             continue
-        paths = [field.path for field in FIELDS if field.path not in used and (field.path == prefix or field.path.startswith(prefix+'.'))]
+        paths = [field.path for field in form_fields if field.path not in used and (field.path == prefix or field.path.startswith(prefix+'.'))]
         regular = [path for path in paths if by_path[path].kind not in ('table','array') or path in GROUP_FIELDS]
         expert = [path for path in paths if path not in regular]
         configured = any(_get(document, path) is not None for path in paths)
@@ -832,7 +858,15 @@ def render(draft, *, edit=False):
     rows.append('<details class="advanced-category"><summary>其他导入字段 / 专家编辑</summary><p class="note">原样保留并校验额外字段；不支持的声明会在检查时提示。</p><div class="config-children" data-parent="@extra">'+tree(extras,'@extra')+'</div><button type="button" class="config-add secondary-button" data-parent="@extra">添加扩展字段</button></details></details>'
         + ('</section>' if edit else '<div class="setup-actions"><button type="button" hidden class="secondary-button" data-setup-go="1">← 返回任务与材料</button><span class="note">下一步会检查配置，尚不创建或运行研究。</span></div></section>'))
     rows.append('<script src="/assets/configuration.js"></script>')
-    return '<div class="compact-configuration">'+'\n'.join(rows)+'</div>'
+    metadata='<input type="hidden" name="rendered_backend" value="'+escape(
+        str(_get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND),quote=True)+'">'
+    saved_native=draft.get('native_drafts',{})
+    if saved_native:
+        metadata+='<input type="hidden" name="native_drafts" value="'+escape(
+            json.dumps(saved_native,ensure_ascii=False,separators=(',',':')),quote=True)+'">'
+        metadata+=('<p class="note">已保留以下后端的原生设置草稿：'+escape('、'.join(saved_native))
+            +'。切回对应后端时恢复；这些设置不传给当前后端。</p>')
+    return '<div class="compact-configuration">'+metadata+'\n'.join(rows)+'</div>'
 
 
 SCRIPT_SOURCE = r'''

@@ -4,6 +4,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import time
 import uuid
 
 from . import budget, contracts, controller, runtime
@@ -66,8 +67,168 @@ def operations(root):
     return sorted([operation(root, path.stem) for path in sorted((root / 'host-control' / 'operations').glob('*.json'))], key=lambda row: row.get('sequence', 0))
 
 
+def stop_held_recovery(root, *, held_operation_id, active_operation_id):
+    """Explicit cleanup of a held repair and its exact accepted current owner.
+
+    This mutator is separate from status/operation readers. It neither launches
+    nor reconciles science, and returns uncertainty instead of signalling an
+    unbound process or refunding any accepted consumption.
+    """
+    from .instance_owner import lease
+    root=Path(root).resolve()
+    unknown=dict(status='cleanup_unknown',cleanup_confirmed=False,
+        held_operation_id=held_operation_id,active_operation_id=active_operation_id)
+    with lease(root):
+        held=_read(root,held_operation_id);active=_read(root,active_operation_id)
+        action=held.get('action') or {}
+        step=action.get('step');source=action.get('expected_attempt',0)
+        if (held.get('operation_id') != held_operation_id or held.get('kind') != 'controller'
+                or action.get('kind') != 'worker_resume' or type(step) is not int or step <= 0
+                or type(source) is not int or source < 0
+                or action.get('job_ref') != contracts.record_ref(root/'jobs'/f'{step:03d}.json')
+                or active.get('operation_id') != active_operation_id or active.get('kind') != 'controller'
+                or (active.get('action') or {}).get('kind') not in {'run','continue','worker_resume'}
+                or type(held.get('sequence')) is not int or type(active.get('sequence')) is not int
+                or active['sequence'] < held['sequence']):
+            return unknown
+        process=active.get('process')
+        if not isinstance(process,dict) or process.get('task_ref') != active_operation_id:return unknown
+        from .instance_control import request_pause
+        request_pause(root)  # Existing next-node barrier precedes forced cleanup.
+        if runtime.stop_bound_group(process,active_operation_id) != 'observed_group_cleaned':return unknown
+        descriptor=os.open(root/'host-run.lock',os.O_CREAT|os.O_RDWR|os.O_CLOEXEC|os.O_NOFOLLOW,0o600)
+        try:
+            try:
+                fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:
+                return unknown  # A later owner must never be cleaned as this repair.
+            identity=os.fstat(descriptor)
+            current=os.stat(root/'host-run.lock',follow_symlinks=False)
+            if (identity.st_dev,identity.st_ino)!=(current.st_dev,current.st_ino):return unknown
+            return _stop_held_native_owner(root,unknown)
+        finally:
+            os.close(descriptor)
+
+
+def _stop_held_native_owner(root, unknown):
+    """The explicit cleanup writer holds host-run.lock through this boundary."""
+    from . import accepted_budget, execution, native_recovery
+    head=accepted_budget.read(root)
+    job=head.current_job
+    if job is None or job.get('native_record') is None:
+        return dict(unknown,status='held_recovery_stopped',cleanup_confirmed=True)
+    number=job.get('step');relative=job.get('native_record')
+    if type(number) is not int or number <= 0 or not isinstance(relative,str):return unknown
+    record=root/relative
+    if record.resolve()!=record or not record.is_relative_to(root):return unknown
+    accepted=accepted_budget.native_attempt(root,number,record,head=head)
+    if accepted is None:return unknown
+    intent=accepted['intent'];attempt=intent.get('attempt',0)
+    origin=execution.origin(root,number)
+    expected=origin if attempt==0 else origin/'continuations'/f'{attempt:03d}' if type(attempt) is int else None
+    if (type(attempt) is not int or attempt < 0 or record != expected
+            or intent.get('task_ref') != job['job_ref']
+            or contracts.read(contracts.regular(record/'native-intent.json')) != intent):return unknown
+    binding=job['job_ref'] if attempt==0 else contracts.record_ref(record/'native-intent.json')
+    receipts={}
+    for name in ('native-process.json','runner-process.json','watchdog-process.json'):
+        path=record/name
+        if path.exists() or path.is_symlink():
+            receipt=contracts.read(contracts.regular(path))
+            if not isinstance(receipt,dict) or receipt.get('task_ref') != binding:return unknown
+            receipts[name]=receipt
+    if not {'runner-process.json','watchdog-process.json'} <= set(receipts):return unknown
+    if 'native-process.json' not in receipts:
+        outcome=record/'native-outcome.json'
+        if not outcome.exists() or not native_recovery.never_started(contracts.read(contracts.regular(outcome))):
+            return unknown
+    cleanup=True
+    for name in ('native-process.json','runner-process.json','watchdog-process.json'):
+        receipt=receipts.get(name)
+        if receipt is None:continue
+        if name=='runner-process.json' and 'native-process.json' in receipts:
+            until=time.monotonic()+3  # Original runner/watchdog cleanup grace.
+            while runtime.process_matches(receipt,binding) and time.monotonic()<until:
+                time.sleep(.02)
+        cleanup=runtime.stop_bound_group(receipt,binding)=='observed_group_cleaned' and cleanup
+    return dict(unknown,status='held_recovery_stopped' if cleanup else 'cleanup_unknown',
+        cleanup_confirmed=cleanup,step=number,attempt=attempt)
+
+
+def confirm_no_held_recovery(root, *, goal_id, step, expected_attempt):
+    """Fence a cancelled hold and positively prove no replacement was accepted.
+
+    An empty UI result is not evidence. The existing pause barrier and writer
+    fence keep a later admission out while this owner reads original records.
+    """
+    from .instance_owner import lease
+    root=Path(root).resolve()
+    unknown=dict(status='cleanup_unknown',cleanup_confirmed=False,no_replacement=False,
+        step=step,expected_attempt=expected_attempt)
+    with lease(root):
+        if (not isinstance(goal_id,str) or contracts.settings(root).get('goal_id') != goal_id
+                or type(step) is not int or step <= 0
+                or type(expected_attempt) is not int or expected_attempt < 0):return unknown
+        descriptor=None
+        try:
+            descriptor=os.open(root/'host-run.lock',os.O_RDWR|os.O_CLOEXEC|os.O_NOFOLLOW)
+            fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            identity=os.fstat(descriptor)
+            current=os.stat(root/'host-run.lock',follow_symlinks=False)
+            if (identity.st_dev,identity.st_ino)!=(current.st_dev,current.st_ino):return unknown
+            from .instance_control import request_pause
+            request_pause(root)
+            return _confirm_no_replacement_originals(root,goal_id,step,expected_attempt,unknown)
+        except (OSError,ValueError,KeyError,TypeError):
+            return unknown
+        finally:
+            if descriptor is not None:os.close(descriptor)
+
+
+def _confirm_no_replacement_originals(root, goal_id, step, attempt, unknown):
+    """Produce exact original facts only while the cleanup writer is fenced."""
+    from . import accepted_budget, continuation, execution
+    task_ref=contracts.record_ref(root/'jobs'/f'{step:03d}.json')
+    directory=root/'host-control/operations'
+    if directory.resolve()!=directory or directory.exists() and not directory.is_dir():return unknown
+    for path in directory.glob('*.json'):
+        operation=_read(root,path.stem)
+        if not isinstance(operation,dict) or operation.get('operation_id') != path.stem:return unknown
+        action=operation.get('action') or {}
+        if (operation.get('kind') == 'controller' and action.get('kind') == 'worker_resume'
+                and action.get('step') == step and action.get('expected_attempt',0) == attempt
+                and action.get('job_ref') == task_ref):return unknown
+        if operation.get('kind') == 'controller':
+            if operation.get('status') in {'accepted','running'}:return unknown
+            if not runtime.bound_group_stopped(operation.get('process'),operation.get('operation_id')):
+                return unknown
+    head=accepted_budget.read(root)
+    job=head.current_job
+    record=execution.origin(root,step)
+    if attempt:record=record/'continuations'/f'{attempt:03d}'
+    relative=record.relative_to(root).as_posix()
+    if (head['instance_id'] != goal_id or job is None or job.get('step') != step
+            or job.get('job_ref') != task_ref or job.get('native_record') != relative
+            or head['current_native'] is not None and (
+                head['current_native'].get('record') != relative or head['current_native'].get('step') != step)):
+        return unknown
+    accepted=accepted_budget.native_attempt(root,step,record,head=head)
+    if (accepted is None or accepted['intent'].get('attempt',0) != attempt
+            or accepted['intent'].get('task_ref') != task_ref
+            or contracts.read(contracts.regular(record/'native-intent.json')) != accepted['intent']):return unknown
+    outcome=contracts.read(contracts.regular(record/'native-outcome.json'))
+    facts=continuation._prelaunch_original_facts(root,step,record,attempt=attempt)
+    continuation._require_never_started(outcome,facts)
+    if not runtime.bound_group_stopped(facts['receipt'],facts['binding']):return unknown
+    watchdog=record/'watchdog-process.json'
+    if watchdog.exists() or watchdog.is_symlink():
+        if not runtime.bound_group_stopped(contracts.read(contracts.regular(watchdog)),facts['binding']):
+            return unknown
+    return dict(unknown,status='held_recovery_stopped',cleanup_confirmed=True,no_replacement=True)
+
+
 def start_background(root, *, continue_run=False, ack_correction=None, authorization_note=None, resume_step=None,
-                     operation_id=None):
+                     operation_id=None,expected_attempt=None):
     """Hand the existing single-writer lock to an independent controller process."""
     root = Path(root).resolve()
     from .instance_owner import lease
@@ -76,6 +237,10 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
         require_current(root)
         request = dict(continue_run=bool(continue_run), ack_correction=ack_correction,
                        authorization_note=authorization_note, resume_step=resume_step)
+        if expected_attempt is not None:
+            if resume_step is None or type(expected_attempt) is not int or expected_attempt < 0:
+                raise ValueError('Expected attempt requires an exact worker resume source')
+            request['expected_attempt']=expected_attempt
         if operation_id is not None:
             with budget._ledger_writer(root):
                 previous = _replay(root, operation_id, 'controller', request)
@@ -89,6 +254,7 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
                 raise ValueError('An exact prepared node is required')
             path = contracts.regular(root / 'jobs' / f'{resume_step:03d}.json')
             action = dict(kind='worker_resume', step=resume_step, job_ref=contracts.record_ref(path))
+            if expected_attempt is not None:action['expected_attempt']=expected_attempt
         descriptor = os.open(root / 'host-run.lock', os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             try:
@@ -226,7 +392,8 @@ def _child(root, operation_id, descriptor):
                 path = contracts.regular(root / 'jobs' / f'{action["step"]:03d}.json')
                 if contracts.record_ref(path) != action['job_ref']:
                     raise ValueError('Detached resume lost its exact original scientific task')
-                result = controller._worker_resume_locked(root, action['step'])
+                result = controller._worker_resume_locked(root, action['step'],
+                    expected_attempt=action.get('expected_attempt'))
             else:
                 result = (controller._run(root, continue_wait=action['wait_target'])
                     if action['kind'] == 'continue' else controller._run(root))

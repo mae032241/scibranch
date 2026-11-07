@@ -40,7 +40,7 @@ def _comparison(tmp_path, monkeypatch):
         candidate_recommendation='candidate', route_reason='Compare the same original')
     roles = {1:'H', 2:'W', 3:'A', 4:'W', 5:'A', 6:'W', 7:'A', 8:'E'}
     metadata = {step:dict(role=role, next_action='extract' if step==7 else 'continue_w',
-        origin_identity=origin) for step,role in roles.items()}
+        origin_identity=origin,direct_steps=[step-1] if step in (4,6) else []) for step,role in roles.items()}
     rows = {}
     for step in (3, 5, 7):
         original = dict(step=step, role='A', direct_refs=[])
@@ -75,18 +75,20 @@ def test_older_completed_superset_still_rejects_after_latest_smaller_basis(tmp_p
     job, payload, _, _, opened = _comparison(tmp_path, monkeypatch)
     assert decision.assess(tmp_path, job, payload, focus=dict(mechanism_ref='mechanism')) == [
         dict(code='a_decision_request_repeated', subject='continue_w')]
-    assert opened == [3, 4]
+    assert opened == [3]  # Completed response comes from accepted metadata, without reopening W.
 
 
 @pytest.mark.parametrize('change', ['question', 'candidate', 'focus', 'action', 'incomplete'])
 def test_different_decision_keys_and_incomplete_responses_are_not_reused(tmp_path, monkeypatch, change):
-    job, payload, _, rows, opened = _comparison(tmp_path, monkeypatch)
+    job, payload, metadata, rows, opened = _comparison(tmp_path, monkeypatch)
     focus = dict(mechanism_ref='mechanism')
     if change == 'question':payload['decision_request']['question'] += ' Another question.'
     elif change == 'candidate':payload['candidate_recommendation'] = 'other'
     elif change == 'focus':focus['mechanism_ref'] = 'other'
     elif change == 'action':payload['next_action'] = 'revise_h'
-    else:rows[4][0]['direct_refs'] = []
+    else:
+        metadata[4]['direct_steps'] = []
+        rows[4][0]['direct_refs'] = []
     assert decision.assess(tmp_path, job, payload, focus=focus) == []
     assert not ({1, 2, 7, 8} & set(opened))
 

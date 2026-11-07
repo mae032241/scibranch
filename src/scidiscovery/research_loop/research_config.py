@@ -6,21 +6,20 @@ retain their identity-bound settings; operational edits append exact node revisi
 from __future__ import annotations
 
 import copy
-import os
 from pathlib import Path
 import re
-import shutil
 
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
-from . import contracts, controller, search, project_layout
+from . import contracts, controller, search, project_layout, backends
 
-DEFAULT_MODEL = 'gpt-6.1-sol'
-DEFAULT_REASONING_EFFORT = 'high'
-DEFAULT_SERVICE_TIER = 'default'
+_PROFILE_DEFAULTS = backends.provider().profile_defaults()
+DEFAULT_MODEL = _PROFILE_DEFAULTS['model']
+DEFAULT_REASONING_EFFORT = _PROFILE_DEFAULTS['reasoning_effort']
+DEFAULT_SERVICE_TIER = _PROFILE_DEFAULTS['service_tier']
 
 
 def read_declaration(path):
@@ -140,8 +139,8 @@ def from_document(document, *, base):
     for key in ('model', 'reasoning_effort', 'service_tier'):
         if key in agent:
             result[key] = agent[key]
-    result['native_backend'] = agent.get('backend', 'codex')
-    launcher = agent.get('launcher', ['codex'] if result['native_backend'] == 'codex' else None)
+    result['native_backend'] = agent.get('backend', backends.DEFAULT_BACKEND)
+    launcher = agent.get('launcher')
     if launcher is not None:
         if not isinstance(launcher, list) or not launcher or any(not isinstance(arg, str) or not arg.strip() for arg in launcher):
             raise ValueError('agent.launcher must be a nonempty argv array')
@@ -149,7 +148,9 @@ def from_document(document, *, base):
         # Only a path-like executable is relative to the declaration. Other
         # argv elements are native arguments, not guessed filesystem paths.
         if '/' in launcher[0] or launcher[0].startswith('~'):
-            launcher[0] = str(_path(launcher[0], base, 'agent.launcher[0]'))
+            # Preserve the invoked entry point; its resolved target is frozen
+            # separately by the provider's launcher contract.
+            launcher[0] = str((Path(base) / Path(launcher[0]).expanduser()).absolute())
     result['launcher'] = launcher
     if 'roles' in agent:
         result['role_profiles'] = agent['roles']
@@ -157,16 +158,8 @@ def from_document(document, *, base):
         result['worker_profiles'] = agent['workers']
     if 'skills' in document:
         result['skills'] = copy.deepcopy(_table(document['skills'], {'sets'}, 'skills'))
-    options = _table(agent.get('native', {}),
-        {'sandbox_workspace_write', 'features'}, 'agent.native')
-    options = copy.deepcopy(options)
-    if 'sandbox_workspace_write' in options:
-        sandbox = _table(options['sandbox_workspace_write'],
-            {'writable_roots', 'network_access', 'exclude_tmpdir_env_var', 'exclude_slash_tmp'},
-            'agent.native.sandbox_workspace_write')
-        if 'writable_roots' in sandbox:
-            sandbox['writable_roots'] = [str(item) for item in _paths(
-                sandbox['writable_roots'], base, 'agent.native.sandbox_workspace_write.writable_roots')]
+    options = backends.provider(result['native_backend']).declaration_options(
+        agent.get('native', {}), base=base)
     permissions = _table(document.get('permissions', {}),
         {'workspace', 'network', 'web', 'subagents'}, 'permissions')
     result['native_options'] = {**options, **permissions}
@@ -177,8 +170,11 @@ def from_document(document, *, base):
     for key in ('max_tokens', 'max_seconds', 'max_steps'):
         if key not in budgets:
             raise ValueError(f'budget.{key} is required')
-        result[key] = budgets[key]
+        result[key] = (None if key in {'max_tokens', 'max_seconds'}
+                       and budgets[key] == 'unlimited' else budgets[key])
     for key in ('max_output_item_bytes', 'max_output_total_bytes', 'candidate_extra_slots'):
+        # Preserve legacy byte fields for exact declaration roundtrips. They no
+        # longer impose file-size quotas on scientific originals or outputs.
         if key in budgets:
             result[key] = budgets[key]
     if 'storage' in budgets:
@@ -213,7 +209,7 @@ def from_document(document, *, base):
         result['delivery_policy'] = delivery
     policies = _table(document.get('policies', {}),
         {'formal_review', 'execution_authority', 'candidate_audit', 'decision_contract',
-         'selection', 'worker_context', 'resume', 'history_observer'}, 'policies')
+         'selection', 'worker_context', 'worker_context_windows', 'resume', 'history_observer'}, 'policies')
     for source, target in (('formal_review', 'formal_review_policy'),
                            ('execution_authority', 'execution_authority_policy'),
                            ('candidate_audit', 'candidate_audit_policy')):
@@ -231,6 +227,8 @@ def from_document(document, *, base):
             result[target] = policies[source]
     if 'worker_context' in policies:
         result['worker_fragment_policy'] = dict(context=policies['worker_context'])
+    if 'worker_context_windows' in policies:
+        result.setdefault('worker_fragment_policy', dict(context='same_session'))['max_context_windows'] = policies['worker_context_windows']
     result['ui'] = copy.deepcopy(_table(document.get('ui', {}),
         {'port', 'open_browser', 'approval_secret_file'}, 'ui'))
     if 'approval_secret_file' in result['ui']:
@@ -243,13 +241,12 @@ def normalize(options, *, frozen_skill_selection=None):
     result = copy.deepcopy(options)
     if result.get('native_options') is None:
         result['native_options'] = {}
-    codex = result.get('native_backend', 'codex') == 'codex'
-    if not codex and result.get('model') is None:
+    backend_name=result.get('native_backend', backends.DEFAULT_BACKEND)
+    provider=backends.provider(backend_name)
+    for name,default in provider.profile_defaults().items():
+        if result.get(name) is None:result[name]=copy.deepcopy(default)
+    if result.get('model') is None:
         raise ValueError('The selected backend requires an explicit model')
-    for name, default in (('model', DEFAULT_MODEL), ('reasoning_effort', DEFAULT_REASONING_EFFORT if codex else None),
-                          ('service_tier', DEFAULT_SERVICE_TIER if codex else None)):
-        if result.get(name) is None:
-            result[name] = default
     result.setdefault('search_policy', copy.deepcopy(search.DEFAULT_POLICY))
     for name in ('root', 'objective', 'public_root'):
         if name not in result:
@@ -306,21 +303,28 @@ def normalize(options, *, frozen_skill_selection=None):
                         raise ValueError('Explicit delivery adapter conflicts with the selected execution provider')
                     selected_adapter.setdefault(key,copy.deepcopy(value))
     launcher = result.get('launcher')
-    standard = (result.get('native_backend', 'codex') == 'codex' and isinstance(launcher, list)
-                and len(launcher) == 1 and isinstance(launcher[0], str) and Path(launcher[0]).name == 'codex')
-    if standard and result.get('resume_policy') is None and result.get('worker_fragment_policy') is None:
-        from . import native_recovery
-        invoked = shutil.which(launcher[0])
-        if invoked is None:
-            raise ValueError('The selected standard native launcher is unavailable')
-        result['launcher'] = [str(Path(invoked).absolute())]
-        native_home = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex')))
-        if not native_home.is_absolute():
-            raise ValueError('Frozen native output repair requires an absolute inherited CODEX_HOME')
-        result['resume_policy'] = dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn',
-            output_repair=True, output_only=True, execution_wake=True, native_home=str(native_home.resolve()),
-            automatic_recovery=native_recovery.policy({}))
-        if result.get('node_budget_policy') is None:
+    if launcher is None:
+        launcher=provider.default_launcher()
+        result['launcher']=launcher
+    backend=backends.selected(dict(native_backend=backend_name,
+        native_launcher_argv=launcher,native_options=result['native_options']))
+    cadence=backend.supports_resume and backend.default_experiment_mode()=='local'
+    if (cadence and result.get('node_budget_policy') is None
+            and any(key in result and result[key] is None for key in ('max_tokens', 'max_seconds'))):
+        raise ValueError('Unlimited global budgets require explicit finite all-role budget.node_targets')
+    if result.get('resume_policy') is None:
+        defaults=backend.default_resume_policy()
+        if defaults is not None:
+            result['launcher']=defaults['launcher']
+            result['resume_policy']=defaults['policy']
+    if cadence:
+        # Ordinary W fragments have their own full-task authorization. JSON
+        # repairs keep the narrower output-only policy, including after a
+        # caller explicitly selects a different fragment context strategy.
+        result.setdefault('worker_fragment_policy', dict(context='same_session'))
+        if result['worker_fragment_policy'] is not None:
+            result['worker_fragment_policy'].setdefault('max_context_windows', 1)
+        if result.get('resume_policy') is not None and result.get('node_budget_policy') is None:
             result['node_budget_policy'] = {role: dict(max_observed_tokens=result['max_tokens'],
                 max_seconds=result['max_seconds']) for role in 'HWAE'}
     return result
@@ -381,7 +385,7 @@ def to_document(root, settings=None):
                if row['source'] != 'project/global/objective.md']
     if updates:
         research['user_updates'] = updates
-    agent = dict(backend=value.get('native_backend', 'codex'), launcher=value['native_launcher_argv'],
+    agent = dict(backend=value.get('native_backend', backends.DEFAULT_BACKEND), launcher=value['native_launcher_argv'],
                  model=value['model'], reasoning_effort=value.get('reasoning_effort'),
                  service_tier=value.get('service_tier'))
     agent = {key: copy.deepcopy(item) for key, item in agent.items() if item is not None}
@@ -391,11 +395,14 @@ def to_document(root, settings=None):
         agent['workers'] = copy.deepcopy(value['worker_profiles'])
     native = value.get('native_options') or {}
     permissions = {key: copy.deepcopy(native[key]) for key in ('workspace', 'network', 'web', 'subagents') if key in native}
-    extra = {key: copy.deepcopy(native[key]) for key in ('sandbox_workspace_write', 'features') if key in native}
+    extra = {key: copy.deepcopy(item) for key,item in native.items() if key not in permissions}
     if extra:
         agent['native'] = extra
-    budgets = {key: value[key] for key in ('max_tokens', 'max_seconds', 'max_steps',
-               'max_output_item_bytes', 'max_output_total_bytes') if value.get(key) is not None}
+    budgets = {key: ('unlimited' if value[key] is None else value[key])
+               for key in ('max_tokens', 'max_seconds')}
+    budgets['max_steps'] = value['max_steps']
+    budgets.update({key: value[key] for key in ('max_output_item_bytes', 'max_output_total_bytes')
+                    if value.get(key) is not None})
     if value.get('storage_policy') is not None:
         # TOML has no null: omitted dimensions retain their disabled defaults.
         budgets['storage'] = {key: item for key, item in value['storage_policy'].items() if item is not None}
@@ -426,6 +433,8 @@ def to_document(root, settings=None):
         observer['source_contract'] = copy.deepcopy(execution_inputs.SOURCE_CONTRACT)
     if value.get('worker_fragment_policy') is not None:
         policies['worker_context'] = copy.deepcopy(value['worker_fragment_policy']['context'])
+        if 'max_context_windows' in value['worker_fragment_policy']:
+            policies['worker_context_windows'] = value['worker_fragment_policy']['max_context_windows']
     result = dict(version=1, research=research, agent=agent, permissions=permissions,
                   budget=budgets, executor=executor, policies=policies, ui=copy.deepcopy(value.get('ui', {})))
     if value.get('skills') is not None:

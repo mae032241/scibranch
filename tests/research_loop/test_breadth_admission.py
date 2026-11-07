@@ -11,8 +11,8 @@ from execution_fixtures import execution_registry
 
 
 def combination(*,ambiguous=False,grant=None,baseline=None,prior_unknown=False):
-    rows=[dict(mechanism_ref=f'h001.m{index}',label='same' if ambiguous else label,source_h=1,
-        source_h_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),minimal_test='A distinguishable scientific prediction',status='pending')
+    rows=[dict(mechanism_ref=f'h001.m{index}',label='same' if ambiguous else label,source_step=1,
+        source_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),minimal_test='A distinguishable scientific prediction',status='pending')
         for index,label in enumerate(('P','Q'),1)]
     return dict(version=1,initial_calls=1,mechanisms=rows,
         baseline=baseline or [dict(mechanism_ref=row['mechanism_ref'],accepted_count=0) for row in rows],
@@ -62,7 +62,7 @@ def test_first_branch_second_call_waits_for_another_branch_then_shared_search_co
     assert (directory/'process.json').is_file() and (directory/'completed.json').is_file()
     original=originals(lane)[0]
     assert original['scope']['mechanism_ref'] is None
-    assert original['mechanism_binding']==dict(mechanism_ref='h001.m1',source_h=1,source_h_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),
+    assert original['mechanism_binding']==dict(mechanism_ref='h001.m1',source_step=1,source_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),
         job_ref=original['scope']['job_ref'],grant=None)
     rejected(lane,lane.source('P-extra'))
     other=run(lane,'Q-initial','h001.m2')
@@ -154,7 +154,7 @@ def test_exact_a_extra_one_call_is_consumed_once_and_queries_collect_remain_avai
     result=run(lane,'A-extra-P')
     binding=originals(lane)[0]['mechanism_binding']
     assert binding['grant']==dict(source_a=3,source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'))
-    assert binding['mechanism_ref']=='h001.m1' and binding['source_h_ref']==dict(path='/fixture/native-evidence/001/result-identity.json')
+    assert binding['mechanism_ref']=='h001.m1' and binding['source_ref']==dict(path='/fixture/native-evidence/001/result-identity.json')
     rejected(lane,lane.source('do-not-reuse-A-extra'))
     # Re-loading the same frozen grant does not erase its accepted original.
     configure(lane,configured)

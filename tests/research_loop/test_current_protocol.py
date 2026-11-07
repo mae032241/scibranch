@@ -95,8 +95,11 @@ def test_current_instance_cannot_accept_old_retained_job_from_current_caller_cop
     assert tree(root) == before
 
 
+# Checkpoint capture is private to an accepted stopped-attempt inventory. Its
+# public admission is covered by the native/continuation entries below; the
+# independent stage-end writer still rejects before consuming its inventory.
 OWNER_WRITES = {
-    'checkpoint_end_stage': lambda root, job, record: checkpoint.end_stage(root,job,record,'archived_original'),
+    'checkpoint_end_stage': lambda root, job, record: checkpoint.end_stage(root,job,record,'archived_original',inventory=None),
     'controller_run': lambda root, job, record: controller.run(root),
     'controller_closeout': lambda root, job, record: controller.closeout(root),
     'controller_resume': lambda root, job, record: controller.worker_resume(root, 1),
@@ -108,12 +111,11 @@ OWNER_WRITES = {
     'native_runner': lambda root, job, record: native.run_native(root, 1),
     'runtime_start': lambda root, job, record: runtime.start(root, 1),
     'continuation': lambda root, job, record: continuation.start(root, 1),
-    'checkpoint_write': lambda root, job, record: checkpoint.capture(root, job, record),
     'correction_publish': lambda root, job, record: correction.publish(root, 1),
     'audit_execution': lambda root, job, record: candidate_audit.execute(root, job, dict(next_action='audit', candidate_recommendation='original')),
     'delivery_sources': lambda root, job, record: delivery.freeze_sources(root, []),
     'delivery_submit': lambda root, job, record: delivery.invoke(root, dict(action_id='never-submitted'), 1),
-    'history_refresh': lambda root, job, record: history.refresh(root, 2),
+    'history_audit_projection': lambda root, job, record: history.render_audit_overview(root, 2),
 }
 
 
@@ -171,11 +173,40 @@ def test_old_instance_status_rejects_before_reading_jobs_or_rebuilding_views(
     assert tree(root) == before
 
 
+@pytest.mark.parametrize('entry', ['status', 'prepare', 'invoke'])
+@pytest.mark.parametrize('retired_protocol', [30, 31, 32])
+def test_retired_hwa_protocol_rejects_before_scientific_interpretation_or_writes(
+        scene, forbid_effect, monkeypatch, entry, retired_protocol):
+    """Synthetic compatibility originals; not qualification of an old scientific seal."""
+    from scidiscovery.research_loop import instance_control
+    root = scene
+    job = c.build_job(root, 1, 'H', [])
+    settings = c.settings(root)
+    settings['handoff_protocol'] = retired_protocol
+    job['handoff_protocol'] = retired_protocol
+    c.write(root / 'settings.json', settings)
+    c.write(root / 'jobs/001.json', job)
+    before = tree(root)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Retired HWA originals must not be scientifically reinterpreted')
+    monkeypatch.setattr(c, 'science_payload', forbidden)
+    monkeypatch.setattr(c, 'result_schema', forbidden)
+    operation = {
+        'status': lambda: instance_control.status(root),
+        'prepare': lambda: c.build_job(root, 2, 'W', [1]),
+        'invoke': lambda: native.execute_native(root, 1),
+    }[entry]
+    with pytest.raises(protocol.UnsupportedProtocol, match='Instance') as failure:
+        operation()
+    assert failure.value.code == 'unsupported_protocol'
+    assert tree(root) == before
+
+
 @pytest.mark.parametrize('field,value', [
     ('worker_view_version', None), ('worker_view_version', 0), ('worker_view_version', True),
     ('lineage_projection_version', None), ('lineage_projection_version', 0),
 ])
-def test_retained_old_job_view_rejects_without_upgrade(scene, field, value):
+def test_retained_old_job_view_rejects_without_upgrade(scene, monkeypatch, field, value):
     root = scene
     job = c.build_job(root, 1, 'H', [])
     if value is None:
@@ -184,6 +215,11 @@ def test_retained_old_job_view_rejects_without_upgrade(scene, field, value):
         job[field] = value
     c.write(root / 'jobs/001.json', job)
     before = tree(root)
+    from scidiscovery.research_loop import accepted_prefix, handoff_state
+    def forbidden(*args, **kwargs):
+        pytest.fail('Unsupported retained view must reject before reconciliation or material expansion')
+    monkeypatch.setattr(accepted_prefix, 'reconcile', forbidden)
+    monkeypatch.setattr(handoff_state, 'material_inputs', forbidden)
     for operation in (lambda: protocol.require_current(root, job),
             lambda: protocol.stage_scope(root, job), lambda: c.build_job(root, 1, 'H', [])):
         with pytest.raises(protocol.UnsupportedProtocol, match='Scientific job view'):
@@ -209,6 +245,8 @@ def test_registered_scope_guard_precedes_factory_load_and_original_acceptance(ar
     def forbidden(*args, **kwargs):
         raise AssertionError('Scope protocol must be checked before loading a factory')
     monkeypatch.setattr(experiments, '_adapter', forbidden)
+    from scidiscovery.research_loop import experiment_client
+    monkeypatch.setattr(experiment_client, 'load_client_facts', forbidden)
     before = tree(root)
     for action in (lambda: experiments.load(old), lambda: experiments.dispatch_descriptor(old, payload)):
         with pytest.raises(protocol.UnsupportedProtocol):

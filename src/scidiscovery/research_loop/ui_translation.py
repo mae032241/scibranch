@@ -33,12 +33,6 @@ _MAX_OUTPUT = 1024 * 1024
 _FAILED = "Translation did not complete. Request a retry explicitly."
 _MAX_STDERR = 8192
 _MAX_NATIVE_ERROR = 4096
-_ENVIRONMENT_KEYS = (
-    "PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL",
-    "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID",
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
-)
 _FAILURES = {
     "model_rejected": "翻译模型不可用或名称不受支持。请在阅读与翻译中核对模型名称和账号权限，再手动重试。",
     "authentication": "翻译服务认证失败。请检查本机启动器的登录状态或凭据，再手动重试。",
@@ -105,11 +99,10 @@ def load_config(path):
 def _configuration(value):
     if not isinstance(value, dict) or set(value) - _OPTIONS:
         raise ValueError("Unsupported translation configuration fields.")
-    config = dict(backend="codex", launcher_argv=None, model=None, target_language="zh-CN",
+    config = dict(backend=backends.DEFAULT_BACKEND, launcher_argv=None, model=None, target_language="zh-CN",
                   reasoning_effort=None, service_tier=None, timeout_seconds=120)
     config.update(value)
-    if config["backend"] not in ("codex", "protocol"):
-        raise ValueError("Translation backend must be codex or protocol.")
+    provider=backends.provider(config["backend"])
     for key, limit in (("model", 256), ("target_language", 64),
                        ("reasoning_effort", 64), ("service_tier", 64)):
         field = config[key]
@@ -126,8 +119,8 @@ def _configuration(value):
     if launcher is not None and (not isinstance(launcher, list) or not launcher or len(launcher) > 64
             or any(not isinstance(arg, str) or not arg or len(arg) > 4096 or "\0" in arg for arg in launcher)):
         raise ValueError("Translation launcher_argv must be a nonempty bounded argument list.")
-    if config["backend"] == "protocol" and launcher is None:
-        raise ValueError("Translation protocol backend requires launcher_argv.")
+    if launcher is None:
+        provider.default_launcher()
     try:
         for argument in launcher or []:
             argument.encode("utf-8")
@@ -147,32 +140,25 @@ def _configuration(value):
 
 def _profile(config):
     return json.dumps(dict(rules=_RULES, backend=config["backend"],
-        launcher_argv=config["launcher_argv"] or ["codex"], model=config["model"],
+        launcher_argv=_launcher(config), model=config["model"],
         target_language=config["target_language"], reasoning_effort=config["reasoning_effort"],
         service_tier=config["service_tier"]), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _launcher(config):
+    return config['launcher_argv'] if config['launcher_argv'] is not None else backends.provider(config['backend']).default_launcher()
+
+
 def _native_settings(config):
-    # Freeze the same native declaration used by the actual invocation. No
-    # adapter selection or process is needed to expose settings/cache reads.
-    settings = dict(native_backend=config["backend"],
-        native_launcher_argv=config["launcher_argv"] or ["codex"],
-        native_options=dict(workspace="read-only", network=False, web="disabled", subagents=False))
-    settings["native_permissions"] = backends.permission_summary(settings)
-    return settings
+    # Settings and cache reads consume declared provider facts, with no process.
+    return dict(native_backend=config['backend'],native_launcher_argv=_launcher(config),
+        native_options=dict(workspace='read-only',network=False,web='disabled',subagents=False))
 
 
 def _support(config):
-    settings = _native_settings(config)
-    launcher = settings["native_launcher_argv"]
-    permissions = settings["native_permissions"]
-    supported = (launcher == ["codex"] or (len(launcher) == 1 and Path(launcher[0]).is_absolute()))
-    supported = supported and permissions["enforcement"].get("workspace") == "native_sandbox"
-    supported = supported and permissions["enforcement"].get("network") == "native_sandbox"
-    supported = supported and permissions["effective"] == dict(
-        workspace="read-only", network=False, web="disabled", subagents=False)
-    reason = "" if supported else "当前启动器无法落实原生只读与禁网防护；仅支持默认 Codex 或单一绝对 Codex 路径，现有配置与缓存仍可读取。"
-    return bool(supported), reason, permissions
+    settings=_native_settings(config)
+    capability=backends.provider(config['backend']).readonly_capability(settings)
+    return capability['status']=='supported',capability.get('reason',''),capability['permissions']
 
 
 def _texts(values):
@@ -252,6 +238,8 @@ class TranslationService:
         with self._condition:
             self._require_open()
             merged = {**self._config, **mapping}
+            if mapping.get('backend',self._config['backend'])!=self._config['backend'] and 'launcher_argv' not in mapping:
+                merged['launcher_argv']=None
             if self._config["model"] is None and mapping.get("model") is not None and "enabled" not in mapping:
                 merged["enabled"] = True
             config = _configuration(merged)
@@ -425,15 +413,9 @@ class TranslationService:
             work = Path(temporary)
             schema_path, pending = work / "response-schema.json", work / "response.json"
             schema_path.write_text(json.dumps(schema), encoding="utf-8")
-            args = adapter.launch(profile, work, pending, schema_path, _INSTRUCTION)
-            # Translation has a separate, narrower startup configuration from
-            # scientific native roles. These native switches disable command
-            # execution and image viewing before the request is sent. They do
-            # not claim that every possible native tool is absent.
-            args[-1:-1] = ['-c', 'features.shell_tool=false', '-c', 'tools.view_image=false',
-                '-c', 'shell_environment_policy.inherit="none"']
-            request = adapter.request(prompt, profile=profile, work=work, schema=schema_path)
-            result, usage = self._invoke(adapter, args, request, work, pending, config["timeout_seconds"])
+            args,environment = adapter.launch_readonly(profile,work,pending,schema_path,_INSTRUCTION)
+            request = adapter.request(prompt, profile=profile, work=work, schema=schema_path,response_schema=schema)
+            result, usage = self._invoke(adapter, args, request, work, pending, config["timeout_seconds"], environment=environment)
         if not isinstance(result, dict) or set(result) != {"translations"} or not isinstance(result["translations"], list):
             raise _TranslationError("response_invalid", usage)
         mapped = {}
@@ -447,7 +429,7 @@ class TranslationService:
             raise _TranslationError("response_invalid", usage)
         return [mapped[field["id"]] for field in fields], usage
 
-    def _invoke(self, adapter, args, request, work, pending, timeout):
+    def _invoke(self, adapter, args, request, work, pending, timeout, *, environment):
         process, usage = None, None
         result, completed = None, False
         output, stderr, native_errors, total = bytearray(), bytearray(), bytearray(), 0
@@ -459,16 +441,12 @@ class TranslationService:
                 value = json.loads(line)
                 if not isinstance(value, dict):
                     raise ValueError
-                item = value.get("item")
-                if value.get("type") == "tool" or (isinstance(item, dict) and item.get("type") in
-                        {"command_execution", "mcp_tool_call", "web_search", "file_change"}):
-                    raise _TranslationError("tool_action", usage)
-                # Native Codex failures are deliberately not normalized by the
-                # scientific adapter. Keep their original bounded evidence here.
-                if value.get("type") in {"error", "turn.failed"}:
-                    native_errors.extend(line + b"\n")
-                    del native_errors[:-_MAX_NATIVE_ERROR]
                 event = adapter.event(value)
+                if event.get('tool_action'):
+                    raise _TranslationError('tool_action',usage)
+                if event.get('failed'):
+                    native_errors.extend(line+b'\n')
+                    del native_errors[:-_MAX_NATIVE_ERROR]
                 if "result" in event:
                     if result is not None:
                         raise ValueError
@@ -489,7 +467,7 @@ class TranslationService:
                 try:
                     process = subprocess.Popen(args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, start_new_session=True,
-                        env={key: os.environ[key] for key in _ENVIRONMENT_KEYS if key in os.environ})
+                        env=environment)
                 except OSError as exc:
                     raise _TranslationError("launcher_unavailable", details=str(exc)) from exc
                 self._process = process
@@ -553,13 +531,14 @@ class TranslationService:
                     details = (native_errors + stderr).decode("utf-8", errors="replace")
                     fallback = "backend_error" if native_errors else "backend_exit" if code != 0 else "missing_completion"
                     raise _TranslationError(_failure_kind(details, fallback), usage)
-                if result is None and adapter.name == "codex":
-                    if not pending.is_file() or pending.stat().st_size > _MAX_OUTPUT:
-                        raise _TranslationError("response_invalid", usage)
+                if result is None:
                     try:
-                        result = json.loads(pending.read_text("utf-8"))
-                    except (OSError, ValueError) as exc:
-                        raise _TranslationError("response_invalid", usage) from exc
+                        response=adapter.acquire_response_file(pending,max_bytes=_MAX_OUTPUT)
+                        if response is not None:
+                            if len(response)>_MAX_OUTPUT:raise _TranslationError('output_limit',usage)
+                            result=json.loads(response)
+                    except (OSError,ValueError) as exc:
+                        raise _TranslationError('response_invalid',usage) from exc
                 return result, usage
         except _TranslationError as exc:
             # No launcher argv, prompt or config is copied to diagnostics. The

@@ -16,8 +16,12 @@ from scidiscovery.research_loop import budget, contracts as c, controller, execu
 pytestmark = pytest.mark.process_e2e
 
 LAUNCHER = r'''import json,os,pathlib,sys,time
+args=sys.argv[1:]
+if 'app-server' in args:
+ sys.stderr.write('Fixture does not implement metadata-only app-server.\n')
+ sys.exit(2)
 from scidiscovery.research_loop import worker_execution_bridge as bridge
-args=sys.argv[1:];prompt=sys.stdin.read();work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
+prompt=sys.stdin.read();work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
 home=pathlib.Path(os.environ['THIN_HWA_NATIVE_HOME']);role=os.environ['THIN_HWA_ROLE']
 root=work.parents[2];resume='resume' in args
 def request(arguments):
@@ -26,7 +30,7 @@ def request(arguments):
 thread='11111111-2222-4333-8444-555555555555'
 with (work/'work/launches').open('a') as f:f.write('resume\n' if resume else 'exec\n')
 print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
-p=home/'sessions/rollout.jsonl';p.parent.mkdir(parents=True,exist_ok=True)
+p=home/'sessions'/f'rollout-{thread}.jsonl';p.parent.mkdir(parents=True,exist_ok=True)
 if not p.exists():p.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
 payload=dict(summary='Synthetic original execution',scientific_result='Only fixture engineering facts.',limitations=['No model or solver.'],implementation_selection=None)
 if role=='W':
@@ -37,16 +41,18 @@ if role=='W':
  if not resume:
   (work/'work/initial-prompt').write_text(prompt)
   options=json.loads((root/'fixture-options.json').read_text())
-  package=work/'work/package';package.write_bytes(b'opaque original job package')
-  command=['run','--payload',str(package),'--new-plan','--mechanism','P']
+  package=work/'code/package';package.parent.mkdir(exist_ok=True);package.write_bytes(b'opaque original job package')
+  command=['run','--payload',str(package),'--new-plan','--mechanism','1']
   if options.get('synchronous_first'):
    code,first=request(command);assert code==0,first
-   command[-1]='Q'
+   command[-1]='2'
   code,result=request(command)
   assert code==2,result
   assert result['status']==options.get('query_state','running'),result
   (work/'work/original-call').write_text(result['call_id'])
   (work/'work/executor-handoff.json').write_text(json.dumps(result['handoff']))
+  if options.get('adaptive_batches'):
+   (work/'work/managed-calls.json').write_text(json.dumps([dict(call_id=result['call_id'],payload=package.read_text())]))
   if options.get('follow_handoff') and result['handoff']['action']=='poll_original':
    handoff=result['handoff'];queries=[]
    while handoff['action']=='poll_original':
@@ -86,7 +92,8 @@ if role=='W':
    (work/'work/final-handoff.json').write_text(json.dumps(handoff))
  else:
   assert thread in args and (work/'work/original-call').exists()
-  assert 'original managed execution has finished' in prompt
+  repair='Fix diagnosed JSON/layout only' in prompt
+  if not repair:assert 'Resume same task/scope/permissions/budget' in prompt
   (work/'work/wake-prompt').write_text(prompt)
   packet=json.loads((work/'work/execution-results.json').read_text())
   assert len(packet['executions'])==1
@@ -96,24 +103,60 @@ if role=='W':
   assert result['status']==row['status']
   assert not {'proofs','scope','accepted','submission','sha256','config_record'} & result.keys()
   assert not (work/row['result']).parent.joinpath('originals').exists()
+  options=json.loads((root/'fixture-options.json').read_text())
+  calls=json.loads((work/'work/managed-calls.json').read_text()) if options.get('adaptive_batches') else None
+  if calls:assert result['call_id']==calls[-1]['call_id']
+  references=work/'work/consumed-output-refs.json'
+  prior_refs=json.loads(references.read_text()) if references.exists() else []
+  for prior in prior_refs:
+   retained=work/prior['path'];assert retained.read_text()==prior['payload']
+   try:retained.write_text('must stay readonly across wake/recovery')
+   except OSError:pass
+   else:raise AssertionError('A prior batch output became writable')
   for item in packet['executions'][0]['outputs']:
-   retained=work/item['path'];assert retained.read_bytes()==b'opaque original job package'
+   retained=work/item['path'];assert retained.read_bytes()==(calls[-1]['payload'].encode() if calls else b'opaque original job package')
    for action in (lambda:retained.chmod(0o600),lambda:retained.write_bytes(b'must stay readonly')):
     try:action()
     except OSError:pass
     else:raise AssertionError('Managed wake reopened a shared output')
+   if not any(prior['path']==item['path'] for prior in prior_refs):
+    prior_refs.append(dict(path=item['path'],payload=retained.read_text()))
+  references.write_text(json.dumps(prior_refs))
+  failure_marker=work/'work/temporary-wake-failure'
+  if options.get('temporary_wake_failure') and not failure_marker.exists():
+   failure_marker.write_text('Original results were consumed before this temporary native failure.')
+   print(json.dumps(dict(type='turn.failed',error=dict(code='capacity_exceeded',status=503))),flush=True)
+   sys.exit(7)
   (work/'work/consumed-result').write_text(packet['executions'][0]['status'])
   if 'native_state' in packet['executions'][0]:(work/'work/consumed-native-state').write_text(packet['executions'][0]['native_state'])
-  options=json.loads((root/'fixture-options.json').read_text())
-  if options.get('probe_new_call'):
-   code,denied=request(['run','--payload',str(work/'work/package'),'--new-plan','--mechanism','Q'])
-   assert code==2,denied
-   assert denied['status']=='unavailable',denied
-   (work/'work/new-call-denied').write_text(denied['status'])
+  if calls and len(calls)<options['adaptive_batches']:
+   package=work/'code/package'
+   package.write_text('adaptive batch '+str(len(calls)+1)+' after verified '+calls[-1]['call_id'])
+   mechanism='1' if options.get('same_focus') else '2'
+   code,next_call=request(['run','--payload',str(package),'--new-plan','--mechanism',mechanism])
+   assert code==2 and next_call['status']=='running',next_call
+   assert next_call['call_id'] not in [call['call_id'] for call in calls]
+   calls.append(dict(call_id=next_call['call_id'],payload=package.read_text()))
+   (work/'work/managed-calls.json').write_text(json.dumps(calls))
+   (work/'work/new-call-accepted').write_text(next_call['call_id'])
+  if repair and options.get('repeat_output_repair'):
+   code,refused=request(['run','--payload',str(work/'code/package'),'--new-plan','--mechanism','1'])
+   assert code==2 and refused['status']=='unavailable' and 'call_id' not in refused,refused
+   with (work/'work/repair-refusals.jsonl').open('a') as stream:stream.write(json.dumps(refused)+'\n')
  consumed=(work/'work/consumed-result').exists()
- payload.update(stage_intent='review' if resume else options.get('stage_intent','review'),mechanism_findings=[dict(mechanism='P',basis='observed' if consumed else 'blocked',finding='Read exact original terminal' if consumed else 'Original accepted execution has no consumed terminal'),dict(mechanism='Q',basis='blocked',finding='No Q experiment requested in this fixture')])
+ payload.update(stage_intent='review' if resume else options.get('stage_intent','review'),mechanism_findings=[dict(mechanism='h001.m1',basis='observed' if consumed else 'blocked',finding='Read exact original terminal' if consumed else 'Original accepted execution has no consumed terminal'),dict(mechanism='h001.m2',basis='blocked',finding='This fixture supplies no Q scientific conclusion')])
 elif role=='A':
  payload.update(candidate_recommendation=None,progress_assessment=None,portfolio_review=None,search_review=dict(dispositions=[dict(mechanism_ref='h001.m1',status='screened',reason='Review original W result')],next_focus=dict(mechanism_ref='h001.m1',action='improve')),next_action='wait',route_reason='Bounded engineering test complete',decision_request=dict(decision='mechanism',question='What changes the mechanism?',change_criterion='A discriminating observation'))
+if role=='W' and resume and options.get('repeat_output_repair') and len(calls)==options['adaptive_batches']:
+ payload.pop('summary')
+previous=dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
+for line in p.read_text().splitlines():
+ event=json.loads(line)
+ if event.get('payload',{}).get('type')=='token_count':previous=event['payload']['info']['total_token_usage']
+total={key:previous[key]+value for key,value in dict(input_tokens=10,cached_input_tokens=2,output_tokens=2).items()}
+with p.open('a') as stream:
+ stream.write(json.dumps(dict(type='event_msg',payload=dict(type='token_count',info=dict(
+  total_token_usage=total,last_token_usage=dict(total_tokens=100),model_context_window=1000))))+'\n')
 print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=10,cached_input_tokens=2,output_tokens=2))),flush=True)
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
 '''
@@ -135,12 +178,29 @@ def instance(tmp_path,options,*,fragment=False,resume=True,seconds=120,node_seco
     return root
 
 
-def run_cli(root):
+def run_cli(root,*,on_wait=None):
     options=c.read(root/'fixture-options.json');stop=threading.Event();errors=[]
     def backend_events():
-        previous=None;work=c.workspace(root,2)
+        previous=None;work=c.workspace(root,2);next_wait=0
         try:
             while not stop.wait(.01):
+                if on_wait is not None:
+                    record=root/'native-evidence/002'
+                    if next_wait:record=record/'continuations'/f'{next_wait:03d}'
+                    waiting=record/'execution-wait.json'
+                    if waiting.exists():
+                        value=c.read(waiting)
+                        for item in value['calls']:
+                            config=c.read(Path(item['config']['path']))
+                            call=c.read(Path(item['accepted']['path']))['call_id']
+                            if not (e.Records(config).directory(call)/'completed.json').exists():
+                                on_wait(record,config,call)
+                                e.load(config).complete(call)
+                        next_wait+=1
+                    elif (record/'native-outcome.json').exists():
+                        outcome=c.read(record/'native-outcome.json')
+                        if type(outcome.get('returncode')) is int and outcome['returncode']!=0:next_wait+=1
+                if not options.get('follow_handoff'):continue
                 path=work/'work/fixture-query.json'
                 if not path.exists():continue
                 event=c.read(path)
@@ -157,7 +217,7 @@ def run_cli(root):
                 temporary=work/'work/fixture-query-ack.pending';c.write(temporary,event)
                 temporary.replace(work/'work/fixture-query-ack.json');previous=event
         except BaseException as error:errors.append(error)
-    thread=threading.Thread(target=backend_events) if options.get('follow_handoff') else None
+    thread=threading.Thread(target=backend_events) if options.get('follow_handoff') or on_wait is not None else None
     if thread is not None:thread.start()
     try:
         return subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli','run','--root',str(root)],capture_output=True,text=True,timeout=35)
@@ -168,7 +228,8 @@ def run_cli(root):
         assert thread is None or not thread.is_alive()
 
 
-def standard_instance(tmp_path,monkeypatch,*,wake='default'):
+def standard_instance(tmp_path,monkeypatch,*,wake='default',adaptive_batches=2,same_focus=False,
+        repeat_output_repair=False,temporary_wake_failure=False):
     """Use the real prepare CLI and its standard Codex defaulting path."""
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Read the same original managed result and retain its limitations.')
@@ -180,17 +241,21 @@ def standard_instance(tmp_path,monkeypatch,*,wake='default'):
     monkeypatch.setenv('PATH',str(executable.parent)+os.pathsep+os.environ['PATH'])
     root=tmp_path/'instance';nodes=tmp_path/'nodes.json'
     c.write(nodes,{role:dict(max_observed_tokens=200,max_seconds=20) for role in 'HWAE'})
-    launcher=['codex'] if wake=='default' else [str(executable)]
-    options=dict(collect=True,terminal_status='known_success',probe_new_call=True)
+    launcher=['codex'] if wake=='default' and not temporary_wake_failure else [str(executable)]
+    options=dict(collect=True,terminal_status='known_success',adaptive_batches=adaptive_batches,
+        same_focus=same_focus,repeat_output_repair=repeat_output_repair,temporary_wake_failure=temporary_wake_failure)
     selection=tmp_path/'execution.json';c.write(selection,dict(executor='composed_execution:fixture',configuration=options))
     arguments=['prepare','--root',str(root),'--objective',str(objective),'--public-root',str(public),
         '--native-launcher-json',json.dumps(launcher),'--execution-config',str(selection),'--max-tokens','1000',
         '--max-seconds','120','--max-steps','7','--model','no-model','--reasoning-effort','high',
         '--node-budget-policy',str(nodes)]
-    if wake!='default':
+    if wake!='default' or temporary_wake_failure:
         policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
             output_repair=True,output_only=True,native_home=str(home))
-        if wake!='missing':policy['execution_wake']=wake
+        if wake!='missing':policy['execution_wake']=True if wake=='default' else wake
+        if temporary_wake_failure:
+            policy['automatic_recovery']=dict(enabled=True,max_continues=2,max_retries=1,
+                initial_backoff_seconds=0,max_backoff_seconds=0,max_wait_seconds=0,jitter_fraction=0)
         path=tmp_path/'resume.json';c.write(path,policy)
         arguments+=['--worker-resume-policy',str(path)]
     prepared=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli',*arguments],
@@ -199,11 +264,11 @@ def standard_instance(tmp_path,monkeypatch,*,wake='default'):
     c.write(root/'fixture-options.json',options)
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Two mechanisms',commitments=[
         dict(label=label,minimal_test='Read original backend fact',existing_ref=None) for label in ('P','Q')],
-        focus=dict(label=None,action='screen')))
+        focus=dict(index=1,action='improve') if same_focus else dict(index=None,action='screen')))
     return root,home
 
 
-def test_default_cli_wakes_original_output_only_w_and_cannot_start_another_managed_call(tmp_path,monkeypatch,composed_registry):
+def test_default_cli_completion_wake_keeps_distinct_followup_execution_under_original_w(tmp_path,monkeypatch,composed_registry):
     root,home=standard_instance(tmp_path,monkeypatch)
     policy=c.settings(root)['resume_policy']
     assert policy['execution_wake'] is True and policy['output_only'] is True and policy['output_repair'] is True
@@ -225,8 +290,9 @@ def test_default_cli_wakes_original_output_only_w_and_cannot_start_another_manag
     assert terminal.returncode==0,(terminal.stdout,terminal.stderr)
     assert json.loads(terminal.stdout)['handoff']['action']=='consume_terminal'
     from scidiscovery.research_loop import managed_wait
-    assert managed_wait.handoff(config,dict(call_id=call,status='unknown'),'query')['action']=='reconcile_or_stop'
-    reply=run_cli(root);result=json.loads(reply.stdout)
+    retained=managed_wait.handoff(config,dict(call_id=call,status='unknown'),'query')
+    assert retained['action']=='consume_terminal' and retained['reason']=='original_terminal_verified'
+    reply=run_cli(root,on_wait=lambda *args:None);result=json.loads(reply.stdout)
     if reply.returncode!=0 or result['status']!='wait':
         record=execution.record(root,2)
         diagnostic=dict(stdout=reply.stdout,stderr=reply.stderr,attempt=str(record),originals={})
@@ -236,31 +302,24 @@ def test_default_cli_wakes_original_output_only_w_and_cannot_start_another_manag
                     stream.seek(max(0,path.stat().st_size-12000))
                     diagnostic['originals'][str(path)]=stream.read(12000).decode('utf-8',errors='replace')
         pytest.fail(json.dumps(diagnostic,ensure_ascii=False,indent=2))
-    assert (work/'work/launches').read_text()=='exec\nresume\n'
+    assert (work/'work/launches').read_text()=='exec\nresume\nresume\n'
     assert (work/'work/consumed-result').read_text()=='known_success'
-    assert (work/'work/new-call-denied').read_text()=='unavailable'
+    assert (work/'work/new-call-accepted').read_text()!=call
     prompt=(work/'work/wake-prompt').read_text()
-    assert 'This output-only wake' in prompt and 'Do not start new experiments or training' in prompt
+    assert 'continue original W work' in prompt and 'Managed execution:' in prompt
+    assert 'Output-only:' not in prompt
     assert 'handoff.action' in prompt
-    chain=execution.records(root,2);assert len(chain)==2
+    chain=execution.records(root,2);assert len(chain)==3
     intent=c.read(chain[1]/'native-intent.json')
     assert intent['continuation_kind']=='execution_wake' and intent['session']['home']==str(home)
-    assert execution.home(root,2,0)==execution.home(root,2,1)==home
+    assert all(execution.home(root,2,number)==home for number in range(3))
     assert intent['budget_slice']['previous_tokens']==12
     assert (chain[0]/'execution-wait.json').exists() and (chain[0]/'result-identity.json').exists()
     assert c.read(chain[1]/'native-outcome.json')['usage']['unknown_steps']==[]
-    # Both public dispatch and an adapter's direct acceptance must consult the
-    # current host intent, even with the original pre-wake configuration.
-    with pytest.raises(e.UnsupportedExecution,match='Output-only execution wake'):
-        e.dispatch(config,work/'work/package',new=True,mechanism='Q')
-    accepted=e.Records(config).accepted(call)
-    from scidiscovery.operations.execution import LocalFileDescriptor
-    with pytest.raises(e.UnsupportedExecution,match='Output-only execution wake'):
-        e.Records(config).accept(LocalFileDescriptor.model_validate(accepted['prepared']),{},accepted['interface'])
-    assert len(e.Records(config).calls())==1
+    assert len(e.Records(config).calls())==2
     assert all(path.read_bytes()==raw for path,raw in originals.items())
     assert json.loads(run_cli(root).stdout)['status']=='wait'
-    assert (work/'work/launches').read_text()=='exec\nresume\n'
+    assert (work/'work/launches').read_text()=='exec\nresume\nresume\n'
 
 
 @pytest.mark.parametrize('wake',['missing',False])

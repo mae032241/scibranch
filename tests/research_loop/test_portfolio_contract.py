@@ -64,33 +64,26 @@ def rewrite(record,payload):
 
 @pytest.mark.parametrize('review',[None,{},'A concise comparison',{'main_line':MAIN,'reason':'  '},
     {'main_line':'h999.m1','reason':'An unknown route'}])
-def test_substantive_completed_worker_review_still_has_a_real_small_gate(tmp_path,review):
+def test_completed_worker_assessment_does_not_require_global_comparison(tmp_path,review):
     root=prepared(tmp_path)
-    _,_,record=raw_author(root,review=review)
-    with pytest.raises(OutputRepairRequired,match='portfolio_review'):c.seal_result(root,3)
-    assert not (record/'result-identity.json').exists()
-
-
-def test_compact_comparison_and_three_key_final_coverage_preserve_breadth(tmp_path):
-    root=prepared(tmp_path)
-    review=dict(discriminating_work=None,main_line=MAIN,reason='The competitor has no decisive target evidence; its cheapest test is unavailable. Stop with this gap, revisiting when the target input arrives.')
     _,payload,record=raw_author(root,review=review)
-    payload['final_coverage']=[dict(mechanism_ref=ref,status='unexplored',reason='No target evidence establishes this route; the target response remains unanswered.') for ref in (MAIN,OTHER)]
+    payload.pop('final_coverage',None)
     rewrite(record,payload);c.seal_result(root,3)
     assert c.validate(c.workspace(root,3))['portfolio_review']==review
     state=search.project(root,4)
+    assert state['focus']==dict(mechanism_ref=MAIN,action='improve')
     assert state['order']['discriminating_work']==[]
-    assert state['portfolio']['mainline_reviews'][0]['main_line']==MAIN
-    assert len(state['portfolio']['seen_w'])==1
+    assert state['portfolio']['mainline_reviews']==[]
 
 
-def test_missing_final_mechanism_cannot_be_published_as_complete_coverage(tmp_path):
+@pytest.mark.parametrize('coverage',[None,[],[dict(mechanism_ref=MAIN,status='unexplored',reason='Missing target evidence')]])
+def test_final_assessment_preserves_optional_partial_coverage_without_inventory_gate(tmp_path,coverage):
     root=prepared(tmp_path)
-    _,payload,record=raw_author(root,review=dict(discriminating_work=None,main_line=MAIN,reason='The second route remains unresolved at this bounded stop.'))
-    payload['final_coverage']=[dict(mechanism_ref=MAIN,status='unexplored',reason='Target performance remains unmeasured.')]
-    rewrite(record,payload)
-    with pytest.raises(OutputRepairRequired,match='final_coverage'):c.seal_result(root,3)
-    assert not (record/'result-identity.json').exists()
+    _,payload,record=raw_author(root,review=None)
+    payload['final_coverage']=coverage
+    rewrite(record,payload);c.seal_result(root,3)
+    assert c.validate(c.workspace(root,3))['final_coverage']==coverage
+    assert (record/'result-identity.json').exists()
 
 
 @pytest.mark.parametrize('pointer',['/role','/direct_refs/0/path','/implementation_selection','/control_outcome','/scientific_result/missing','/summary/~2'])
@@ -107,66 +100,37 @@ def test_no_duplicate_comparison_declaration_is_required(tmp_path,boundary):
     step=2 if boundary=='no_completed_w' else 3
     _,payload,record=raw_author(root,step,parents=(1,) if step==2 else (1,2),
         action='wait' if boundary=='wait' else 'finish')
-    payload.pop('portfolio_review');rewrite(record,payload)
+    payload.pop('portfolio_review');payload.pop('final_coverage',None);rewrite(record,payload)
     c.seal_result(root,step)
     assert (record/'result-identity.json').exists()
 
 
-def test_active_work_updates_are_sparse_and_explicit_execute_keeps_real_focus_gate():
-    context=dict(applicable=True,mechanisms={MAIN:{},OTHER:{}},final=False,
-        discriminating_work=[dict(work_ref='A003-D001',status='deferred',mechanism_refs=[OTHER],next_action='continue_w')])
-    job=dict(role='A');payload=dict(next_action='continue_w',portfolio_review=dict(discriminating_work=None,main_line=MAIN,
-        reason='Keep the main line while testing its viable competitor.',
-        work_updates=[dict(work_ref='A003-D001',action='execute',reason='The discriminating target input is now available.')]))
-    # A main line may differ from the next exact discriminating W focus.
-    assert search.require_portfolio_review(None,job,payload,context=context,
-        interpretation=dict(focus=dict(mechanism_ref=OTHER,action='improve')))==payload['portfolio_review']
-    payload['portfolio_review'].pop('work_updates')
-    assert search.require_portfolio_review(None,job,payload,context=context)==payload['portfolio_review']
-    payload['portfolio_review']['work_updates']=[dict(work_ref='A003-D001',action='execute',reason='Test its prediction.')]
-    with pytest.raises(OutputRepairRequired,match='actual W focus'):
-        search.require_portfolio_review(None,job,payload,context=context,
-            interpretation=dict(focus=dict(mechanism_ref=MAIN,action='improve')))
-
-
-def test_sparse_update_preserves_omitted_work_original_and_response():
-    import copy
-    from scidiscovery.research_loop.scientific_intent import resolve_discriminating_work
-    first=dict(work_ref='A003-D001',status='deferred',source_a=3,declaration_pointer='/portfolio_review/discriminating_work',
-        mechanism_refs=[MAIN],next_action='extract',updates=[],executions=[])
-    second=dict(copy.deepcopy(first),work_ref='A004-D001',source_a=4,mechanism_refs=[OTHER])
-    state=dict(order=dict(discriminating_work=[first,second]));before=copy.deepcopy(state)
-    payload=dict(next_action='extract',portfolio_review=dict(main_line=MAIN,reason='Keep both scientific commitments visible.',
-        discriminating_work=None,work_updates=[dict(work_ref=first['work_ref'],action='execute',reason='Gather the exact missing observation.')]))
-    context=dict(applicable=True,mechanisms={MAIN:{},OTHER:{}},final=False,discriminating_work=[first,second])
-    search.require_portfolio_review(None,dict(role='A'),payload,context=context)
-    rows=resolve_discriminating_work(state,dict(role='A',step=5),payload)
-    assert rows[0]['status']=='executed' and rows[0]['executions']==[dict(source_a=5,response=None)]
-    assert rows[1]==before['order']['discriminating_work'][1] and state==before
-
-
-@pytest.mark.parametrize('action',['defer','withdraw'])
-def test_work_reason_is_free_text_without_null_slots_or_deep_evidence_table(action):
-    context=dict(applicable=True,mechanisms={MAIN:{}},final=False,
-        discriminating_work=[dict(work_ref='A003-D001',status='deferred',mechanism_refs=[MAIN],next_action='extract')])
-    payload=dict(next_action='finish',portfolio_review=dict(discriminating_work=None,main_line=MAIN,reason='Bounded scientific comparison and unmet conditions.',
-        work_updates=[dict(work_ref='A003-D001',action=action,reason='Exact retained W evidence changes feasibility; revisit only when missing conditions are supplied.')]))
-    search.require_portfolio_review(None,dict(role='A'),payload,context=context)
-
-
-def test_completed_worker_review_must_explicitly_declare_no_new_work_or_a_real_work(tmp_path):
+@pytest.mark.parametrize('action',['continue_w','revise_h','extract','finish'])
+def test_optional_a_global_planning_cannot_change_retained_w_intent(tmp_path,action):
+    from scidiscovery.research_loop import accepted_budget
     root=prepared(tmp_path)
-    _,payload,record=raw_author(root,review=dict(main_line=MAIN,reason='No feasible additional comparison exists under the missing target input.'))
-    with pytest.raises(OutputRepairRequired,match='discriminating_work'):c.seal_result(root,3)
-    assert not (record/'result-identity.json').exists()
-    payload['portfolio_review']['discriminating_work']=None
+    before=accepted_budget.read(root)['search']
+    advice=dict(main_line=OTHER,reason='Optional authored opinion',
+        discriminating_work=dict(mechanism_refs=[OTHER],question='An optional comparison',next_action=action),
+        work_updates=[dict(work_ref='A999-D001',action='execute',reason='No such retained work')])
+    _,payload,record=raw_author(root,action=action,review=advice,search_review=dict(
+        dispositions=[dict(mechanism_ref=MAIN,status='waived',reason='Optional authored advice')],
+        next_focus=dict(mechanism_ref=OTHER,action='repair')))
+    payload['final_coverage']=[dict(mechanism_ref=MAIN,status='ruled_out',reason='Optional partial account')]
     rewrite(record,payload);c.seal_result(root,3)
-    assert c.validate(c.workspace(root,3))['portfolio_review']['discriminating_work'] is None
+    after=accepted_budget.read(root)['search']
+    assert after['focus']==before['focus'] and after['allocation']==before['allocation']
+    for ref,item in before['table']['mechanisms'].items():
+        assert {key:after['table']['mechanisms'][ref][key] for key in ('status','source_step','source_ref','accepted_calls')}=={
+            key:item[key] for key in ('status','source_step','source_ref','accepted_calls')}
+    assert after['table']['remaining']==before['table']['remaining']
+    assert after['extra_grant'] is None and after['work_count']==0
+    assert after['last_science']==before['last_science']
+    assert after['portfolio']['main_line'] is None
+    assert c.validate(c.workspace(root,3))['portfolio_review']==advice
 
 
-def test_minimal_new_discriminating_work_is_accepted_without_extra_null_fields():
-    context=dict(applicable=True,mechanisms={MAIN:{},OTHER:{}},final=False,discriminating_work=[])
-    work=dict(mechanism_refs=[OTHER],question='Which target observation would distinguish the competitor? Revisit when the missing target input arrives.',next_action='extract')
-    payload=dict(next_action='continue_w',portfolio_review=dict(main_line=MAIN,
-        reason='Keep the current main line; defer the cheapest competitor test until its target input arrives.',discriminating_work=work))
-    assert search.require_portfolio_review(None,dict(role='A'),payload,context=context)==payload['portfolio_review']
+def test_unconsumed_optional_advice_needs_no_identity_resolution_or_repair():
+    payload=dict(portfolio_review=dict(competitor=dict(evidence=[dict(source_step=999,pointer='/missing')])))
+    assert search.optional_reference_diagnostics(None,dict(role='A'),payload)==[]
+    assert search.require_portfolio_review(None,dict(role='A'),payload)==payload['portfolio_review']

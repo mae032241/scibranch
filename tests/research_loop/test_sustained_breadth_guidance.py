@@ -74,58 +74,67 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
     assert transmitted.count(literal) == 1
     assert literal == expected
     assert job_path.read_bytes() == original
-    assert transmitted.count(guidance.STAGE_PLANNING[role]) == 1
+    if role != 'A':
+        assert transmitted.count(guidance.STAGE_PLANNING[role]) == 1
+    assert len(transmitted.encode()) <= c.MAX_FIXED_RESPONSE_BYTES == 3072
+    assert schema == c.result_schema(role, job.get('handoff_protocol', c.HANDOFF_PROTOCOL),
+        'selection' in job, **c.response_options(job))
     reading = task['reading_order']
     for concept in ('native file/shell tools', 'JSON keys/shapes', 'needed fields or line ranges',
             'combined batch returns', 'Reuse unchanged originals', 'fill gaps/conflicts/truncation'):
         assert concept in reading
         assert concept not in transmitted
     if role == 'H':
-        for concept in ('Use A evidence/limits/exact refs for mechanism decisions',
-                'no default A/full-pool redo', 'Check concrete conflicts/gaps as needed',
-                'Revise/reopen/add mechanisms beyond screening',
-                'minimal_test: public metric/conditions, reference procedure/evaluation driver',
-                'repeats only if useful'):
+        assert 'Check prior directions against subsequent W work' in reading
+        for concept in ('competing explanations', 'distinguishing experiments',
+                'observations/counterevidence', 'contradictions or stalled progress',
+                'constraints/counts/commitments fixed', 'may add/revise mechanisms'):
             assert concept in transmitted
+        for declaration in ('search_plan:', 'commitments[{label,existing_ref?}]',
+                'index:1-based|null', 'screen|improve'):
+            assert declaration in task['breadth_response']
+        assert 'minimal_test' not in task['breadth_response']
+        for requirement in ('task acceptance', 'minimal_test', 'evaluation driver', 'fair controls', 'replication'):
+            assert requirement not in transmitted
     elif role == 'A':
-        assert 'portfolio_assessment' in task
-        assert task['portfolio_response'] == c.PORTFOLIO_RESPONSE
+        assert 'portfolio_assessment' not in task
+        assert 'portfolio_response' not in task
         assert c.PORTFOLIO_RESPONSE not in transmitted
-        assert 'decision-changing' not in task['portfolio_response']
-        assert 'uncertainty' not in task['portfolio_response'].lower()
-        assert transmitted.count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
-        assert c.AUTHOR_EVIDENCE_GUIDANCE not in json.dumps(task)
-        for concept in ('Prior A gaps/W delta first',
-                'reuse reports/arrays/code/full-pool index',
-                'no routine rereads/refits/repackaging',
-                'Weigh strongest rivals', 'finite choice with limits if sufficient',
-                'Batch unmet-goal work: continue_w(improve)',
-                'Only evidenced mechanism gaps: revise_h(minimal executable test)',
-                'even if methods improve',
-                'Compare full procedures', 'changed conditions limit comparisons', 'may reject all',
-                'Publish own reports/executed code+helpers',
-                'cite exact managed originals'):
-            assert concept in transmitted
-        assert len(guidance.STAGE_PLANNING['A'].encode()) <= 461
-        assert reading.startswith('Prior A unresolved questions and latest W changes')
+        assert task['role_contract'].count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
+        assert c.AUTHOR_EVIDENCE_GUIDANCE not in transmitted
+        for concept in ('meaningful judgment', 'deliver/finish/continue_w', 'decision_request',
+                'question,change_criterion', 'High-level decision-changing', 'mechanical checks/W',
+                'not indefinite vetoes'):
+            assert concept in task['role_contract']
+        assert 'Soft targets do not end research' in transmitted
+        assert reading.startswith('The concrete assessment question and latest W changes')
         for concept in ('no routine redo of old observations',
-                'Check new/conflicting execution facts at original calls',
+                'Check execution facts only at calls addressable by the current experiment client',
                 'Parent claims are not qualification', 'originals remain available'):
             assert concept in reading
         assert task['lineage']['candidates'] == job['history']['view']['candidates']
         assert task['lineage']['indexes'] == job['history']['view']['indexes']
         assert '2-3 full procedures' not in transmitted
     else:
-        assert 'Reuse exact driver/report refs/conditions' in transmitted
-        assert 'compare full tuning/output procedures; deliver from same' in transmitted
+        for concept in ('W owns sustained research direction/design/adaptation',
+                'H for hypotheses', 'A for a decision-changing judgment', 'observations and residuals',
+                'breadth for conflict/stall', 'runnable candidates/helpers',
+                'negatives', 'exact originals'):
+            assert concept in transmitted
+        assert set(schema['properties']['stage_intent']['enum'])=={'continue','handoff','revise_h','review','decision'}
+        assert 'search_plan' in job['scientific_response_fields']
+        assert 'next_action' not in schema['properties']
+        assert 'before deepening any' not in transmitted
+        assert 'fair coverage before focus' not in transmitted
     if role != 'A':
-        assert reading.endswith(' A verifies independently. Check live execution facts at original calls. Parents are claims. Omissions: conclusion/index/next_page.')
-    assert 'Use declared writable paths; no control wrappers/hashes' in transmitted
+        assert ' A verifies independently. Parents are claims.' in reading
+        assert reading.endswith(' Check execution facts only at calls addressable by the current experiment client. For history use assigned originals or select exact frozen-history I IDs for next-node inputs after return. Retained identity alone implies neither readable material nor queryable calls. Prose/requested_evidence/evidence_requests do not bind inputs; do not search private control records. Omissions: conclusion/index/next_page.')
+    assert 'declared writes; no wrappers/hashes' in transmitted
     if role == 'H':
-        for concept in ('H owns questions/mechanisms/criteria',
-                'Publish reusable owned reports/results/executed scripts+needed helpers',
-                'via declared outputs (usually artifacts/)',
-                'managed originals: refs only, no copies/links'):
+        for concept in ('revisable high-level scientific methods/directions',
+                'W owns direction/design/implementation/adaptation',
+                'Publish rationale', 'declared outputs', 'cite managed originals',
+                'No downstream budget/call/audit caps'):
             assert concept in transmitted
     assert schema['additionalProperties'] is True  # Science extras remain allowed without a repeated banner.
 
@@ -157,7 +166,9 @@ def test_existing_final_closeout_and_repair_gates_suppress_new_work_planning(tmp
     if gate == 'final_return':
         assert 'Protected FINAL: conclude now; no new role/audit/experiment.' in prompt
     elif gate == 'output_repair':
-        assert 'No work/rerun/resubmit this turn' in prompt
+        for boundary in ('Fix diagnosed JSON/layout only', 'full JSON; keep science/plans/limits',
+                'No work/rerun/resubmit', 'W grants unchanged', 'no prior experiment implied'):
+            assert boundary in prompt
 
 
 @pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
@@ -171,7 +182,8 @@ def test_frozen_long_worker_literal_and_work_unit_keep_the_actual_fragment_contr
         'Return to A for required independent judgment, strategic choices/tradeoffs, '
         'direction-changing counterevidence, stall/scope change/blocker or actual limits. Retain spent budgets.')
     job = dict(role='W', handoff_protocol=c.HANDOFF_PROTOCOL, search={},
-        native_role_instruction=literal, scientific_work_unit=unit)
+        native_role_instruction=literal, scientific_work_unit=unit,
+        worker_fragment_policy=dict(context='same_session'))
     task = c.response_instructions(job)
     backend = backends.selected(dict(native_backend=backend_name,
         native_launcher_argv=['codex'] if backend_name == 'codex' else ['independent'],
@@ -192,13 +204,39 @@ def test_frozen_long_worker_literal_and_work_unit_keep_the_actual_fragment_contr
     assert size <= c.MAX_FIXED_RESPONSE_BYTES == 3072
 
 
+@pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
+@pytest.mark.parametrize('role', ['A', 'W'])
+def test_unlimited_shared_balances_keep_actual_ordinary_and_fragment_contracts_bounded(tmp_path, backend_name, role):
+    job = dict(role=role, handoff_protocol=c.HANDOFF_PROTOCOL, search={},
+        scientific_response_fields=['portfolio_review', 'final_coverage'], formal_review_version=1,
+        native_role_instruction=max((guidance.DEFAULT[role], c.ROLE_INSTRUCTIONS[role]),
+            key=lambda value: len(value.encode())))
+    if role == 'A':
+        job.update(portfolio_context={}, final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')])
+    else:
+        job['worker_fragment_policy']=dict(context='same_session')
+        job['scientific_work_unit'] = max(guidance.WORK_UNITS.values(), key=lambda value: len(value.encode()))
+    task = c.response_instructions(job)
+    backend = backends.selected(dict(native_backend=backend_name,
+        native_launcher_argv=['codex'] if backend_name == 'codex' else ['independent'],
+        native_options={} if backend_name == 'codex' else None),
+        schema_transport='prompt' if backend_name == 'codex' else None)
+    worker = role == 'W'
+    size, _, _, _ = rendered_contract(tmp_path, job, task,
+        dict(continuation_kind='fragment' if worker else 'automatic_recovery'), backend,
+        remaining={},
+        execution_interface=dict(capabilities={}, result_protocol='local-result-v1',
+            executor='local_execution:command') if worker else None,
+        managed_command=['experiment'] if worker else None,
+        budget_status=dict(shared_seconds_remaining=None, shared_observed_tokens_remaining=None))
+    assert size <= c.MAX_FIXED_RESPONSE_BYTES == 3072
+
+
 def plan(*, revised=False):
     commitments = [dict(label='Transport-limited explanation' if not revised else 'Retained transport explanation',
-        minimal_test='Transport predicts a thickness effect; compare matched public conditions.',
         existing_ref='h001.m1' if revised else None)]
     if revised:
-        commitments.append(dict(label='Interface-state explanation', existing_ref=None,
-            minimal_test='Interface states predict a history effect at fixed thickness; compare matched conditions.'))
+        commitments.append(dict(label='Interface-state explanation', existing_ref=None))
     return dict(scope='Distinguish transport from interface-state causal explanations.',
         commitments=commitments, focus=dict(index=2 if revised else 1, action='screen'))
 
@@ -292,10 +330,10 @@ def test_a_gap_or_bottleneck_revision_adds_distinct_route_with_stable_refs_and_f
     finish(root, 4, 'H', [1, 2, 3], action='experiment', search_choice=plan(revised=True))
     state = search.project(root, 5)
     assert set(state['mechanisms']) == {'h001.m1', 'h004.m2'}
-    assert state['mechanisms']['h001.m1']['original_h'] == 1
-    assert state['mechanisms']['h001.m1']['source_h'] == 4
+    assert state['mechanisms']['h001.m1']['original_step'] == 1
+    assert state['mechanisms']['h001.m1']['source_step'] == 4
     assert state['mechanisms']['h004.m2']['label'] == 'Interface-state explanation'
-    assert state['mechanisms']['h004.m2']['original_h'] == 4
+    assert state['mechanisms']['h004.m2']['original_step'] == 4
     assert state['focus'] == dict(mechanism_ref='h004.m2', action='screen')
     job, config = worker(root, tmp_path, 5, [4], qualified_local=True)
     assert [row['path'] for row in job['direct_refs']] == ['inputs/parents/004/conclusion.json']

@@ -103,12 +103,18 @@ def test_current_work_continue_keeps_new_work_after_historical_output_repair(tmp
 
 
 @pytest.mark.parametrize('output_only',[False,True])
-def test_existing_execution_wake_policy_still_bounds_new_work(tmp_path,monkeypatch,output_only):
+def test_execution_completion_keeps_original_work_permission_separate_from_output_repair(tmp_path,monkeypatch,output_only):
     _,config,_=accepted_attempts(tmp_path,monkeypatch,[dict(continuation_kind='execution_wake')],output_only=output_only)
-    if output_only:
-        with pytest.raises(experiments.UnsupportedExecution,match='Output-only execution wake'):
-            experiments._require_new_execution(config)
-    else:experiments._require_new_execution(config)
+    experiments._require_new_execution(config)
+
+
+def test_latest_output_repair_after_three_wakes_still_rejects_stale_full_task_client(tmp_path,monkeypatch):
+    root,config,_=accepted_attempts(tmp_path,monkeypatch,[
+        *[dict(continuation_kind='execution_wake') for _ in range(3)],
+        dict(continuation_kind='repair',output_repair=dict(code='missing_output'))])
+    config['native_attempt']=dict(number=0,execution_key=c.record_ref(root/'jobs/001.json'))
+    with pytest.raises(experiments.UnsupportedExecution,match='Output repair permits original results only'):
+        experiments._require_new_execution(config)
 
 
 @pytest.mark.process_e2e

@@ -82,7 +82,7 @@ Skill 不授予执行权限或科学资格，详见[接口参考](docs/PLUGIN_RU
 [当前架构](docs/ARCHITECTURE.zh-CN.md) · [发布范围](docs/RELEASE.zh-CN.md) ·
 [安全边界](SECURITY.md) · [贡献指南](CONTRIBUTING.md)
 
-当前运行时只接受协议 **29** 的实例，不提供旧格式兼容读取或迁移。单节点 token 目标为软目标，
+当前运行时只接受协议 **33** 的实例，不提供旧格式兼容读取或迁移。单节点 token 目标为软目标，
 共享准入预算与有限执行限制仍受约束。完成、权限、候选与恢复的详细合同由
 [架构](docs/ARCHITECTURE.zh-CN.md)定义。
 

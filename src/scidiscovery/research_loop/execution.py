@@ -127,14 +127,21 @@ def validate_records(root, step):
     job = c.read_job(root / 'jobs' / f'{step:03d}.json')
     from . import checkpoint
     fragments = checkpoint.enabled(root, job)
+    from . import continuation
+    wakes = (job['role']=='W' and not job.get('formal_review') and not job.get('final_only')
+        and not job.get('final_report') and job.get('purpose')!='closeout'
+        and continuation.wake_allowed(settings.get('resume_policy')))
     from . import budget
     author_permit=root/'host-recovery/author-closeout'/f'{step:03d}.json'
-    limit = budget.historical_step_limit(root) - 1 if fragments else max(repair_limit,int(author_permit.exists()))
+    limit = budget.historical_step_limit(root) - 1 if fragments or wakes else max(repair_limit,int(author_permit.exists()))
     limit += automatic_limit
     # Reattaching an interrupted author does not spend a scientific retry.
-    limit += sum(1 for path in directory.iterdir() if path.is_dir()
-        and (path/'native-intent.json').exists()
-        and c.read(c.regular(path/'native-intent.json')).get('continuation_kind') == 'reentry')
+    retained_continuations=[c.read(c.regular(path/'native-intent.json'))
+        for path in directory.iterdir() if path.is_dir() and (path/'native-intent.json').exists()]
+    limit += sum(item.get('continuation_kind') in {'reentry','technical_restart'}
+        for item in retained_continuations)
+    if sum(item.get('continuation_kind') == 'technical_restart' for item in retained_continuations) >= budget.historical_step_limit(root):
+        raise ValueError('Technical restart attempts exceed their shared finite steps')
     from . import author_closeout
     successor=author_closeout.successor_path(root,step)
     verified_authors=None
@@ -185,10 +192,17 @@ def validate_records(root, step):
         if kind == 'execution_wake' and not wake_authorized:
             raise ValueError('Execution wake differs from its frozen authorization')
         if ((settings.get('resume_policy') or {}).get('output_only') and kind in {'repair','fragment','execution_wake'}
-                and not output_repair and not wake_authorized):
+                and not output_repair and not wake_authorized and not (kind == 'fragment' and fragments)):
             raise ValueError('Output-only policy cannot authorize scientific continuation')
-        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','reentry','automatic_recovery'} or kind == 'fragment' and not fragments:
+        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','reentry','automatic_recovery','technical_restart'} or kind == 'fragment' and not fragments:
             raise ValueError('Native continuation kind differs from its frozen policy')
+        if kind == 'technical_restart':
+            previous_intents=[c.read(c.regular(item/'native-intent.json')) for item in result]
+            outcomes=[c.read(c.regular(item/'native-outcome.json')) for item in result]
+            facts=[continuation._prelaunch_original_facts(root,step,item,attempt=index)
+                for index,item in enumerate(result)]
+            continuation.validate_technical_restart(root,job,intent,prior_paths=result,
+                prior_intents=previous_intents,outcomes=outcomes,original_facts=facts)
         if kind == 'automatic_recovery':
             continuation.validate_automatic(root, step, intent, prior_record=result[-1],
                 prior_intents=[c.read(c.regular(item / 'native-intent.json')) for item in result])
@@ -199,7 +213,7 @@ def validate_records(root, step):
                 author_closeout.require_intent_eligibility(root,job,intent,verified=verified_authors[number])
             else:
                 author_closeout.require_intent_eligibility(root,job,intent)
-        if kind in {'repair','execution_wake'}:
+        if kind == 'repair':
             repairs += 1
             if repairs > repair_limit:
                 raise ValueError('Native repair attempts exceed their original finite authorization')
@@ -303,13 +317,17 @@ def accept_current_terminal(root, step, chain, outcome):
     from . import budget
     receipts=[budget._attempt_receipt(root,job,path,intent=intent)
         for path,intent in zip(chain,intents)]
+    from . import continuation
+    technical_facts=([continuation._prelaunch_original_facts(root,step,path,attempt=index)
+        for index,path in enumerate(chain[:-1])]
+        if any(intent.get('continuation_kind')=='technical_restart' for intent in intents[1:]) else [])
     processes={name:c.read(c.regular(chain[-1]/name))
         for name in ('runner-process.json','native-process.json')}
     payload=(c.science_payload(chain[-1]/'science-output.json','W',policy['handoff_protocol'])
         if any(intent.get('continuation_kind')=='author_closeout' for intent in intents[1:]) else None)
     return _accept_current_terminal_from_facts(root,job,chain,intents,outcome,
         processes=processes,receipts=receipts,policy=policy,payload=payload,
-        task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'))
+        task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),technical_facts=technical_facts)
 
 
 def accept_current_terminal_for_inventory(root,job,inventory,*,original_outcome,meter):
@@ -318,12 +336,18 @@ def accept_current_terminal_for_inventory(root,job,inventory,*,original_outcome,
     receipts=[budget._attempt_receipt(root,job,path,intent=intent)
         for path,intent in zip(inventory.chain[:-1],inventory.intents[:-1])]
     receipts.append((inventory.record,inventory.native_intent,original_outcome,meter,False))
+    from . import continuation
+    technical_facts=([continuation._prelaunch_original_facts(root,job['step'],path,attempt=index)
+        for index,path in enumerate(inventory.chain[:-1])]
+        if any(intent.get('continuation_kind')=='technical_restart' for intent in inventory.intents[1:]) else [])
     return _accept_current_terminal_from_facts(root,job,inventory.chain,inventory.intents,
         inventory.native_outcome,processes=inventory.process_receipts,receipts=receipts,
-        policy=inventory.policy,payload=inventory.payload,task_ref=inventory.task_ref)
+        policy=inventory.policy,payload=inventory.payload,task_ref=inventory.task_ref,
+        technical_facts=technical_facts)
 
 
-def _accept_current_terminal_from_facts(root,job,chain,intents,outcome,*,processes,receipts,policy,payload,task_ref):
+def _accept_current_terminal_from_facts(root,job,chain,intents,outcome,*,processes,receipts,policy,payload,task_ref,
+        technical_facts=()):
     current = chain[-1]
     binding = dict(path=str(current/'native-intent.json'))
     process_boot = None
@@ -340,8 +364,15 @@ def _accept_current_terminal_from_facts(root,job,chain,intents,outcome,*,process
     from . import budget
     budget._attempt_consumption_from_facts(root,job,receipts,policy=policy,
         limits=budget.node_limits(root,job,settings=policy),task_ref=task_ref)
+    from . import continuation
+    for number,intent in enumerate(intents[1:],1):
+        if intent.get('continuation_kind')=='technical_restart':
+            continuation.validate_technical_restart(root,job,intent,
+                prior_paths=chain[:number],prior_intents=intents[:number],
+                outcomes=[item[2] for item in receipts[:number]],
+                original_facts=technical_facts[:number])
     if any(intent.get('continuation_kind')=='author_closeout' for intent in intents[1:]) and payload is not None:
         # records() already validated every author intent, permit, projection,
         # call inventory and code digest in this very invocation. Check the one
         # current final response once; no verdict survives this record() call.
-        if payload.get('stage_intent')=='continue':raise ValueError('Author closeout cannot reopen exploration')
+        if payload.get('stage_intent')!='decision':raise ValueError('Author closeout cannot reopen exploration or consultation')

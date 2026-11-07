@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from scidiscovery.research_loop import accepted_prefix, accepted_search, contracts as c
-from scidiscovery.research_loop import controller, formal_review, fork_runtime, fork_service
+from scidiscovery.research_loop import controller, formal_review, fork_runtime, fork_service, lineage
 from scidiscovery.research_loop import continuation, candidate_refs
 from scidiscovery.research_loop import originals, semantic
 from scidiscovery.research_loop.output_repair import OutputRepairRequired
@@ -67,12 +67,12 @@ def test_assessment_uses_frozen_none_context_without_reinterpreting_old_h(scene,
     c.build_job(scene,2,'W',[1],instruction='Exact scientific question')
     finish(scene,2,'W',[1])
     generate=c._decision_context
-    def only_new_context(root,job):
+    def only_new_context(job,*,sources):
         assert job['step']==3,'An accepted W/H context was regenerated'
-        return generate(root,job)
+        return generate(job,sources=sources)
     monkeypatch.setattr(c,'_decision_context',only_new_context)
     job=c.build_job(scene,3,'A',[1,2])
-    handoff=c._assessment_handoff(scene,job)
+    handoff=job['assessment_handoff']
     assert handoff['current_w']=='inputs/parents/002/conclusion.json'
     assert handoff['current_h']=='inputs/parents/001/conclusion.json'
     assert 'previous_a' not in handoff
@@ -115,7 +115,10 @@ def test_fork_seed_materializes_saved_candidate_and_work_public_pages(tmp_path, 
         for kind,identity in [('candidate','W001-C001'),('work','A001-D001')]]
     member=dict(origin_identity=origin,step=1,ordinal=1,branch=origin,
         navigation=dict(path=nav_path))
-    for path,value in [('member.json',member),('navigation.json',dict(step=1,entities=[dict(page=path) for path in pages])),
+    research=lineage.research_navigation({},dict(step=1,role='H'),
+        dict(summary='Saved authored mechanism',scientific_result='Open evidence question',limitations=['Missing measurement']),
+        node_path='nodes/parent/001')
+    for path,value in [('member.json',member),('navigation.json',dict(step=1,research=research,entities=[dict(page=path) for path in pages])),
             ('event.json',dict(kind='scientific_seal',step=1,index_updates={
                 accepted_search.key('candidate','candidate-one'):dict(current=candidate),
                 accepted_search.key('work','A001-D001'):dict(current=work)}))]:
@@ -136,6 +139,9 @@ def test_fork_seed_materializes_saved_candidate_and_work_public_pages(tmp_path, 
     public=accepted_prefix.visibility(child,frozen)
     navigation=c.read(public/nav_path)
     assert [row['page'] for row in navigation['entities']]==pages
+    assert navigation['research']==research
+    assert c.read(public/Path(nav_path).parent/'research.json')==research
+    assert (public/Path(nav_path).parent/'scientific-original.json').samefile(parent/'raw.json')
     documents=[c.read(public/page) for page in pages]
     assert documents[0]['observation']['id']=='W001-C001'
     assert documents[1]['work_ref']=='A001-D001'

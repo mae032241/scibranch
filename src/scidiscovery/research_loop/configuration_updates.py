@@ -243,6 +243,12 @@ def _resource_authorization_revision(root, events):
     return budget._resource_ref(root, changes[-1]) if changes else None
 
 
+def _budget_amendment_arguments(changed):
+    """An explicit removed ceiling differs from an unchanged amendment arg."""
+    return {key: 'unlimited' if amount is None and key in {'max_tokens', 'max_seconds'} else amount
+            for key, amount in changed.items()}
+
+
 def submit(root, configuration, *, base=None, expected_revision=None,
            authorization_note=None):
     """Validate and queue a complete declaration using optimistic concurrency."""
@@ -296,8 +302,8 @@ def submit(root, configuration, *, base=None, expected_revision=None,
         if resource_changed and (not isinstance(authorization_note, str) or not authorization_note.strip()):
             raise ValueError('Execution resource changes require an operator adjustment note')
         if changed:
-            budget._validate_amendment(root, **changed, authorization_note=authorization_note,
-                                      authorization_statement=authorization_note)
+            budget._validate_amendment(root, **_budget_amendment_arguments(changed), authorization_note=authorization_note,
+                                      authorization_statement=authorization_note, applicable_settings=settings)
         if values and state['pending'] and not explicit_authorization:
             # A model-only edit keeps the original pending authorization, rather
             # than silently rebasing its older amounts onto an intervening CLI edit.
@@ -377,8 +383,9 @@ def bind_new_job_facts(root, step, *, base):
             if resource_applied is not None and resource_applied['allowance'] != (settings.get('execution_resource_policy') or {}).get('allowance'):
                 raise ValueError('Configuration execution resource amendment operation changed')
             if changed and applied is None:
-                budget._amend_locked(root, **changed, authorization_note=row['authorization_note'],
-                                     authorization_statement=row['authorization_note'], operation_id=operation)
+                budget._amend_locked(root, **_budget_amendment_arguments(changed), authorization_note=row['authorization_note'],
+                                     authorization_statement=row['authorization_note'], operation_id=operation,
+                                     applicable_settings=settings)
             if row.get('resource_change') and settings.get('execution_resource_policy') is not None and resource_applied is None:
                 budget.amend_execution_grant(root, allowance=settings['execution_resource_policy']['allowance'],
                     authorization_note=row['authorization_note'], operation_id=resource_operation)

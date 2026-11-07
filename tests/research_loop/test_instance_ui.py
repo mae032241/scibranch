@@ -14,6 +14,159 @@ from test_execution_authority import prepare
 from test_history_handoff import finish
 
 
+def test_current_context_is_independent_of_billing_and_loaded_once(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import ui_saved_status as saved
+    record=tmp_path/'native-evidence/001'
+    record.mkdir(parents=True)
+    (record/'native-intent.json').write_text('{}')
+    observation=dict(coverage='unknown',context=dict(status='last_reported',total_tokens=85,
+        model_context_window=100,current_window=True,observed_at=123.,reported_at=122.))
+    reads=[]
+    def read(path,memo):
+        reads.append(path.name)
+        return observation if path.name=='usage-observation.json' else None
+    monkeypatch.setattr(saved,'_saved_read',read)
+    monkeypatch.setattr(saved,'_native_outcome',lambda *args: {})
+    value=saved._usage(tmp_path,[1])
+    assert value['unknown_steps']==[1]
+    assert value['context']['status']=='last_reported' and value['context']['ratio']==.85
+    assert value['context']['observed_at']==123. and value['context']['reported_at']==122.
+    assert value['context']['step']==1 and value['context']['attempt']==0
+    assert reads.count('usage-observation.json')==1
+
+
+def test_latest_unstarted_attempt_does_not_reuse_prior_context(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import ui_saved_status as saved
+    record=tmp_path/'native-evidence/001'
+    (record/'continuations/001').mkdir(parents=True)
+    (record/'native-intent.json').write_text('{}')
+    observation=dict(coverage='live',context=dict(status='last_reported',total_tokens=85,
+        model_context_window=100,current_window=True,observed_at=123.))
+    monkeypatch.setattr(saved,'_saved_read',lambda path,memo:
+        observation if path.name=='usage-observation.json' else None)
+    monkeypatch.setattr(saved,'_native_outcome',lambda *args: {})
+    value=saved._usage(tmp_path,[1])
+    assert value['context']==dict(status='unavailable',step=1,attempt=1)
+
+
+def test_execution_owner_view_is_bounded_readonly_and_not_scientific_counts(tmp_path,monkeypatch):
+    from pathlib import Path
+    from scidiscovery.research_loop import experiments,ui_saved_status as saved
+    job=dict(step=2,role='W',worker_view_version=1)
+    records=tmp_path/'host-runtime/experiment-control/002/records'
+    records.mkdir(parents=True)
+    config=dict(record_dir=str(records),scope=dict(step=2),native_attempt=dict(number=1))
+    owner=experiments.Records(config)
+    owner.live_status('exact-original','submitted',accepted=dict(_display_first_call=True,native_attempt=dict(number=1)))
+    monkeypatch.setattr(Path,'iterdir',lambda *args:pytest.fail('Display must not enumerate receipts'))
+    monkeypatch.setattr(experiments,'registration',lambda *args:pytest.fail('Display must not load a backend'))
+    first=saved._live_executions(tmp_path,job)
+    assert first['coverage']=='observed' and first['counts']['submitted']==1
+    assert first['counts']['running']==0 and first['calls'][0]['call_id']=='exact-original'
+    assert first['calls'][0]['attempt']==1
+    owner.live_status('exact-original','running')
+    changed=saved._live_executions(tmp_path,job)
+    assert changed['counts']['running']==1 and changed['counts']['submitted']==0
+    assert set(changed['calls'][0])=={'call_id','attempt','state','updated_at'}
+    assert 'scientific' not in changed and 'candidate_id' not in changed['calls'][0]
+    owner.live_status('exact-original','known_success')
+    assert saved._live_executions(tmp_path,job)['counts']['known_success']==1
+
+
+def test_missing_execution_view_is_explicit_unknown_without_legacy_scan(tmp_path,monkeypatch):
+    from pathlib import Path
+    from scidiscovery.research_loop import ui_saved_status as saved
+    monkeypatch.setattr(Path,'iterdir',lambda *args:pytest.fail('No legacy scan'))
+    value=saved._live_executions(tmp_path,dict(step=2,role='W',worker_view_version=1))
+    assert value['coverage']=='unknown' and value['counts']=={} and value['calls']==[]
+
+
+def test_only_bound_observed_process_identity_marks_running_and_terminal_wins(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import experiments,protocol,ui_saved_status as saved
+    records=tmp_path/'host-runtime/experiment-control/002/records'
+    directory=records/'calls/exact-call'
+    directory.mkdir(parents=True)
+    scope=dict(step=2)
+    experiments.write(directory/'accepted.json',dict(call_id='exact-call',scope=scope,
+        native_attempt=dict(number=0)))
+    monkeypatch.setattr(protocol,'require_scope',lambda value:None)
+    owner=experiments.Records(dict(record_dir=str(records),scope=scope))
+    publish=experiments.Records.publish.__wrapped__
+    invalid=records/'calls/invalid-process'
+    invalid.mkdir()
+    experiments.write(invalid/'accepted.json',dict(call_id='invalid-process',scope=scope,
+        native_attempt=dict(number=0)))
+    publish(owner,'invalid-process','process.json',dict(pid=123))
+    assert not (records/'live-status.json').exists()
+    identity=dict(pid=123,start_ticks=1,pgid=123,sid=123,boot_id='observed-boot',state='S',
+        task_ref=dict(path=str(directory/'accepted.json')))
+    publish(owner,'exact-call','process.json',identity)
+    process_original=(directory/'process.json').read_bytes()
+    job=dict(step=2,role='W',worker_view_version=1)
+    assert saved._live_executions(tmp_path,job)['counts']['running']==1
+    publish(owner,'exact-call','completed.json',dict(status='known_success'))
+    with pytest.raises(FileExistsError):publish(owner,'exact-call','process.json',identity)
+    assert (directory/'process.json').read_bytes()==process_original
+    owner.live_status('exact-call','running')  # A stale observation cannot regress terminal.
+    value=saved._live_executions(tmp_path,job)
+    assert value['counts']['known_success']==1 and value['counts']['running']==0
+
+
+def test_technical_pause_offers_only_exact_owner_reported_recovery(tmp_path):
+    root,key=prepare(tmp_path,enabled=False)
+    ui,cookie=session(root,key)
+    token=ui._browser(cookie)
+    snapshot=ui._snapshot()
+    technical=dict(phase='native_prelaunch',stage='technical_pause',pending_step=2,pending_role='W',
+        reason='native_metadata_unsupported',repair_scope='worker_attempt',expected_attempt=1,
+        recovery_available=False,supported_actions=[],recheck_required=True)
+    current=dict(step=2,role='W',state='native_not_submitted',continuations=1,technical_stop=technical)
+    snapshot['view'].update(nodes=[current],paused=False,correction={})
+    snapshot.update(conclusion=None,final=None,operation=None)
+    status=ui._status(snapshot,{})
+    assert status['state']=='technical_pause' and not status['display']['active']
+    primary=str(ui._primary(token,True,snapshot,status))
+    assert 'action="/control/' not in primary
+    available=dict(technical,recovery_available=True,supported_actions=['worker-resume'])
+    snapshot['operation']=dict(status='applied',kind='controller',result=dict(technical_stop=available))
+    primary=str(ui._primary(token,True,snapshot,status))
+    assert 'action="/control/resume"' in primary
+    assert 'name="step" value="2"' in primary and 'name="expected_attempt" value="1"' in primary
+    assert 'action="/control/' not in str(ui._primary(token,False,snapshot,status))
+    available['expected_attempt']=0
+    assert 'action="/control/' not in str(ui._primary(token,True,snapshot,status))
+
+
+@pytest.mark.parametrize('expected_attempt',[0,2])
+def test_technical_repair_form_posts_exact_attempt_and_binds_retries(tmp_path,monkeypatch,expected_attempt):
+    root,key=prepare(tmp_path,enabled=False)
+    ui,cookie=session(root,key)
+    token=ui._browser(cookie)
+    snapshot=ui._snapshot()
+    technical=dict(phase='native_prelaunch',stage='technical_pause',pending_step=2,pending_role='W',
+        reason='native_metadata_unsupported',repair_scope='worker_attempt',expected_attempt=expected_attempt,
+        recovery_available=True,supported_actions=['worker-resume'],recheck_required=True)
+    snapshot['view'].update(nodes=[dict(step=2,role='W',state='native_not_submitted',
+        continuations=expected_attempt,technical_stop=technical)],paused=False,correction={})
+    snapshot.update(conclusion=None,final=None,operation=dict(status='applied',kind='controller',
+        result=dict(technical_stop=technical)))
+    primary=str(ui._primary(token,True,snapshot,ui._status(snapshot,{})))
+    fields={html.unescape(key):html.unescape(value) for key,value in
+        re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">',primary)}
+    submitted=[]
+    def start(selected,**options):
+        assert selected==root
+        submitted.append(options)
+        return dict(status='accepted',operation_id=options['operation_id'])
+    monkeypatch.setattr(control,'start_background',start)
+    assert post(ui,cookie,'resume',fields)[0]==303
+    assert submitted[0]['resume_step']==2 and submitted[0]['expected_attempt']==expected_attempt
+    assert post(ui,cookie,'resume',fields)[0]==303
+    assert submitted[0]==submitted[1]
+    assert post(ui,cookie,'resume',dict(fields,expected_attempt=str(expected_attempt+1)))[0]==422
+    assert len(submitted)==2
+
+
 def test_service_backoff_presentation_remains_active_and_pausable(tmp_path):
     from scidiscovery.research_loop import ui_view
     root, key = prepare(tmp_path, enabled=False)
@@ -1016,7 +1169,7 @@ def test_configuration_reads_audited_budget_without_rewriting_frozen_settings(tm
 
 
 @pytest.mark.parametrize('change_budget', [False, True])
-def test_workspace_configuration_limits_are_independent_of_live_clock(tmp_path, monkeypatch, change_budget):
+def test_workspace_configuration_updates_are_queued_after_host_restart(tmp_path, monkeypatch, change_budget):
     from scidiscovery.research_loop import budget, configuration_updates, contracts as c
     from test_configuration_form import Controls
     root, key = prepare(tmp_path, enabled=False)
@@ -1036,8 +1189,9 @@ def test_workspace_configuration_limits_are_independent_of_live_clock(tmp_path, 
     cookie = headers['Set-Cookie']
     originals = {path: path.read_bytes() for path in (
         root / 'settings.json', root / 'settings-identity.json', root / 'host-started.json',
-        root / 'jobs/001.json', root / 'host-control/configuration/bindings/000001.json',
-        root / 'control-ledger/000001.json', root / 'control-ledger/000002.json')}
+        root / 'jobs/001.json', root / 'host-control/configuration/bindings/000001.json')}
+    originals.update({path: path.read_bytes() for path in (root / 'control-ledger').iterdir()
+                      if path.is_file()})
     stamp.update(at_unix=2000., at_boottime=1., boot_id='current-boot')
 
     settings = ui.get('/instances/1/settings', host=ui.host, cookie=cookie)
@@ -1056,7 +1210,7 @@ def test_workspace_configuration_limits_are_independent_of_live_clock(tmp_path, 
     fields['cfg.agent.model'] = 'next-boot-model'
     if change_budget:
         fields['cfg.budget.max_tokens'] = '60000'
-        fields['authorization_note'] = 'Queue more comparisons after clock recovery'
+        fields['authorization_note'] = 'Queue more comparisons after host restart'
     saved, _, headers = ui.post('/instances/1/control/configuration-update', host=ui.host,
         origin='http://' + ui.host, cookie=cookie, content_type='application/x-www-form-urlencoded',
         body=urlencode(fields).encode())
@@ -1065,12 +1219,7 @@ def test_workspace_configuration_limits_are_independent_of_live_clock(tmp_path, 
     assert state['pending'] and state['settings']['model'] == 'next-boot-model'
     assert state['active_settings']['model'] == 'fixture'
     assert state['settings']['max_tokens'] == (60000 if change_budget else 54321)
-    with pytest.raises(ValueError, match='Control clock boot changed'):
-        budget.snapshot(root)
-    with pytest.raises(ValueError, match='Control clock boot changed'):
-        configuration_updates.bind_new_job(root, 2)
     assert all(path.read_bytes() == data for path, data in originals.items())
-    assert {path.name for path in (root / 'control-ledger').iterdir()} == {'000001.json', '000002.json'}
     assert not (root / 'host-control/configuration/bindings/000002.json').exists()
     assert not (root / 'jobs/002.json').exists()
 
@@ -1287,7 +1436,7 @@ def test_headless_browser_executes_public_progress_poll(tmp_path, monkeypatch):
     import subprocess
     import tempfile
     import time
-    from scidiscovery.research_loop import instance_ui, contracts as c, execution, runtime, ui_mechanisms, ui_view, ui_translation
+    from scidiscovery.research_loop import accepted_budget, profiles, instance_ui, contracts as c, execution, runtime, ui_mechanisms, ui_view, ui_translation
     chrome = shutil.which('google-chrome') or shutil.which('chromium')
     node = shutil.which('node')
     if not chrome or not node:
@@ -1342,10 +1491,12 @@ network = false
                 advanced.add(stage)
                 if stage == 'metered':
                     task_ref = c.record_ref(root / 'jobs/001.json')
-                    c.write(record / 'native-intent.json', dict(task_ref=task_ref, prepared_at=1.0))
+                    job=c.read_job(root/'jobs/001.json')
+                    accepted_budget.accept_native(root,1,record,dict(task_ref=task_ref,prepared_at=1.0,
+                        **profiles.binding(c.settings(root),job)))
                     c.write(record / 'runner-process.json', runtime.process_identity(os.getpid(), task_ref))
                 elif stage == '2':
-                    finish(root, 1, 'H', [], action='analyze', summary='First browser phase finding')
+                    finish(root, 1, 'H', [], action='analyze', summary='First browser phase finding',preserve_native_intent=True)
                     _, _, output = finish(root, 2, 'A', [1], summary='Second browser phase conclusion')
                     (output / 'native.jsonl').write_text(json.dumps(dict(type='item.completed', item=dict(type='agent_message', text='Second phase public output'))) + '\n')
                 elif stage == '3':
@@ -1354,7 +1505,9 @@ network = false
                 elif stage == '4':
                     c.build_job(root, 4, 'W', [3])
                     output = execution.origin(root, 4)
-                    c.write(output / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/004.json'), prepared_at=1.0))
+                    job=c.read_job(root/'jobs/004.json')
+                    accepted_budget.accept_native(root,4,output,dict(task_ref=c.record_ref(root/'jobs/004.json'),prepared_at=1.0,
+                        **profiles.binding(c.settings(root),job)))
                     c.write(output / 'runner-process.json', runtime.process_identity(os.getpid(), c.record_ref(root / 'jobs/004.json')))
                 elif stage == 'stopped':
                     output = execution.origin(root, 4)
@@ -1413,7 +1566,7 @@ network = false
                     status='deferred', reason=reason, declared_in_window=True, events=[
                         dict(step=1, role='H', label=label, text=question),
                         dict(step=2, role='W', text=None, findings=[dict(basis='observed', text=finding)],
-                            calls=None, sources=[1], metrics=[dict(key='Exact fixture validation protocol', ambiguous_label=False,
+                            calls=None, source_authors=[dict(source_step=1,source_role='H')], metrics=[dict(key='Exact fixture validation protocol', ambiguous_label=False,
                                 omitted=0, rows=[dict(label='Fixture candidate with a long original label', metric='0.125',
                                     direction='lower', status='recorded')])]),
                         dict(step=3, role='A', status='deferred', text=reason)]))
@@ -1799,7 +1952,7 @@ if (!(await evaluate(`(()=>{const matrix=document.querySelector('[data-config-gr
 await evaluate(`document.querySelector('.advanced-settings').open=true;true`);
 await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));const groups=new Map(categories.map(group=>[group.dataset.configGroup,group]));const required=['agent','budget','executor','delivery','policies'],frozen=['research','project','skills','ui','version'];return required.every(name=>groups.has(name)) && frozen.every(name=>!groups.has(name)) && groups.size===categories.length && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.budget.breadth.initial_calls"]').checkVisibility({contentVisibilityAuto:true})})()`);
 await evaluate(`['agent','budget','executor','policies'].forEach(prefix=>document.querySelector('.advanced-category[data-config-group="'+prefix+'"]').open=true);true`);
-await waitFor(`(()=>{const advanced=document.querySelector('.advanced-settings');const paths=['agent.backend','agent.native.features.fast_mode','budget.breadth.initial_calls','budget.correction.pause_after','budget.max_output_item_bytes','budget.role_shares.min_w_share','executor.mode','executor.config.executor','policies.formal_review','policies.resume.max_attempts','policies.resume.output_only'];return paths.every(path=>advanced.querySelector('[name="cfg.'+path+'"]').checkVisibility({contentVisibilityAuto:true}))})()`);
+await waitFor(`(()=>{const advanced=document.querySelector('.advanced-settings');const paths=['agent.backend','agent.native.features.fast_mode','budget.breadth.initial_calls','budget.correction.pause_after','budget.role_shares.min_w_share','executor.mode','executor.config.executor','policies.formal_review','policies.resume.max_attempts','policies.resume.output_only'];return paths.every(path=>advanced.querySelector('[name="cfg.'+path+'"]').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.budget.max_output_item_bytes"]') && !document.querySelector('[name="cfg.budget.max_output_total_bytes"]')})()`);
 await waitFor(`(()=>{const boxes=['max_w_seconds','max_w_observed_tokens','max_requested_repairs','initial_calls'].map(key=>document.querySelector('[name="cfg.budget.breadth.'+key+'"]').getBoundingClientRect());return boxes.every((box,index)=>box.width>100 && Math.abs(box.top-boxes[0].top)<2 && (!index || box.left>boxes[index-1].right))})()`);
 await noOverflow();
 await screenshot('current-configuration-desktop');

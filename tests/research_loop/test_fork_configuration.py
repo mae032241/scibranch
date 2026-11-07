@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from scidiscovery.research_loop import (
-    budget, configuration_updates as updates, contracts as c, controller,
+    accepted_budget, budget, configuration_updates as updates, contracts as c, controller,
     execution_authority, fork_runtime, fork_service, fork_sources, formal_review,
 )
 from test_history_handoff import finish
@@ -15,6 +15,13 @@ from test_history_handoff import finish
 ALLOWANCE = dict(max_tokens=600, max_seconds=40, max_steps=3)
 REVISED_ALLOWANCE = dict(max_tokens=800, max_seconds=50, max_steps=4)
 RESOURCES = dict(wall_time_seconds=100, max_storage_bytes=10000)
+
+
+def budget_transactions(root):
+    """Audit this small fixture's actual budget mutations, excluding queued settings."""
+    events,_=budget.audit_events(root)
+    return [event for event in events if event['kind'] in {'clock','budget_amend','resource_grant',
+        'resource_reserve','resource_rebind','resource_bind','resource_settle','resource_release'}]
 
 
 def test_fork_freezes_exact_project_declaration_and_base_identity(tmp_path):
@@ -126,7 +133,8 @@ def test_initial_selected_edit_rejects_before_contracts_and_accounting_then_can_
     original_model = document['agent']['model']
     document['agent']['model'] = 'illegal-selected-model'
     original_settings = (root / 'settings.json').read_bytes()
-    original_events, _ = budget._events(root, c.settings(root))
+    original_events = budget_transactions(root)
+    original_head = accepted_budget.read(root)
 
     def forbidden_contract(*args, **kwargs):
         pytest.fail('Rejected selected settings reached contract freezing')
@@ -144,7 +152,8 @@ def test_initial_selected_edit_rejects_before_contracts_and_accounting_then_can_
     assert not (root / 'host-control/configuration/contracts/000001').exists()
     assert not (root / 'host-control/configuration/bindings/000002.json').exists()
     assert not (root / 'jobs/002.json').exists()
-    assert budget._events(root, c.settings(root))[0] == original_events
+    assert accepted_budget.read(root) == original_head
+    assert budget_transactions(root) == original_events
     assert budget.ceilings(root) == ALLOWANCE
     assert (root / 'settings.json').read_bytes() == original_settings
 
@@ -152,7 +161,8 @@ def test_initial_selected_edit_rejects_before_contracts_and_accounting_then_can_
     saved = updates.submit(root, document, expected_revision=0,
         authorization_note='Allow the declared additional comparison resources')
     assert saved['revision'] == 1 and saved['pending']
-    assert budget._events(root, c.settings(root))[0] == original_events
+    assert budget_transactions(root) == original_events
+    assert budget.ceilings(root) == ALLOWANCE
     job = fork_runtime.build_selected_job(root, 2)
     fork_runtime.validate_selected_job(root, c.workspace(root, 2), job)
     assert job['step'] == 2 and job['role'] == 'A'
@@ -161,11 +171,12 @@ def test_initial_selected_edit_rejects_before_contracts_and_accounting_then_can_
     accounting = budget.execution_accounting(root)
     assert accounting['grant']['allowance'] == RESOURCES
     assert accounting['reservations'] == []
-    events, _ = budget._events(root, c.settings(root))
+    events, _ = budget.audit_events(root)
     assert [event.get('operation_id') for event in events if event['kind'] == 'budget_amend'] == ['configuration-1']
     assert [event.get('operation_id') for event in events if event['kind'] == 'resource_grant'
             and event.get('operation_id') is not None] == ['configuration-1-resources']
-    assert updates._reservation(root, 2)['configuration_revision'] == job['configuration_revision']
+    head=accepted_budget.read(root)
+    assert updates._reservation(root, 2, head=head)['configuration_revision'] == job['configuration_revision']
 
 
 @pytest.mark.parametrize('entry', ['direct', 'controller'])
@@ -180,29 +191,30 @@ def test_selected_bind_rechecks_under_existing_locks_before_any_effect(selected_
         updates.submit(root, document, expected_revision=0,
             authorization_note='Queued finite comparison allowance')
     original_revision = (root / 'host-control/configuration/revisions/000001.json').read_bytes()
-    original_events, _ = budget._events(root, c.settings(root))
+    original_events = budget_transactions(root)
+    original_head = accepted_budget.read(root)
     if entry == 'controller':
         (root / 'pause.request').unlink()
     held = []
     observations = []
-    operator_writer, configuration_writer = budget._operator_writer, updates._writer
+    operator_writer, configuration_writer = budget._operator_writer_from_base, updates._writer_from_base
     preflight = fork_runtime.preflight_selected_settings
 
     @contextmanager
     def observed_operator_writer(*args, **kwargs):
-        with operator_writer(*args, **kwargs):
+        with operator_writer(*args, **kwargs) as produced:
             held.append('budget')
             try:
-                yield
+                yield produced
             finally:
                 held.pop()
 
     @contextmanager
     def observed_configuration_writer(*args, **kwargs):
-        with configuration_writer(*args, **kwargs):
+        with configuration_writer(*args, **kwargs) as produced:
             held.append('configuration')
             try:
-                yield
+                yield produced
             finally:
                 held.pop()
 
@@ -213,8 +225,8 @@ def test_selected_bind_rechecks_under_existing_locks_before_any_effect(selected_
     def forbidden_amendment(*args, **kwargs):
         pytest.fail('Rejected selected settings reached a budget or resource amendment')
 
-    monkeypatch.setattr(budget, '_operator_writer', observed_operator_writer)
-    monkeypatch.setattr(updates, '_writer', observed_configuration_writer)
+    monkeypatch.setattr(budget, '_operator_writer_from_base', observed_operator_writer)
+    monkeypatch.setattr(updates, '_writer_from_base', observed_configuration_writer)
     monkeypatch.setattr(fork_runtime, 'preflight_selected_settings', observed_preflight)
     monkeypatch.setattr(budget, '_amend_locked', forbidden_amendment)
     monkeypatch.setattr(budget, 'amend_execution_grant', forbidden_amendment)
@@ -225,7 +237,8 @@ def test_selected_bind_rechecks_under_existing_locks_before_any_effect(selected_
             next(controller._step_numbers(root, 2))
 
     assert observations == [('budget', 'configuration')]
-    assert budget._events(root, c.settings(root))[0] == original_events
+    assert accepted_budget.read(root) == original_head
+    assert budget_transactions(root) == original_events
     assert budget.ceilings(root) == ALLOWANCE
     assert budget.execution_accounting(root)['grant'] is None
     assert not (root / 'host-control/configuration/bindings/000002.json').exists()

@@ -913,9 +913,17 @@ def native_attempt(root, step, record, *, head=None):
     return row
 
 
-def usage(root, *, head=None):
-    """Closed accepted totals plus the one current attempt's fresh meter."""
-    state = read(root) if head is None else head
+def load_usage_rows(state):
+    """The usage producer loads the exact current/stopped job rows once."""
+    current_job=state.current_job
+    stopped=(state['closeout'] or {}).get('stopped_original')
+    current=state['current_native']
+    steps={value['step'] for value in (current_job,stopped,current) if value is not None}
+    return {step:state.row(f'job/{step:03d}') for step in steps}
+
+
+def usage_from_facts(state, *, job_rows, current_native):
+    """Pure reduction of one accepted head and explicitly observed live facts."""
     totals = {key: state['usage'][key] for key in ('input_tokens', 'cached_input_tokens', 'output_tokens')}
     count = state['usage']['unknown_count']
     unknown = [] if not count else [state['usage']['first_unknown_step']]
@@ -924,34 +932,32 @@ def usage(root, *, head=None):
     for step in (None if current_job is None else current_job['step'],
             None if stopped is None else stopped['step']):
         if step is not None and step not in unknown:
-            row = state.row(f'job/{step:03d}')
+            row = job_rows[step]
             if row is not None and row['unknown_count']:
                 unknown.append(step)
     current = state['current_native']
     if current is not None:
-        record = Path(root)/current['record']
-        meter_path = record/'usage.json'
-        missing = not meter_path.exists()
-        if not missing:
-            meter = c.read(meter_path)
+        if not isinstance(current_native,dict) or current_native.get('record')!=current['record']:
+            raise ValueError('Current native usage facts changed their accepted attempt')
+        meter=current_native['meter']
+        missing=meter is None
+        if meter is not None:
             from .native import _usage_event
             if _usage_event(dict(type='turn.completed', usage=meter)) != meter:
                 raise ValueError('Current native usage observation changed')
             for key in totals:
                 totals[key] += meter[key]
-        outcome = record/'native-outcome.json'
-        metadata = c.native_outcome(record).get('metering') if outcome.exists() else None
-        observation = record/'usage-observation.json'
-        if metadata is None and observation.exists():
-            metadata = c.read(observation)
+        metadata=current_native['metering']
         missing |= isinstance(metadata, dict) and metadata.get('coverage') == 'unknown'
-        missing |= (record/'interruption.json').exists() and not outcome.exists()
+        missing |= current_native['interrupted'] and not current_native['outcome_present']
         if missing:
-            row = state.row(f'job/{current["step"]:03d}')
+            row = job_rows[current['step']]
             if not row['unknown_count']:
                 count += 1
             if current['step'] not in unknown:
                 unknown.append(current['step'])
+    elif current_native is not None:
+        raise ValueError('Live native usage facts have no accepted current attempt')
     # Metering gaps retain their reported lower bound and diagnostics without
     # asserting execution uncertainty; the original-call gate owns that fact.
     return dict(totals, observed_tokens=totals['input_tokens']+totals['output_tokens'],
@@ -960,6 +966,23 @@ def usage(root, *, head=None):
         unknown_steps_omitted_count=max(0, count-len(unknown)),
         reserved_unknown_steps=[], blocking_unknown_steps=[],
         accounting_basis='observed_lower_bound')
+
+
+def usage(root, *, head=None):
+    """Own filesystem observation, then reduce the accepted/current facts."""
+    state=read(root) if head is None else head
+    rows=load_usage_rows(state)
+    current=state['current_native'];observed=None
+    if current is not None:
+        record=Path(root)/current['record']
+        meter=record/'usage.json';outcome=record/'native-outcome.json'
+        outcome_present=outcome.exists()
+        metadata=c.native_outcome(record).get('metering') if outcome_present else None
+        observation=record/'usage-observation.json'
+        if metadata is None and observation.exists():metadata=c.read(observation)
+        observed=dict(record=current['record'],meter=c.read(meter) if meter.exists() else None,
+            metering=metadata,outcome_present=outcome_present,interrupted=(record/'interruption.json').exists())
+    return usage_from_facts(state,job_rows=rows,current_native=observed)
 
 
 def unknown_except(root, meter, allowed=(), *, head=None):

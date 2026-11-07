@@ -3,10 +3,9 @@ import json
 import os
 import time
 from pathlib import Path
-import uuid
 
 from . import configuration_updates
-from . import budget, contracts as c, execution, native, runtime, checkpoint
+from . import budget, budget_limits, contracts as c, execution, native, runtime, checkpoint
 from .output_repair import OutputRepairRequired, WorkRepairRequired
 
 
@@ -22,6 +21,199 @@ class AutomaticRecoveryRequired(RuntimeError):
         self.inventory = inventory
 
 
+def technical_stop_from_facts(job, outcome, *, recovery_available=False,
+        blocked_reason=None, attempt=0):
+    """Public control diagnosis from the owner's already-read originals."""
+    from . import native_recovery
+    if not native_recovery.never_started(outcome):return None
+    value = dict(phase='native_prelaunch', stage='technical_pause',
+        pending_step=job['step'], pending_role=job['role'],
+        reason=outcome['stop_reason'], repair_scope='worker_attempt',
+        recovery_available=bool(recovery_available), recheck_required=True,
+        expected_attempt=attempt,
+        supported_actions=['worker-resume'] if recovery_available else [])
+    if blocked_reason is not None:value['blocked_reason'] = blocked_reason
+    return value
+
+
+def _prelaunch_original_facts(root, step, record, *, attempt):
+    """Produce exact filesystem/process observations for one failed attempt."""
+    from .native_usage import stream_binding
+    binding = (c.record_ref(root/'jobs'/f'{step:03d}.json') if attempt == 0 else
+        c.record_ref(record/'native-intent.json'))
+    receipt = c.read(c.regular(record/'runner-process.json'))
+    return dict(binding=binding,receipt=receipt,
+        stream=stream_binding(record/'native.jsonl'),
+        native_process_present=(record/'native-process.json').exists() or (record/'native-process.json').is_symlink(),
+        running=runtime.process_matches(receipt,binding),
+        unexpected_activity=any((record/name).exists() or (record/name).is_symlink()
+            for name in ('usage.json','science-output.json','result.pending.json')))
+
+
+def _require_never_started(outcome, facts):
+    """Pure qualification of the exact stopped runner's produced facts."""
+    from . import native_recovery
+    if not native_recovery.never_started(outcome):
+        raise ResumeUnavailable('technical_restart_original_ineligible')
+    if facts['native_process_present']:
+        raise ResumeUnavailable('technical_restart_native_process_present')
+    if facts['stream'] != outcome['native_stream']:
+        raise ValueError('Original native stream changed')
+    receipt,binding=facts['receipt'],facts['binding']
+    if (receipt.get('task_ref') != binding
+            or not isinstance(receipt.get('boot_id'), str) or not receipt['boot_id']
+            or any(type(receipt.get(key)) is not int or receipt[key] <= 0
+                for key in ('pid','start_ticks','pgid','sid','ppid'))):
+        raise ValueError('Original prelaunch runner identity changed')
+    if facts['running']:
+        raise ResumeUnavailable('worker_resume_original_running')
+    if facts['unexpected_activity']:
+        raise ResumeUnavailable('technical_restart_unexpected_activity')
+
+
+def validate_technical_restart(root, job, intent, *, prior_paths, prior_intents, outcomes, original_facts):
+    """A new attempt can replace only the same never-submitted task prefix."""
+    number = intent.get('attempt')
+    if (type(number) is not int or number < 1 or number != len(prior_paths)
+            or intent.get('continuation_kind') != 'technical_restart'
+            or len(prior_intents) != number or len(outcomes) != number or len(original_facts) != number
+            or intent.get('technical_restart') != dict(source_attempt=number-1,
+                outcome_ref=c.record_ref(prior_paths[-1]/'native-outcome.json'))
+            or intent.get('session') is not None or intent.get('context_mode') != 'new_context'
+            or intent.get('native_home') != str(root/'native-homes'/f'{job["step"]:03d}'/f'context-{number:03d}')
+            or any(intent.get(key) is not None for key in
+                ('automatic_recovery','output_repair','work_repair','execution_wake','interruption'))):
+        raise ValueError('Technical restart changed its exact original scope')
+    for index,(path,source,outcome) in enumerate(zip(prior_paths,prior_intents,outcomes)):
+        if index and source.get('continuation_kind') != 'technical_restart':
+            raise ValueError('Technical restart cannot replace previously submitted science')
+        _require_never_started(outcome,original_facts[index])
+
+
+def _technical_restart_gate(root, job, paths, intents, outcomes, *, head, settings):
+    """Read current admission once, without accepting scientific output."""
+    from . import backends, correction, fork_runtime
+    if (execution.origin(root,job['step'])/'result-identity.json').exists():
+        raise ResumeUnavailable('technical_restart_stage_already_sealed')
+    if (root/'pause.request').exists() or head['closeout'] is not None or head['final_return'] is not None:
+        raise ResumeUnavailable('worker_resume_paused_or_closeout')
+    if correction.gate(root,job['step']-1) is not None:
+        raise ResumeUnavailable('worker_resume_correction_paused')
+    if (head.current_job is None or head.current_job['step'] != job['step']
+            or head.current_job['job_ref'] != c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')):
+        raise ResumeUnavailable('technical_restart_current_job_changed')
+    if (head['active_audit'] is not None or head['unresolved_actions']
+            or head['delivery_preparation']['unresolved_ref'] is not None
+            or budget.execution_blocked(root)):
+        raise ResumeUnavailable('technical_restart_original_execution_unresolved')
+    if any((execution.origin(root,later)/'native-intent.json').exists()
+            for later in fork_runtime.local_steps(root,include_native=True) if later > job['step']):
+        raise ResumeUnavailable('worker_resume_successor_present')
+    capability=backends.selected(settings).recovery_capability('technical_restart')
+    if capability.get('status') != 'supported':
+        raise ResumeUnavailable('technical_restart_unsupported_backend')
+    original_facts=[]
+    for index,(path,intent,outcome) in enumerate(zip(paths,intents,outcomes)):
+        if index and intent.get('continuation_kind') != 'technical_restart':
+            raise ResumeUnavailable('technical_restart_original_ineligible')
+        facts=_prelaunch_original_facts(root,job['step'],path,attempt=index)
+        _require_never_started(outcome,facts)
+        original_facts.append(facts)
+    node_limits=budget.node_limits(root,job,settings=settings)
+    if node_limits is None:
+        raise ResumeUnavailable('technical_restart_budget_unavailable')
+    budget._attempt_consumption_from_facts(root,job,
+        [(path,intent,outcome,None,False) for path,intent,outcome in zip(paths,intents,outcomes)],
+        policy=settings,limits=node_limits,task_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'))
+    reason=budget.node_admission(root,job)
+    if reason is not None:raise ResumeUnavailable(reason)
+    limits=budget.snapshot(root)
+    meter=native.usage(root)
+    if (budget_limits.reached(limits['seconds_remaining'])
+            or limits['max_tokens'] is not None and meter['accounted_tokens'] >= limits['max_tokens']
+            or budget.used_steps(root) >= limits['max_steps']):
+        raise ResumeUnavailable('worker_resume_budget_unavailable')
+    return original_facts
+
+
+def technical_stop(root, job, record, outcome):
+    """Status owner qualifies an actionable pause using current admission."""
+    from . import accepted_budget, native_recovery
+    if not native_recovery.never_started(outcome):return None
+    root=Path(root)
+    head=accepted_budget.read(root)
+    policy=c.settings_for_job(root,job,base=head.base,head=head)
+    accepted=list(execution.accepted_intents_from_facts(root,job['step'],job=job,
+        base=head.base,policy=policy,head=head,task_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')))
+    paths=[path for path,_ in accepted];intents=[intent for _,intent in accepted]
+    attempt=len(paths)-1
+    if not paths or paths[-1] != record:return None
+    outcomes=[c.read(c.regular(path/'native-outcome.json')) for path in paths[:-1]]+[outcome]
+    try:
+        _technical_restart_gate(root,job,paths,intents,outcomes,head=head,settings=policy)
+        available=True;reason=None
+    except (ResumeUnavailable,budget.NodeBudgetUnavailable) as error:
+        available=False;reason=getattr(error,'reason',str(error))
+    except OSError:
+        available=False;reason='technical_restart_original_unverified'
+    return technical_stop_from_facts(job,outcome,recovery_available=available,
+        blocked_reason=reason,attempt=attempt)
+
+
+def _start_technical_restart(root, step, paths, *, outcome, expected_attempt):
+    """Explicit replacement of a proven non-submission, never thread resume."""
+    from . import accepted_budget, profiles
+    root=Path(root)
+    expected=0 if expected_attempt is None else expected_attempt
+    if type(expected) is not int or expected < 0:
+        raise ValueError('Technical restart requires an exact source attempt')
+    intents=[c.read(c.regular(path/'native-intent.json')) for path in paths]
+    if expected < len(paths)-1:
+        replacement=intents[expected+1]
+        if (replacement.get('continuation_kind') != 'technical_restart'
+                or (replacement.get('technical_restart') or {}).get('source_attempt') != expected):
+            raise ResumeUnavailable('technical_restart_source_attempt_changed')
+        # A repeated operation collects the replacement it already accepted.
+        # It cannot silently turn a failed replacement into another submission.
+        return native.wait_native(root,step)
+    if expected != len(paths)-1:
+        raise ResumeUnavailable('technical_restart_source_attempt_changed')
+    job=validate_task(root,step)
+    head=accepted_budget.read(root)
+    settings=c.settings_for_job(root,job,base=head.base,head=head)
+    outcomes=[c.read(c.regular(path/'native-outcome.json')) for path in paths[:-1]]+[outcome]
+    original_facts=_technical_restart_gate(root,job,paths,intents,outcomes,head=head,settings=settings)
+    original=intents[0]
+    profiles.validate_intent(settings,job,original)
+    binding=profiles.binding(settings,job)
+    # The failed attempt remains missing its billing receipt. Closing accepted
+    # accounting retains that unknown coverage and all previously charged cost.
+    current=head['current_native']
+    if current is not None:
+        if current['record'] != paths[-1].relative_to(root).as_posix():
+            raise ResumeUnavailable('technical_restart_current_attempt_changed')
+        accepted_budget.accept_terminal_from_base(root,step,paths[-1],base=head.base,
+            meter=None,unknown=True,metering=outcome.get('metering'))
+    budget.transition(root,'advance','explicit_technical_restart')
+    anchor=budget.accept_continuation(root,job,paths)
+    number=len(paths)
+    record=execution.origin(root,step)/'continuations'/f'{number:03d}'
+    intent=dict(step=step,attempt=number,continuation_kind='technical_restart',
+        context_mode='new_context',native_home=str(root/'native-homes'/f'{step:03d}'/f'context-{number:03d}'),
+        **binding,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
+        root_intent_ref=c.record_ref(paths[0]/'native-intent.json'),previous=execution.proof(paths[-1]),
+        budget_slice=anchor,technical_restart=dict(source_attempt=number-1,
+            outcome_ref=c.record_ref(paths[-1]/'native-outcome.json')))
+    validate_technical_restart(root,job,intent,prior_paths=paths,prior_intents=intents,
+        outcomes=outcomes,original_facts=original_facts)
+    record.mkdir(parents=True,exist_ok=True)
+    accepted_budget.accept_native(root,step,record,intent)
+    # run_native repeats the backend's real capability/permission preflight in
+    # its unchanged launch path before it can submit any model request.
+    runtime.start(root,step,number)
+    return native.wait_native(root,step,_reentry_started=True)
+
+
 def automatic_source(root, step, record):
     """Interpret retained native failures while verifying original native facts.
 
@@ -33,42 +225,34 @@ def automatic_source(root, step, record):
     from . import backends
     policy = configuration_updates.for_step(root, step)
     backend = backends.selected(policy)
-    if backend.name != 'codex' or not backend.standard:
+    if backend.recovery_capability('automatic_recovery').get('status') != 'supported':
         raise ResumeUnavailable('automatic_recovery_unsupported_backend')
     outcome = c.native_outcome(record)
     intent = c.read(c.regular(record / 'native-intent.json'))
     return _automatic_source_from_facts(record, policy=policy, intent=intent, outcome=outcome)
 
 
+def _native_writer_facts(record, outcome):
+    """Use the exact stopped writer's compact facts and bound original stat."""
+    from .native_usage import stream_binding
+    expected = outcome.get('native_stream')
+    if not isinstance(expected, dict):
+        raise ResumeUnavailable('native_compact_control_facts_unavailable')
+    if stream_binding(Path(record) / 'native.jsonl') != expected:
+        raise ValueError('Original native stream changed')
+    if (type(outcome.get('terminal_observed')) is not bool
+            or type(outcome.get('native_activity_observed')) is not bool):
+        raise ValueError('Native writer control facts are unavailable')
+    return outcome
+
+
 def _automatic_source_from_facts(record, *, policy, intent, outcome):
-    """Verify the original native stream using its owner's retained receipts."""
-    from . import backends, native_recovery
+    """Accepted writer facts already own native failure/activity/session meaning."""
+    from . import backends
     backend = backends.selected(policy)
-    if backend.name != 'codex' or not backend.standard:
+    if backend.recovery_capability('automatic_recovery').get('status') != 'supported':
         raise ResumeUnavailable('automatic_recovery_unsupported_backend')
-    failures = []
-    terminal = activity = False
-    completed_before = None
-    thread = (intent.get('session') or {}).get('thread_id')
-    with c.regular(record / 'native.jsonl', limit=None).open('rb') as stream:
-        for line in stream:
-            try:event = json.loads(line)
-            except ValueError:continue  # A truncated transport tail grants nothing.
-            if not isinstance(event, dict):continue
-            projected = backend.event(event)
-            if projected.get('failure') is not None:failures.append(projected['failure'])
-            if projected.get('completed') and not terminal:completed_before = len(failures)
-            terminal = terminal or projected.get('completed', False)
-            activity = activity or projected.get('activity', False)
-            if 'session' in projected:thread = projected['session']
-    expected = native_recovery.combine(failures, completed_before=completed_before
-        if terminal and outcome.get('returncode') == 0
-            and outcome.get('cleanup') == 'observed_group_cleaned' else None)
-    if (outcome.get('terminal_observed') is not terminal
-            or outcome.get('native_activity_observed') is not activity
-            or outcome.get('thread_id') != thread):
-        raise ValueError('Automatic recovery native failure evidence changed')
-    return dict(outcome, native_failure=expected)
+    return dict(_native_writer_facts(record, outcome))
 
 
 def format_source(root, step, record):
@@ -81,7 +265,7 @@ def format_source(root, step, record):
     from . import backends
     policy = configuration_updates.for_step(root, step)
     backend = backends.selected(policy)
-    if backend.name != 'codex' or not backend.standard:return None
+    if backend.recovery_capability('format_fallback').get('status') != 'supported':return None
     outcome = c.read(c.regular(record / 'native-outcome.json'))
     if not _format_source_outcome(outcome):return None
     intent = c.read(c.regular(record / 'native-intent.json'))
@@ -96,60 +280,24 @@ def _format_source_outcome(outcome):
 
 
 def _format_source_from_facts(record, *, policy, intent, outcome):
-    """Retain positive stream evidence without reopening known control facts."""
-    from . import backends, native_recovery
+    from . import backends
     backend = backends.selected(policy)
-    if backend.name != 'codex' or not backend.standard:return None
-    if not _format_source_outcome(outcome):return None
-    thread = (intent.get('session') or {}).get('thread_id')
-    activity = rejected = False
-    raw=c.regular(record / 'native.jsonl', limit=None)
-    if raw.stat().st_size > 256 * 1024:return None
-    with raw.open('rb') as stream:
-        for number in range(65):
-            line=stream.readline(32 * 1024 + 1)
-            if not line:break
-            if number >= 64 or len(line) > 32 * 1024:return None
-            try:event=json.loads(line)
-            except (ValueError,RecursionError):return None
-            if not isinstance(event,dict):return None
-            kind=event.get('type')
-            if kind in {'error','turn.failed'}:
-                if not native_recovery.format_rejection(event):return None
-                rejected=True
-            elif kind not in {'thread.started','turn.started'} or rejected:
-                return None
-            projected=backend.event(event)
-            activity=activity or projected.get('activity',False)
-            if 'session' in projected:
-                if thread is not None and thread != projected['session']:return None
-                thread=projected['session']
-    if not rejected:return None
-    if outcome.get('native_activity_observed') is not activity or outcome.get('thread_id') != thread:
-        raise ValueError('Automatic recovery native format evidence changed')
-    return dict(outcome, format_rejected=True)
+    if backend.recovery_capability('format_fallback').get('status') != 'supported' or not _format_source_outcome(outcome):
+        return None
+    facts = _native_writer_facts(record, outcome)
+    return dict(facts, format_rejected=True) if facts.get('native_format_rejected') is True else None
 
 
 def _automatic_session(root, step, record, outcome):
     identity = outcome.get('native_identity') or {}
-    path = identity.get('path')
     original = c.read(c.regular(record / 'native-intent.json'))
     retained = original.get('session') or {}
     if retained and outcome.get('thread_id') == retained.get('thread_id'):
-        path = Path(retained['path'])
-        if (path.resolve() != path or not path.is_relative_to(Path(retained['home']) / 'sessions')
-                or retained.get('workspace') != str(c.workspace(root, step))):
-            raise ValueError('Automatic recovery retained session identity changed')
-        with c.regular(path, limit=None).open('rb') as stream:header = stream.readline()
-        validate_session_header(header, retained['thread_id'], c.workspace(root, step))
-        if json.loads(header) != retained.get('header'):
-            raise ValueError('Original native session header changed')
+        from . import backends
+        backend=backends.selected(configuration_updates.for_step(root,step))
+        backend.validate_resume_session(retained,c.workspace(root,step),retained['home'])
         return retained
-    if not path and retained:
-        path = retained.get('path')
-    if not path:
-        raise ResumeUnavailable('worker_resume_session_unavailable')
-    return session(root, step, record, home=identity.get('home') or retained.get('home'), session_path=path)
+    return session(root, step, record, home=identity.get('home'), session_path=identity.get('path'))
 
 
 def _completed_work_request(root, step, record, source_attempt, prior_intents, *, inventory):
@@ -160,9 +308,7 @@ def _completed_work_request(root, step, record, source_attempt, prior_intents, *
         raise ValueError('Current inventory belongs to another task')
     if (job['role'] != 'W' or job.get('formal_review') or job.get('final_only')
             or job.get('purpose') == 'closeout'
-            or any(item.get('continuation_kind') in {'author_closeout','execution_wake'}
-                or item.get('execution_wake')
-                for item in prior_intents)
+            or any(item.get('continuation_kind') == 'author_closeout' for item in prior_intents)
             or not (record / 'work-evidence.json').exists() or (record / 'stage-end.json').exists()):
         return None
     from . import worker_delivery
@@ -177,7 +323,7 @@ def _completed_work_request(root, step, record, source_attempt, prior_intents, *
         science = c.science_payload(record / 'science-output.json', 'W', job.get('handoff_protocol', 1),
             **c.response_options(job))
         # A valid continuation fragment retains its original fragment route.
-        if science.get('stage_intent') == 'continue':return None
+        if science.get('stage_intent') in {'continue','handoff','revise_h','review'}:return None
         delivery=worker_delivery.assessment(root,job,science,record,inventory=inventory,source_attempt=source_attempt)
         if delivery['status']!='incomplete':
             return None
@@ -222,7 +368,7 @@ def automatic_decision(root, step, *, inventory=None):
     original = c.read(c.regular(last / 'native-intent.json'))
     format_outcome = (format_source(root, step, last)
         if not completed and (last / 'native.jsonl').exists() else None)
-    if (original.get('continuation_kind') in {'author_closeout','execution_wake'}
+    if (original.get('continuation_kind') == 'author_closeout'
             or not completed and (original.get('output_repair')
                 or original.get('work_repair') and original.get('continuation_kind')!='automatic_recovery')):
         return stop('automatic_recovery_special_scope_unavailable')
@@ -240,7 +386,7 @@ def automatic_decision(root, step, *, inventory=None):
     if outcome.get('stop_reason') not in {None, 'native_failure_event'}:
         return stop(outcome['stop_reason'])
     backend = backends.selected(settings)
-    if backend.name != 'codex' or not backend.standard:return stop('automatic_recovery_unsupported_backend')
+    if backend.recovery_capability('automatic_recovery').get('status') != 'supported':return stop('automatic_recovery_unsupported_backend')
     if outcome.get('cleanup') != 'observed_group_cleaned':return stop('automatic_recovery_cleanup_unknown')
     binding = execution.identity(root, step, len(paths)-1)
     for name in ('runner-process.json', 'native-process.json'):
@@ -299,15 +445,14 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
         work_request=_completed_work_request(root,step,prior_record,intent['attempt']-1,prior_intents,inventory=inventory)
     if work_request is not None:
         if (outcome.get('terminal_observed') is not True or (prior_record/'stage-end.json').exists()
-                or any(item.get('continuation_kind') in {'author_closeout','execution_wake'}
-                    or item.get('execution_wake') for item in prior_intents)):
+                or any(item.get('continuation_kind') == 'author_closeout' for item in prior_intents)):
             raise ValueError('Automatic work recovery cannot reopen a closed or special task')
         expected = native_recovery.work_decision(limits, native_recovery.counters(prior_intents),
             session_available=bool(intent.get('session')))
         if intent.get('work_repair') != work_request or intent.get('output_repair') is not None:
             raise ValueError('Automatic work recovery differs from its exact original delivery failure')
     elif not format_fallback and (job.get('final_only') or job.get('purpose') == 'closeout'
-            or prior_intent.get('continuation_kind') in {'author_closeout','execution_wake'}
+            or prior_intent.get('continuation_kind') == 'author_closeout'
             or prior_intent.get('output_repair')
             or prior_intent.get('work_repair') and prior_intent.get('continuation_kind')!='automatic_recovery'
             or intent.get('work_repair') or intent.get('output_repair')
@@ -315,7 +460,7 @@ def validate_automatic(root, step, intent, *, prior_record=None, prior_intents=N
         raise ValueError('Automatic recovery source is not an eligible unfinished task')
     used = native_recovery.counters(prior_intents)
     if format_fallback:
-        if (prior_intent.get('continuation_kind') in {'author_closeout','execution_wake'}
+        if (prior_intent.get('continuation_kind') == 'author_closeout'
                 or prior_intent.get('output_repair') or prior_intent.get('work_repair')
                 or intent.get('work_repair') or intent.get('output_repair')):
             raise ValueError('Automatic format fallback changed its original scope')
@@ -395,20 +540,17 @@ def _automatic_start_locked(root, step, decision, *, inventory=None, recovery_wa
         intent['session'] = _automatic_session(root, step, last, c.read(last / 'native-outcome.json'))
     validate_automatic(root, step, intent, prior_record=last,
         prior_intents=[c.read(c.regular(path / 'native-intent.json')) for path in paths],inventory=inventory)
-    with (record / 'native-intent.json').open('x') as stream:
-        json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
     from . import accepted_budget
     accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
     return intent
 
 
-def policy(value, launcher):
+def policy(value, launcher, *, backend=None):
     required={'max_attempts','protocol','usage_scope'}
     if (not isinstance(value, dict) or not required <= set(value)
             or set(value)-required-{'output_repair','output_only','execution_wake','native_home','automatic_recovery'}
             or type(value['max_attempts']) is not int or not 1 <= value['max_attempts'] <= 2
-            or value['protocol'] != 'codex_exec_resume' or value['usage_scope'] != 'turn'
             or ('output_repair' in value and type(value['output_repair']) is not bool)
             or ('execution_wake' in value and type(value['execution_wake']) is not bool)
             or ('output_only' in value and (type(value['output_only']) is not bool
@@ -416,6 +558,9 @@ def policy(value, launcher):
             or ('native_home' in value and (not value.get('output_only') or not isinstance(value['native_home'],str)
                 or not Path(value['native_home']).is_absolute() or Path(value['native_home']).resolve()!=Path(value['native_home'])))):
         raise ValueError('Resume requires explicit finite attempts and qualified turn-scoped launcher protocol')
+    from . import backends
+    backends.selected(dict(native_backend=backends.DEFAULT_BACKEND if backend is None else backend,
+        native_launcher_argv=launcher)).validate_resume_policy(value)
     if not launcher or not Path(launcher[0]).is_absolute() or not Path(launcher[0]).is_file():
         raise ValueError('Resume requires an exact frozen executable, never PATH selection')
     files = []
@@ -435,7 +580,7 @@ def policy(value, launcher):
 def validate_launcher(root, step=None):
     from . import backends
     settings = configuration_updates.for_step(root, step) if step is not None else configuration_updates.current(root)
-    if not backends.selected(settings).supports_resume:
+    if backends.selected(settings).recovery_capability('resume').get('status') != 'supported':
         raise ResumeUnavailable('worker_resume_unsupported_backend')
     limits = settings.get('resume_policy')
     if limits is None:raise ResumeUnavailable('worker_resume_unsupported')
@@ -447,7 +592,7 @@ def validate_launcher(root, step=None):
 
 
 def wake_allowed(limits):
-    """Old full-resume grants retain wake; output-only needs its narrow opt-in."""
+    """Execution completion has its own opt-in, separate from JSON repair."""
     return limits is not None and limits.get('execution_wake', not limits.get('output_only', False)) is True
 
 
@@ -480,52 +625,32 @@ def validate_session_header(line, thread, workspace):
 
 
 def session(root, step, record, *, home=None, session_path=None, identity_proof=False):
+    """Retain exact hook/session metadata; the transcript is an opaque original."""
     from . import backends
-    if not backends.selected(configuration_updates.for_step(root, step)).supports_resume:
+    from .native_usage import MetadataUnavailable
+    backend=backends.selected(configuration_updates.for_step(root, step))
+    if backend.recovery_capability('resume').get('status') != 'supported':
         raise ResumeUnavailable('worker_resume_unsupported_backend')
-    outcome_path = record / 'native-outcome.json'
-    outcome = c.read(c.regular(outcome_path)) if outcome_path.exists() else {}
+    outcome = c.native_outcome(record)
     thread = outcome.get('thread_id')
-    if not outcome_path.exists():
-        with c.regular(record / 'native.jsonl').open('rb') as stream:
-            for line in stream:
-                try:event = json.loads(line)
-                except ValueError:continue  # The final line can be interrupted.
-                if isinstance(event, dict) and event.get('type') == 'thread.started':
-                    thread = event.get('thread_id')
-                    break
-    try:
-        if str(uuid.UUID(thread)) != thread:raise ValueError
-    except (ValueError, TypeError, AttributeError):
+    identity = outcome.get('native_identity') or {}
+    value = identity.get('session')
+    if not isinstance(value, dict):
+        raise ResumeUnavailable('worker_resume_metadata_unavailable')
+    if thread is None or value.get('thread_id') != thread:
         raise ResumeUnavailable('worker_resume_thread_unavailable')
-    found = False
-    with c.regular(record / 'native.jsonl').open('rb') as stream:
-        for line in stream:
-            event = json.loads(line)
-            if event.get('type') == 'thread.started':
-                if event.get('thread_id') != thread:raise ValueError('Native thread identity changed')
-                thread_event=event
-                found = True
-                break
-    if not found:raise ResumeUnavailable('worker_resume_thread_unavailable')
-    if home is None:
-        number = execution.records(root, step).index(record)
-        home = execution.home(root, step, number)
-    home = Path(home)
-    if home.resolve() != home:raise ValueError('Original native home changed')
-    matches = []
-    paths = [Path(session_path)] if session_path is not None else (home / 'sessions').rglob('*.jsonl')
-    for path in paths:
-        if path.resolve() != path or not path.is_relative_to(home / 'sessions'):
-            raise ValueError('Native session original changed')
-        with c.regular(path).open('rb') as stream:line = stream.readline()
-        event = json.loads(line)
-        if event.get('type') == 'session_meta' and event.get('payload', {}).get('id') == thread:
-            validate_session_header(line, thread, c.workspace(root, step))
-            matches.append(dict(path=str(path), header=event))
-    if len(matches) != 1:raise ResumeUnavailable('worker_resume_session_unavailable')
-    return dict(thread_id=thread, home=str(home), workspace=str(c.workspace(root, step)),
-                **(dict(thread_event=thread_event) if identity_proof else {}), **matches[0])
+    actual_home = home if home is not None else identity.get('home')
+    if actual_home is None:
+        raise ResumeUnavailable('worker_resume_metadata_unavailable')
+    if session_path is not None and str(session_path) != value.get('path'):
+        raise ValueError('Native session original path changed')
+    try:
+        backend.validate_resume_session(value,c.workspace(root, step),actual_home)
+        backend.validate_session_event(outcome.get('native_thread_event'),thread)
+    except MetadataUnavailable as error:
+        raise ResumeUnavailable(str(error)) from error
+    thread_event = outcome.get('native_thread_event')
+    return dict(value, **(dict(thread_event=thread_event) if identity_proof else {}))
 
 
 def interruption(root, job, record):
@@ -581,7 +706,7 @@ def _reenter_locked(root, step):
     from .protocol import require_current
     require_current(root)
     # Reentry continues an already accepted full task. The policy's output-only
-    # restriction still governs new repairs/wakes, not this interrupted task.
+    # restriction still governs new repairs, not this interrupted task.
     validate_launcher(root, step)
     job = validate_task(root, step,inventory=inventory)
     require_current(root, job)
@@ -597,7 +722,6 @@ def _reenter_locked(root, step):
     original = c.read(c.regular(prior / 'native-intent.json'))
     if (original.get('continuation_kind') == 'author_closeout'
             or original.get('output_repair') or original.get('work_repair')
-            or original.get('execution_wake') and (settings.get('resume_policy') or {}).get('output_only')
             or not isinstance(original.get('budget_slice'), dict)):
         raise ResumeUnavailable('worker_resume_interrupted_scope_unavailable')
     profile_binding = profiles.binding(settings, job)
@@ -631,9 +755,15 @@ def _reenter_locked(root, step):
         root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(prior),
         session=session_ref, budget_slice=anchor, interruption=c.record_ref(marker))
     validate_reentry(root, job, intent, prior)
-    with (record / 'native-intent.json').open('x') as stream:
-        json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
     from . import accepted_budget
+    # A reboot ends this local writer without producing a native outcome.
+    # Close its accepted accounting with the retained observed lower bound;
+    # the existing operator writer keeps this settlement and the replacement
+    # acceptance in one recovery operation, and both ledger writes can resume.
+    report = saved['budget_slice']
+    meter = ({key: report[key] for key in ('input_tokens', 'cached_input_tokens', 'output_tokens')}
+        if report['usage_observed'] else None)
+    accepted_budget.accept_terminal(root,step,prior,meter=meter,unknown=True)
     accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
     return intent
@@ -705,6 +835,19 @@ def seal_or_repair(root, step, *, inventory):
                 from . import worker_delivery
                 delivery=worker_delivery.assessment(root,job,science,record,inventory=inventory)
                 if science['stage_intent']!='continue':worker_delivery.require_output_clarification(science,delivery)
+                if (science['stage_intent'] in {'handoff','revise_h','review'} or review_required and science['stage_intent']=='continue') and (
+                        any(call['status']=='unknown' for call in inventory.managed_calls)
+                        or ((job.get('search') or {}).get('breadth') or {}).get('prior_unknown')):
+                    raise ResumeUnavailable('worker_handoff_original_execution_unknown')
+                if science['stage_intent'] in {'handoff','revise_h','review'}:
+                    # Explicit ordinary W handoffs retain incomplete work; the
+                    # original stopped-writer and managed-wait gates above still apply.
+                    checkpoint.end_stage(root,job,record,'worker_'+science['stage_intent'],inventory=inventory)
+                    return c.seal_result_from_inventory(root,step,inventory=inventory)
+                if review_required and science['stage_intent']=='continue':
+                    if delivery['status']=='incomplete':return _work_exit(root,job,record,review['reason'],inventory=inventory)
+                    checkpoint.end_stage(root,job,record,review['reason'],inventory=inventory)
+                    return c.seal_result_from_inventory(root,step,inventory=inventory)
                 if delivery['status']=='partial':
                     checkpoint.end_stage(root,job,record,delivery['reason'],inventory=inventory)
                     return c.seal_result_from_inventory(root,step,inventory=inventory)
@@ -721,10 +864,13 @@ def seal_or_repair(root, step, *, inventory):
                         checkpoint.end_stage(root, job, record, error.reason,inventory=inventory)
                         return c.seal_result_from_inventory(root, step,inventory=inventory)
                     except ResumeUnavailable as error:
-                        if str(error) != 'worker_fragment_review_requested':
+                        reason = str(error)
+                        if reason == 'worker_fragment_review_requested':
+                            reason = error.review_reason
+                        elif reason not in {'worker_resume_paused_or_closeout', 'worker_resume_correction_paused'}:
                             raise
-                        if delivery['status']=='incomplete':return _work_exit(root,job,record,error.review_reason,inventory=inventory)
-                        checkpoint.end_stage(root, job, record, error.review_reason,inventory=inventory)
+                        if delivery['status']=='incomplete':return _work_exit(root,job,record,reason,inventory=inventory)
+                        checkpoint.end_stage(root, job, record, reason,inventory=inventory)
                         return c.seal_result_from_inventory(root, step,inventory=inventory)
                     return dict(fragment_continuation=True)
                 checkpoint.end_stage(root, job, record, review['reason'] if review_required else 'worker_requested',inventory=inventory)
@@ -783,11 +929,9 @@ def output_request(root, step, record, *, inventory, source_attempt=None, verify
             from . import formal_review
             formal_review.validate_choice(root,job,science,inventory=inventory)
             from . import semantic
-            interpretation,_=semantic.author_choices(root,job,science,inventory=inventory)
-            if job['role']=='A' and not job.get('formal_review'):
-                from . import search,candidate_nominations
-                search.require_portfolio_review(root,job,science,interpretation=interpretation)
-                candidate_nominations.require_final_coverage(root,job,science)
+            semantic.author_choices(root,job,science,inventory=inventory)
+            from . import decision
+            decision.require_request(job,science)
             if job['role']=='W':
                 from . import worker_delivery, candidate_nominations
                 worker_delivery.require_delivery(root,job,science,record,inventory=inventory,source_attempt=source_attempt)
@@ -877,7 +1021,12 @@ def validate_fragment_chain(root, step, chain):
         intent = c.read(c.regular(record / 'native-intent.json'))
         if intent.get('continuation_kind') != 'fragment':
             continue
+        settings = configuration_updates.for_step(root, step)
+        if not checkpoint.enabled_for_policy(job, settings=settings):
+            raise ValueError('Fragment continuation requires the original ordinary W task')
         prior = chain[number - 1]
+        if c.read(c.regular(prior / 'native-intent.json')).get('continuation_kind') == 'author_closeout':
+            raise ValueError('Fragment continuation cannot expand an author closeout scope')
         saved = c.read(c.regular(prior/'checkpoint.json'))
         original = c.native_outcome(prior)
         science = c.science_payload(prior / 'science-output.json', 'W', job.get('handoff_protocol', 1))
@@ -886,7 +1035,7 @@ def validate_fragment_chain(root, step, chain):
                 or original['usage']['unknown_steps'] and not budget.native_completion_known(original, configuration_updates.for_step(root, step))):
             raise ValueError('Fragment continuation has no qualified original continuing turn')
         mode = intent.get('context_mode')
-        if mode != checkpoint.policy(configuration_updates.for_step(root, step)['worker_fragment_policy'])['context']:
+        if mode != checkpoint.policy(settings['worker_fragment_policy'])['context']:
             raise ValueError('Fragment context mode changed its frozen policy')
         if mode == 'new_context' and intent.get('native_home') != str(root / 'native-homes' / f'{step:03d}' / f'context-{number:03d}'):
             raise ValueError('Fresh native context changed its exact attempt namespace')
@@ -941,7 +1090,10 @@ def fragment_start(root, step, *, inventory):
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
     root = Path(root)
-    if validate_launcher(root, step).get('output_only'):raise ResumeUnavailable('worker_resume_output_only')
+    # Full ordinary fragments are authorized independently from output-only
+    # repairs. A completed repair may restore a continuing W response, but the
+    # repair turn itself retains its existing no-new-execution boundary.
+    validate_launcher(root, step)
     job = validate_task(root, step,inventory=inventory)
     if not checkpoint.enabled(root, job):
         raise ResumeUnavailable('worker_fragments_unavailable')
@@ -959,6 +1111,8 @@ def fragment_start(root, step, *, inventory):
             raise ResumeUnavailable('worker_resume_successor_present')
     paths = execution.records(root, step)
     last = paths[-1]
+    if c.read(c.regular(last / 'native-intent.json')).get('continuation_kind') == 'author_closeout':
+        raise ResumeUnavailable('worker_fragment_special_scope_unavailable')
     saved = checkpoint.validate(root, job, last,inventory=inventory)
     science = c.science_payload(last / 'science-output.json', 'W', job.get('handoff_protocol', 1))
     if saved['science']['status'] != 'present' or checkpoint.disposition(science) != 'continue':
@@ -970,6 +1124,13 @@ def fragment_start(root, step, *, inventory):
         error.review_reason = review['reason']
         raise error
     mode = checkpoint.policy(settings['worker_fragment_policy'])['context']
+    maximum = settings['worker_fragment_policy'].get('max_context_windows')
+    windows = (inventory.native_outcome.get('metering') or {}).get('context_windows') or {}
+    if (mode == 'new_context' and maximum is not None
+            and type(windows.get('windows_started')) is int and windows['windows_started'] >= maximum):
+        error = ResumeUnavailable('worker_fragment_review_requested')
+        error.review_reason = 'worker_context_review_due'
+        raise error
     session_ref = session(root, step, last) if mode == 'same_session' else None
     from . import profiles
     profile_binding = profiles.binding(settings, job)
@@ -988,15 +1149,13 @@ def fragment_start(root, step, *, inventory):
         intent['session'] = session_ref
     else:
         intent['native_home'] = str(root / 'native-homes' / f'{step:03d}' / f'context-{number:03d}')
-    with (record / 'native-intent.json').open('x') as stream:
-        json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
     from . import accepted_budget
     accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
     return intent
 
 
-def start(root, step, *, inventory=None):
+def start(root, step, *, inventory=None, expected_attempt=None):
     from .protocol import require_current
     require_current(root)
     from . import contracts as _contracts
@@ -1011,6 +1170,16 @@ def start(root, step, *, inventory=None):
         return native.wait_native(root, step)  # An accepted attempt is collected before cap checks.
     last = paths[-1]
     outcome = c.native_outcome(last)
+    from . import native_recovery
+    if native_recovery.never_started(outcome):
+        return _start_technical_restart(root,step,paths,outcome=outcome,
+            expected_attempt=expected_attempt)
+    if expected_attempt is not None:
+        if (type(expected_attempt) is not int or expected_attempt < 0
+                or expected_attempt >= len(paths)-1
+                or (c.read(c.regular(paths[expected_attempt+1]/'native-intent.json')).get('technical_restart') or {}).get('source_attempt') != expected_attempt):
+            raise ResumeUnavailable('technical_restart_source_attempt_changed')
+        return native.wait_native(root,step)
     if inventory is None:inventory=c.accept_current_inventory(root,step)
     job = inventory.job
     repair = None
@@ -1049,7 +1218,7 @@ def start(root, step, *, inventory=None):
     from . import correction
     if correction.gate(root, step - 1) is not None:
         raise ResumeUnavailable('worker_resume_correction_paused')
-    repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') not in {'fragment','reentry','automatic_recovery'} for path in paths[1:])
+    repairs = sum(c.read(path / 'native-intent.json').get('continuation_kind', 'repair') == 'repair' for path in paths[1:])
     if repairs >= limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
     settings = configuration_updates.for_step(root, step)
     from . import fork_runtime
@@ -1077,8 +1246,6 @@ def start(root, step, *, inventory=None):
     validate_repair(root,step,intent,prior_record=last,
         prior_intents=[c.read(path/'native-intent.json') for path in paths],
         verify_task=False,inventory=inventory)
-    with (record / 'native-intent.json').open('x') as stream:
-        json.dump(intent, stream);stream.flush();os.fsync(stream.fileno())
     from . import accepted_budget
     accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step, number)
@@ -1089,17 +1256,32 @@ def validate_wake(root,step,intent,prior):
     from . import managed_wait, experiments
     job=c.read(root/'jobs'/f'{step:03d}.json')
     validate_wake_policy(root,step)
-    if job['role']!='W':raise ValueError('Execution wake requires the original W task')
-    managed_wait.validate(root,job,prior)
+    if (job['role']!='W' or job.get('formal_review') or job.get('final_only')
+            or job.get('final_report') or job.get('purpose')=='closeout'):
+        raise ValueError('Execution wake requires the original ordinary W task')
+    source=c.read(c.regular(prior/'native-intent.json'))
+    repair=source.get('output_repair') is not None
+    if (source.get('continuation_kind')=='author_closeout'
+            or repair and (type(source.get('attempt')) is not int or source['attempt']<1
+                or not checkpoint.enabled(root,job))):
+        raise ValueError('Execution wake cannot expand a special continuation scope')
+    value=managed_wait.validate(root,job,prior)
+    if repair and c.read(c.regular(prior/'checkpoint.json'))['science']['status']!='present':
+        raise ValueError('Execution wake requires a successfully completed ordinary W output repair')
     request=intent['execution_wake']
     if request['waiting']!=experiments.proof(prior/managed_wait.NAME):
         raise ValueError('Execution wake changed its original waiting checkpoint')
-    value=c.read(prior/managed_wait.NAME)
     expected=[]
     for item in value['calls']:
         path=Path(item['accepted']['path']).parent/'execution-observation.json'
         observed=c.read(c.regular(path))
-        accepted=c.read(Path(item['accepted']['path']));_,config=managed_wait._config(root,job,accepted)
+        accepted=c.read(Path(item['accepted']['path']))
+        # Independent ordinary-stage permission may consume an older accepted
+        # original after JSON repair; it grants no execution in that repair turn.
+        if repair and (type(accepted.get('native_attempt',{}).get('number')) is not int
+                or not 0<=accepted['native_attempt']['number']<source['attempt']):
+            raise ValueError('Execution wake after output repair requires previously accepted ordinary work')
+        _,config=managed_wait._config(root,job,accepted)
         experiments.verify_observation(observed,lambda proof:Path(proof['path']),interface=config['execution_interface'])
         expected.append(experiments.proof(path))
     if request['observations']!=expected:raise ValueError('Execution wake differs from the same original terminal observations')
@@ -1108,7 +1290,7 @@ def validate_wake(root,step,intent,prior):
 def wake_start(root,step,observations,*,inventory=None):
     """Resume one successful suspended native turn, sharing original finite authorization."""
     from . import managed_wait, experiments
-    limits=validate_wake_policy(root, step);job=validate_task(root,step,inventory=inventory);paths=execution.records(root,step);last=paths[-1]
+    validate_wake_policy(root, step);job=validate_task(root,step,inventory=inventory);paths=execution.records(root,step);last=paths[-1]
     if inventory is None:
         from . import handoff_state
         job = handoff_state.material_inputs(root,job,sources={})
@@ -1121,14 +1303,15 @@ def wake_start(root,step,observations,*,inventory=None):
     if any((execution.origin(root,later)/'native-intent.json').exists()
             for later in fork_runtime.local_steps(root, include_native=True) if later > step):
         raise ResumeUnavailable('worker_resume_successor_present')
-    attempts=sum(c.read(path/'native-intent.json').get('continuation_kind','repair') not in {'fragment','reentry','automatic_recovery'} for path in paths[1:])
-    if attempts>=limits['max_attempts']:raise ResumeUnavailable('worker_resume_limit')
+    request=dict(waiting=experiments.proof(last/managed_wait.NAME),observations=observations)
+    # Check ordinary-W scope and each exact terminal original before accepting
+    # another dispatch or advancing any cumulative budget anchor.
+    validate_wake(root,step,dict(execution_wake=request),last)
     _eligible_original(root,step,paths,successful=True,wait_runner=True)
     session_ref=session(root,step,last)
     from . import profiles
     profile_binding=profiles.binding(configuration_updates.for_step(root, step),job)
     profiles.validate_intent(configuration_updates.for_step(root, step),job,c.read(paths[0]/'native-intent.json'))
-    request=dict(waiting=experiments.proof(last/managed_wait.NAME),observations=observations)
     number=len(paths)
     budget.transition(root,'advance','accepted_execution_wake')
     anchor=budget.accept_continuation(root,job,paths)
@@ -1137,9 +1320,6 @@ def wake_start(root,step,observations,*,inventory=None):
     intent=dict(step=step,attempt=number,continuation_kind='execution_wake',**profile_binding,
         task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),root_intent_ref=c.record_ref(paths[0]/'native-intent.json'),
         previous=execution.proof(last),session=session_ref,budget_slice=anchor,execution_wake=request)
-    validate_wake(root,step,intent,last)
-    with (record/'native-intent.json').open('x') as stream:
-        json.dump(intent,stream);stream.flush();os.fsync(stream.fileno())
     from . import accepted_budget
     accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root,step,number)

@@ -28,7 +28,7 @@ from . import instance_science as science
 from . import instance_display as display, ui_saved_status as saved_status
 from . import instance_render as render
 from . import instance_live as live
-from . import budget, configuration_form, configuration_updates, progress, public_output, research_config, user_guidance
+from . import backends, budget, configuration_form, configuration_updates, progress, public_output, research_config, user_guidance
 from . import ui_components as ui
 from . import ui_mechanisms, ui_view, ui_translation, ui_errors, ui_guidance
 from . import fork_ui
@@ -404,20 +404,20 @@ class InstanceUI:
             '<label class="check-label"><input type="checkbox" name="enabled" value="true"'
             + (' checked' if value.get('enabled') else '') + '>启用应用翻译模型</label>'
             + field('target_language', '目标语言', placeholder='zh-CN、en、ja…')
-            + '<label>翻译后端<select name="backend">' + ''.join('<option value="' + backend + '"'
-                + (' selected' if value.get('backend') == backend else '') + '>' + label + '</option>'
-                for backend, label in [('codex', 'Codex'), ('protocol', '协议启动器')]) + '</select></label>'
+            + '<label>翻译后端<select name="backend">' + ''.join('<option value="' + ui.esc(backend) + '"'
+                + (' selected' if value.get('backend') == backend else '') + '>' + ui.esc(label) + '</option>'
+                for backend, label in [(name,name) for name in backends.names()]) + '</select></label>'
             + field('model', '翻译模型', placeholder='填写本机后端可用的模型名称')
             + '<details' + (' open' if problem and problem.field in {'reasoning_effort', 'service_tier', 'timeout_seconds', 'launcher_argv'} else '') + '><summary>高级设置</summary>'
             + field('reasoning_effort', '推理力度（可选）') + field('service_tier', '服务档位（可选）')
             + field('timeout_seconds', '单批超时（秒，最多 300）', type_='number')
             + '<label>启动命令参数（可选 JSON 数组）<textarea name="launcher_argv" placeholder="例如 [&quot;/path/to/launcher&quot;]">'
             + ui.esc(public_output.cleaner(self.root, settings={})((submitted or {}).get('launcher_argv', ''))) + '</textarea></label>'
-            + '<label class="check-label"><input type="checkbox" name="reset_launcher" value="true">恢复默认 Codex 启动命令</label>'
+            + '<label class="check-label"><input type="checkbox" name="reset_launcher" value="true">恢复所选后端的默认启动命令</label>'
             + '<p class="note">留空保留已保存的启动命令。请使用本机后端的登录设置；此处不填写凭据。</p></details>')
         body = ('<nav><a href="/">返回工作台</a></nav><details open><summary>阅读与翻译</summary>'
             '<p>翻译仅用于阅读。设置在工作台内跨实例共享，独立于研究模型与预算。原文和下载文件保持原样。</p>'
-            '<p>点击翻译后才会调用模型。标准 Codex 临时采用原生只读、禁网、禁网页与禁子代理设置，忽略用户配置，在独立临时目录运行。检测到工具事件会停止并拒绝译文；这不保证工具执行前全部禁用，也不是同用户强隔离。失败后仅手动重试。</p>'
+            '<p>点击翻译后才会调用模型。受支持的后端采用临时只读、禁网、禁网页与禁子代理设置，在独立临时目录运行。检测到工具事件会停止并拒绝译文；这不保证工具执行前全部禁用，也不是同用户强隔离。失败后仅手动重试。</p>'
             + '<p class="note">' + ('当前启动器支持此临时防护。' if value['supported'] else ui.esc(value['unsupported_reason'])) + '</p>'
              + (problem.markup() if problem else '') + '<form method="post" action="/translation/configure">' + fields + '<button type="submit">保存阅读设置</button></form></details>')
         return (problem.status if problem else 200), self._page(problem.title if problem else '阅读与翻译', body, live=False), {}
@@ -460,7 +460,7 @@ class InstanceUI:
                     raise ValueError('Translation timeout_seconds must be between 1 and 300.') from None
                 for key in ('reasoning_effort', 'service_tier'):
                     config[key] = config.get(key) or None
-                if value.get('reset_launcher') == 'true' or (config.get('backend') == 'codex' and self.translation.settings()['backend'] != 'codex'):
+                if value.get('reset_launcher') == 'true':
                     config['launcher_argv'] = None
                 if value.get('launcher_argv', '').strip():
                     config['launcher_argv'] = json.loads(value['launcher_argv'])
@@ -531,12 +531,12 @@ class InstanceUI:
                 profile.get('service_tier') or view.get('service_tier') or '后端未指定')) + '</tr>'
         body += ('</tbody></table></div></section><section class="configuration-section"><h2>预算与用量</h2>'
             + ('<p class="note">当前预算暂不可读，请到总览或控制请求记录核对。</p>' if 'error' in current_budget else
-                '<h3>当前生效总上限</h3>' + facts([('模型用量上限', str(current_budget['max_tokens']) + ' tokens'),
-                    ('活动时间上限', str(current_budget['max_seconds']) + ' 秒'),
+                '<h3>当前生效总上限</h3>' + facts([('模型用量上限', '不限' if current_budget['max_tokens'] is None else str(current_budget['max_tokens']) + ' tokens'),
+                    ('活动时间上限', '不限' if current_budget['max_seconds'] is None else str(current_budget['max_seconds']) + ' 秒'),
                     ('研究阶段数上限', str(current_budget['max_steps']) + ' 阶段')]))
             + '<details><summary>查看创建时的原始总上限</summary>'
-            + facts([('模型用量上限', str(original_view.get('max_tokens', '未声明')) + ' tokens'),
-                ('活动时间上限', str(original_view.get('max_seconds', '未声明')) + ' 秒'),
+            + facts([('模型用量上限', '不限' if original_view.get('max_tokens', '未声明') is None else str(original_view.get('max_tokens', '未声明')) + ' tokens'),
+                ('活动时间上限', '不限' if original_view.get('max_seconds', '未声明') is None else str(original_view.get('max_seconds', '未声明')) + ' 秒'),
                 ('研究阶段数上限', str(original_view.get('max_steps', '未声明')) + ' 阶段')])
             + '</details><p><a href="/#live-usage">查看已用额度</a> · <a href="/operations">核对预算调整记录</a></p></section>'
             '<section class="configuration-section"><h2>权限与实验执行</h2>'
@@ -630,8 +630,8 @@ class InstanceUI:
                 '<div><dt>新研究保存到</dt><dd>'+path_summary(root.resolve())+'</dd></div>'
                 '<div><dt>全局模型</dt><dd>'+html.escape(str(preview['model']))+'</dd></div>'
                 '<div><dt>推理力度 / 服务档位</dt><dd>'+html.escape(str(preview.get('reasoning_effort') or '后端未指定'))+' / '+html.escape(str(preview.get('service_tier') or '后端未指定'))+'</dd></div>'
-                '<div><dt>模型用量上限</dt><dd>'+html.escape(str(preview['max_tokens']))+' tokens</dd></div>'
-                '<div><dt>活动时间上限</dt><dd>'+html.escape(str(preview['max_seconds']))+' 秒</dd></div>'
+                '<div><dt>模型用量上限</dt><dd>'+('不限' if preview['max_tokens'] is None else html.escape(str(preview['max_tokens']))+' tokens')+'</dd></div>'
+                '<div><dt>活动时间上限</dt><dd>'+('不限' if preview['max_seconds'] is None else html.escape(str(preview['max_seconds']))+' 秒')+'</dd></div>'
                 '<div><dt>研究阶段数上限</dt><dd>'+html.escape(str(preview['max_steps']))+' 阶段</dd></div></dl>'
                 '<h3>研究助手的实际权限</h3><p class="note">下面区分声明与后端生效值；实验执行仍受自身授权条件限制。</p>'
                 '<table class="permission-review"><thead><tr><th scope="col">访问项目</th><th scope="col">配置声明</th><th scope="col">生效值</th></tr></thead><tbody>')
@@ -1099,7 +1099,28 @@ class InstanceUI:
             exhausted=ui_view.exhausted_limits(view, used if isinstance(used, int) else None),
             waiting_reason=waiting_reason, current_round=rounds[0]['index'] if rounds else None,
             completed_line=completed_line, elapsed=elapsed, clean=clean)
+        technical=self._technical_stop(snapshot,receipt)
+        if technical is not None:
+            status.update(state='technical_pause',badge='技术暂停',
+                headline='原任务在模型启动前停止，尚未进入科学评审；请修复本机配置后核对同一原任务。')
+            display['active']=False
         return dict(status, display=display)
+
+    @staticmethod
+    def _technical_stop(snapshot,receipt=None):
+        nodes=snapshot.get('view',{}).get('nodes') or []
+        current=nodes[-1] if nodes else None
+        if current is None or current.get('state') in ui_view.SEALED:return None
+        safe=current.get('technical_stop')
+        if not isinstance(safe,dict) or safe.get('phase')!='native_prelaunch':return None
+        value=(receipt or snapshot.get('operation') or {}).get('result') or {}
+        reported=value.get('technical_stop')
+        if (isinstance(reported,dict) and all(reported.get(key)==safe.get(key)
+                for key in ('phase','pending_step','expected_attempt','reason'))
+                and reported.get('recovery_available') is True
+                and reported.get('supported_actions')==['worker-resume']):
+            return reported
+        return dict(safe,recovery_available=False,supported_actions=[])
 
     def _activity(self, current):
         """Latest public messages of the active stage via a bounded forward cursor."""
@@ -1142,6 +1163,10 @@ class InstanceUI:
         view = snapshot['view']
         display = status['display']
         items = []
+        technical=self._technical_stop(snapshot)
+        if technical is not None:
+            items.append(dict(text='当前为启动前技术暂停，未产生科学评审结论。先修复本机原生后端或必需控制观测配置；原任务身份、此前成果和已用预算保留。',
+                href='/nodes/'+str(technical['pending_step']),action='查看原任务与启动条件'))
         if status['state'] == 'waiting':
             current = display['current']
             item = dict(text='A 记录了等待条件：' + (status['headline'].removeprefix('A 等待：')) + ' 请核对原因、补充材料或方向建议后再处理。',
@@ -1209,6 +1234,13 @@ class InstanceUI:
         state = status['state']
         view = snapshot['view']
         current = status['display']['current']
+        technical=self._technical_stop(snapshot)
+        if technical is not None:
+            if manager and technical.get('recovery_available'):
+                return ui.Safe(self._form(token,'resume','<input type="hidden" name="step" value="'
+                    +str(technical['pending_step'])+'"><input type="hidden" name="expected_attempt" value="'
+                    +str(technical['expected_attempt'])+'">','重查启动条件并续接同一原任务'))
+            return ui.link('查看技术暂停与修复条件','/nodes/'+str(technical['pending_step']),cls='primary')
         if state == 'service_error':
             if manager and not view.get('paused'):
                 return ui.Safe(self._form(token, 'pause', '', '暂停研究'))
@@ -1260,6 +1292,8 @@ class InstanceUI:
                     'waiting_execution': '本次控制请求已结束，正在等待原实验执行（waiting_execution）。请核对原任务，勿重复提交。',
                 }
                 notice = stopped.get(result.get('status'), notice)
+                if self._technical_stop(snapshot,receipt) is not None:
+                    notice='本次控制请求因启动前技术问题停止推进；尚未进入科学评审。请修复本机配置，再核对同一原任务的续接条件。'
                 if result.get('status') in stopped:
                     if sealed:
                         notice = '历史控制请求曾停止推进；当前阶段结论已封存，请以当前研究状态为准。'
@@ -1329,10 +1363,32 @@ class InstanceUI:
                        attention=self._attention(token, manager, snapshot, status), notices=self._notices(snapshot, receipt))
         metrics = self._guarded(ui_view.breadth_metrics, view, ui_view.cleaner(self.root), clean=ui_view.cleaner(self.root))
         # A finished study shows every round as one line; otherwise the current round opens.
-        return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, usage) + self._fragment(ui.breadth_metrics, metrics), 'live-activity': self._fragment(ui.activity, activity, href='/progress'),
+        return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, usage) + self._fragment(ui.breadth_metrics, metrics)
+                    + self._execution_activity(view.get('live_executions')), 'live-activity': self._fragment(ui.activity, activity, href='/progress'),
                 'live-trail': self._fragment(ui.trail, trail, older_href='/results', open_current=not display['completed']),
                 'live-token-monitor': '' if 'error' in usage else self._fragment(ui.token_monitor,
                     usage['tokens'].get('details'), scope='整个研究 · 累计已记录用量')}
+
+    @staticmethod
+    def _execution_activity(value):
+        if not isinstance(value,dict):return ''
+        labels={'accepted':'已接受','submitted':'已提交，运行状态待观察','queued':'已观察排队',
+            'running':'已观察运行','cancelling':'正在取消','known_success':'执行成功',
+            'known_failed':'执行失败','not_submitted':'确认未提交','unknown':'状态未知'}
+        coverage={'observed':'本地观察','partial':'部分覆盖，计数为下界','unknown':'观察不可用'}
+        body='<section class="execution-activity"><h3>当前 W 执行观察 · 阶段 '+ui.esc(str(value.get('step')))+'</h3>'
+        body+='<p>'+ui.esc(coverage.get(value.get('coverage'),'观察不可用'))+'；'+ui.esc(value.get('limitation',''))+'</p>'
+        counts=value.get('counts') or {}
+        if counts:body+='<p>'+' · '.join(ui.esc(labels[key])+' '+str(counts[key]) for key in labels if counts.get(key))+'</p>'
+        rows=value.get('calls') or []
+        if rows:
+            body+='<table><thead><tr><th>原调用</th><th>attempt</th><th>执行观察</th><th>最近记录</th></tr></thead><tbody>'
+            for row in rows:
+                age=ui_view.elapsed_text(row['updated_at'])
+                body+='<tr><td>'+ui.esc(row['call_id'])+'</td><td>'+('未知' if row['attempt'] is None else str(row['attempt']))+'</td><td>'+ui.esc(labels[row['state']])+'</td><td>'+ui.esc(age+'前' if age else '时间未知')+'</td></tr>'
+            body+='</tbody></table>'
+        if value.get('omitted_count'):body+='<p>另有 '+str(value['omitted_count'])+' 个调用未在此表展开。</p>'
+        return body+'</section>'
 
     def _live_snapshot(self, token, mount, *, force=False):
         self.browser.verify(token, instance_id=self.instance)
@@ -1388,10 +1444,11 @@ class InstanceUI:
             return body + '<p><a href="/?after=0">浏览全部阶段记录</a></p></details>'
         body += '<p class="note">以下操作仍受控制层原有条件约束；页面显示的状态不授予新的权限。</p><div class="action-row">'
         trigger = None if 'error' in snapshot else (snapshot['view']['correction'].get('current_pause') or {}).get('trigger_id')
-        for action in ('start', 'pause', 'continue'):
+        technical=self._technical_stop(snapshot)
+        for action in (('pause',) if technical is not None else ('start','pause','continue')):
             body += self._control_form(browser_token, action, correction_trigger=trigger)
         body += '</div>'
-        if step is not None:
+        if step is not None and technical is None:
             body += self._form(browser_token, 'resume', '<input type="hidden" name="step" value="' + str(step) + '">', '继续此阶段原任务（须满足原有条件）')
         body += '<div id="live-budget-navigation">' + self._budget_navigation(snapshot) + '</div>'
         body += '<p><a href="/delete">删除实例</a> · <a href="/candidates">全候选历史</a> · <a href="/operations">控制请求记录</a> · <a href="/?after=0">浏览全部阶段记录</a>'
@@ -2042,6 +2099,8 @@ class InstanceUI:
             expected = schemas[action]
             if action == 'budget' and 'authorization_statement' in form:
                 expected = expected | {'authorization_statement'}
+            if action == 'resume' and 'expected_attempt' in form:
+                expected = expected | {'expected_attempt'}
             if (not {'nonce', 'csrf'} <= set(form) or
                     action == 'configuration-update' and 'expected_revision' not in form or
                     expected is not None and set(form) != expected | {'nonce', 'csrf'} or
@@ -2150,6 +2209,7 @@ class InstanceUI:
                 operation_id=self._operation_id(browser_token, action, form))
         elif action == 'resume':
             self.control_result = control.start_background(self.root, resume_step=integer('step'),
+                expected_attempt=integer('expected_attempt',optional=True) if 'expected_attempt' in form else None,
                 operation_id=self._operation_id(browser_token, action, form))
         elif action == 'pause':
             self.control_result = control.request_pause(self.root)

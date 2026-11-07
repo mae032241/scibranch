@@ -917,7 +917,7 @@ def inspect_source(parent_root, selected_job_ref):
     # Source settings contracts retain root-relative public identities, while
     # input globals are the selected job's frozen files above.
     route_fields = ('role', 'instruction', 'evidence_return', 'correction_request', 'author_correction',
-        'purpose', 'source_cutoff', 'delivery_sources', 'engineering_repair', 'final_report')
+        'purpose', 'source_cutoff', 'delivery_sources', 'engineering_repair', 'final_report', 'supervision_request')
     route = {field: copy.deepcopy(job.get(field)) for field in route_fields}
     route['parents'] = [int(Path(row['path']).parts[2]) for row in job.get('direct_refs', [])]
     def latest(role):

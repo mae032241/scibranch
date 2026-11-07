@@ -174,15 +174,10 @@ def _sources_from_base(root, *, base):
     return _read(root, ref) if ref is not None else dict(declarations=[], globals=[])
 
 
-def _producer(root, step, *, facts):
-    from . import originals
-    source, seal = facts['owner'], facts['seal']
-    if source.inherited:
-        return dict(kind='producer', step=step,
-            seal=originals.original_ref(source, f'native-evidence/{step:03d}/result-identity.json'),
-            missing_reason=None if seal.get('source_provenance') else 'legacy_producer_without_source_proof')
-    return dict(kind='producer', step=step, seal=_ref(root, facts['seal_path']),
-                missing_reason=None if seal.get('source_provenance') else 'legacy_producer_without_source_proof')
+def _producer(step, *, facts, seal_ref):
+    """Reduce the operation owner's exact producer facts without I/O."""
+    return dict(kind='producer',step=step,seal=seal_ref,
+        missing_reason=None if facts['seal'].get('source_provenance') else 'legacy_producer_without_source_proof')
 
 
 def fork_input_facts(source, original, *, document, producer_origins):
@@ -217,8 +212,7 @@ def input_facts(root, job, *, base, head, sources, material_paths=None, review_b
     steps.update(row['step'] for row in job.get('delivery_sources', {}).get('source_nodes', []))
     if job.get('formal_review'):
         if review_binding is None:
-            from . import formal_review
-            review_binding = formal_review.input_binding(root, job['formal_review'])
+            raise IntegrityError('Formal review qualification requires its explicit review binding')
         steps.update(review_binding.get('scientific_source_steps', []))
     if job.get('engineering_repair') is not None:
         steps.add(job['engineering_repair']['source']['step'])
@@ -226,10 +220,17 @@ def input_facts(root, job, *, base, head, sources, material_paths=None, review_b
     for step in sorted(steps):
         if not 0 < step < job['step']:
             raise IntegrityError('Source producer is not an exact preceding node')
-        if step not in sources:
-            sources[step] = handoff_state.sealed_facts(root, step, base=base)
+        known=sources.get(step)
+        if known is None or 'seal_path' not in known or 'raw_path' not in known:
+            # The formal-review material owner already loaded the exact seal
+            # and job. Complete its control locators once here without reading
+            # those originals again or renewing historical qualification.
+            sources[step]=handoff_state.sealed_facts(root,step,base=base,
+                owner=known['owner'] if known is not None else None,known=known)
         facts = producers[step] = sources[step]
-        producer_edges.append(_producer(root,step,facts=facts))
+        seal_ref=(originals.original_ref(facts['owner'],f'native-evidence/{step:03d}/result-identity.json')
+            if facts['owner'].inherited else _ref(root,facts['seal_path']))
+        producer_edges.append(_producer(step,facts=facts,seal_ref=seal_ref))
         ref = facts['seal'].get('source_provenance')
         if 'provenance' not in facts:
             facts['provenance'] = (_source_read(facts['owner'], ref) if ref is not None else None)
@@ -394,7 +395,12 @@ def _load_input_facts(root, job):
     from . import accepted_budget
     base = c.settings(root)
     head = (None if job.get('fork_source') is not None else accepted_budget.load(root, base=base))
-    return input_facts(root, job, base=base, head=head, sources={})
+    sources={}
+    review_binding=None
+    if job.get('formal_review') and job.get('fork_source') is None:
+        from . import formal_review
+        review_binding=formal_review.input_binding(root,job['formal_review'],sources=sources)
+    return input_facts(root,job,base=base,head=head,sources=sources,review_binding=review_binding)
 
 
 def _source_read(source, ref):

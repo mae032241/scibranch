@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import stat
 
@@ -91,7 +92,7 @@ def test_project_capture_aggregates_only_declared_roots_and_preserves_empty_root
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('limits', [{'max_files': 1}, {'max_total_bytes': 8}, {'max_scan_entries': 4}])
+@pytest.mark.parametrize('limits', [{'max_files': 1}, {'max_scan_entries': 4}])
 def test_project_capture_shares_limits_across_declared_roots_before_git(tmp_path, helper, limits):
     root, _, arguments = _project(tmp_path)
     with pytest.raises(ValueError):
@@ -109,8 +110,8 @@ def test_project_capture_rejects_cross_root_change_and_same_call_edit(tmp_path, 
     helper.verify(root, step=7, call_id='call-1', code_version=first)
     original_read = helper._read_file
 
-    def read(path, expected, inventory):
-        result = original_read(path, expected, inventory)
+    def read(path, expected, inventory, **options):
+        result = original_read(path, expected, inventory, **options)
         if path == project / 'tools/helper.py':
             (project / 'src/main.py').write_bytes(b'changed after its read\n')
         return result
@@ -228,8 +229,8 @@ def test_capture_rejects_blob_import_failure_before_index_and_pin(tmp_path, monk
         if arguments[0] != 'fast-import':
             return original_git(private, arguments, **kwargs)
         assert arguments == ('fast-import', '--quiet', '--done')
-        assert isinstance(kwargs['data'], bytearray)
-        assert kwargs['input_limit'] == len(kwargs['data'])
+        assert hasattr(kwargs['data'], 'read')
+        assert kwargs['input_limit'] is None
         assert kwargs['output_limit'] == 41
         index = kwargs['index']
         lock = index.with_name(index.name + '.lock')
@@ -332,16 +333,12 @@ def test_capture_ignores_empty_directory_branches_and_preserves_regular_files(tm
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('case', ['file_bytes', 'total_bytes', 'files', 'scan_entries',
+@pytest.mark.parametrize('case', ['files', 'scan_entries',
                                   'symlink_file', 'symlink_directory', 'fifo', 'git_component'])
 def test_preflight_rejects_bounds_and_nonregular_code_before_repository_writes(tmp_path, helper, case):
     root, code = _source(tmp_path)
     limits = {}
-    if case == 'file_bytes':
-        limits = {'max_file_bytes': 1}
-    elif case == 'total_bytes':
-        limits = {'max_total_bytes': 1}
-    elif case == 'files':
+    if case == 'files':
         (code / 'second.py').write_bytes(b'x')
         limits = {'max_files': 1}
     elif case == 'scan_entries':
@@ -497,10 +494,10 @@ def test_new_export_rechecks_complete_bytes_before_returning(tmp_path, monkeypat
     original_blob = helper._blob
     injected = False
 
-    def blob(private, record, context):
+    def blob(private, record, context, **options):
         nonlocal injected
-        content = original_blob(private, record, context)
-        if content == b'later\n' and not injected:
+        content = original_blob(private, record, context, **options)
+        if record[2] == len(b'later\n') and not injected:
             injected = True
             if injection == 'extra_file':
                 (export / 'extra.py').write_bytes(b'extra\n')
@@ -522,19 +519,27 @@ def test_new_export_rechecks_complete_bytes_before_returning(tmp_path, monkeypat
 
 
 @pytest.mark.process_e2e
-def test_original_effective_limits_can_be_supplied_to_verify_and_materialize(tmp_path, helper):
+def test_legacy_byte_limits_do_not_reject_capture_verify_materialize_or_transfer(tmp_path, helper):
     root, code = _source(tmp_path)
-    content = b'x' * (1048576 + 1)
+    # Small deterministic incompressible data also exceeds the former packed
+    # transfer allowance when the preserved entry/file counts are both one.
+    content = random.Random(17).randbytes(1048576 + 16384)
     (code / 'main.py').write_bytes(content)
-    limits = {'max_file_bytes': len(content)}
+    limits = {'max_file_bytes': 1, 'max_total_bytes': 1,
+              'max_files': 1, 'max_scan_entries': 1}
     version = _capture(helper, root, code, limits=limits)
-    with pytest.raises(ValueError, match='max_file_bytes'):
-        helper.verify(root, step=7, call_id='call-1', code_version=version)
-    with pytest.raises(ValueError, match='max_file_bytes'):
-        helper.materialize(root, step=7, call_id='call-1', code_version=version)
+    helper.verify(root, step=7, call_id='call-1', code_version=version)
     helper.verify(root, step=7, call_id='call-1', code_version=version, limits=limits)
     export = helper.materialize(root, step=7, call_id='call-1', code_version=version, limits=limits)
     assert (export / 'main.py').read_bytes() == content
+    assert helper.materialize(root, step=7, call_id='call-1', code_version=version) == export
+    child = tmp_path / 'child'; child.mkdir()
+    helper.transfer(root, child, step=7, call_id='call-1', code_version=version, limits=limits)
+    try:
+        transferred = helper.materialize(child, step=7, call_id='call-1', code_version=version, limits=limits)
+        assert (transferred / 'main.py').read_bytes() == content
+    finally:
+        helper.cleanup_export(child, step=7, call_id='call-1')
 
 
 @pytest.mark.process_e2e

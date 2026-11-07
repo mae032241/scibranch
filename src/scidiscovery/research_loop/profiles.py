@@ -59,7 +59,7 @@ def for_job(settings, job):
 
 def binding(settings, job):
     profile = for_job(settings, job)
-    result = dict(native_profile=profile) if 'native_profile' in job else {}
+    result = dict(native_profile=profile)
     if 'skill_binding' in job:
         result['skill_binding'] = job['skill_binding']
     return result

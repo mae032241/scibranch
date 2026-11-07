@@ -75,6 +75,7 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
                   scope='public_draft_log', sealed_conclusion=dict(step=step, available=(execution.origin(root, step) / 'result-identity.json').exists(), qualification='not_asserted'), bytes_read=0)
     result['role'] = job['role']
     result['context'] = dict(status='unavailable')
+    result['context_windows'] = native_usage.context_windows(None)
     try:
         result['state'] = 'unstarted'
         intent_path = record / 'native-intent.json'
@@ -107,11 +108,13 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
             if observation.get('coverage') in {'live', 'terminal', 'unknown'}:
                 result['usage']['coverage'] = observation['coverage']
             result['usage']['measurement_status'] = native_usage.measurement_status(observation)
+            result['context_windows'] = native_usage.context_windows(observation.get('context_windows'))
             if observation.get('coverage') in {'live', 'terminal'}:
                 result['context'] = native_usage.context(observation.get('context'))
     except (OSError, ValueError, TypeError, KeyError):
         result['observation_state'] = 'unavailable'
         result['context'] = dict(status='unavailable')
+        result['context_windows'] = native_usage.context_windows(None)
     result.setdefault('usage', dict(coverage='unknown'))
     result['usage'].update(native_usage.breakdown(result['usage']))
     path = record / 'native.jsonl'

@@ -159,19 +159,12 @@ def _require_new_execution(config):
     # cannot lend its earlier full-task grant to the latest narrow repair.
     if intent.get('output_repair') is not None or intents[-1][1].get('output_repair') is not None:
         raise UnsupportedExecution('Output repair permits original results only; no new scientific execution or compilation')
-    job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
-    if not (configuration_updates.for_job(root,job).get('resume_policy') or {}).get('output_only'):return
-    paths=execution.records(root,step)
-    for path in paths[1:]:
-        intent=c.read(c.regular(path/'native-intent.json'))
-        if intent.get('continuation_kind')=='execution_wake':
-            raise UnsupportedExecution('Output-only execution wake permits original results only; no new managed execution')
 
 
 def _review_observation(value, stamp):
     """Interpret the same live or archived host observation without new grants."""
     reason=('host_review_observation_unavailable' if value is None else
-        'review_deadline_reached' if stamp['at_boottime']>=value['deadline_boottime'] else
+        'review_deadline_reached' if value['deadline_boottime'] is not None and stamp['at_boottime']>=value['deadline_boottime'] else
         'host_review_observation_expired' if stamp['at_boottime']>=value['valid_until_boottime'] else
         value['reason'] if value['pending'] else None)
     return dict(requested=bool(reason),reason=reason,
@@ -180,7 +173,7 @@ def _review_observation(value, stamp):
 
 
 def review_status(config):
-    """Read host facts; a missing lease or deadline never becomes a new grant."""
+    """Read host facts; an unlimited deadline still requires a finite live lease."""
     admission=config.get('admission')
     if not isinstance(admission,dict) or type(admission.get('version')) is not int or admission['version']!=ADMISSION_VERSION:
         raise UnsupportedExecution('Preserved admission contract is read-only; prepare a new instance')
@@ -197,9 +190,9 @@ def review_status(config):
                 or value['native_attempt']!=config['native_attempt'] or value['boot_id']!=stamp['boot_id']):
             raise IntegrityError('Host review facts differ from the frozen stage or native attempt')
         deadline,lease=value['deadline_boottime'],value['valid_until_boottime']
-        if (type(deadline) not in (int,float) or not 0<deadline<float('inf')
+        if (deadline is not None and (type(deadline) not in (int,float) or not 0<deadline<float('inf'))
                 or type(lease) not in (int,float) or not 0<lease<float('inf')):
-            raise IntegrityError('Host review facts have no finite original deadline')
+            raise IntegrityError('Host review facts require an original deadline and finite lease')
         return _review_observation(value,stamp)
     except FileNotFoundError:
         return _review_observation(None,stamp)
@@ -351,6 +344,7 @@ def _adapter(config, path, *, host_services=None):
 
 
 def _public_capabilities(adapter):
+    from . import experiment_client
     result=[]
     for item in adapter.capabilities():
         if (not isinstance(item,AdapterCapability) or not isinstance(item.key,str) or not ID.fullmatch(item.key)
@@ -360,6 +354,10 @@ def _public_capabilities(adapter):
                 or not isinstance(item.content,bytes) or not isinstance(item.public_summary,Mapping)
                 or any(previous['key']==item.key for previous in result)):
             raise IntegrityError('Registered public capability contract is malformed')
+        if item.key==experiment_client.FROZEN_CODE_DIRECTORY_KEY:
+            expected=experiment_client.frozen_code_directory_capability()
+            if item!=expected or encoded(dict(item.public_summary))!=encoded(dict(expected.public_summary)):
+                raise IntegrityError('Registered code directory capability differs from its declared contract')
         result.append(dict(key=item.key,kind=item.kind,schema_id=item.schema_id,
             payload_schema_version=item.payload_schema_version,media_type=item.media_type,
             public_summary=dict(item.public_summary),size_bytes=len(item.content)))
@@ -1056,6 +1054,54 @@ class Records:
         from . import experiment_client
         return experiment_client.root_for_configuration(self.config,allow_standalone=True) or self.root
 
+    def live_status(self, call_id, state, *, accepted=None):
+        # Optional presentation must never change a durable call's outcome.
+        try:self._live_status(call_id,state,accepted=accepted)
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError,RecursionError):pass
+
+    def _live_status(self, call_id, state, *, accepted=None):
+        """Publish bounded display facts inside the receipt owner's transaction.
+
+        This replaceable projection is never admission or scientific evidence.
+        Missing legacy entries remain unknown; no receipt tree is reconstructed.
+        """
+        states={'accepted','submitted','queued','running','cancelling','known_success',
+            'known_failed','not_submitted','unknown'}
+        if not isinstance(call_id,str) or not ID.fullmatch(call_id):
+            raise IntegrityError('Execution display identity is invalid')
+        state=state if state in states else execution_status(state)
+        if state not in states:state='unknown'
+        path=self.root/'live-status.json'
+        try:
+            previous=json.loads(read(path,65536))
+            if (previous.get('version')!=1 or previous.get('scope')!=self.config['scope']
+                    or not isinstance(previous.get('calls'),dict) or len(previous['calls'])>128):
+                previous={}
+        except (OSError,ValueError,TypeError,RecursionError):previous={}
+        calls=dict(previous.get('calls') or {})
+        partial=previous.get('partial',True)
+        # The first writer knows whether it is publishing the first accepted
+        # call only from its admission's existing inventory, never a new scan.
+        if accepted is not None and accepted.get('_display_first_call') is True:partial=False
+        if call_id in calls or len(calls)<128:
+            prior=calls.get(call_id) or {}
+            attempt=((accepted or {}).get('native_attempt') or {}).get('number',prior.get('attempt'))
+            if type(attempt) is not int or attempt<0:attempt=None;partial=True
+            calls[call_id]=dict(state=state,attempt=attempt,updated_at=time.time())
+            if (prior.get('state') in {'known_success','known_failed','not_submitted'}
+                    and state not in {'known_success','known_failed','not_submitted'}):
+                calls[call_id]=prior
+        else:partial=True
+        value=dict(version=1,scope=self.config['scope'],calls=calls,partial=bool(partial),
+            updated_at=time.time(),source='execution_receipt_owner')
+        data=encoded(value)
+        if len(data)>65536:raise ValueError('Execution display exceeds its fixed bound')
+        if path.resolve()!=path or path.is_symlink() or path.exists() and not path.is_file():
+            raise IntegrityError('Execution display is not an ordinary mutable slot')
+        from . import atomic_files,storage_policy as storage
+        with storage.mutation(None,0 if path.exists() else len(data),context=storage.Deadline(65)):
+            atomic_files.replace_bytes(path,data)
+
     def calls(self):
         root = self.root / 'calls'
         if root.resolve() != root:
@@ -1196,8 +1242,24 @@ class Records:
             if not files:inventory.file(descriptor.size_bytes)
             for item in files:
                 inventory.entry();inventory.file(item['size_bytes'])
+            frozen_sources = {}
+            def bind_input(identity, target):
+                source_path = Path(identity['path'])
+                previous = frozen_sources.get(identity['path'])
+                if previous is not None:
+                    if previous[0] != identity:
+                        raise IntegrityError('Managed input changed before acceptance')
+                    source_path = previous[1]
+                c._bind_original(source_path, target, context=operation_context,
+                    root=self.storage_root(), policy=self.config.get('storage_policy'),
+                    size_bytes=identity['size_bytes'],
+                    source_kind='managed_frozen' if previous is not None else 'mutable')
+                if previous is None:
+                    if proof(identity['path'],context=operation_context) != identity:
+                        raise IntegrityError('Managed input changed during acceptance')
+                    frozen_sources[identity['path']] = (identity, target)
             if not direct_input:
-                c._bind_original(Path(descriptor.local_path), source, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=descriptor.size_bytes, source_kind='mutable')
+                bind_input(original, source)
             seen = set()
             for item in files:
                 name = item['name']; relative = Path(name)
@@ -1214,7 +1276,7 @@ class Records:
                     if any(saved.get(key)!=item.get(key) for key in ('path','size_bytes','file_stat')):
                         raise IntegrityError('Code data inventory differs from its frozen scientific input')
                 else:
-                    c._bind_original(Path(item['path']), target, context=operation_context, root=self.storage_root(), policy=self.config.get('storage_policy'), size_bytes=item['size_bytes'], source_kind='mutable')
+                    bind_input(original, target)
             with self.admission_lease(context=operation_context):
                 binding=self.admission_binding(mechanism,expected_calls=expected_calls,
                     recovery_admission=recovery_admission)
@@ -1228,6 +1290,8 @@ class Records:
                 destination.parent.mkdir(exist_ok=True)
                 from . import instance_archive
                 instance_archive._publish(directory,destination)
+                display_accepted=dict(accepted,_display_first_call=expected_calls==[])
+                self.live_status(descriptor.name,'accepted',accepted=display_accepted)
         finally:
             if directory.exists():
                 if _local_preparation:
@@ -1260,6 +1324,21 @@ class Records:
         # recovery information after a real side effect. Admission and retained
         # payloads/logs remain quota-bound; receipt bytes count in the next scan.
         write(directory / filename, value)
+        state=({'submission.json':'submitted',
+            'submission-retirement.json':'not_submitted'}.get(filename))
+        if filename=='process.json':
+            # The launch owner acquired this identity after starting the child.
+            # This is an observation at publication time, never a UI /proc probe.
+            if (all(type(value.get(key)) is int and value[key]>0
+                    for key in ('pid','start_ticks','pgid','sid'))
+                    and isinstance(value.get('boot_id'),str) and value['boot_id'].strip()
+                    and isinstance(value.get('state'),str) and len(value['state'])==1
+                    and value['state']!='Z'
+                    and value.get('task_ref')==dict(path=str(directory/'accepted.json'))):
+                state='running'
+        if filename in {'terminal.json','completed.json','collected.json'}:
+            state=value.get('native_state') or value.get('status') or 'unknown'
+        if state is not None:self.live_status(call_id,state,accepted=accepted)
 
     def accepted(self,call_id,*,_validated_breadth=False,_breadth_rows=None):
         """Read accepted control identity without reopening scientific payloads."""
@@ -1301,6 +1380,7 @@ class Records:
         if path.exists():
             if json.loads(read(path))!=value:raise IntegrityError('Original external execution identity changed')
         else:self.publish(call_id,'submission.json',value)
+        self.live_status(call_id,state,accepted=accepted)
         return external_id,state
 
     def external(self,call_id):
@@ -1676,7 +1756,9 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     path=directory/'execution-observation.json'
     saved=_saved_observation(config,adapter,call_id,path,
         operation_context=operation_context,verify_files=True)
-    if saved is not None:return saved
+    if saved is not None:
+        records.live_status(call_id,saved.get('status','unknown'))
+        return saved
     accepted=records.accepted(call_id)
     if accepted['interface']!=config['execution_interface']:
         raise IntegrityError('Observation interface differs from accepted execution')
@@ -1686,6 +1768,7 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     if external is None:return None
     details=adapter.status_details(call_id);state=details.get('state')
     status=execution_status(state)
+    records.live_status(call_id,status,accepted=accepted)
     if status not in {'known_success','known_failed'}:return None
     result=adapter.result(call_id)
     completion=directory/'completed.json'
@@ -1765,6 +1848,8 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
 
 
 def dispatch_descriptor(config, payload, *, parent=None, new=False, change=None, mechanism=None, command_options=None,_source_script=None):
+    from .protocol import require_scope
+    require_scope(config.get('scope') if isinstance(config,dict) else None)
     from . import experiment_client
     return _dispatch_descriptor_operation(config,payload,parent=parent,new=new,change=change,mechanism=mechanism,
         command_options=command_options,_source_script=_source_script,client_facts=experiment_client.load_client_facts(config))
@@ -1913,9 +1998,9 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, cl
     selection=(experiment_client._observe_code_selection(config,logical,resolved=payload.local_path,
         experiment_directory=(command_options or {}).get('experiment_directory'),facts=client_facts)
         if instance is not None and config.get('scope',{}).get('role')=='W' else None)
-    if (selection is not None and selection['logical_root']=='project'
-            and config['execution_interface']['executor']!='local_execution:command'):
-        raise UnsupportedExecution('Project directory execution requires the managed Local runtime; compile a self-contained implementation JSON for this executor.')
+    if (selection is not None and selection['selection']=='directory'
+            and not experiment_client.supports_frozen_code_directory(config['execution_interface'])):
+        raise UnsupportedExecution('Selected executor does not declare frozen code directory inputs; select a supported executor or a self-contained input.')
     _require_new_execution(config)
     try:binding=records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
@@ -1978,8 +2063,7 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, cl
         if 'base_identity' in metadata:
             raise IntegrityError('Adapters cannot supply host-owned project identity')
         if instance is not None:
-            from . import contracts as c
-            job=c.read(c.regular(instance/'jobs'/f'{config["scope"]["step"]:03d}.json'))
+            job=client_facts['job']
             if job.get('project') is not None:metadata['base_identity']=dict(job['project']['base_identity'])
         if code_version is not None:
             metadata['code_version']=dict(code_version)
@@ -2116,6 +2200,7 @@ def _submit_descriptor(config, adapter, capabilities, prepared, accepted):
         result=json.loads(read(observed['completed']['path'])) if observed is not None else adapter.result(call_id)
         if observed is None and capabilities.query and records.external(call_id) is not None:
             state=execution_status(adapter.status_details(call_id).get('state'))
+            records.live_status(call_id,state,accepted=accepted)
             if state in PENDING_EXECUTION_STATES:
                 result=dict(result,status=state,note='Original execution is '+state+'; preserve its identity without resubmission.')
     except Exception as error:
@@ -2137,11 +2222,12 @@ def progress(config):
             counts['not_submitted']+=1
             rows.append(dict(call_id=path.name,status='not_submitted',candidate_id=None))
             continue
-        binding=None
+        binding=None;accepted=None
         try:
             _,prior=original_adapter(config,path.name,'query')
             details = prior.status_details(path.name)
-            binding=Records(config).accepted(path.name).get('mechanism_binding')
+            accepted=Records(config).accepted(path.name)
+            binding=accepted.get('mechanism_binding')
         except (FileNotFoundError,json.JSONDecodeError,UnicodeDecodeError):
             details=dict(state='unknown')
         except IntegrityError:
@@ -2149,6 +2235,7 @@ def progress(config):
         except (OSError,KeyError,TypeError,AttributeError,RecursionError) as error:
             raise IntegrityError('Published execution metadata is malformed or unavailable') from error
         state = execution_status(details.get('state'))
+        Records(config).live_status(path.name,state,accepted=accepted)
         counts[state] += 1
         rows.append(dict(call_id=path.name, **(dict(mechanism_ref=binding['mechanism_ref']) if binding else {}), status=state, candidate_id=details.get('candidate_id'),
             evaluation_key=details.get('evaluation_key'), metric=details.get('metric'), direction=details.get('direction'),
@@ -2240,7 +2327,7 @@ def _cli_parser(*,configuration=True):
     sub=parser.add_subparsers(dest='command',required=True)
     run=sub.add_parser('run');payload=run.add_mutually_exclusive_group(required=True)
     payload.add_argument('--script',type=Path,help='Script path relative to the task workspace, independently of --experiment-dir');payload.add_argument('--payload',type=Path)
-    run.add_argument('--experiment-dir',type=Path,help='Current-W Local: independent experiments/<name> runtime directory, created if absent; script remains relative to the task workspace. Other declared executors retain their directory snapshot semantics; unavailable for Cov single-source execution')
+    run.add_argument('--experiment-dir',type=Path,help='Current-W Local: independent experiments/<name> runtime directory, created if absent; script remains relative to the task workspace. Other executors use their declared invocation; directory code inputs do not enable this runtime option')
     choice=run.add_mutually_exclusive_group();choice.add_argument('--parent-plan');choice.add_argument('--new-plan',action='store_true')
     run.add_argument('--change-intent');run.add_argument('--mechanism')
     run.add_argument('arguments',nargs=argparse.REMAINDER,help='When declared by the selected executor, script arguments after --; passed as argv, never shell text')
@@ -2496,8 +2583,13 @@ def main(argv=None):
                 dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
             code=3
     except (_AdmissionReviewRequired,common._AdmissionReviewRequired) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
-            dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False))
+        if accepted_call_id is None and args.command=='run' and str(error) in {'worker_progress_review_due','worker_direction_review_due',
+                'worker_context_review_due','worker_context_observation_unknown'}:
+            result=dict(status='review_required',reason=str(error),accepted=False,
+                note='Independent A assessment is due before new scientific execution.')
+        else:
+            result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
+                dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False))
         code=2
     except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
@@ -2507,9 +2599,15 @@ def main(argv=None):
                     'Choose an available authorized H mechanism before another request'),config=feedback_config)))
         code=2
     except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired) as error:
-        result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
-            dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
-        code=3
+        if accepted_call_id is None and args.command=='run' and str(error) in {'worker_progress_review_due','worker_direction_review_due',
+                'worker_context_review_due','worker_context_observation_unknown'}:
+            result=dict(status='review_required',reason=str(error),accepted=False,
+                note='Independent A assessment is due before new scientific execution.')
+            code=2
+        else:
+            result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
+                dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
+            code=3
     except (ConcurrentExecution,common.ConcurrentExecution) as error:
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unknown',note=_diagnostic(error,'Execution preparation outcome is unknown; preserve the original preparation without replay',config=feedback_config)))
@@ -2876,7 +2974,7 @@ def _code_version_binding(config, accepted, *, source=None):
     _validate_base_identity(project,accepted)
     if version['selection']=='directory':
         valid=(logical==Path('project' if project is not None else 'code')
-            and config.get('execution_interface',{}).get('executor')=='local_execution:command')
+            and experiment_client.supports_frozen_code_directory(config.get('execution_interface',{})))
     else:valid=logical.parts[0]=='code' and len(entry.parts)==1
     if (not valid or accepted.get('source_script')!=str(c.workspace(root,config['scope']['step'])/logical/entry)
             or any(key in accepted for key in ('entry','source_reference','source_input'))):

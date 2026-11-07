@@ -39,10 +39,14 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
         assert instruction.startswith(expected+'\n') and prompt.startswith(expected+'\n')
         assert 'role_guidance' not in view and 'role_instruction' not in view
         if role == 'A':
-            assert view['reading_order'].startswith('Prior A unresolved questions and latest W changes')
+            assert view['reading_order'].startswith('The concrete assessment question and latest W changes')
             assert 'Parent claims are not qualification' in view['reading_order']
         else:
-            assert view['reading_order'].endswith(' A verifies independently. Check live execution facts at original calls. Parents are claims. Omissions: conclusion/index/next_page.')
+            assert ' A verifies independently. Parents are claims.' in view['reading_order']
+            assert 'Check execution facts only at calls addressable by the current experiment client' in view['reading_order']
+            assert 'select exact frozen-history I IDs for next-node inputs after return' in view['reading_order']
+            assert 'Prose/requested_evidence/evidence_requests do not bind inputs' in view['reading_order']
+            assert view['reading_order'].endswith('Omissions: conclusion/index/next_page.')
         # Source construction retains a logical namespace, mounted at launch.
         # Read its declared source rather than requiring a copied input tree.
         objective = next(item for item in job['global_materials'] if item['path']==view['global']['objective'])
@@ -54,14 +58,18 @@ def test_current_role_advice_reaches_frozen_science_view_with_original_constrain
         assert c.validate(work)['summary'] == 'A contribution'
     decisions = decision.schema()['properties']['decision']['enum']
     assert set(decisions) == {'candidate', 'mechanism', 'compliance'}
-    assert 'Assess progress independently' in guidance.DEFAULT['A']
-    assert 'no incumbent or unknown-optimality veto' in c.AUTHOR_EVIDENCE_GUIDANCE
-    assert 'Calls and audits are not proof' in c.AUTHOR_EVIDENCE_GUIDANCE
+    assert 'Independently judge the requested high-level' in guidance.DEFAULT['A']
+    assert 'High-level decision-changing' in c.AUTHOR_EVIDENCE_GUIDANCE
+    assert 'mechanical checks/W' in c.AUTHOR_EVIDENCE_GUIDANCE
+    assert 'not indefinite vetoes' in c.AUTHOR_EVIDENCE_GUIDANCE
     assert 'Honor checks' in guidance.DEFAULT['W']
-    assert 'Initial/grant opportunities are not trial caps' in guidance.DEFAULT['W']
-    assert 'W owns methods/grids' in guidance.STAGE_PLANNING['H']
-    assert 'differing predictions, signal, priority and reopening condition' in guidance.DEFAULT['H']
-    assert 'Preserve user/task constraints, required counts and commitments' in guidance.DEFAULT['H']
+    assert 'Own the research direction' in guidance.DEFAULT['W']
+    assert 'W owns direction/design/implementation/adaptation' in guidance.STAGE_PLANNING['H']
+    assert 'Propose revisable competing explanations' in guidance.DEFAULT['H']
+    assert 'Preserve original constraints and counts' in guidance.DEFAULT['H']
+    assert 'W may add or revise mechanisms' in guidance.DEFAULT['H']
+    assert 'minimal_test' not in guidance.DEFAULT['H']
+    assert 'validate' not in guidance.DEFAULT['H'] and 'repair' not in guidance.DEFAULT['H']
 
 
 def test_actual_domain_usage_fits_existing_total_bound_and_only_w_receives_it(tmp_path):
@@ -175,20 +183,36 @@ def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_o
     assert context['source_role'] == 'A' and context['source_action'] == 'continue_w'
     assert context['original_instruction'] == instruction == job['instruction']
     authority = context['authority']
-    assert 'A selects global direction and decision-changing evidence' in authority
+    for bound in ('Original user/task constraints', 'frozen dispatch/catalog',
+            'focused evidence gaps', 'execution permissions remain binding'):
+        assert bound in authority
+    assert 'H offers revisable hypotheses/directions' in authority
+    assert 'A independently assesses evidence/claims' in authority
     assert 'Concrete execution methods are proposals' in authority
-    assert 'Original user constraints and H scope/discriminating commitments remain binding' in authority
-    assert 'W owns execution design and H owns mechanism revision' in authority
+    assert 'W owns research direction/design/implementation/adaptation' in authority
+    assert 'may revise mechanisms' in authority
+    assert 'seal before a new W freezes revisions' in authority
+    for obsolete in ('assigned H scope', 'H owns high-level methods/directions'):
+        assert obsolete not in authority
+    for scope in ('original user/task constraints', 'frozen dispatch/catalog',
+            'Propose revisions', 'seal before a new W freezes'):
+        assert scope in task['question']
+    assert 'assigned H directions' not in task['question']
+    assert 'explore toward unmet goals' in task['question']
+    assert 'necessary validation' not in task['question']
     assert job['search']['focus'] == dict(mechanism_ref='h001.m1', action='improve')
     assert search.launch_reason(root, job) is None
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
     assert job['scientific_work_unit'] in task['question']
     assert 'focused scientific mechanism' in task['question']
     assert job['worker_fragment_policy'] == dict(context='same_session')
-    assert 'Continuation configured: same_session;' in task['stage_response']
-    assert task['stage_response'].startswith('stage_intent: review=A|decision=partial|continue=work.')
+    assert 'Continuation:same_session;' in task['stage_response']
+    for route in ('continue=same W', 'handoff=', 'revise_h=H', 'review=A evidence', 'decision=request A assessment'):
+        assert route in task['stage_response']
+    assert 'new W' in task['stage_response']
     assert task['stage_response'].endswith('needs terminal/session+known usage+authorization.')
-    assert 'Return to independent A, not global completion' in job['native_role_instruction']
+    assert 'Handoff freezes new/revised mechanisms without A' in job['native_role_instruction']
+    assert 'Batches/progress/windows alone do not require A' in task['role_contract']
     # A's complete optional proposal is the same bound original, not a rewritten
     # four-comparison quota or a substituted scientific question.
     assert c.read(record/'science-output.json')['worker_request']['return_point'] == 'Return to A after the four comparisons.'
@@ -201,11 +225,12 @@ def test_improve_a_comparison_recipe_preserves_local_scientific_iterations_and_o
         prompt, _, schema = native.render_scientific_request(job, task, intent, backend_name='codex',
             instruction_transport='prompt')
         assert prompt.count(guidance.STAGE_PLANNING['W']) == 1
-        assert 'Within H: observe, design/run small batches, compare, adapt' in prompt
-        assert 'unresolved judgment, discriminator, decision-changing outcomes' in prompt
-        assert 'Return with limits if answered, low value/cost or insufficient token/time' in prompt
-        assert 'stage_intent:continue|review|decision' in prompt
-        assert schema['properties']['stage_intent']['enum'] == ['continue', 'review', 'decision']
+        assert 'W owns sustained research direction/design/adaptation' in prompt
+        assert 'H for hypotheses' in prompt and 'A for a decision-changing judgment' in prompt
+        assert 'from observations and residuals' in prompt
+        assert 'Revisit breadth for conflict/stall' in prompt
+        assert 'stage_intent:continue|handoff|revise_h|review|decision' in prompt
+        assert schema['properties']['stage_intent']['enum'] == ['continue', 'handoff', 'revise_h', 'review', 'decision']
         assert 'next_action' not in schema['properties']
     frozen = {path: path.read_bytes() for path in (root/'jobs/004.json', work/'science-task.json')}
     monkeypatch.setitem(guidance.WORK_UNITS, 'improve', 'Future guidance must not replace this accepted work unit.')
@@ -262,7 +287,7 @@ def test_existing_mechanism_pressure_tests_and_diagnostics_route_directly_to_bat
     assert search.launch_reason(root, job) is None
     state = search.project(root, 4)
     assert set(state['mechanisms']) == {'h001.m1', 'h001.m2'}
-    assert all(row['original_h'] == row['source_h'] == 1 for row in state['mechanisms'].values())
+    assert all(row['original_step'] == row['source_step'] == 1 for row in state['mechanisms'].values())
     assert c.read(c.host_record(c.workspace(root, 1)) / 'science-output.json')['search_plan'] == h_choice
     context = task['decision_context']
     assert context['source_action'] == 'continue_w'
@@ -276,45 +301,108 @@ def test_existing_mechanism_pressure_tests_and_diagnostics_route_directly_to_bat
     prompt, _, _ = native.render_scientific_request(job, task, {}, backend_name='codex',
         instruction_transport='prompt')
     assert prompt.count(guidance.STAGE_PLANNING['W']) == 1
-    assert 'Finish useful implementation/tuning/controls/checks before independent A' in prompt
+    for retained in ('runnable candidates/helpers', 'negatives', 'exact originals'):
+        assert retained in prompt
     assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
 @pytest.mark.parametrize('action', ['screen', 'validate', 'repair'])
-def test_a_bounded_work_units_do_not_gain_improve_followup_authority(tmp_path, action):
-    root, instruction, _ = comparison_recipe_stage(tmp_path, action)
+def test_a_bounded_work_proposals_retain_w_research_focus(tmp_path, action):
+    root, instruction, record = comparison_recipe_stage(tmp_path, action)
     job = c.build_job(root, 4, 'W', [1, 2, 3], instruction=instruction)
     task = c.read(c.workspace(root, 4)/'science-task.json')
-    if action == 'repair':
-        # A's request cannot manufacture an exact failed observation or a
-        # launchable repair focus. The original denial remains authoritative.
-        assert job['search']['focus'] is None
-        assert 'scientific_work_unit' not in job
-        denials = [row['code'] for row in job['search']['intent_diagnostics']]
-        assert any(code.startswith('search_repair_source_') for code in denials)
-        assert search.launch_reason(root, job) == denials[0]
-    else:
-        assert job['search']['focus']['action'] == action
-        assert job['scientific_work_unit'] == guidance.WORK_UNITS[action]
-        assert guidance.WORK_UNITS[action] in task['question']
+    # A's proposal remains authored context. It cannot turn W's retained
+    # improve scope into screening, validation or repair authority.
+    assert job['search']['focus']==dict(mechanism_ref='h001.m1',action='improve')
+    assert job['scientific_work_unit']==guidance.WORK_UNITS['improve']
+    assert guidance.WORK_UNITS['improve'] in task['question']
+    assert 'original user/task constraints' in task['question']
+    assert 'frozen dispatch/catalog' in task['question']
+    assert search.launch_reason(root,job) is None
+    original=c.read(record/'science-output.json')
+    assert original['search_review']['next_focus']['action']==action
+    assert original['decision_request']['question']=='Which related change resolves the target-condition gap?'
+    assert original['decision_request']['change_criterion']=='Retained fair controls show that the target-condition gap is resolved.'
+    assert task['decision_context']['source_original']=='inputs/parents/003/conclusion.json'
+    assert task['decision_context']['original_instruction']==instruction
     assert 'return-after-comparison' not in task['decision_context']['authority']
     assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
-    assert guidance.WORK_UNITS['improve'] not in task['question']
+    assert guidance.WORK_UNITS[action] not in task['question']
 
 
-def test_a_mechanism_revision_keeps_h_ownership_without_w_followup_authority(tmp_path):
+@pytest.mark.parametrize('action,question_start', [
+    ('improve', 'Own sustained experiment design'),
+    ('validate', 'Own sustained experiment design'),
+])
+def test_a_work_intent_survives_real_science_projection_and_native_rendering(tmp_path, action, question_start):
+    root, instruction, record = comparison_recipe_stage(tmp_path, action)
+    job = c.build_job(root, 4, 'W', [1, 2, 3], instruction=instruction)
+    task = c.science_view(job, root)
+    assert task['question'].startswith(question_start)
+    assert task['decision_context']['original_instruction'] == instruction == job['instruction']
+    assert task['decision_context']['source_original'] == 'inputs/parents/003/conclusion.json'
+    assert c.read(record/'science-output.json')['search_review']['next_focus']['action'] == action
+    assert search.launch_reason(root, job) is None
+    assert job['search']['focus']==dict(mechanism_ref='h001.m1',action='improve')
+    assert 'observations, residuals and local relations' in task['question']
+    assert guidance.WORK_UNITS['improve'] in task['question']
+    assert guidance.WORK_UNITS['validate'] not in task['question']
+    for intent in ({}, dict(continuation_kind='fragment')):
+        prompt, _, schema = native.render_scientific_request(job, task, intent,
+            backend_name='codex', instruction_transport='prompt')
+        assert prompt.count(guidance.STAGE_PLANNING['W']) == 1
+        assert job['scientific_work_unit'] in task['question']
+        assert schema['properties']['stage_intent']['enum'] == ['continue', 'handoff', 'revise_h', 'review', 'decision']
+        assert 'next_action' not in schema['properties']
+
+
+@pytest.mark.parametrize('special', [dict(purpose='closeout'), dict(final_report=True),
+    dict(final_only=True), dict(correction_request=dict(reason='Retain exact correction scope.'))])
+def test_special_worker_questions_keep_the_original_instruction(tmp_path, special):
+    root, instruction, _ = comparison_recipe_stage(tmp_path, 'improve')
+    job = c.build_job(root, 4, 'W', [1, 2, 3], instruction=instruction)
+    view = c._science_view(dict(job, **special), None, parent_sources={}, policy={}, qualified_materials=[])
+    assert view['question'] == instruction + '\nWork unit: ' + job['scientific_work_unit']
+
+
+def test_initial_h_improve_instruction_is_retained_with_local_worker_autonomy(tmp_path):
+    root = prepare(tmp_path, guidance.DEFAULT, search_policy=search.DEFAULT_POLICY)
+    instruction = 'Study residual-conditioned solver changes within the retained sparse estimation mechanism.'
+    finish(root, 1, 'H', [], action='experiment', text=instruction, search_choice=dict(
+        scope='Improve sparse estimation', commitments=[dict(label='Sparse estimation', existing_ref=None)],
+        focus=dict(index=1, action='improve')))
+    job = c.build_job(root, 2, 'W', [1], instruction=instruction)
+    view = c.science_view(job, root)
+    assert view['question'].startswith(instruction + '\n')
+    assert job['instruction'] == instruction
+    assert 'decision_context' not in view
+    assert job['search']['focus'] == dict(mechanism_ref='h001.m1', action='improve')
+    for scope in ('original user/task constraints', 'frozen dispatch/catalog',
+            'Propose revisions', 'seal before a new W freezes'):
+        assert scope in view['question']
+    assert 'assigned H scope' not in view['question']
+    assert job['scientific_work_unit'] == guidance.WORK_UNITS['improve']
+
+
+def test_a_revision_request_retains_exact_h_input_without_frozen_h_authority(tmp_path):
     root, instruction, _ = comparison_recipe_stage(tmp_path, 'improve', next_action='revise_h')
     job = c.build_job(root, 4, 'H', [1, 2, 3], instruction=instruction)
     task = c.read(c.workspace(root, 4)/'science-task.json')
     assert task['decision_context']['source_action'] == 'revise_h'
     assert task['decision_context']['original_instruction'] == instruction
-    assert 'H owns mechanism revision' in task['decision_context']['authority']
+    assert 'H offers revisable hypotheses/directions' in task['decision_context']['authority']
+    assert 'Original user/task constraints' in task['decision_context']['authority']
+    assert 'frozen dispatch/catalog' in task['decision_context']['authority']
+    assert 'H owns high-level methods/directions' not in task['decision_context']['authority']
+    assert 'assigned H scope' not in task['decision_context']['authority']
     assert 'related observation-driven follow-ups' not in task['decision_context']['authority']
-    assert 'Revise the qualitative mechanism matrix' in task['question']
+    assert 'Revise high-level scientific methods/directions' in task['question']
+    assert 'direct W observations/counterevidence' in task['question']
+    assert 'provisional H judgments' in task['question']
     assert guidance.WORK_UNITS['improve'] not in task['question']
 
 
-def test_initial_screen_keeps_its_independent_assessment_boundary(tmp_path):
+def test_initial_screen_keeps_comparison_scope_without_forcing_exhaustion(tmp_path):
     root = prepare(tmp_path, guidance.DEFAULT, search_policy=search.DEFAULT_POLICY)
     finish(root, 1, 'H', [], action='experiment', search_choice=dict(
         scope='Compare mechanisms before selecting a main line',
@@ -325,9 +413,16 @@ def test_initial_screen_keeps_its_independent_assessment_boundary(tmp_path):
     task = c.read(c.workspace(root, 2)/'science-task.json')
     assert job['scientific_work_unit'] == guidance.WORK_UNITS['screen']
     assert set(search.project(root, 2)['mechanisms']) == {'h001.m1', 'h001.m2'}
-    assert 'Shallow-screen all assigned mechanisms fairly before deepening any' in task['question']
-    assert 'only discriminators needed for this comparison' in task['question']
+    assert job['search']['focus']==dict(mechanism_ref='h001.m1',action='screen')
+    assert {row['mechanism_ref'] for row in job['search']['coverage_obligation']}=={'h001.m1','h001.m2'}
+    for concept in ('fair controls', 'Reuse adequate evidence', 'observations and obstacles'):
+        assert concept in task['question']
+    assert 'Calls alone do not establish screening' in task['question']
+    assert 'before deepening any' not in task['question']
     assert guidance.WORK_UNITS['improve'] not in task['question']
     assert 'decision_context' not in task
-    assert 'Return to independent A, not global completion' in job['native_role_instruction']
-    assert task['stage_response'].startswith('stage_intent: review=A|decision=partial|continue=work.')
+    assert 'Handoff freezes new/revised mechanisms without A' in job['native_role_instruction']
+    assert 'Batches/progress/windows alone do not require A' in task['role_contract']
+    for route in ('continue=same W', 'handoff=', 'revise_h=H', 'review=A evidence', 'decision=request A assessment'):
+        assert route in task['stage_response']
+    assert 'new W' in task['stage_response']

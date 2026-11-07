@@ -101,7 +101,7 @@ and [configuration reference](docs/RESEARCH_CONFIGURATION.md).
 [Architecture](docs/ARCHITECTURE.md) · [Release scope](docs/RELEASE.md) ·
 [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-The current runtime accepts protocol **29** instances only; earlier formats have
+The current runtime accepts protocol **33** instances only; earlier formats have
 no compatibility reader or migration. Node token targets are advisory, while shared
 admission budgets and finite execution limits remain enforced. The
 [architecture](docs/ARCHITECTURE.md) owns the detailed completion, permission,

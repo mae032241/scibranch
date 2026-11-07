@@ -124,12 +124,12 @@ def test_single_absolute_codex_uses_native_protection(services):
 
 
 def test_standard_name_cannot_override_hint_only_permission_summary(services, monkeypatch):
-    summary = backends.permission_summary
-    def hint_only(settings):
-        value = summary(settings)
+    summary = backends.Codex.permissions
+    def hint_only(self,settings):
+        value = summary(self,settings)
         value['enforcement'] = dict.fromkeys(value['enforcement'], 'hint_only')
         return value
-    monkeypatch.setattr(backends, 'permission_summary', hint_only)
+    monkeypatch.setattr(backends.Codex, 'permissions', hint_only)
     service = services(config=dict(model='reading-model'))
     assert service.settings()['supported'] is False
     assert service.start(['source'])['status'] == 'unsupported'
@@ -218,7 +218,7 @@ def test_standard_codex_actual_argv_explicit_start_and_durable_cache(services, f
     assert 'features.shell_tool=false' in configs and 'tools.view_image=false' in configs
     assert 'shell_environment_policy.inherit="none"' in configs
     assert not {'PYTHONPATH', 'GIT_DIR', 'SSH_AUTH_SOCK', 'SCID_PRIVATE_CONTEXT', 'CUSTOM_APP_SECRET'} & set(invocation['environment_keys'])
-    assert set(invocation['environment_keys']) <= set(translation._ENVIRONMENT_KEYS) | {'LC_CTYPE'}
+    assert set(invocation['environment_keys']) <= set(backends.Codex.READONLY_ENVIRONMENT_KEYS) | {'LC_CTYPE'}
     sandbox = next(value for value in configs if value.startswith('sandbox_workspace_write='))
     assert '"network_access"=false' in sandbox and '"writable_roots"=[]' in sandbox
     assert configs.count('developer_instructions=' + json.dumps(translation._INSTRUCTION)) == 1
@@ -304,3 +304,91 @@ def test_configuration_change_keeps_inflight_profile_and_serial_worker(services,
     assert [[field['text'] for field in json.loads(row['prompt'])['fields']] for row in invocations] == [row[2] for row in observed]
     service.configure(dict(model='first-model', target_language='zh-CN'))
     assert service.lookup(['source'])['entries'][0]['translation'] == 'zh-CN:source'
+
+
+def test_registered_readonly_provider_owns_defaults_launch_and_environment(services, monkeypatch, tmp_path):
+    calls=[]
+    class Independent(backends.Protocol):
+        name='independent_readonly_fixture'
+        @staticmethod
+        def default_launcher(): return ['independent-reader']
+        @classmethod
+        def readonly_capability(cls,settings):
+            permissions=cls(settings).permissions(settings)
+            return dict(status='supported',reason='',permissions=permissions)
+        def launch_readonly(self,profile,work,pending,schema,instruction):
+            calls.append((dict(profile),list(self.settings['native_launcher_argv'])))
+            assert instruction==translation._INSTRUCTION
+            return [*self.settings['native_launcher_argv'],'--own-readonly',str(pending)],dict(OWN_READONLY_ENV='selected')
+        def acquire_response_file(self,pending,*,max_bytes):
+            return pending.read_bytes()[:max_bytes]
+    monkeypatch.setitem(backends._PROVIDERS,Independent.name,Independent)
+    def forbidden(*args,**kwargs):
+        pytest.fail('Independent translation selected the Codex readonly transport')
+    for name in ('default_launcher','readonly_capability','launch_readonly','acquire_response_file'):
+        monkeypatch.setattr(backends.Codex,name,forbidden)
+    service=services(config=dict(backend=Independent.name,model='independent-model'))
+    def invoke(adapter,args,request,work,pending,timeout,*,environment):
+        assert isinstance(adapter,Independent)
+        assert args==['independent-reader','--own-readonly',str(pending)]
+        assert environment==dict(OWN_READONLY_ENV='selected')
+        packet=json.loads(request)
+        assert packet['profile']['model']=='independent-model'
+        assert json.loads(packet['prompt'])['fields']==[dict(id='0',text='Exact original')]
+        assert packet['response_schema']['properties']['translations']['maxItems']==1
+        return dict(translations=[dict(id='0',text='独立译文')]),dict(input_tokens=2,cached_input_tokens=0,output_tokens=3)
+    monkeypatch.setattr(service,'_invoke',invoke)
+    translated,usage=service._translate(service._config,['Exact original'])
+    assert translated==['独立译文'] and usage['output_tokens']==3
+    assert calls==[(dict(model='independent-model',reasoning_effort=None,service_tier=None),['independent-reader'])]
+    service.configure(dict(launcher_argv=['exact-custom-reader'],target_language='en'))
+    service.configure(dict(target_language='ja'))
+    assert service._config['launcher_argv']==['exact-custom-reader']
+    class Other(Independent):
+        name='other_readonly_fixture'
+        @staticmethod
+        def default_launcher(): return ['other-reader']
+        @classmethod
+        def readonly_capability(cls,settings):
+            return dict(status='unsupported',reason='No readonly enforcement',permissions=cls(settings).permissions(settings))
+    monkeypatch.setitem(backends._PROVIDERS,Other.name,Other)
+    service.configure(dict(backend=Other.name))
+    assert service._config['launcher_argv'] is None
+    assert translation._native_settings(service._config)['native_launcher_argv']==['other-reader']
+    monkeypatch.setattr(translation.subprocess,'Popen',forbidden)
+    assert service.start(['Do not launch'])['status']=='unsupported'
+    assert not service._queue and not service._inflight
+
+
+@pytest.mark.process_e2e
+def test_registered_readonly_provider_reads_its_own_response_file(services, monkeypatch, tmp_path):
+    import sys
+    program=tmp_path/'independent_reading.py'
+    program.write_text('''import json,pathlib,sys
+request=json.loads(sys.stdin.read())
+fields=json.loads(request['prompt'])['fields']
+pathlib.Path(sys.argv[1]).write_text(json.dumps(dict(translations=[dict(id=row['id'],text='own:'+row['text']) for row in fields])))
+print(json.dumps(dict(type='completed',usage=dict(input_tokens=1,output_tokens=2))),flush=True)
+''')
+    calls=[]
+    class Independent(backends.Protocol):
+        name='independent_readonly_process_fixture'
+        @staticmethod
+        def default_launcher(): return [sys.executable,'-I',str(program)]
+        @classmethod
+        def readonly_capability(cls,settings):
+            # This local transport fixture tests dispatch, not isolation.
+            return dict(status='supported',reason='',permissions=cls(settings).permissions(settings))
+        def launch_readonly(self,profile,work,pending,schema,instruction):
+            return [*self.settings['native_launcher_argv'],str(pending)],{}
+        def acquire_response_file(self,pending,*,max_bytes):
+            calls.append('own-response')
+            with pending.open('rb') as stream:return stream.read(max_bytes+1)
+    monkeypatch.setitem(backends._PROVIDERS,Independent.name,Independent)
+    def forbidden(*args,**kwargs):pytest.fail('Independent response used Codex transport')
+    for name in ('default_launcher','readonly_capability','launch_readonly','acquire_response_file'):
+        monkeypatch.setattr(backends.Codex,name,forbidden)
+    service=services(config=dict(backend=Independent.name,model='independent-model'))
+    service.start(['Original'])
+    assert wait_for_entry(service,'Original')==dict(source='Original',translation='own:Original',status='cached')
+    assert calls==['own-response']

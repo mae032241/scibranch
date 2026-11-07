@@ -28,7 +28,8 @@ def case(tmp_path, monkeypatch, outcome='known_success', executor='remote_execut
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_native(root,2,record,dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
     config_path=c.workspace(root,2)/'work/experiment-config.json'
     options=dict(outcome=outcome) if executor.startswith('remote_') else dict(run_argv=[sys.executable])
     options.update(extra or {})

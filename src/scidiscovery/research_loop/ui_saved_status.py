@@ -1,8 +1,12 @@
 """Display saved control records without invoking scientific admission readers."""
 import copy
+import json
 import math
+import os
+import re
+import stat
 
-from . import accepted_search, budget, contracts as c, instance_display as display, native_usage, runtime
+from . import accepted_search, budget, budget_limits, contracts as c, instance_display as display, native_usage, runtime
 from .ui_view import memo_lock, native_completed
 
 
@@ -190,7 +194,11 @@ def _node(root, step, job, memo=None):
         {'permanent', 'temporary', 'incomplete', 'unknown'} else 'unknown',
         codes=[code for code in failure.get('codes', []) if code in known_codes],
         statuses=[status for status in failure.get('statuses', []) if type(status) is int and 100 <= status <= 599]) if failure else None
+    from . import continuation
+    technical_stop=continuation.technical_stop_from_facts(job,outcome,attempt=len(records)-1,
+        blocked_reason='technical_restart_recheck_required')
     return dict(step=step, role=job['role'], state=state, continuations=len(records) - 1,
+        **(dict(technical_stop=technical_stop) if technical_stop is not None else {}),
         **(dict(automatic_recovery=shown) if shown is not None else {}),
         stop_reason=outcome.get('stop_reason'), returncode=outcome.get('returncode'),
         terminal_observed=outcome.get('terminal_observed'), cleanup=outcome.get('cleanup'),
@@ -201,8 +209,11 @@ def _node(root, step, job, memo=None):
 def _usage(root, numbers, memo=None):
     totals = dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     unknown = []
+    latest = None
     for step in numbers:
         for record in attempts(root, step):
+            if numbers and step == numbers[-1]:
+                latest = (step, record, {})
             if not (record / 'native-intent.json').exists():
                 continue
             sealed = (root / 'native-evidence' / f'{step:03d}' / 'result-identity.json').exists()
@@ -210,7 +221,11 @@ def _usage(root, numbers, memo=None):
             cache = memo if terminal else None
             value = _saved_read(record / 'usage.json', cache)
             outcome = _native_outcome(record, memo)
-            metadata = outcome.get('metering') or _saved_read(record / 'usage-observation.json', cache) or {}
+            observation = ((_saved_read(record / 'usage-observation.json', cache) or {})
+                if not outcome.get('metering') or step == numbers[-1] else {})
+            metadata = outcome.get('metering') or observation
+            if numbers and step == numbers[-1]:
+                latest = (step, record, observation)
             if value is None or metadata.get('coverage') == 'unknown':
                 if step not in unknown:
                     unknown.append(step)
@@ -220,13 +235,11 @@ def _usage(root, numbers, memo=None):
     observed = totals['input_tokens'] + totals['output_tokens']
     context = dict(status='unavailable')
     measurement_status = native_usage.measurement_status(None)
-    if numbers:
-        step = numbers[-1]
-        record = attempts(root, step)[-1]
-        metadata = _read(record / 'usage-observation.json', {})
+    if latest is not None:
+        step, record, metadata = latest
         measurement_status = native_usage.measurement_status(metadata)
-        if metadata.get('coverage') in {'live', 'terminal'}:
-            context = native_usage.context(metadata.get('context'))
+        # Current context is independent of cumulative billing coverage.
+        context = native_usage.context(metadata.get('context'))
         context.update(step=step, attempt=0 if record.name == f'{step:03d}' and record.parent.name == 'native-evidence' else int(record.name))
     return dict(totals, observed_tokens=observed, accounted_tokens=observed, unknown_steps=unknown,
         **native_usage.breakdown(totals), context=context, measurement_status=measurement_status,
@@ -304,9 +317,47 @@ def _budget(root, settings, events):
     return dict(limits, original_max_steps=settings['max_steps'], time_budget_basis=basis,
         advance_seconds=durations['advance'], waiting_seconds=durations['waiting'], paused_seconds=durations['paused'],
         unclassified_seconds=durations['unclassified'], elapsed_seconds=elapsed, consumed_seconds=consumed,
-        seconds_remaining=max(0., limits['max_seconds'] - consumed) if consumed is not None else None,
+        seconds_remaining=budget_limits.remaining(limits['max_seconds'], consumed) if consumed is not None else None,
         time_status='recorded' if consumed is not None else 'unknown', clock_phase=phase, ledger_events=len(events),
         **(dict(unmeasured_shutdown_tail=True) if unmeasured_tail else {}))
+
+
+def _live_executions(root, job):
+    """Read one current W owner's bounded display view, without querying work."""
+    if job is None or job.get('role')!='W':return None
+    from . import experiment_client
+    unavailable=dict(step=job['step'],coverage='unknown',calls=[],counts={},
+        limitation='当前执行观察未提供；旧记录不会通过扫描或远端查询补建。')
+    path=experiment_client._record_directory_from_facts(root,job['step'],job)/'live-status.json'
+    try:
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+        with os.fdopen(fd,'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):return unavailable
+            raw=stream.read(65537)
+        if len(raw)>65536:return unavailable
+        value=json.loads(raw)
+        if (not isinstance(value,dict) or value.get('version')!=1
+                or (value.get('scope') or {}).get('step')!=job['step']
+                or value.get('source')!='execution_receipt_owner'
+                or type(value.get('partial')) is not bool
+                or not isinstance(value.get('calls'),dict) or len(value['calls'])>128):return unavailable
+        states={'accepted','submitted','queued','running','cancelling','known_success',
+            'known_failed','not_submitted','unknown'}
+        rows=[];counts=dict.fromkeys(sorted(states),0)
+        for identity,row in value['calls'].items():
+            if (not isinstance(identity,str) or re.fullmatch(r'[A-Za-z0-9._-]{1,128}',identity) is None
+                    or not isinstance(row,dict) or row.get('state') not in states
+                    or row.get('attempt') is not None and (type(row['attempt']) is not int or row['attempt']<0)
+                    or type(row.get('updated_at')) not in (int,float)
+                    or not 0<=row['updated_at']<=2**53-1):return unavailable
+            counts[row['state']]+=1
+            rows.append(dict(call_id=identity,state=row['state'],attempt=row['attempt'],updated_at=row['updated_at']))
+        rows.sort(key=lambda row:row['updated_at'],reverse=True)
+        return dict(step=job['step'],coverage='partial' if value['partial'] else 'observed',
+            counts=counts,calls=rows[:20],omitted_count=max(0,len(rows)-20),
+            limitation='执行状态来自本地调用收据与已有生命周期观察；不表示科学认可。'
+                +(' 覆盖不完整，计数为已观察下界。' if value['partial'] else ''))
+    except (OSError,ValueError,TypeError,KeyError,AttributeError,RecursionError):return unavailable
 
 
 def _correction(root):
@@ -495,14 +546,16 @@ def status(root, *, after=0, limit=None, memo=None):
     selected = [step for step in visible if step > after]
     if limit is not None:
         selected = selected[:limit]
-    nodes = [_node(root, step, c.read(root / 'jobs' / f'{step:03d}.json'), memo) if step in numbers else
+    jobs={step:c.read(root/'jobs'/f'{step:03d}.json') for step in selected if step in numbers}
+    nodes = [_node(root, step, jobs[step], memo) if step in numbers else
         dict(step=step, role=originals.source_job(originals.node(root, step))['role'],
              state='seal_present_unverified', inherited=True) for step in selected]
     last = selected[-1] if selected else after
     usage_value=_usage(root,numbers,memo);budget_value=_budget(root,settings,events)
+    executions=_live_executions(root,jobs.get(numbers[-1]) if numbers else None)
     closeout_value = closeout(root, events, numbers)
     return dict(portfolio_metrics=portfolio_metrics(root,numbers,usage_value,budget_value,memo=memo),instance=str(root), goal_id=settings['goal_id'], objective=settings['objective'],
-        paused=(root / 'pause.request').exists(), nodes=nodes, usage=usage_value,
+        paused=(root / 'pause.request').exists(), nodes=nodes, usage=usage_value,live_executions=executions,
         budget=budget_value, correction=_correction(root), closeout=closeout_value,
         result_step=(closeout_value or {}).get('result_step'),
         closeout_preparation=None, goal_completion='not_asserted', after=after,

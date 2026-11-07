@@ -1,4 +1,4 @@
-"""Explicit local result declarations projected into existing candidate bindings."""
+"""Explicit managed result declarations projected into existing candidate bindings."""
 import math
 from pathlib import Path
 
@@ -69,7 +69,7 @@ def candidates(rows, *, diagnostics=None):
 
 
 def sources(root, fact, candidate_id, *, source=None):
-    """Resolve only a declared local candidate, from its exact sealed call archive."""
+    """Resolve only a declared managed candidate, from its exact sealed call archive."""
     from . import originals, candidate_refs
     if source is None:
         source = originals.node(root, fact['managed_calls'][0]['scope']['step']) if fact.get('managed_calls') else None
@@ -117,11 +117,17 @@ def sources(root, fact, candidate_id, *, source=None):
     if sum(item==declaration for item in completed_declarations)!=1:
         raise ValueError('Managed candidate differs from completed result')
     objects['artifact'] = objects['outputs/' + declaration['artifact'].removeprefix('artifacts/')]
+    replay = {}
+    entry = accepted.get('entry', accepted.get('code_version', {}).get('entry'))
+    if entry is not None:replay['entry'] = entry
+    if isinstance(accepted.get('arguments'), list):
+        replay['arguments'] = list(accepted['arguments'])
+    elif 'command' in accepted and 'script_index' in accepted:
+        replay['arguments'] = accepted['command'][accepted['script_index'] + 1:]
     return dict(candidate_id=candidate_id, status='audit_pending',
         ledger=proof(row['completed']), objects=objects,
         context=dict(kind='managed_local_result', call_id=row['call_id'],
-            replay=dict(entry=accepted.get('entry',accepted.get('code_version',{}).get('entry')),
-                arguments=accepted['command'][accepted['script_index'] + 1:]),
+            **(dict(replay=replay) if replay else {}),
             **(dict(source_code_version=dict(accepted['code_version']),
                 accepted={key:row['accepted'][key] for key in ('path','size_bytes')}) if 'code_version' in accepted else {}),
             candidate=declaration, metrics=completed['result']['metrics'],

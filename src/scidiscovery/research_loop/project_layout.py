@@ -20,7 +20,6 @@ from .storage_policy import Deadline, StorageQuotaExceeded
 
 MAX_ROOTS = 64
 MAX_ENTRIES = 100_000
-MAX_METADATA_BYTES = 32 * 1024 * 1024
 MAX_PATH_BYTES = 4096
 SECONDS = 65
 _FIELDS = {'base_root', 'editable', 'scratch', 'outputs'}
@@ -179,12 +178,13 @@ def _git(root, arguments, *, context, output_limit=4096, worktree=True):
             while selector.get_map():
                 for key, _ in selector.select(min(.1, deadline.remaining_seconds())):
                     buffer, limit = key.data
-                    chunk = os.read(key.fd, min(65536, limit - len(buffer) + 1))
+                    stdout = key.fileobj is process.stdout
+                    chunk = os.read(key.fd, min(65536, limit - len(buffer) + 1) if stdout else 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
                     else:
-                        buffer.extend(chunk)
-                        if len(buffer) > limit:
+                        buffer.extend(chunk if stdout else chunk[:max(0, limit - len(buffer))])
+                        if stdout and len(buffer) > limit:
                             raise StorageQuotaExceeded('Project Git metadata capability limit exceeded')
             result = process.wait(timeout=deadline.remaining_seconds())
         if result:
@@ -267,17 +267,20 @@ def _base_view(project, *, context, exclude):
     # check may refresh index stat-cache metadata, so anchor controls afterward.
     _control(root)
     pathspec = ('.', *(':(top,literal,exclude)' + item for item in exclude))
+    # Every admitted name already has a path/count bound. This envelope covers
+    # all such listings without imposing an independent aggregate byte quota.
+    metadata_limit = MAX_ENTRIES * (MAX_PATH_BYTES + 128)
     dirty = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--', *pathspec),
-                 context=context, output_limit=MAX_METADATA_BYTES)
+                 context=context, output_limit=metadata_limit)
     anchors, controls = _control(root)
     identity = _identity(root, context)
     if identity != project['base_identity']:
         raise ValueError('Project HEAD changed from the frozen base identity')
     index = _listing(_git(root, ('ls-files', '--stage', '-z'), context=context,
-                         output_limit=MAX_METADATA_BYTES), index=True,
+                         output_limit=metadata_limit), index=True,
                      object_format=identity['object_format'], context=context)
     tree = _listing(_git(root, ('ls-tree', '-r', '-z', '--full-tree', identity['commit']),
-                        context=context, output_limit=MAX_METADATA_BYTES), index=False,
+                        context=context, output_limit=metadata_limit), index=False,
                     object_format=identity['object_format'], context=context)
     if index != tree:
         raise ValueError('Project Git index differs from frozen HEAD; staged changes are unsupported')

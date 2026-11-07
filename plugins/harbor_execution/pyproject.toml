@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scidiscovery-harbor-execution"
+version = "0.1.1"
+description = "Managed experiments in an original Harbor-owned Docker task container"
+requires-python = ">=3.10"
+dependencies = ["scidiscovery>=0.1.1"]
+
+[project.optional-dependencies]
+harbor = ["harbor==0.25.0"]
+
+[project.entry-points."scidiscovery.execution_interfaces"]
+harbor_execution = "harbor_execution.experiments:REGISTRATION"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harbor_execution*"]
+
+[tool.setuptools.package-data]
+harbor_execution = ["examples/*.toml", "examples/*.json"]

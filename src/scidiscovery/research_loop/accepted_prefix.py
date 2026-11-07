@@ -167,7 +167,7 @@ def _write_once(path, value):
 
 def _public_entity(kind,row):
     fields={'mechanism':('mechanism_ref','ordinal','origin_ref','label','minimal_test','status',
-        'source_h','original','planned_step','accepted_calls','remaining','next_remaining','participated_cycles'),
+        'source_step','source_role','original','planned_step','accepted_calls','remaining','next_remaining','participated_cycles'),
         'work':('work_ref','status','mechanism_refs','reason','source_a','selected_step','execution_step'),
         'candidate':('public_reference','first_step')}
     value={key:row[key] for key in fields[kind] if key in row}
@@ -221,6 +221,7 @@ def fork_seed(root,settings,*,search_seed,identity_root):
                 if not target.samefile(original):raise ValueError('Fork scientific alias changed its original')
             else:os.link(original,target,follow_symlinks=False)
         _write_once(directory/'index.json',nav)
+        _write_once(directory/'research.json',nav['research'])
         value=dict(old,branch=prefix['branch'],storage_root=str(Path(identity_root)/originals.FORK_DIRECTORY),
             scientific_event=event_ref)
         _write_once(_member_path(root,prefix,value['origin_identity'],value['step']),value)
@@ -266,7 +267,7 @@ def _publish_breadth(directory,summary,*,candidate_references=None):
         from . import originals
         source_key=originals.identity_key(row['source_origin_identity'])
         rows.append(_public_entity('mechanism',dict(row,mechanism_ref=ref,
-            original=f'inputs/history/nodes/{source_key}/{row["source_h"]:03d}/scientific-original.json')))
+            original=f'inputs/history/nodes/{source_key}/{row["source_step"]:03d}/scientific-original.json')))
     references={} if candidate_references is None else candidate_references
     c.write(Path(directory)/'breadth-table.json',dict(version=1,mechanisms=rows,
         nominations=candidate_nominations.source_table_projection(summary,
@@ -275,7 +276,7 @@ def _publish_breadth(directory,summary,*,candidate_references=None):
 
 def prepare_node(root, job, payload, seal, *, inventory):
     """Prepare this node's mechanical publication before its acceptance marker."""
-    from . import accepted_budget, accepted_search, contracts as c, originals,history,candidate_refs
+    from . import accepted_budget, accepted_search, contracts as c, originals,history,candidate_refs,lineage,budget
     root=Path(root)
     if inventory.base is None or inventory.policy is None or inventory.head is None:
         raise ValueError('Scientific publication requires its produced base, policy and head')
@@ -295,14 +296,35 @@ def prepare_node(root, job, payload, seal, *, inventory):
     base=f'nodes/{key}/{job["step"]:03d}'
     prior=navigation(root,prefix)
     recent=([*prior.get('recent',[])] if prior else [])[-1:]
-    item=dict(step=job['step'],role=job['role'],summary=payload['summary'][:512],
-        limitations=payload.get('limitations',[])[:4],original=f'inputs/history/{base}/science.json')
+    item=dict(step=job['step'],role=job['role'],**lineage.authored_excerpt(payload),
+        original=f'inputs/history/{base}/science.json')
     recent.append(item)
     observation=inventory.observation_document if seal.get('observations') else None
+    budget_fraction=None
+    completion_fraction=None
+    basis=inventory.policy.get('supervision_budget_basis')
+    if inventory.policy.get('supervision_policy') is not None and basis is not None:
+        observed=accepted_budget.usage(root,head=state)
+        limits=budget._snapshot(root,inventory.base,accepted_budget.AcceptedEvents(state))
+        budget_fraction=budget.supervision_fraction(initial_tokens=basis['max_tokens'],
+            initial_seconds=basis['max_seconds'],
+            observed_tokens=observed.get('accounted_tokens',observed['observed_tokens']),
+            active_seconds=limits['consumed_seconds'])
+        # Reported lower bounds can prove a crossed trigger despite metering
+        # gaps. They cannot establish consumption at A completion: filling an
+        # old gap later must not masquerade as new post-review consumption.
+        token_complete=(basis['max_tokens'] is None or
+            observed.get('unknown_step_count')==0 and observed.get('blocking_unknown_count')==0
+            and not observed.get('unknown_steps') and not observed.get('blocking_unknown_steps'))
+        time_complete=(basis['max_seconds'] is None or
+            limits['consumed_seconds'] is not None and not limits.get('unmeasured_shutdown_tail'))
+        if token_complete and time_complete:
+            completion_fraction=budget_fraction
     search_delta=accepted_search.prepare_node_from_facts(root,job,payload,seal,summary=state['search'],
         lookup=lambda name:accepted_budget.search_row(root,name,head=state),
         usage_lookup=lambda number:accepted_budget.native_usage_row(root,number,head=state),
-        observation=observation,policy=inventory.policy,origin=origin)
+        observation=observation,delivery_facts=inventory.delivery,policy=inventory.policy,origin=origin,
+        budget_fraction=budget_fraction,completion_fraction=completion_fraction)
     snapshot=root/'native-evidence'/f'{job["step"]:03d}'/'breadth-snapshot.json'
     _write_once(snapshot,search_delta['summary'])
     snapshot_ref=dict(origin_identity=origin,path=snapshot.relative_to(root).as_posix(),size_bytes=snapshot.stat().st_size)
@@ -335,6 +357,8 @@ def prepare_node(root, job, payload, seal, *, inventory):
         implementations=[dict(id=f'{job["role"]}{job["step"]:03d}-I{index:03d}',
             label=Path(row['path']).name) for index,row in enumerate(sorted(seal['materials'],key=lambda row:row['path']),1)],
         scope='Accepted authored science and exact implementation locators; no inherited qualification.')
+    node['research']=lineage.research_navigation(prior['research'] if prior else {},job,payload,node_path=base,
+        supervision_state=search_delta['summary'])
     node['entities']=[]
     for name,row in search_delta['rows'].items():
         parts=name.split('/',2)
@@ -404,6 +428,7 @@ def commit_node_from_facts(root, pending, *, base, head, seal):
             if not raw_alias.samefile(original):raise ValueError('Accepted public scientific original changed')
         else:os.link(original,raw_alias,follow_symlinks=False)
         _write_once(directory/'index.json',pending['node'])
+        _write_once(directory/'research.json',pending['node']['research'])
         for public,canonical in pending['candidate_aliases'].items():
             _write_once(_key_file(root/MEMBERS/_view_key(prefix)/'candidate-aliases',public),dict(candidate_id=canonical))
         for identity,value in pending['implementation_candidates'].items():

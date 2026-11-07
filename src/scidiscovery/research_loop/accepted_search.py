@@ -7,6 +7,7 @@ node/call/candidate facts retain their existing exact-original addresses.
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,7 +16,7 @@ VERSION = 2
 
 
 def key(kind, identity):
-    if kind not in {'mechanism', 'ordinal', 'work', 'candidate', 'node', 'call', 'cycle', 'due', 'judgment', 'repair'}:
+    if kind not in {'mechanism', 'ordinal', 'work', 'candidate', 'node', 'call', 'cycle', 'due', 'judgment', 'repair', 'round', 'round_call'}:
         raise ValueError('Unknown accepted scientific fact kind')
     if not isinstance(identity, (str, int)) or isinstance(identity, bool):
         raise ValueError('Exact accepted scientific identity required')
@@ -24,6 +25,7 @@ def key(kind, identity):
 
 
 def empty():
+    from . import supervision
     return dict(version=VERSION, node_count=0, mechanism_count=0, pending_count=0,
         remaining_count=0, owed_count=0, candidate_count=0, relation_count=0,
         failed_candidate_count=0, unknown_candidate_count=0, observation_count=0,
@@ -33,7 +35,7 @@ def empty():
         current_h=None,last_h=None,last_w=None,last_science=None,focus=None, allocation=None,
         table=dict(mechanisms={},ordinals=[],remaining=[],nominations=dict(by_mechanism_ref={},latest_extras=[],source_step=None,origin_identity=None)),current_facts={},extra_grant=None,
         opportunity_unknown_count=0, work_count=0, diagnostics=[],
-        pending_work_response=None,
+        pending_work_response=None, supervision=supervision.empty(),
         portfolio=dict(completed_cycle_count=0, pending_w=None, last_branch=None,
             last_branches=[], last_decision_step=None, main_line=None,
             mainline_streak=0, mainline_source=None, overdue_count=0,
@@ -162,16 +164,69 @@ def _record_terminal(delta,fact):
         item['last_terminal']=pointer
 
 
-def prepare_node(root, job, payload, seal, *, summary, lookup, observation, usage_lookup=None):
+def _screen_observations(job, payload, observation, delivery_facts):
+    """Retain eligible exact observations, never a scientific screened verdict.
+
+    The publication owner supplies already qualified delivery and call values.
+    Bind them to this W's frozen mechanism versions before later W declarations
+    can revise the current table. Reusing an observation creates no new call.
+    """
+    from . import worker_delivery
+    if job['role']!='W':return []
+    rows=[]
+    if worker_delivery.applicable(job):
+        if delivery_facts is None:
+            raise ValueError('Accepted screen observations require produced delivery facts')
+        bindings={row['mechanism_ref']:{key:copy.deepcopy(row[key])
+            for key in ('mechanism_ref','source_step','source_ref','source_role')}
+            for row in job['search']['breadth']['mechanisms']}
+        evidence_rows=delivery_facts['evidence']
+        # Resolve the complete original set once: two distinct originals with
+        # the same call_id cannot become an unambiguous authored reference by
+        # considering their rows separately.
+        eligible=worker_delivery.finding_coverage(payload,evidence_rows,bindings)['observed']
+        calls={}
+        for evidence in evidence_rows:
+            parts=Path(evidence['accepted']['path']).parts
+            if len(parts)>=3 and parts[-3]=='calls' and parts[-1]=='accepted.json':
+                calls.setdefault(parts[-2],set()).add(worker_delivery._evidence_key(evidence))
+        referenced={}
+        for finding in payload.get('mechanism_findings',[]) if isinstance(payload.get('mechanism_findings'),list) else []:
+            if not isinstance(finding,dict) or finding.get('basis')!='observed':continue
+            ref=finding.get('mechanism');call=finding.get('call_id')
+            if isinstance(ref,str) and ref in eligible and isinstance(call,str) and len(calls.get(call,()))==1:
+                referenced.setdefault(next(iter(calls[call])),set()).add(ref)
+        for evidence in evidence_rows:
+            refs={evidence['mechanism_ref']}|referenced.get(worker_delivery._evidence_key(evidence),set())
+            for ref in bindings:
+                if ref not in refs or ref not in eligible:continue
+                rows.append(dict(mechanism_binding=bindings[ref],accepted=copy.deepcopy(evidence['accepted'])))
+    else:
+        for call in (observation or {}).get('managed_calls',[]):
+            binding=call.get('mechanism_binding')
+            if binding is not None and call['status'] in {'known_success','known_failed'}:
+                rows.append(dict(mechanism_binding={key:copy.deepcopy(binding[key])
+                    for key in ('mechanism_ref','source_step','source_ref','source_role')},accepted=copy.deepcopy(call['accepted'])))
+    unique={}
+    for row in rows:
+        identity=(row['mechanism_binding']['mechanism_ref'],worker_delivery._evidence_key(row))
+        prior=unique.setdefault(identity,row)
+        if prior!=row:raise ValueError('Accepted screen observation identity changed')
+    return list(unique.values())
+
+
+def prepare_node(root, job, payload, seal, *, summary, lookup, observation, delivery_facts=None, usage_lookup=None,
+        budget_fraction=None, completion_fraction=None):
     """Independent entry: produce this node's policy and exact original owner."""
     from . import contracts as c
     return prepare_node_from_facts(root,job,payload,seal,summary=summary,lookup=lookup,
-        observation=observation,usage_lookup=usage_lookup,policy=c.settings(root,job),
-        origin=_origin(root,job['step']))
+        observation=observation,delivery_facts=delivery_facts,usage_lookup=usage_lookup,policy=c.settings(root,job),
+        origin=_origin(root,job['step']),budget_fraction=budget_fraction,
+        completion_fraction=completion_fraction)
 
 
 def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observation,
-        policy, origin, usage_lookup=None):
+        policy, origin, delivery_facts=None, usage_lookup=None, budget_fraction=None, completion_fraction=None):
     """Copy the small breadth table and apply this accepted original's facts.
 
     ``lookup`` must read at the same canonical accepted head as ``summary``. The
@@ -184,6 +239,14 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
     origin=copy.deepcopy(origin)
     delta = _Delta(summary, lookup)
     current = delta.summary
+    round_bindings=copy.deepcopy(current['table']['mechanisms'])
+    # Selected rows retain the task's exact source versions, even when this W
+    # authors an existing_ref revision before its rounds are accepted. A screen
+    # may additionally select the same frozen prefix's catalog members; those
+    # already-produced pre-update table rows retain their exact source versions.
+    frozen_breadth=(job.get('search') or {}).get('breadth') or {}
+    round_bindings.update({row['mechanism_ref']:copy.deepcopy(row)
+        for row in frozen_breadth.get('mechanisms',[])})
     step, role = job['step'], job['role']
     if delta.get('node', step) is not None:
         raise ValueError('Scientific original is already accepted at this head')
@@ -202,16 +265,17 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
     if role=='W':current['last_w']=step
     current['relation_count'] += len(job.get('direct_refs', [])) + len(seal.get('selected_inputs', []))
     node = dict(step=step, role=role, next_action=payload.get('next_action'),
-        stage_intent=payload.get('stage_intent'), focus=copy.deepcopy((job.get('search') or {}).get('focus')),
+        stage_intent=payload.get('stage_intent'), purpose=job.get('purpose'),evidence_return=copy.deepcopy(job.get('evidence_return')),
+        limitations=copy.deepcopy(payload.get('limitations',[])),delivery=copy.deepcopy(control.get('worker_delivery')),focus=copy.deepcopy((job.get('search') or {}).get('focus')),
         allocation=copy.deepcopy((job.get('search') or {}).get('allocation')),
         breadth=bool((job.get('search') or {}).get('breadth')), assessed=False,portfolio_assessed=False,
         direct_steps=[int(row['path'].split('/')[2]) for row in job.get('direct_refs',[])],
         pending_executions=copy.deepcopy(seal.get('pending_executions')),
         pending_calls=[], pending_namespace_unavailable=False,
-        origin_identity=copy.deepcopy(origin))
+        origin_identity=copy.deepcopy(origin),screen_observations=_screen_observations(job,payload,observation,delivery_facts))
     delta.put('node', step, node)
     request=current['pending_work_response']
-    if request and step==request['source_a']+1:
+    if request:
         author=delta.get('node',request['source_a'])
         expected={'continue_w':'W','revise_h':'H','extract':'E'}.get(author['next_action'])
         direct=any(row['path']==f'inputs/parents/{request["source_a"]:03d}/conclusion.json' for row in job.get('direct_refs',[]))
@@ -221,30 +285,32 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
                 item=delta.get('work',ref)
                 if item is None:raise ValueError('Accepted scientific work request is absent')
                 item['executions'][-1]['response']=dict(source_step=step,role=role,pointer='/scientific_result')
-        current['pending_work_response']=None
+            current['pending_work_response']=None
     if role=='W' and node['focus'] and node['focus']['action']=='repair':
         repair_root=job['search']['repair_root']
         repair=delta.get('repair',repair_root)
         if repair is None:repair=delta.put('repair',repair_root,dict(accepted_count=0))
         repair['accepted_count']+=1
-    if ordinary and role in {'H', 'A'}:
+    consultation=job.get('purpose')=='worker_consultation'
+    producer=search.mechanism_producer(job)
+    if ordinary and producer and (role=='H' and not consultation or isinstance(payload.get('search_plan'),dict)):
         current['last_science'] = dict(step=step, role=role)
-    if ordinary and valid:
+    if ordinary and valid and role!='A':
         current['focus'] = copy.deepcopy(control.get('resolved_focus'))
         current['allocation'] = copy.deepcopy(control.get('resolved_allocation'))
         current['diagnostics'] = copy.deepcopy(control.get('diagnostics', []))
-        if role == 'H':
-            current['current_h'] = step
+        if producer:
             plan = payload.get('search_plan') or {}
+            if role=='H' and (not consultation or plan.get('commitments')):current['current_h'] = step
             for index, authored in enumerate(plan.get('commitments', []), 1):
-                ref = authored.get('existing_ref') or f'h{step:03d}.m{index}'
+                ref = authored.get('existing_ref') or f'{role.lower()}{step:03d}.m{index}'
                 item = delta.get('mechanism', ref)
                 if item is None:
-                    item = delta.put('mechanism', ref, dict(status='pending', original_h=step,
+                    item = delta.put('mechanism', ref, dict(status='pending', original_step=step,original_role=role,
                         accepted_calls=0, participated_cycles=0, last_participated_cycle=current['portfolio']['completed_cycle_count']))
                     current['mechanism_count'] += 1
                     item.update(ordinal=current['mechanism_count'],origin_identity=origin,
-                        origin_ref=dict(goal_id=origin['goal_id'],source_h=step,mechanism_ref=ref))
+                        origin_ref=dict(goal_id=origin['goal_id'],source_step=step,source_role=role,mechanism_ref=ref))
                     delta.put('ordinal',item['ordinal'],dict(ordinal=item['ordinal'],mechanism_ref=ref,origin_identity=origin))
                     current['pending_count'] += 1
                     current['portfolio']['unexcluded_count'] += 1
@@ -255,28 +321,12 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
                     _status(delta, ref, item, 'pending', initial_calls)
                     if was_waived:_due(delta,item,reset=True)
                     item.pop('disposition', None)
-                item.update(label=authored['label'], minimal_test=search.minimal_test_text(authored['minimal_test']), source_h=step,
-                    source_origin_identity=origin,source_h_ref=_seal_ref(root,step))
+                item.update(label=authored['label'], minimal_test=search.minimal_test_text(authored.get('minimal_test',authored['label'])), source_step=step,
+                    source_role=role,source_origin_identity=origin,source_ref=_seal_ref(root,step))
                 delta.queue(ref, item, step)
                 if current['extra_grant'] and current['extra_grant']['mechanism_ref'] == ref:
                     current['extra_grant'] = None
-        elif role == 'A':
-            review = payload.get('search_review') or {}
-            for authored in review.get('dispositions', []):
-                ref = authored['mechanism_ref'];item = delta.get('mechanism', ref)
-                if item is None:
-                    raise ValueError('Accepted A disposition has no registered mechanism')
-                if item['status'] != authored['status']:
-                    was_waived=item['status']=='waived'
-                    _status(delta, ref, item, authored['status'], initial_calls)
-                    if authored['status']=='waived':_due(delta,item,active=False)
-                    elif was_waived:_due(delta,item,reset=True)
-                    item['disposition'] = dict(reason=authored['reason'], source_a=step)
-                    if item['status'] == 'pending' and not any(row['mechanism_ref']==ref for row in current['table']['remaining']):delta.queue(ref,item,step)
-            focus = current['focus']
-            if focus and isinstance(review.get('next_focus'), dict) and review['next_focus'].get('mechanism_ref') is not None:
-                current['extra_grant'] = dict(mechanism_ref=focus['mechanism_ref'], source_a=step,source_a_ref=_seal_ref(root,step),used_calls=0)
-    elif ordinary:
+    elif ordinary and role!='A':
         current['focus'] = None
         current['allocation'] = None
         current['diagnostics'] = copy.deepcopy(control.get('diagnostics', []))
@@ -338,7 +388,7 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
             grant = current['extra_grant']
             if binding.get('grant') is not None and grant and binding['grant']['source_a'] == grant['source_a']:
                 grant['used_calls'] += 1
-    if role == 'A' and payload.get('next_action')!='audit':
+    if role == 'A' and not consultation and payload.get('next_action')!='audit':
         candidate = payload.get('candidate_recommendation')
         # Only an original visible before this A may occupy its authored slot.
         # An unresolved optional citation is retained in the raw original, not
@@ -348,8 +398,11 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
             current['historical_a_recommendation'] = current['a_recommended']
         current['latest_a_step'] = step
         current['a_recommended'] = dict(candidate_id=candidate, author_step=step) if candidate is not None else None
-    _portfolio(delta, job, payload, observation, valid and ordinary, initial_calls,usage_lookup)
-    _work(delta, job, payload, valid and ordinary)
+    _portfolio(delta, job, payload, observation, valid and ordinary and not consultation, initial_calls,usage_lookup)
+    _work(delta, job, payload, valid and ordinary and not consultation)
+    _supervision(delta,job,payload,seal,observation,origin=origin,
+        bindings=round_bindings,valid=valid and ordinary and not consultation,policy=policy,
+        budget_fraction=budget_fraction,completion_fraction=completion_fraction)
     if role=='W' and job.get('candidate_nomination_mechanisms'):
         from . import candidate_nominations
         authored=c.scientific_field(job,payload,'candidate_nominations')
@@ -404,7 +457,8 @@ def _retain_current(delta,step=None):
     if summary['last_science']:retain('node',summary['last_science']['step'])
     portfolio=summary['portfolio'];pending=portfolio['pending_w']
     if pending:
-        retain('node',pending['step']);retain('node',pending['cycle_root'])
+        for member in pending.get('steps',[pending['step']]):retain('node',member)
+        retain('node',pending['cycle_root'])
         retain('cycle',pending['cycle_root']);retain('repair',pending['cycle_root'])
     request=summary['pending_work_response']
     if request:retain('node',request['source_a'])
@@ -419,6 +473,11 @@ def _retain_current(delta,step=None):
     summary['current_facts']=selected
 
 
+def search_completed(job,payload):
+    from . import search
+    return search.completed_worker(job,payload)
+
+
 def _portfolio(delta, job, payload, observation, valid, initial_calls,usage_lookup):
     summary, step = delta.summary, job['step']
     portfolio = summary['portfolio']
@@ -428,45 +487,25 @@ def _portfolio(delta, job, payload, observation, valid, initial_calls,usage_look
             branches = [focus['mechanism_ref']]
             if (job.get('search') or {}).get('breadth'):
                 branches = list(dict.fromkeys(row['mechanism_binding']['mechanism_ref'] for row in (observation or {}).get('managed_calls', []) if row.get('mechanism_binding')))
+            old=portfolio['pending_w']
+            direct=delta.get('node',step)['direct_steps']
+            linked=bool(old and old['step'] in direct)
+            if linked:
+                branches=list(dict.fromkeys([*old.get('all_branches',old.get('branches',[old['branch']])),*branches]))
             delta.get('node',step)['branches']=branches
             portfolio['pending_w'] = dict(step=step, branch=focus['mechanism_ref'], branches=branches[:4],branch_count=len(branches),
-                completed=payload.get('stage_intent') == 'review', repair=focus['action'] == 'repair',
-                cycle_root=job['search']['repair_root'] if focus['action']=='repair' else step)
+                all_branches=branches,steps=[*old.get('steps',[old['step']]),step] if linked else [step],
+                completed=search_completed(job,payload), repair=focus['action'] == 'repair' or bool(linked and old['repair']),
+                cycle_root=old['cycle_root'] if linked else job['search']['repair_root'] if focus['action']=='repair' else step)
             if focus['action']=='repair':_exclude_cycle(delta,job['search']['repair_root'])
         return
     if job['role'] != 'A' or not valid:return
     if job.get('author_correction'):
         corrected=delta.get('node',job['author_correction']['root']['step'])
         if corrected and corrected.get('assessed_cycle_root') is not None:_exclude_cycle(delta,corrected['assessed_cycle_root'])
-    review = payload.get('portfolio_review')
-    if isinstance(review, dict) and 'main_line' in review and payload.get('next_action') != 'wait' and (job.get('portfolio_context') or {}).get('required_for_completed_w', True):
-        main = review['main_line']
-        root_step=(job.get('author_correction') or {}).get('root',{}).get('step',step)
-        judgment=delta.get('judgment',root_step)
-        if judgment is None:
-            judgment=delta.put('judgment',root_step,dict(previous_main=portfolio['main_line'],previous_streak=portfolio['mainline_streak'],previous_root=portfolio['latest_judgment_root']))
-            portfolio['latest_judgment_root']=root_step
-        judgment.update(main_line=main,source_step=step)
-        suffix=[];cursor=portfolio['latest_judgment_root']
-        # Only an explicit replacement of an older judgment reads its accepted
-        # suffix. Ordinary append/latest clarification keeps scalar updates.
-        while cursor!=root_step:
-            item=delta.get('judgment',cursor)
-            if item is None:raise ValueError('Accepted portfolio judgment suffix is missing')
-            suffix.append(item);cursor=item['previous_root']
-            if cursor is None:raise ValueError('Corrected portfolio judgment is outside its accepted order')
-        previous_main,streak=judgment['previous_main'],judgment['previous_streak']
-        for item in [judgment,*reversed(suffix)]:
-            item['previous_main'],item['previous_streak']=previous_main,streak
-            selected=item['main_line']
-            streak=streak+1 if selected is not None and selected==previous_main else int(selected is not None)
-            previous_main=selected
-        latest=suffix[0] if suffix else judgment
-        portfolio['main_line']=previous_main;portfolio['mainline_streak']=streak
-        portfolio['mainline_source']=dict(source_step=latest['source_step'],pointer='/portfolio_review/main_line')
     pending = portfolio['pending_w'];focus = summary['focus']
     pending_node=delta.get('node',pending['step']) if pending else None
-    branches=pending_node.get('branches',[pending['branch']]) if pending_node else []
+    branches=pending.get('all_branches',pending_node.get('branches',[pending['branch']])) if pending_node else []
     final = job.get('final_report') or job.get('final_only') or job.get('purpose') == 'closeout'
     direct = bool(pending and any(row['path'] == f'inputs/parents/{pending["step"]:03d}/conclusion.json' for row in job.get('direct_refs', [])))
     original_cycle=True
@@ -474,7 +513,7 @@ def _portfolio(delta, job, payload, observation, valid, initial_calls,usage_look
         original=delta.get('node',job['author_correction']['root']['step'])
         original_cycle=bool(original and original['role']=='A' and pending and pending['step'] in original['direct_steps'])
     repairing = focus and focus['action'] == 'repair' and pending and focus['mechanism_ref'] in branches
-    if original_cycle and pending and pending['completed'] and not repairing and (direct or final) and payload.get('next_action') not in {'audit', 'formal_review', 'extract', 'wait'}:
+    if original_cycle and pending and pending['completed'] and (direct or final) and payload.get('next_action') not in {'audit', 'formal_review', 'extract', 'wait'}:
         old = delta.get('node', pending['step'])
         if old is None:raise ValueError('Pending portfolio W original is absent')
         cycle_node=delta.get('node',pending['cycle_root'])
@@ -492,9 +531,10 @@ def _portfolio(delta, job, payload, observation, valid, initial_calls,usage_look
             portfolio['last_branch_count'] = len(branches)
             sample_complete=False;reported=None
             if usage_lookup is not None:
-                w_usage,a_usage=usage_lookup(pending['step']),usage_lookup(step)
-                sample_complete=bool(w_usage and a_usage and w_usage['complete'] and a_usage['complete'] and not pending['repair'] and not job.get('author_correction'))
-                if sample_complete:reported=w_usage['reported_tokens']+a_usage['reported_tokens']
+                worker_usage=[usage_lookup(member) for member in pending.get('steps',[pending['step']])]
+                a_usage=usage_lookup(step)
+                sample_complete=bool(a_usage and a_usage['complete'] and all(row and row['complete'] for row in worker_usage) and not pending['repair'] and not job.get('author_correction'))
+                if sample_complete:reported=sum(row['reported_tokens'] for row in worker_usage)+a_usage['reported_tokens']
             sample=dict(w_step=pending['step'],a_step=step,reported_tokens=reported)
             advice=portfolio['token_advice']
             advice['complete_sample_count']+=int(sample_complete)
@@ -502,19 +542,14 @@ def _portfolio(delta, job, payload, observation, valid, initial_calls,usage_look
             if sample_complete:
                 advice['reported_tokens_sum']+=reported
                 advice['samples']=(advice['samples']+[sample])[-2:]
-            delta.put('cycle', pending['cycle_root'], dict(w_step=pending['step'],a_step=step, mechanism_refs=branches,
+            delta.put('cycle', pending['cycle_root'], dict(w_step=pending['step'],w_steps=copy.deepcopy(pending.get('steps',[pending['step']])),a_step=step, mechanism_refs=branches,
                 repair=pending['repair'],sample_complete=sample_complete,reported_tokens=reported))
             delta.get('node',step)['assessed_cycle_root']=pending['cycle_root']
-        if not old['assessed']:
+        for member in pending.get('steps',[pending['step']]):
+            old=delta.get('node',member)
+            if old is None:raise ValueError('Pending portfolio chain original is absent')
+            if old['assessed']:continue
             old['assessed']=True
-            if old['breadth']:
-                for authored in (payload.get('search_review') or {}).get('dispositions', []):
-                    if authored['status'] in {'screened', 'deferred', 'waived'}:
-                        item = delta.get('mechanism', authored['mechanism_ref'])
-                        delta.unqueue(authored['mechanism_ref'], item)
-            elif old.get('allocation'):
-                ref = old['allocation']['mechanism_ref'];item = delta.get('mechanism', ref)
-                if item and item.get('planned_step') == old['allocation']['planned_step']:delta.unqueue(ref, item)
         portfolio['pending_w'] = None
     if payload.get('next_action') in {'continue_w', 'revise_h', 'finish'} and (payload.get('scientific_result') or payload.get('route_reason')):
         portfolio['last_decision_step'] = step
@@ -531,35 +566,107 @@ def _exclude_cycle(delta,root_step):
 
 
 def _work(delta, job, payload, valid):
-    if not valid or job['role'] != 'A':return
-    review = payload.get('portfolio_review')
-    if not isinstance(review, dict):return
-    executed_refs=[]
-    for update in review.get('work_updates', []):
-        item = delta.get('work', update['work_ref'])
-        if item is None:raise ValueError('Accepted scientific work identity is absent')
-        was_active = item['status'] != 'withdrawn'
-        item.update(status={'withdraw':'withdrawn','execute':'executed','defer':'deferred'}[update['action']],
-            updates=[dict(source_a=job['step'], **update)])
-        if update['action'] == 'execute':
-            item['executions'] = [dict(source_a=job['step'], response=None)]
-            executed_refs.append(update['work_ref'])
-        delta.summary['work_count'] += int(item['status'] != 'withdrawn') - int(was_active)
-    work = review.get('discriminating_work')
-    if isinstance(work, dict) and work.get('existing_ref') is None:
-        ref = f'A{job["step"]:03d}-D001'
-        executed = work['next_action'] == payload.get('next_action')
-        delta.put('work', ref, dict(work_ref=ref, source_a=job['step'],
-            declaration_pointer='/portfolio_review/discriminating_work',
-            mechanism_refs=copy.deepcopy(work['mechanism_refs']),question=work['question'],next_action=work['next_action'],
-            change_criterion=work.get('change_criterion') if isinstance(work.get('change_criterion'),str) else work['question'],
-            status='executed' if executed else 'deferred',
-            updates=[dict(source_a=job['step'],action='execute' if executed else 'defer',reason=review.get('reason',''),deferral=copy.deepcopy(review.get('deferral')))],
-            executions=[dict(source_a=job['step'], response=None)] if executed else []))
-        delta.summary['work_count'] += 1
-        if executed:executed_refs.append(ref)
-    delta.get('node',job['step'])['executed_work']=executed_refs
-    if executed_refs:delta.summary['pending_work_response']=dict(source_a=job['step'])
+    # Optional portfolio advice never creates or executes scientific work.
+    return
+
+
+def _supervision(delta, job, payload, seal, observation, *, origin, bindings, valid, policy,
+        budget_fraction=None, completion_fraction=None):
+    """Accept explicit experiment batches against this W's produced originals.
+
+    Only host-produced observation facts and the pre-update stable mechanism
+    table are consumed. Failed optional declarations remain authored originals;
+    they never trigger output repair or synthesize scientific rounds.
+    """
+    from . import contracts as c, supervision
+    state=delta.summary['supervision']
+    chosen=supervision.policy(policy.get('supervision_policy'))
+    if delta.summary['node_count']==1 and not state['total_rounds']:
+        state=supervision.empty(chosen)
+    elif state['policy']!=chosen:
+        raise ValueError('Accepted scientific supervision policy cannot change')
+    request=job.get('supervision_request')
+    fraction=request.get('budget_fraction') if isinstance(request,dict) else None
+    state=supervision.observe(supervision.observe(state,fraction),budget_fraction)
+    diagnostics=[]
+    def diagnostic(index,reason):
+        diagnostics.append(dict(source_step=job['step'],pointer=f'/exploration_rounds/{index}' if index is not None else '/exploration_rounds',reason=reason))
+    if job['role']=='W' and valid:
+        declarations=c.scientific_field(job,payload,'exploration_rounds')
+        if declarations is None:
+            diagnostic(None,'no_declared_scientific_rounds')
+        elif not isinstance(declarations,list):
+            diagnostic(None,'invalid_scientific_round_declaration')
+        else:
+            calls={}
+            for call_index,call in enumerate((observation or {}).get('managed_calls',[])):
+                calls.setdefault(call.get('call_id'),[]).append((call_index,call))
+            for index,authored in enumerate(declarations):
+                if (not isinstance(authored,dict) or set(authored)!={'mechanism','question','call_ids','finding'}
+                        or any(not isinstance(authored.get(field),str) or not authored[field].strip() for field in ('mechanism','question','finding'))
+                        or not isinstance(authored.get('call_ids'),list) or not authored['call_ids']
+                        or any(not isinstance(call,str) or not call for call in authored['call_ids'])
+                        or len(set(authored['call_ids']))!=len(authored['call_ids'])):
+                    diagnostic(index,'invalid_scientific_round_declaration');continue
+                ref=authored['mechanism'];expected=bindings.get(ref)
+                if expected is None:
+                    diagnostic(index,'unbound_direction');continue
+                evidence=[];identities=[];reason=None
+                for identity in authored['call_ids']:
+                    matches=calls.get(identity,[])
+                    if len(matches)!=1:
+                        reason='ambiguous_or_missing_current_w_call';break
+                    call_index,call=matches[0];binding=call.get('mechanism_binding')
+                    proof=call.get('accepted')
+                    if call.get('status') not in {'known_success','known_failed'}:
+                        reason='original_outcome_unknown';break
+                    if (not isinstance(binding,dict) or binding.get('mechanism_ref')!=ref
+                            or any(binding.get(key)!=expected.get(key) for key in ('source_step','source_ref','source_role'))):
+                        reason='exact_direction_binding_mismatch';break
+                    if (not isinstance(proof,dict) or not isinstance(proof.get('path'),str)
+                            or type(proof.get('size_bytes')) is not int or proof['size_bytes']<0):
+                        reason='exact_call_original_unavailable';break
+                    # The source owner and original logical path identify a
+                    # call. Byte size and archive snapshot aliases do not.
+                    proof_key=json.dumps(dict(origin_identity=origin,path=proof['path']),
+                        sort_keys=True,separators=(',',':'))
+                    if proof_key in identities or delta.get('round_call',proof_key) is not None:
+                        reason='original_already_counted';break
+                    identities.append(proof_key)
+                    evidence.append(dict(call_id=identity,call_index=call_index,
+                        status=call['status'],accepted=copy.deepcopy(proof),
+                        mechanism_binding=copy.deepcopy(binding),observation_ref=copy.deepcopy(seal.get('observations'))))
+                if reason:
+                    diagnostic(index,reason);continue
+                round_id=f'w{job["step"]:03d}.r{index+1}'
+                fact=dict(round_id=round_id,source_step=job['step'],source_role='W',
+                    origin_identity=copy.deepcopy(origin),pointer=f'/exploration_rounds/{index}',
+                    scientific_original_ref=copy.deepcopy(seal.get('raw_ref')),
+                    mechanism=ref,question=authored['question'],finding=authored['finding'],
+                    call_ids=copy.deepcopy(authored['call_ids']),evidence=evidence,
+                    ordinal=state['total_rounds']+1)
+                delta.put('round',round_id,fact)
+                for identity in identities:
+                    delta.put('round_call',identity,dict(round_id=round_id,source_step=job['step']))
+                state=supervision.add_round(state,fact)
+    if diagnostics:
+        state['diagnostics']=diagnostics[:4]
+        state['diagnostics_omitted_count']=max(0,len(diagnostics)-4)
+    result=c.scientific_field(job,payload,'supervision_result') if job['role']=='A' else None
+    science=payload.get('scientific_result')
+    meaningful=isinstance(science,str) and bool(science.strip())
+    routes={'continue_existing':{'continue_w'},'request_evidence':{'continue_w','revise_h','extract'},'finalize':{'finish','deliver'}}
+    if (job['role']=='A' and valid and isinstance(request,dict) and meaningful
+            and isinstance(result,str) and payload.get('next_action') in routes.get(result,set())):
+        frozen=request.get('cutoff') or {};count=frozen.get('total_rounds')
+        original=delta.get('round',frozen['round_id']) if isinstance(frozen.get('round_id'),str) else None
+        bound=(type(count) is int and state['covered_rounds']<=count<=state['total_rounds'] and
+            (count==0 and frozen.get('source_step') is None and frozen.get('round_id') is None
+             or original is not None and original['ordinal']==count and original['source_step']==frozen.get('source_step')
+                and original['source_step']<job['step']))
+        if bound:
+            state=supervision.cover(state,request,source_step=job['step'],completion_fraction=completion_fraction)
+    delta.summary['supervision']=state
 
 
 def prepare_recovery(*, summary, lookup, step, call_id, resolved,recovery_ref):
@@ -617,22 +724,6 @@ def requested_refs(job, payload=None):
     mechanisms, works = set(), set()
     for row in rows(obj(payload.get('search_plan')).get('commitments')):
         if isinstance(row, dict) and isinstance(row.get('existing_ref'), str):mechanisms.add(row['existing_ref'])
-    review = obj(payload.get('search_review'))
-    for row in rows(review.get('dispositions')):
-        if isinstance(row, dict) and isinstance(row.get('mechanism_ref'), str):mechanisms.add(row['mechanism_ref'])
-    focus = review.get('next_focus')
-    if isinstance(focus, dict) and isinstance(focus.get('mechanism_ref'), str):mechanisms.add(focus['mechanism_ref'])
-    portfolio = obj(payload.get('portfolio_review'))
-    if isinstance(portfolio, dict):
-        if isinstance(portfolio.get('main_line'), str):mechanisms.add(portfolio['main_line'])
-        work = portfolio.get('discriminating_work')
-        if isinstance(work, dict):
-            mechanisms.update(ref for ref in rows(work.get('mechanism_refs')) if isinstance(ref, str))
-            if isinstance(work.get('existing_ref'), str):works.add(work['existing_ref'])
-        for row in rows(portfolio.get('work_updates')):
-            if isinstance(row, dict) and isinstance(row.get('work_ref'), str):works.add(row['work_ref'])
-    for row in rows(payload.get('final_coverage')):
-        if isinstance(row, dict) and isinstance(row.get('mechanism_ref'), str):mechanisms.add(row['mechanism_ref'])
     for field in ('final_coverage_mechanisms', 'candidate_nomination_mechanisms'):
         for row in job.get(field, []):
             if isinstance(row, dict) and isinstance(row.get('mechanism_ref'), str):mechanisms.add(row['mechanism_ref'])
@@ -699,5 +790,5 @@ def catalog_item(root,catalog,choice,*,head=None):
         raise ValueError('Mechanism is outside this frozen catalog')
     if type(choice) is int and item['ordinal']!=choice:
         raise ValueError('Mechanism number changed its exact original identity')
-    source=dict(origin_identity=item['source_origin_identity'],seal_ref=item['source_h_ref'])
+    source=dict(origin_identity=item['source_origin_identity'],seal_ref=item['source_ref'])
     return ref,item,head,source

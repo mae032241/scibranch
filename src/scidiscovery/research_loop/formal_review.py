@@ -38,7 +38,7 @@ def _contract():
     return dict(version=1, instruction=review_rules.REVIEW_INSTRUCTION+' '+REVIEW_EVIDENCE_GUIDANCE,
         scope='Review only the exact supplied material and scientific question. Do not edit the subject. '
               'Use revise, blocked or inconclusive for unsupported claims. Review grants no execution permission.',
-        schema=schema(), authors_contract='native_participants_and_selected_implementations_v1',
+        schema=schema(), authors_contract='native_participants_implementations_and_worker_influence_v2',
         default_inputs='exact_subject_and_global_objective_constraints_v1')
 
 
@@ -79,25 +79,24 @@ def capture_participants(root, job):
                    outcome=q._ref(root, record / 'native-outcome.json'))
         binding = outcome.get('native_identity') or {}
         try:
-            if binding.get('participant_scope') != 'codex_exec_single_agent_v1' or not binding.get('path',):
+            from . import backends
+            provider=backends.participant_provider(binding)
+            if not binding.get('path',):
                 raise ValueError('native_participant_identity_unsupported')
             original = continuation.session(root, job['step'], record, home=binding['home'],
                 session_path=binding['path'], identity_proof=True)
-            with c.regular(Path(original['path'])).open('rb') as stream:
-                line = stream.readline()
-            if json.loads(line) != original['header']:
-                raise q.IntegrityError('Native session header changed before retention')
             path = c.host_record(c.workspace(root, job['step'])) / 'authorship' / f'{number:03d}.json'
             path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                if c.regular(path).read_bytes() != line:
-                    raise q.IntegrityError('Retained native identity changed')
-            else:
-                path.write_bytes(line)
-                path.chmod(0o400)
-            identity = ('codex_exec', original['thread_id'])
+            kind=provider.authorship_proof_kind(binding)
+            metadata = dict(version=1, kind=kind, session=original,
+                intent=row['intent'], outcome=row['outcome'],
+                native_process=q._ref(root, record / 'native-process.json'))
+            retained = q._save(root, path, metadata)
+            identity = provider.validate_participant_event(outcome.get('native_thread_event'),outcome,
+                q._read(root,row['intent']),c.workspace(root,job['step']))
             participants.add(identity)
-            row.update(status='known', participant=list(identity), session=original, header=q._ref(root, path))
+            row.update(status='known', participant=list(identity), session=original,
+                proof_kind=kind, metadata=retained)
         except q.IntegrityError:
             raise
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
@@ -105,8 +104,35 @@ def capture_participants(root, job):
             row.update(status='unsupported', reason=str(error))
         rows.append(row)
     return q._save(root, c.host_record(c.workspace(root, job['step'])) / 'native-authorship.json',
-        dict(version=1, complete=complete and bool(rows), participants=[list(row) for row in sorted(participants)],
+        dict(version=2, complete=complete and bool(rows), participants=[list(row) for row in sorted(participants)],
              attempts=rows, scope='Actual controlled native participants only; arbitrary shell work remains outside this proof.'))
+
+
+def _metadata_participant(row, metadata, outcome, intent, process, workspace, intent_reference):
+    """Validate frozen hook facts; historical native homes need not still exist."""
+    session = (outcome.get('native_identity') or {}).get('session')
+    thread_event = outcome.get('native_thread_event')
+    from . import backends
+    try:
+        provider=backends.participant_provider(outcome.get('native_identity') or {})
+        kind=provider.authorship_proof_kind(outcome.get('native_identity') or {})
+    except ValueError as error:
+        raise q.IntegrityError('Authorship provider proof unsupported') from error
+    if (metadata.get('version') != 1 or metadata.get('kind') != kind or row.get('proof_kind')!=kind
+            or metadata.get('intent') != row['intent'] or metadata.get('outcome') != row['outcome']
+            or not isinstance(session, dict) or session.get('source') != 'native_metadata_hooks'
+            or session.get('workspace') != str(workspace) or session.get('thread_id') != outcome.get('thread_id')
+            or not isinstance(thread_event, dict) or thread_event.get('type') != 'thread.started'
+            or thread_event.get('thread_id') != session['thread_id']
+            or metadata.get('session') != dict(session, thread_event=thread_event)
+            or row.get('session') != metadata['session']
+            or (outcome.get('budget_notification') or {}).get('status') != 'available'
+            or process.get('task_ref') != (intent['task_ref'] if row['attempt'] == 0 else intent_reference)):
+        raise q.IntegrityError('Authorship compact native identity changed')
+    try:
+        return provider.validate_participant_event(thread_event,outcome,intent,workspace)
+    except ValueError as error:
+        raise q.IntegrityError('Authorship native provider proof changed') from error
 
 
 def participants(root, job, seal, *, source=None):
@@ -140,12 +166,22 @@ def participants(root, job, seal, *, source=None):
             complete = False
             continue
         outcome = q._read(root, row['outcome'])
-        if outcome.get('native_identity', {}).get('participant_scope') != 'codex_exec_single_agent_v1':
+        from . import backends
+        try: backends.participant_provider(outcome.get('native_identity') or {})
+        except ValueError:
             raise q.IntegrityError('Authorship has no complete native participant scope')
-        identity = ('codex_exec', outcome['thread_id'])
-        header = root / row['header']['path']
-        q._check({**row['header'], 'path': str(header)})
-        continuation.validate_session_header(header.read_bytes(), identity[1], c.workspace(root, job['step']))
+        if row.get('metadata') is not None:
+            metadata = q._read(root, row['metadata'])
+            if metadata['native_process'] != q._ref(root, record / 'native-process.json'):
+                raise q.IntegrityError('Authorship native process changed')
+            identity = _metadata_participant(row, metadata, outcome, q._read(root, row['intent']),
+                q._read(root, metadata['native_process']), c.workspace(root, job['step']),
+                c.record_ref(record / 'native-intent.json'))
+        else:
+            identity = ('codex_exec', outcome['thread_id'])
+            header = root / row['header']['path']
+            q._check({**row['header'], 'path': str(header)})
+            continuation.validate_session_header(header.read_bytes(), identity[1], c.workspace(root, job['step']))
         if row['participant'] != list(identity) or row['session']['thread_id'] != identity[1]:
             raise q.IntegrityError('Authorship participant identity changed')
         found.add(identity)
@@ -190,11 +226,19 @@ def _inherited_participants(source, job, seal):
         if row['status'] != 'known':
             complete = False
             continue
-        if outcome.get('native_identity', {}).get('participant_scope') != 'codex_exec_single_agent_v1':
+        from . import backends
+        try: backends.participant_provider(outcome.get('native_identity') or {})
+        except ValueError:
             raise q.IntegrityError('Inherited native participant scope is incomplete')
-        identity = ('codex_exec', outcome['thread_id'])
-        header = originals.resolve_ref(source, row['header'])
-        continuation.validate_session_header(header.read_bytes(), identity[1], source.logical_workspace)
+        if row.get('metadata') is not None:
+            metadata = c.read(originals.resolve_ref(source, row['metadata']))
+            process = c.read(originals.resolve_ref(source, metadata['native_process']))
+            identity = _metadata_participant(row, metadata, outcome, intent, process,
+                source.logical_workspace, q.control_reference(source.original_root, row['intent']))
+        else:
+            identity = ('codex_exec', outcome['thread_id'])
+            header = originals.resolve_ref(source, row['header'])
+            continuation.validate_session_header(header.read_bytes(), identity[1], source.logical_workspace)
         if row['participant'] != list(identity) or row['session']['thread_id'] != identity[1]:
             raise q.IntegrityError('Inherited native participant changed')
         found.add(identity)
@@ -249,7 +293,7 @@ def validate_original(source, job, seal, payload, *, controls_only=False):
 
 
 def authors(root, step, active=None, memo=None, *, source=None):
-    """Only exact producer and declared implementation contributors are authors."""
+    """Trace exact implementations and W continuation/consultation contributors."""
     active, memo = set() if active is None else active, {} if memo is None else memo
     from . import originals
     owner = originals.node(root, step) if source is None else originals.at_step(source, step)
@@ -276,6 +320,22 @@ def authors(root, step, active=None, memo=None, *, source=None):
         elif proof.get('missing_reason') is not None:
             complete = False  # Legacy/opaque call inputs have no trusted coverage.
     if not job.get('formal_review'):
+        # Consultation advice and retained W work can shape a new subject even
+        # without selected implementation bytes. Use the same direct-parent
+        # originals, carrying their actual participant identities through the
+        # existing authors traversal; role labels never establish independence.
+        influence=[]
+        if job['role']=='W' or job.get('purpose')=='worker_consultation':
+            for reference in job.get('direct_originals',job.get('direct_refs',[])):
+                origin=int(Path(reference['path']).parts[2])
+                producer=originals.dependency(owner,origin)
+                parent_job=originals.source_job(producer)
+                if (parent_job['role']=='W' or parent_job.get('purpose')=='worker_consultation'):
+                    influence.append((origin,producer))
+        for origin,producer in influence:
+            contributor=authors(root,origin,{*active,key},memo,source=producer)
+            complete=complete and contributor['complete']
+            people.update(tuple(row) for row in contributor['participants'])
         contributions = list(job.get('selected_inputs', []))
         from . import execution_inputs
         execution_inputs.validate_seal(root, job, seal, source=context)
@@ -624,6 +684,7 @@ def bind_job(root, job, *, sources=None):
 
 
 def validate_job(root, job, *, sources=None):
+    binding=None
     back = job.get('evidence_return') or {}
     if job.get('formal_review') or back.get('kind')=='formal_review':
         expected=dict(job)
@@ -645,6 +706,7 @@ def validate_job(root, job, *, sources=None):
         raise q.IntegrityError('Frozen formal review choice constraints changed')
     if job.get('formal_review_version')==1 and contract(root, job) is None:
         raise q.IntegrityError('Formal review task lost its operator contract')
+    return binding
 
 
 def feedback(root, job):

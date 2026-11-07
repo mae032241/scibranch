@@ -86,16 +86,8 @@ def publish_stream(root, blocks_factory, *, size_bytes=None, context=None, polic
     limits = storage.for_root(root) if policy is None else storage.configuration(policy)
     inventory = storage.Inventory(limits,context=context)
     inventory.limit('max_files',1)
-    # Only an explicitly enabled instance byte quota needs advance measurement.
-    # Default publication transforms and writes the stream in one pass.
-    if size_bytes is None and limits['enabled'] and limits['max_instance_bytes'] is not None:
-        size_bytes=0
-        for block in blocks_factory():
-            storage.check(context)
-            if type(block) is not bytes:raise ValueError('Atomic stream requires bytes blocks')
-            size_bytes+=len(block)
-            inventory.limit('max_file_bytes',size_bytes)
-            inventory.limit('max_total_bytes',size_bytes)
+    # Legacy byte fields never require a measurement pass. A real declared size
+    # remains an exact identity check in the single publication pass below.
     with storage.writer_lock(root,context=context):
         with storage.mutation(root,size_bytes or 0,policy=limits,context=context,target=target):
             atomic_files.publish_stream(target,blocks_factory(),size_bytes=size_bytes,
@@ -130,6 +122,8 @@ def link(original, destination, *, size_bytes, root, context=None, policy=None):
             if _generation(original)!=before or _generation(destination)!=before:
                 raise ValueError('Shared source changed during alias publication')
             atomic_files._sync_directory(destination.parent)
+            if _generation(original)!=before or _generation(destination)!=before:
+                raise ValueError('Shared source changed during alias publication')
         except BaseException:
             if created:
                 destination.unlink(missing_ok=True)

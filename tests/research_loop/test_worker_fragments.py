@@ -24,7 +24,8 @@ def fragment(tmp_path):
                        search_policy=None)
     job = c.build_job(root, 1, 'W', [])
     record = c.host_record(c.workspace(root, 1))
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_native(root, 1, record, dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None, cleanup='observed_group_cleaned'))
     c.write(record / 'usage.json', dict(input_tokens=10, cached_input_tokens=3, output_tokens=4))
     return root, job, record
@@ -188,10 +189,10 @@ def test_host_review_overrides_continuation_without_rewriting_science():
     value = dict(stage_intent='continue', scientific_result='A small proxy improvement is conditional.')
     original = json.dumps(value)
     assert checkpoint.disposition(value) == 'continue'
-    assert checkpoint.disposition(value, review_requested=True) == 'review'
+    assert checkpoint.disposition(value, review_requested=True) == 'handoff'
     assert json.dumps(value) == original
     assert checkpoint.disposition(dict(stage_intent='review')) == 'review'
-    with pytest.raises(OutputRepairRequired, match='continue this mechanism'):
+    with pytest.raises(OutputRepairRequired, match='Use continue, handoff'):
         checkpoint.disposition(dict(stage_intent='finish'))
 
 
@@ -247,7 +248,7 @@ payload={'summary':'One decision-relevant contribution','scientific_result':'A p
 if role=='H':payload.update(search_plan=None,next_action='experiment',route_reason='A discriminating comparison under the original scope')
 if role=='W':
     turns=int(os.environ.get('SCID_U2_FAKE_TURNS','2'))
-    intent='continue' if case=='normal' and number+1<turns else 'review'
+    intent='continue' if case=='normal' and number+1<turns else 'decision'
     payload.update(stage_intent=intent,mechanism_findings=None)
 if role=='A':payload.update(search_review=None,candidate_recommendation=None,progress_assessment=None,next_action='finish',route_reason='Retain bounded uncertainty')
 for field in ('decision_request','portfolio_review'):
@@ -337,7 +338,7 @@ def test_soft_target_allows_original_stage_to_continue_fragments(internal_fragme
     root = internal_fragment_instance(cap=14)
     assert controller.run(root)['status'] == 'finish'
     assert len(execution.records(root, 2)) == 2
-    assert c.read(execution.raw(root, 2))['stage_intent'] == 'review'
+    assert c.read(execution.raw(root, 2))['stage_intent'] == 'decision'
     assert c.validate(c.workspace(root, 2))['role'] == 'W'
     record = execution.record(root, 2)
     ended = checkpoint.stage_end(root, c.read(root / 'jobs/002.json'), record)

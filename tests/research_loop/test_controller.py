@@ -112,6 +112,7 @@ def scene(tmp_path, monkeypatch):
         result = dict(role=role, next_action=action, route_reason="Evidence requests this route" if action else "",
             direct_refs=job["direct_refs"], summary=f"Contribution {step}",
             scientific_result="A bounded finding", limitations=["Goal is not fully tested"])
+        if role=='W':result['stage_intent']='decision'
         payload = {key: value for key, value in result.items() if key not in {"role", "direct_refs"}}
         if role in {"W", "E"}:
             payload.pop("next_action")

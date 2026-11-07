@@ -123,6 +123,8 @@ def chain(tmp_path, monkeypatch, request):
         execution_resource_policy=dict(version=1, allowance=dict(wall_time_seconds=100, max_storage_bytes=1000000)),
         source_restrictions=[] if getattr(request, 'param', None) == 'unknown_source' else [
             dict(source=str(objective), restriction='clear')],
+        **(dict(max_output_item_bytes=1,max_output_total_bytes=1)
+           if getattr(request,'param',None)=='legacy_byte_fields' else {}),
         **(dict(project=project, native_options=dict(workspace='workspace-write', network=False))
            if project is not None else {}))
     # Only the native scheduling/identity boundary is synthetic. Source binding,
@@ -166,6 +168,8 @@ def chain(tmp_path, monkeypatch, request):
     finish(root, 1, 'H', [], action='experiment', files={'mesh.tdr': 'mesh'})
     job = c.build_job(root, 2, 'W', [1]); work = c.workspace(root, 2); record = c.host_record(work)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_native(root,2,record,c.read(record/'native-intent.json'))
     config_path = work / 'work/execution.json'; config = e.configure(root, 2, 'tcad_execution:tcad', options, config_path)
     author = work / ('project/src/implementation.json' if project is not None else 'code/implementation.json')
     author.parent.mkdir(parents=True,exist_ok=True)
@@ -176,6 +180,20 @@ def chain(tmp_path, monkeypatch, request):
     aliases = work / 'work/scientific-files.json'; c.write(aliases, {'mesh': 'inputs/parents/001/artifacts/mesh.tdr'})
     compile_source = Path(project['base_root']) / 'src/implementation.json' if project is not None else author
     return root, backend, options, config, config_path, compile_source, aliases
+
+
+@pytest.mark.parametrize('chain',['legacy_byte_fields'],indirect=True)
+def test_compile_retains_full_inputs_and_package_despite_legacy_byte_fields(chain,capsys):
+    root,backend,_,_,config_path,author,aliases=chain
+    output=c.workspace(root,2)/'artifacts/package.json'
+    author_bytes=author.read_bytes()
+    assert e.main(['--config',str(config_path),'compile','--implementation',str(author),
+        '--scientific-files',str(aliases),'--output',str(output)])==0
+    assert json.loads(capsys.readouterr().out)['status']=='compiled'
+    assert output.stat().st_size>1 and author.read_bytes()==author_bytes
+    assert (c.workspace(root,1)/'artifacts/mesh.tdr').read_bytes()==b'mesh'
+    assert not backend.prepared and backend.submits==0
+    assert c.settings(root)['max_output_item_bytes']==c.settings(root)['max_output_total_bytes']==1
 
 
 def _reviewed_execution(chain, capsys, *, opaque=False):

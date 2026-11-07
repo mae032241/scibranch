@@ -580,36 +580,48 @@ def test_accepted_continuation_rechecks_task_and_schema_before_actual_popen(tmp_
 
 
 def retained_session_original(tmp_path):
-    """One explicitly named session original; no native launch or tree scan."""
+    """An exact native hook binding; its retained transcript stays opaque."""
+    from scidiscovery.research_loop.native_usage import stream_binding
     root=instance(tmp_path);c.build_job(root,1,'H',[])
     first=execution.origin(root,1)
     thread='11111111-2222-4333-8444-555555555555'
-    c.write(first/'native-outcome.json',dict(thread_id=thread))
-    (first/'native.jsonl').write_text(json.dumps(dict(type='thread.started',thread_id=thread))+'\n')
     home=root/'native-homes/001';directory=home/'sessions';directory.mkdir(parents=True)
     original=directory/'rollout.jsonl'
-    original.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,
-        cwd=str(c.workspace(root,1)),retained_metadata='Preserved native session metadata.')))+'\n')
+    original.write_bytes(b'opaque retained native session transcript without a JSON header\n')
+    info=stream_binding(original)
+    binding=dict(source='native_metadata_hooks',thread_id=thread,home=str(home),
+        workspace=str(c.workspace(root,1)),path=str(original),identity=info['identity'],offset=info['size_bytes'])
+    c.write(first/'native-outcome.json',dict(thread_id=thread,
+        native_thread_event=dict(type='thread.started',thread_id=thread),
+        native_identity=dict(backend='codex',home=str(home),path=str(original),session=binding)))
     return root,first,home,original
 
 
-def test_native_session_reference_retains_exact_header_and_explicit_original(tmp_path):
+def test_native_session_reference_retains_exact_hook_binding_and_opaque_original(tmp_path,monkeypatch):
     root,first,home,session_file=retained_session_original(tmp_path)
-    reference=continuation.session(root,1,first,home=home,session_path=session_file)
-    assert reference['path']==str(session_file)
-    with session_file.open('rb') as stream:header=stream.readline()
-    assert reference['header']==json.loads(header)
-    assert reference['header']['payload']['retained_metadata']=='Preserved native session metadata.'
+    original=session_file.read_bytes()
+    expected=c.native_outcome(first)['native_identity']['session']
+    original_open=Path.open
+    def no_transcript_read(path,*args,**kwargs):
+        if path==session_file:pytest.fail('Resume must not read the native transcript')
+        return original_open(path,*args,**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path,'open',no_transcript_read)
+        reference=continuation.session(root,1,first,home=home,session_path=session_file)
+    assert reference==expected and reference['path']==str(session_file)
+    assert session_file.read_bytes()==original
     assert not (c.workspace(root,1)/'work/launches').exists()
     assert not (first/'continuations').exists()
 
 
-def test_native_session_header_wrong_cwd_does_not_accept_resume(tmp_path):
+def test_native_session_hook_wrong_workspace_does_not_accept_resume(tmp_path):
     root,first,home,session_file=retained_session_original(tmp_path)
-    value=json.loads(session_file.read_text());value['payload']['cwd']='/incorrect-workspace'
-    session_file.write_text(json.dumps(value)+'\n')
-    with pytest.raises(ValueError,match='^Native session identity or workspace changed$'):
+    original=session_file.read_bytes()
+    value=c.native_outcome(first);value['native_identity']['session']['workspace']='/incorrect-workspace'
+    c.write(first/'native-outcome.json',value)
+    with pytest.raises(ValueError,match='Original native session binding changed'):
         continuation.session(root,1,first,home=home,session_path=session_file)
+    assert session_file.read_bytes()==original
     assert not (first/'continuations/001/native-intent.json').exists()
     assert not (c.workspace(root,1)/'work/launches').exists()
 
@@ -631,21 +643,32 @@ def test_native_session_header_identity_drift_cannot_launch_accepted_resume(tmp_
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
-@pytest.mark.parametrize('shape',['current','legacy16','legacy15','required_drift','other_field'])
-def test_resume_accepts_only_exact_published_original_schema_shapes(tmp_path,shape):
+@pytest.mark.parametrize('schema_bytes', [None,
+    b'{"type":"object","properties":{"retained_field":{"type":"string"}}}\n',
+    b'{"type":"object","properties":{"implementation_selection":{"maxItems":16}}}\n'])
+def test_resume_preserves_the_original_opaque_transport_schema(tmp_path,schema_bytes):
     root=instance(tmp_path);job=c.build_job(root,1,'H',[])
     path=execution.origin(root,1)/'science-result.schema.json'
-    schema=c.read(path)
-    if shape!='current':schema['properties']['implementation_selection']['maxItems']=16
-    if shape=='legacy15':schema['properties']['implementation_selection']['maxItems']=15
-    elif shape=='required_drift':schema['required'].remove('summary')
-    elif shape=='other_field':schema['properties']['scientific_result']['minLength']=2
-    c.write(path,schema)
+    if schema_bytes is not None:
+        # Construct this fixture's historical original before accepting work.
+        path.unlink()
+        path.write_bytes(schema_bytes)
+        path.chmod(0o400)
     originals={p:p.read_bytes() for p in (path,root/'jobs/001.json',c.workspace(root,1)/'science-task.json')}
-    if shape in {'current','legacy16'}:assert continuation.validate_task(root,1)==job
-    else:
-        with pytest.raises(ValueError,match='Original native output schema changed'):continuation.validate_task(root,1)
+    assert continuation.validate_task(root,1)==c.job_record(job)
     assert all(p.read_bytes()==data for p,data in originals.items())
+    assert not (execution.origin(root,1)/'native-intent.json').exists()
+
+
+@pytest.mark.parametrize('shape',['missing','symlink'])
+def test_resume_rejects_missing_or_redirected_original_transport_schema(tmp_path,shape):
+    root=instance(tmp_path);c.build_job(root,1,'H',[])
+    path=execution.origin(root,1)/'science-result.schema.json'
+    original=path.read_bytes();path.unlink()
+    if shape=='symlink':
+        target=tmp_path/'other.schema.json';target.write_bytes(original);path.symlink_to(target)
+    with pytest.raises((ValueError,FileNotFoundError)):
+        continuation.validate_task(root,1)
     assert not (execution.origin(root,1)/'native-intent.json').exists()
 
 
@@ -656,3 +679,23 @@ def test_worker_resume_allows_launcher_source_upgrade(tmp_path):
     launcher.write_text(launcher.read_text()+'\n# upgraded launcher\n')
     controller.worker_resume(root,1)
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
+
+
+def test_resume_uses_retained_hook_identity_without_native_history_reads(tmp_path,monkeypatch):
+    from scidiscovery.research_loop.native_usage import stream_binding
+    home=tmp_path/'home';work=tmp_path/'work';path=home/'sessions'/'opaque.jsonl'
+    path.parent.mkdir(parents=True);path.write_bytes(b'opaque native body without a JSON header')
+    info=stream_binding(path);thread='11111111-2222-4333-8444-555555555555'
+    binding=dict(source='native_metadata_hooks',thread_id=thread,home=str(home),workspace=str(work),
+        path=str(path),identity=info['identity'],offset=info['size_bytes'])
+    outcome=dict(thread_id=thread,native_thread_event=dict(type='thread.started',thread_id=thread),
+        native_identity=dict(home=str(home),path=str(path),session=binding))
+    monkeypatch.setattr(continuation.configuration_updates,'for_step',lambda *a:dict(native_backend='codex',native_launcher_argv=['codex']))
+    monkeypatch.setattr(c,'native_outcome',lambda *a:outcome)
+    monkeypatch.setattr(c,'workspace',lambda *a:work)
+    monkeypatch.setattr(Path,'open',lambda *a,**k:pytest.fail('Resume must not read native history/header'))
+    assert continuation.session(tmp_path,1,tmp_path/'record')==binding
+    assert continuation.session(tmp_path,1,tmp_path/'record',identity_proof=True)['thread_event']==outcome['native_thread_event']
+    outcome['native_identity']['session']=None
+    with pytest.raises(continuation.ResumeUnavailable,match='metadata_unavailable'):
+        continuation.session(tmp_path,1,tmp_path/'record')

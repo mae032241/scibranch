@@ -11,14 +11,53 @@ def schema():
                   question=dict(type='string'),
                   change_criterion=dict(type='string'))
     return dict(type=['object', 'null'], properties=fields, required=list(fields), additionalProperties=False,
-        description='Optional context for continue_w, revise_h or extract: the scientific decision, concrete question '
-                    'and what result would change it. Missing or unconsumable context uses the actual route and reason. '
+        description='Required for ordinary A requesting new continue_w, revise_h or extract work: the scientific decision, concrete gap/question '
+                    'and the result that would change its assessment. '
                     'No evidence paths or hashes: the host binds the actual mechanism and assessed originals.')
 
 
 def _request(job,payload):
     request=c.scientific_field(job,payload,'decision_request')
     return request if request is not None and all(request[key].strip() for key in ('question','change_criterion')) else None
+
+
+def validate_supervision(job,payload):
+    """Validate a scoped A direction decision from supplied values, without I/O."""
+    if job['role']!='A' or job.get('supervision_request') is None or c.guidance.purpose(job)!='assessment':
+        return None
+    result=c.scientific_field(job,payload,'supervision_result')
+    action=payload.get('next_action')
+    science=payload.get('scientific_result')
+    meaningful=isinstance(science,str) and bool(science.strip())
+    if meaningful and result=='continue_existing' and action=='continue_w' and payload.get('decision_request') is None:
+        return result
+    if meaningful and result=='request_evidence' and action in ACTIONS and _request(job,payload) is not None:
+        return result
+    if meaningful and result=='finalize' and action in {'finish','deliver'}:
+        return result
+    from .output_repair import OutputRepairRequired
+    raise OutputRepairRequired('a_supervision_result_inconsistent',
+        'Correct this same A output: supply nonblank scientific_result and supervision_result. '
+        'continue_existing=continue_w with no decision_request; request_evidence=continue_w/revise_h/extract '
+        'with concrete decision_request question+change_criterion; finalize=finish/deliver. '
+        'Keep frozen supervision scope and original science/limits; this repair authorizes no new research.')
+
+
+def require_request(job,payload):
+    """Require explicit further-work intent without judging scientific prose."""
+    supervision=validate_supervision(job,payload)
+    if supervision in {'continue_existing','finalize'}:return None
+    if (job['role']!='A' or job.get('formal_review')
+            or c.guidance.purpose(job)!='assessment'
+            or payload.get('next_action') not in ACTIONS):return None
+    request=_request(job,payload)
+    if request is None:
+        from .output_repair import OutputRepairRequired
+        raise OutputRepairRequired('a_decision_request_incomplete',
+            'Correct decision_request in this same A output: supply decision (candidate, mechanism or compliance), '
+            'a nonblank concrete evidence gap/question, and a nonblank change_criterion stating what result would change '
+            'the assessment. Preserve the original science and limitations; no new research is authorized by this repair.')
+    return request
 
 
 def _key(job,payload,focus):
@@ -53,32 +92,41 @@ def _requests(root,job,action,*,head):
         yield row
 
 
-def _response(root,prefix,job,payload):
-    step=job['step']+1
-    if step>prefix['cutoff']:return False
-    try:member=accepted_prefix.member(root,prefix,step)
-    except FileNotFoundError:return False
-    response=history._source(root,step)
-    if response[3]!=member['seal_ref']:
-        raise ValueError('Decision response scientific prefix identity changed')
-    return _completed(job,payload,{step:response})
+def _response(root,prefix,job,payload,*,head):
+    # The accepted node owns exact direct-parent and return identities, even
+    # when consultations or handoffs separate the request from its response.
+    directory=Path(root)/accepted_prefix.MEMBERS/accepted_prefix._view_key(prefix)/'ordinals'
+    for ordinal in range(1,prefix['count']+1):
+        link=c.read(c.regular(directory/f'{ordinal:09d}.json'))
+        if link['step']<=job['step']:continue
+        metadata=accepted_budget.search_row(root,accepted_search.key('node',link['step']),head=head)
+        if metadata is None or metadata['origin_identity']!=link['origin_identity']:
+            raise ValueError('Decision response scientific prefix identity changed')
+        if (metadata['role']!=ACTIONS.get(payload.get('next_action'))
+                or metadata.get('purpose')=='worker_consultation'
+                or job['step'] not in metadata['direct_steps']):continue
+        if metadata['role']=='E' and metadata.get('evidence_return')!=dict(step=job['step'],role='A'):continue
+        return True
+    return False
 
 
 def _completed(job, payload, sources):
-    response = sources.get(job['step'] + 1)
-    if response is None or response[0]['role'] != ACTIONS.get(payload['next_action']):
-        return False
-    following = response[0]
-    if not any(ref['path'] == f'inputs/parents/{job["step"]:03d}/conclusion.json' for ref in following['direct_refs']):
-        return False
-    if following['role'] == 'E' and following.get('evidence_return') != dict(step=job['step'], role='A'):
-        return False
-    return True
+    for response in sources.values():
+        following=response[0]
+        if following['step']<=job['step'] or following['role']!=ACTIONS.get(payload.get('next_action')):
+            continue
+        if following.get('purpose')=='worker_consultation':continue
+        if not any(ref['path'] == f'inputs/parents/{job["step"]:03d}/conclusion.json' for ref in following['direct_refs']):
+            continue
+        if following['role'] == 'E' and following.get('evidence_return') != dict(step=job['step'], role='A'):
+            continue
+        return True
+    return False
 
 
 def assess(root, job, payload, *, focus=None):
     policy=c.settings(root,job)
-    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review'}:
+    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'}:
         return []
     if payload['next_action'] not in ACTIONS:return []
     return _assess_from_facts(root,job,payload,policy=policy,
@@ -89,18 +137,19 @@ def _assess_from_facts(root, job, payload, *, policy, interpretation, head):
     """Consume this attempt's interpretation and accepted comparison head."""
     if policy is None or interpretation is None or head is None:
         raise ValueError('Decision assessment requires its produced policy, interpretation and accepted head')
-    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review'}:
+    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'}:
         return []
+    if job.get('supervision_request') is not None and c.scientific_field(job,payload,'supervision_result')=='continue_existing':return []
     if payload['next_action'] not in ACTIONS:return []
     key,basis=_key(job,payload,interpretation['focus']),_basis(root,job)
     prefix=accepted_prefix.for_job(job)
     for original,prior,seal,_ in _requests(root,job,payload['next_action'],head=head):
         control=seal.get('control_outcome',{})
-        if (original['role']!='A' or original.get('purpose') in {'closeout','formal_review'}
+        if (original['role']!='A' or original.get('purpose') in {'closeout','formal_review','worker_consultation'}
                 or prior.get('next_action') not in ACTIONS or control.get('decision_status')!='applied'
                 or control.get('search_status')=='unresolved' or control.get('selection_status')=='unresolved'):
             continue
-        if (_key(original,prior,control.get('resolved_focus'))==key and _response(root,prefix,original,prior)
+        if (_key(original,prior,control.get('resolved_focus'))==key and _response(root,prefix,original,prior,head=head)
                 and basis<=_basis(root,original,sealed=True)):
             return [dict(code='a_decision_request_repeated',subject=payload['next_action'])]
     return []

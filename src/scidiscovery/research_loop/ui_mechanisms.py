@@ -52,18 +52,21 @@ def project(reader, steps, clean, *, partial=False):
         except Exception as error:  # noqa: BLE001 - retain the rest of the bounded trail
             errors.append(dict(step=step, **ui_view.failure(error, clean)))
             continue
-        if role == 'H':
+        authored_refs=set()
+        if scientific_search.mechanism_producer(job):
             try:plan = scientific_search._choice(job,payload)
             except scientific_search.UnresolvedSearch:plan = None
             if plan is None and payload.get('search_plan') is not None:
-                unresolved.append(dict(step=step, field='H 机制声明'))
+                unresolved.append(dict(step=step, field=role+' 机制声明'))
             for index, row in enumerate((plan or {}).get('commitments') or [], 1):
-                ref = row.get('existing_ref') or f'h{step:03d}.m{index}'
+                ref = row.get('existing_ref') or f'{role.lower()}{step:03d}.m{index}'
+                authored_refs.add(ref)
                 item = mechanism(ref)
                 label, question = clean(row['label'], 300), clean(row['minimal_test'], 2000)
-                item.update(label=label, authored_label=True, question=question, status=None, reason=None, declared_in_window=True)
-                item['events'].append(dict(step=step, role='H', label=label, text=question))
-        elif role == 'W':
+                item.update(label=label, authored_label=True, question=question, status=None, reason=None,
+                    source_step=step,source_role=role,declared_in_window=True)
+                item['events'].append(dict(step=step, role=role, kind='declaration', label=label, text=question))
+        if role == 'W':
             search = job.get('search') or {}
             declared = (search.get('breadth') or {}).get('mechanisms') or []
             for row in declared:
@@ -110,7 +113,7 @@ def project(reader, steps, clean, *, partial=False):
             local = focus.get('mechanism_ref') if focus.get('action') in {'improve', 'repair', 'validate'} else None
             if local:
                 refs.add(local)
-            if not refs:
+            if not refs and not authored_refs:
                 unbound.append(step)
             for ref in sorted(refs):
                 bound_calls = [row for row in calls if _ref(row) == ref and row.get('accepted')]
@@ -118,22 +121,18 @@ def project(reader, steps, clean, *, partial=False):
                 if bound_calls:
                     counts = dict(accepted=len(bound_calls), terminal=sum(row.get('status') in
                         {'known_success', 'known_failed'} for row in bound_calls))
-                sources = {row.get('source_h') for row in declared if row['mechanism_ref'] == ref}
-                sources.update((row.get('mechanism_binding') or {}).get('source_h') for row in calls if _ref(row) == ref)
+                bindings = [row for row in declared if row['mechanism_ref'] == ref]
+                bindings.extend(row.get('mechanism_binding') or {} for row in calls if _ref(row) == ref)
+                authors={(row.get('source_step'),row.get('source_role')) for row in bindings
+                    if type(row.get('source_step')) is int and row['source_step']>0}
                 mechanism(ref)['events'].append(dict(step=step, role='W', findings=findings.get(ref, []),
                     text=clean(payload['summary'], 1200) if local == ref and payload.get('summary') else None,
-                    calls=counts, sources=sorted(source for source in sources if type(source) is int and source > 0),
+                    calls=counts, sources=sorted({source for source,_ in authors}),
+                    source_authors=[dict(source_step=source,source_role=author if author in {'H','W'} else None)
+                        for source,author in sorted(authors,key=lambda row:(row[0],str(row[1])))],
                     metrics=_metrics(candidates.get(ref, []), clean)))
-        elif role == 'A' and not job.get('formal_review'):
-            try:review = scientific_search._choice(job,payload)
-            except scientific_search.UnresolvedSearch:review = None
-            if review is None and payload.get('search_review') is not None:
-                unresolved.append(dict(step=step, field='A 机制处置'))
-            for row in (review or {}).get('dispositions') or []:
-                item = mechanism(row['mechanism_ref'])
-                status, reason = clean(row['status'], 100), clean(row['reason'], 2400)
-                item.update(status=status, reason=reason)
-                item['events'].append(dict(step=step, role='A', status=status, text=reason))
+        # A advice remains in its exact scientific original. It cannot become
+        # an adopted mechanism disposition merely through this UI projection.
     return dict(mechanisms=list(mechanisms.values()), unbound=unbound, unresolved=unresolved, errors=errors,
         omitted=len(steps) - len(shown), partial=partial,
         first=shown[0] if shown else None, last=shown[-1] if shown else None)
@@ -142,15 +141,18 @@ def project(reader, steps, clean, *, partial=False):
 def _event(event):
     step, role = event['step'], event['role']
     body = '<h4 class="mechanism-event-head"><span class="role role-' + role + '">' + role + '</span> ' + ui.link('第 ' + str(step) + ' 阶段 · ' + ui_view.ROLE_LABELS[role], '/results/' + str(step)) + '</h4>'
-    if role == 'H':
+    declaration=event.get('kind')=='declaration'
+    if declaration:
         body += '<p><strong>' + ui.translatable(event['label']) + '</strong></p>'
     if role == 'A':
         body += ui.badge(ui_view.DISPOSITIONS.get(event['status'], event['status']))
     if event.get('text'):
         body += '<p>' + ui.translatable(event['text']) + '</p>'
-    if role == 'W':
-        if event['sources']:
-            body += '<p class="note">关联 H 声明：' + '、'.join(ui.link('第 ' + str(source) + ' 阶段', '/results/' + str(source)) for source in event['sources']) + '</p>'
+    if role == 'W' and not declaration:
+        if event['source_authors']:
+            body += '<p class="note">关联机制声明：' + '、'.join(ui.link(
+                (source['source_role']+' · ' if source['source_role'] else '')+'第 '+str(source['source_step'])+' 阶段',
+                '/results/'+str(source['source_step'])) for source in event['source_authors']) + '</p>'
         for row in event['findings']:
             body += '<p><strong>' + ui.esc({'observed': '观察发现', 'blocked': '受阻原因'}.get(row['basis'], row['basis'])) + '：</strong>' + ui.translatable(row['text']) + '</p>'
         counts = event['calls']
@@ -172,17 +174,17 @@ def _event(event):
 
 
 def _summary(item, *, compact=False):
-    status = ui_view.DISPOSITIONS.get(item['status'], item['status']) if item['status'] else '当前声明暂无 A 处置记录'
+    status = ui_view.DISPOSITIONS.get(item['status'], item['status']) if item['status'] else '科学判断见阶段原文'
     body = '<article class="mechanism-card"><header class="mechanism-card-head"><h3>' + (ui.translatable(ui_view.first_sentence(item['label'], 80) if compact else item['label']) if item.get('authored_label', True) else ui.esc(item['label'])) + '</h3><span class="badge mechanism-status">' + ui.esc(status) + '</span></header>'
     if not compact:
         body += '<dl class="mechanism-overview"><div><dt>可证伪问题</dt><dd>' + (ui.translatable(ui_view.first_sentence(item['question'], 96)) if item['question'] else '本窗口未记录可证伪问题。') + '</dd></div>'
-        latest_w = next((event for event in reversed(item['events']) if event['role'] == 'W'), None)
+        latest_w = next((event for event in reversed(item['events']) if event['role'] == 'W' and event.get('kind')!='declaration'), None)
         finding = None
         if latest_w:
             texts = [row['text'] for row in latest_w['findings']] or [latest_w.get('text')]
             finding = ui_view.first_sentence(texts[0], 120)
         body += '<div><dt>最近 W 记录' + (' · ' + ui.link('第 ' + str(latest_w['step']) + ' 阶段', '/results/' + str(latest_w['step'])) if latest_w else '') + '</dt><dd>' + (ui.translatable(finding) if finding else '本窗口尚未记录逐机制的作者发现。') + '</dd></div>'
-        body += '<div><dt>A 处置理由</dt><dd>' + (ui.translatable(ui_view.first_sentence(item['reason'], 120)) if item['reason'] else '当前声明尚未记录 A 处置理由。') + '</dd></div></dl>'
+        body += '</dl>'
     return body
 
 
@@ -191,9 +193,9 @@ def render(value):
     body = '<section class="mechanism-trails"><h2>机制探索过程</h2>'
     if 'error' in value:
         return ui.Safe(body + ui.error_inline(value, what='机制探索过程') + '</section>')
-    body += '<p class="note">按 H 声明、W 的明确机制关联及 A 原文处置串联；不同评估口径分别保留，候选顺序不代表科学排序。每个机制展开后可查看中间过程与原文。</p>'
+    body += '<p class="note">按 H/W 声明和 W 的明确机制关联串联；A 判断保留在阶段原文中。不同评估口径分别保留，候选顺序不代表科学排序。每个机制展开后可查看中间过程与原文。</p>'
     if value['omitted'] or value['partial']:
-        body += '<p class="note">仅汇集当前窗口内至多 ' + str(ui_view.WINDOW) + ' 个已封存阶段；较早记录未汇入，当前处置可能不完整。' + ui.link('按阶段查看更早原文', '/results?after=0') + '</p>'
+        body += '<p class="note">仅汇集当前窗口内至多 ' + str(ui_view.WINDOW) + ' 个已封存阶段；较早记录未汇入，机制记录可能不完整。' + ui.link('按阶段查看更早原文', '/results?after=0') + '</p>'
     if not value['mechanisms']:
         body += ui.empty('尚无可读取的机制声明或明确绑定的机制证据。')
     tail = ''
@@ -217,9 +219,9 @@ def render(value):
     for index, (item, summary) in enumerate(zip(value['mechanisms'], summaries)):
         reserve -= size(summary + '</article>')
         key = 'mechanism:' + item['ref']
-        opening = '<details class="mechanism-details" data-details-key="' + ui.esc(key) + '"><summary data-live-focus="' + ui.esc(key) + '">查看完整过程与处置理由 <span class="mechanism-record-count">' + str(len(item['events'])) + ' 条记录</span></summary>'
+        opening = '<details class="mechanism-details" data-details-key="' + ui.esc(key) + '"><summary data-live-focus="' + ui.esc(key) + '">查看完整过程与原文 <span class="mechanism-record-count">' + str(len(item['events'])) + ' 条记录</span></summary>'
         fallback = '<p class="note">详细过程因显示长度限制未展开；请查看对应阶段原文：' + '、'.join(ui.link('第 ' + str(step) + ' 阶段', '/results/' + str(step)) for step in sorted({event['step'] for event in item['events']})) + '。</p>'
-        history_note = '' if item['declared_in_window'] else '<p class="note">本窗口未包含该机制的 H 原文；声明信息仅在任务保留时显示，请从相关阶段原文核对声明版本。</p>'
+        history_note = '' if item['declared_in_window'] else '<p class="note">本窗口未包含该机制的 H/W 声明原文；声明信息仅在任务保留时显示，请从相关阶段原文核对声明版本。</p>'
         details = opening + history_note + '<ol class="mechanism-timeline">' + ''.join(_event(event) for event in item['events']) + '</ol></details>'
         if size(body + summary + details + '</article>') + reserve > MAX_RENDER_BYTES:
             details = opening + fallback + '</details>'

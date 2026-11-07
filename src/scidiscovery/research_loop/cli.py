@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from scidiscovery.plugin_configuration import read_execution_selection
 
-from . import budget, contracts, controller, search, research_config, instance_control
+from . import budget, contracts, controller, search, research_config, instance_control, backends
 from .instance_control import status, request_pause, continue_instance
 
 
@@ -27,7 +27,7 @@ def main(argv=None):
     prepare.add_argument('--enable-execution-authority', action='store_true', help='Freeze the optional execution request/decision contract; requires formal review and grants no execution without explicit resources and the trusted gate')
     prepare.add_argument('--execution-resource-policy', type=Path, help='Explicit version1 cumulative allowance JSON: wall_time_seconds/max_storage_bytes; no default grant')
     prepare.add_argument('--native-launcher-json', help='An argv JSON array, e.g. ["codex"]')
-    prepare.add_argument('--native-backend', choices=['codex', 'protocol'], default='codex')
+    prepare.add_argument('--native-backend', choices=backends.names(), default=backends.DEFAULT_BACKEND)
     prepare.add_argument('--native-options-json', help='Explicit inline backend permission/options JSON; omitted uses the same frozen defaults as TOML')
     prepare.add_argument('--history-observer-config', type=Path, help='Optional trusted host adapter/config JSON; frozen at preparation')
     prepare.add_argument('--experiment-mode', choices=['local', 'external'], help='Host-configured W execution (local) or launcher-owned execution (external); standard codex defaults to local, custom launchers to external')
@@ -43,7 +43,7 @@ def main(argv=None):
     prepare.add_argument('--decision-contract', action='store_true', help='Freeze protocol10 scientific A decision requests and exact repeat admission')
     prepare.add_argument('--enable-candidate-audit', action='store_true', help='Opt into protocol9 A audit requests; requires an isolated delivery adapter')
     prepare.add_argument('--delivery-policy', type=Path, help='Explicit frozen closeout reserve and isolated delivery adapter JSON')
-    prepare.add_argument('--worker-context',choices=['same_session','new_context'],help='Qualified W fragments within the same stage; requires explicit resume policy and node budgets')
+    prepare.add_argument('--worker-context',choices=['same_session','new_context'],help='Standard Codex defaults to same_session; custom launchers require a qualified resume policy and node budgets')
     prepare.add_argument('--worker-resume-policy', type=Path, help='Explicit qualified finite continuation policy JSON; omitted standard codex uses at most two output-only repairs in its original home; custom launchers have no default')
     prepare.add_argument('--max-output-item-bytes', type=int, help='Optional explicit per-file storage quota; default has no storage size cap')
     prepare.add_argument('--max-output-total-bytes', type=int, help='Optional explicit total deliverable storage quota; default has no storage size cap')
@@ -95,6 +95,7 @@ def main(argv=None):
     start.add_argument('--root', type=Path, required=True)
     start.add_argument('--continue', dest='continue_run', action='store_true')
     start.add_argument('--resume-step', type=int, help='Resume one exact known failed node through its existing frozen continuation gates')
+    start.add_argument('--expected-attempt', type=int, help='Exact failed source attempt for an explicit prelaunch replacement; repeated requests collect its accepted replacement')
     start.add_argument('--ack-correction')
     start.add_argument('--authorization-note')
     operations = commands.add_parser('operations', help='Read host control operation receipts')
@@ -120,6 +121,9 @@ def main(argv=None):
             ('continue', 'Clear the next-node pause and run; never replay unknown work')):
         command = commands.add_parser(name, help=help_text)
         command.add_argument('--root', type=Path, required=True)
+        if name == 'status':
+            command.add_argument('--no-live-feedback',action='store_true',
+                help='Read compact owner control facts without opening native progress messages')
         if name == 'continue':
             command.add_argument('--ack-correction', help='Exact current published pause trigger ID; permits one nondeferred A cycle')
             command.add_argument('--authorization-note', help='External operator decision; not authentication or a budget amendment')
@@ -143,9 +147,10 @@ def main(argv=None):
     closeout = commands.add_parser('closeout', help='Close exploration within the original remaining authorization')
     closeout.add_argument('--root', type=Path, required=True)
     closeout.add_argument('--export-only', action='store_true', help='Export existing verified results without sealing, launching science or delivering')
-    resume = commands.add_parser('worker-resume', help='Continue one known local failed node in its exact original thread')
+    resume = commands.add_parser('worker-resume', help='Continue one known local failed node, or explicitly replace a proven prelaunch non-submission')
     resume.add_argument('--root', type=Path, required=True)
     resume.add_argument('--step', type=int, required=True)
+    resume.add_argument('--expected-attempt', type=int, help='Exact failed source attempt for an explicit prelaunch replacement')
     recover=commands.add_parser('execution-recover',help='Append same-call terminal evidence for a sealed unknown; new nodes freeze its recovery prefix')
     recover.add_argument('--root',type=Path,required=True)
     recover.add_argument('--step',type=int,required=True)
@@ -246,7 +251,7 @@ def main(argv=None):
                     node_budget_policy=node_policy,
                     delivery_policy=contracts.read(contracts.regular(args.delivery_policy, limit=64_000))
                         if args.delivery_policy is not None else None,
-                    worker_fragment_policy=dict(context=args.worker_context) if args.worker_context else None,
+                    **({'worker_fragment_policy':dict(context=args.worker_context)} if args.worker_context is not None else {}),
                     role_budget_policy=contracts.read(contracts.regular(args.role_budget_policy, limit=4096))
                         if args.role_budget_policy is not None else None,
                     selection_policy=contracts.read(contracts.regular(args.selection_policy, limit=4096))
@@ -279,7 +284,8 @@ def main(argv=None):
             result = progress.read(root, args.step, attempt=args.attempt, cursor=args.cursor, limit_bytes=args.limit_bytes)
         elif args.command == 'start':
             result = instance_control.start_background(root, continue_run=args.continue_run,
-                ack_correction=args.ack_correction, authorization_note=args.authorization_note, resume_step=args.resume_step)
+                ack_correction=args.ack_correction, authorization_note=args.authorization_note,
+                resume_step=args.resume_step,expected_attempt=args.expected_attempt)
         elif args.command in {'result', 'materials', 'artifact'}:
             from . import instance_science
             if args.command == 'result':
@@ -329,9 +335,9 @@ def main(argv=None):
                 authorization_note=args.authorization_note,successor=args.successor,
                 authorization_statement=args.authorization_statement)
         elif args.command == 'worker-resume':
-            result = controller.worker_resume(root, args.step)
+            result = controller.worker_resume(root, args.step,expected_attempt=args.expected_attempt)
         elif args.command == 'status':
-            result = status(root)
+            result = status(root,live_feedback=False) if args.no_live_feedback else status(root)
         elif args.command == 'closeout':
             result = controller.closeout(root, export_only=args.export_only)
         elif args.command == 'budget-amend':

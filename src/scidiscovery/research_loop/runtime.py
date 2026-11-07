@@ -49,18 +49,7 @@ def cleanup_owned_group(child):
     """Clean surviving children by actual ownership, never a stale PGID."""
     deadline = time.monotonic() + 3
     while True:
-        members = []
-        for entry in Path('/proc').iterdir():
-            if not entry.name.isdecimal():
-                continue
-            try:
-                member = process_identity(int(entry.name), child['task_ref'])
-                if (member['pgid'] == child['pgid'] and member['sid'] == child['sid']
-                        and member['boot_id'] == child['boot_id']
-                        and member['start_ticks'] >= child['start_ticks'] and member['state'] != 'Z'):
-                    members.append(member)
-            except (OSError, ValueError, IndexError):
-                pass
+        members = _observed_group_members(child)
         if not members:
             return 'observed_group_cleaned'
         for member in members:
@@ -74,6 +63,61 @@ def cleanup_owned_group(child):
         if time.monotonic() >= deadline:
             return 'cleanup_unknown'
         time.sleep(.02)
+
+
+def _observed_group_members(child):
+    """Observe the existing group contract without granting signal authority."""
+    members=[]
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():continue
+        try:
+            member=process_identity(int(entry.name),child['task_ref'])
+            if (member['pgid']==child['pgid'] and member['sid']==child['sid']
+                    and member['boot_id']==child['boot_id']
+                    and member['start_ticks']>=child['start_ticks'] and member['state']!='Z'):
+                members.append(member)
+        except (OSError,ValueError,IndexError):pass
+    return members
+
+
+def _bound_group_identity(identity, task_ref):
+    return not (not isinstance(identity,dict) or identity.get('task_ref') != task_ref
+            or not isinstance(identity.get('boot_id'),str) or not identity['boot_id']
+            or any(type(identity.get(key)) is not int or identity[key] <= 0
+                for key in ('pid','start_ticks','pgid','sid','ppid'))
+            or identity['pid'] != identity['pgid'] or identity['pid'] != identity['sid'])
+
+
+def bound_group_stopped(identity, task_ref):
+    """Read-only positive absence of one exact owner and its original group."""
+    return (_bound_group_identity(identity,task_ref)
+        and not process_matches(identity,task_ref) and not _observed_group_members(identity))
+
+
+def stop_bound_group(identity, task_ref):
+    """Explicitly stop one exact detached owner, retaining uncertainty.
+
+    Like the watchdog, capture identities while the original leader is live.
+    Never signal a numeric PGID after that leader disappears or is reused.
+    """
+    if not _bound_group_identity(identity,task_ref):
+        return 'cleanup_unknown'
+    members=_observed_group_members(identity)
+    if not process_matches(identity,task_ref):
+        return 'observed_group_cleaned' if not members else 'cleanup_unknown'
+    if not members or not process_matches(identity,task_ref):return 'cleanup_unknown'
+    for member in members:
+        if process_matches(member,task_ref):
+            try:os.kill(member['pid'],signal.SIGTERM)
+            except ProcessLookupError:pass
+    until=time.monotonic()+.5
+    while any(process_matches(member,task_ref) for member in members) and time.monotonic()<until:
+        time.sleep(.02)
+    for member in members:
+        if process_matches(member,task_ref):
+            try:os.kill(member['pid'],signal.SIGKILL)
+            except ProcessLookupError:pass
+    return cleanup_owned_group(identity)
 
 
 def signal_observed_group(child):

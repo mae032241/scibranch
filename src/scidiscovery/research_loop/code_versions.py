@@ -1,4 +1,4 @@
-"""Bounded private Git snapshots of selected code, without execution authority.
+"""Private Git snapshots with count/deadline bounds, without execution authority.
 
 The call ref pins code bytes only. The accepted original record, owned by the
 caller, must keep the full code_version binding immutable. Paths and metadata
@@ -154,9 +154,15 @@ class _GitError(ValueError):
 
 
 def _git(private, arguments, *, context, data=b'', index=None, input_limit=1048576,
-         output_limit=4096, allowed=(0,)):
-    """Allowlisted environment and bounded pipes; never inherit workspace Git state."""
-    if len(data) > input_limit:
+         output_limit=4096, allowed=(0,), output_stream=None):
+    """Isolated Git with chunked pipes and bounded compact control responses.
+
+    File-like input/output streams carry code bytes without a byte quota or an
+    aggregate in-memory payload. Numeric limits describe compact control data
+    or an exact previously observed blob size, never configured file quotas.
+    """
+    streaming = hasattr(data, 'read')
+    if not streaming and input_limit is not None and len(data) > input_limit:
         raise StorageQuotaExceeded('Code Git input limit exceeded')
     _unchanged(private.anchors)
     binary = shutil.which('git', path=os.defpath)
@@ -182,6 +188,7 @@ def _git(private, arguments, *, context, data=b'', index=None, input_limit=10485
     command.extend(arguments)
     deadline = Deadline(10, upstream=context)
     output, error = bytearray(), bytearray()
+    output_count = 0
     process = subprocess.Popen(command, cwd=private.holder, env=env, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                start_new_session=True)
@@ -191,8 +198,8 @@ def _git(private, arguments, *, context, data=b'', index=None, input_limit=10485
                                           (process.stderr, error, 4096)):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, (buffer, limit))
-            offset = 0
-            if data:
+            offset, pending = 0, memoryview(b'')
+            if streaming or data:
                 os.set_blocking(process.stdin.fileno(), False)
                 selector.register(process.stdin, selectors.EVENT_WRITE)
             else:
@@ -200,21 +207,41 @@ def _git(private, arguments, *, context, data=b'', index=None, input_limit=10485
             while selector.get_map():
                 for key, _ in selector.select(min(.1, deadline.remaining_seconds())):
                     if key.fileobj is process.stdin:
+                        if streaming and not pending:
+                            pending = memoryview(data.read(65536))
+                            if not pending:
+                                selector.unregister(process.stdin)
+                                process.stdin.close()
+                                continue
                         try:
-                            offset += os.write(process.stdin.fileno(), memoryview(data)[offset:offset + 65536])
+                            if streaming:
+                                pending = pending[os.write(process.stdin.fileno(), pending):]
+                            else:
+                                offset += os.write(process.stdin.fileno(), memoryview(data)[offset:offset + 65536])
                         except BrokenPipeError:
-                            offset = len(data)
-                        if offset == len(data):
+                            selector.unregister(process.stdin)
+                            process.stdin.close()
+                            continue
+                        if not streaming and offset == len(data):
                             selector.unregister(process.stdin)
                             process.stdin.close()
                     else:
                         buffer, limit = key.data
-                        chunk = os.read(key.fd, min(65536, limit - len(buffer) + 1))
+                        stdout = key.fileobj is process.stdout
+                        chunk = os.read(key.fd, 65536 if not stdout or limit is None else
+                                        min(65536, limit - output_count + 1))
                         if not chunk:
                             selector.unregister(key.fileobj)
                         else:
-                            buffer.extend(chunk)
-                            if len(buffer) > limit:
+                            if stdout:
+                                output_count += len(chunk)
+                                if output_stream is not None:
+                                    output_stream.write(chunk)
+                                else:
+                                    buffer.extend(chunk)
+                            else:
+                                buffer.extend(chunk[:max(0, limit - len(buffer))])
+                            if stdout and limit is not None and output_count > limit:
                                 raise StorageQuotaExceeded('Code Git output limit exceeded')
             result = process.wait(timeout=deadline.remaining_seconds())
         _unchanged(private.anchors)
@@ -335,26 +362,30 @@ def _source_parents(code_root, name, directories):
             raise ValueError('Selected code directory changed before reading')
 
 
-def _read_file(path, expected, inventory):
+def _read_file(path, expected, inventory, *, output_stream=None):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or _signature(info) != expected:
             raise ValueError('Selected code changed before reading')
         inventory.file(0)
-        result = bytearray()
+        result, count = bytearray(), 0
         while True:
-            inventory.limit('max_file_bytes', len(result))
-            chunk = os.read(fd, min(65536, expected[3] - len(result) + 1))
+            inventory.limit('max_file_bytes', count)
+            chunk = os.read(fd, min(65536, expected[3] - count + 1))
             if not chunk:
                 break
-            result.extend(chunk)
+            count += len(chunk)
+            if output_stream is None:
+                result.extend(chunk)
+            else:
+                output_stream.write(chunk)
             inventory.total += len(chunk)
-            inventory.limit('max_file_bytes', len(result))
+            inventory.limit('max_file_bytes', count)
             inventory.limit('max_total_bytes', inventory.total)
-            if len(result) > expected[3]:
+            if count > expected[3]:
                 raise ValueError('Selected code grew while reading')
-        if len(result) != expected[3] or _signature(os.fstat(fd)) != expected:
+        if count != expected[3] or _signature(os.fstat(fd)) != expected:
             raise ValueError('Selected code changed while reading')
         return bytes(result)
     finally:
@@ -452,28 +483,22 @@ def capture(root, *, step, call_id, code_root, entry, selection, logical_root,
              f'\nget-mark :{number}\n'.encode('ascii'))
             for number, (_, info) in enumerate(selected, 1)
         ]
-        payload_size = len(b'done\n') + sum(
-            info[3] + len(prefix) + len(suffix)
-            for (_, info), (prefix, suffix) in zip(selected, framing))
-        payload = bytearray(payload_size)
-        offset = 0
-        for (name, info), (prefix, suffix) in zip(selected, framing):
-            _unchanged(source_anchors)
-            _source_parents(code_root, name, before[1])
-            payload[offset:offset + len(prefix)] = prefix
-            offset += len(prefix)
-            payload[offset:offset + info[3]] = _read_file(code_root / name, info, actual)
-            offset += info[3]
-            payload[offset:offset + len(suffix)] = suffix
-            offset += len(suffix)
-        payload[offset:] = b'done\n'
-        output = _git(private, ('fast-import', '--quiet', '--done'), data=payload,
-                      input_limit=payload_size, output_limit=41 * len(selected),
-                      index=index, context=context)
+        with tempfile.TemporaryFile(dir=private.holder) as payload:
+            for (name, info), (prefix, suffix) in zip(selected, framing):
+                _unchanged(source_anchors)
+                _source_parents(code_root, name, before[1])
+                payload.write(prefix)
+                _read_file(code_root / name, info, actual, output_stream=payload)
+                payload.write(suffix)
+            payload.write(b'done\n')
+            payload.seek(0)
+            output = _git(private, ('fast-import', '--quiet', '--done'), data=payload,
+                          input_limit=None, output_limit=41 * len(selected),
+                          index=index, context=context)
         if (len(output) != 41 * len(selected)
                 or not re.fullmatch(rb'(?:[0-9a-f]{40}\n)+', output)):
             raise ValueError('Invalid private Git blob identities')
-        del payload, framing
+        del framing
         records = bytearray()
         for (name, info), blob in zip(selected, output.splitlines()):
             mode = b'100755' if info[2] & 0o111 else b'100644'
@@ -554,7 +579,7 @@ def verify(root, *, step, call_id, code_version, limits=None, context=None) -> t
 
 
 def transfer(source_root, target_root, *, step, call_id, code_version, limits=None, context=None) -> None:
-    """Transfer this exact call's bounded objects into an independent private Git."""
+    """Stream this exact call's objects into an independent private Git."""
     context = Deadline(65, upstream=context)
     version, policy = _version(code_version), _limits(limits)
     source = _private(source_root, step, call_id, create=False, context=context)
@@ -563,22 +588,26 @@ def transfer(source_root, target_root, *, step, call_id, code_version, limits=No
     objects.add(_oid(_git(source, ('rev-parse', version['commit'] + '^{tree}'), context=context)))
     # Explicit object IDs exclude unrelated refs and commit ancestry. Disable
     # deltas so the receiving repository never depends on a source-side base.
-    payload_limit = policy['max_total_bytes'] + policy['max_scan_entries'] * (_PATH_BYTES + 256) + 1048576
     names = ''.join(oid + '\n' for oid in sorted(objects)).encode('ascii')
-    packed = _git(source, ('pack-objects', '--stdout', '--window=0', '--threads=1',
-        '--no-reuse-object', '--no-reuse-delta'), data=names, input_limit=len(names),
-        output_limit=payload_limit, context=context)
-    target = _private(target_root, step, call_id, create=True, context=context)
-    _git(target, ('index-pack', '--stdin'), data=packed, input_limit=payload_limit,
-        output_limit=128, context=context)
+    with tempfile.TemporaryFile(dir=source.holder) as packed:
+        _git(source, ('pack-objects', '--stdout', '--window=0', '--threads=1',
+            '--no-reuse-object', '--no-reuse-delta'), data=names, input_limit=len(names),
+            output_limit=None, output_stream=packed, context=context)
+        packed.seek(0)
+        target = _private(target_root, step, call_id, create=True, context=context)
+        _git(target, ('index-pack', '--stdin'), data=packed, input_limit=None,
+            output_limit=128, context=context)
     _tree(source, version, policy, context)
     _pin(target, version['commit'], context)
     _tree(target, version, policy, context)
 
 
-def _blob(private, record, context):
-    content = _git(private, ('cat-file', 'blob', record[1]), output_limit=record[2], context=context)
-    if len(content) != record[2]:
+def _blob(private, record, context, *, output_stream=None):
+    start = output_stream.tell() if output_stream is not None else 0
+    content = _git(private, ('cat-file', 'blob', record[1]), output_limit=record[2],
+                   output_stream=output_stream, context=context)
+    size = output_stream.tell() - start if output_stream is not None else len(content)
+    if size != record[2]:
         raise ValueError('Private code blob size changed')
     return content
 
@@ -589,11 +618,25 @@ def _validate_export(private, version, files, directories, policy, context):
     if set(observed[0]) != set(files) or set(observed[1]) != {'.', *directories}:
         raise ValueError('Private export differs from the code version')
     actual = Inventory(policy, context=context)
+    class Compare:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def write(self, chunk):
+            if self.stream.read(len(chunk)) != chunk:
+                raise ValueError('Private export differs from the code version')
+
     for name, record in files.items():
         expected_mode = 0o555 if record[0] == b'100755' else 0o444
-        if (stat.S_IMODE(observed[0][name][2]) != expected_mode
-                or _read_file(private.export / name, observed[0][name], actual) != _blob(private, record, context)):
+        if stat.S_IMODE(observed[0][name][2]) != expected_mode:
             raise ValueError('Private export differs from the code version')
+        with tempfile.TemporaryFile(dir=private.holder) as content:
+            _blob(private, record, context, output_stream=content)
+            content.seek(0)
+            _read_file(private.export / name, observed[0][name], actual,
+                       output_stream=Compare(content))
+            if content.read(1):
+                raise ValueError('Private export differs from the code version')
     if any(stat.S_IMODE(info[2]) != 0o555 for info in observed[1].values()):
         raise ValueError('Private export directory permissions changed')
     if _scan(private.export, version['entry'], 'directory', policy, context) != observed:
@@ -685,7 +728,7 @@ def materialize(root, *, step, call_id, code_version, limits=None, context=None)
             _unchanged(export_anchors)
             fd = os.open(private.export / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             with os.fdopen(fd, 'wb') as stream:
-                stream.write(_blob(private, record, context))
+                _blob(private, record, context, output_stream=stream)
                 stream.flush()
                 os.fchmod(stream.fileno(), 0o555 if record[0] == b'100755' else 0o444)
         for name in sorted(directories, key=lambda value: len(Path(value).parts), reverse=True):

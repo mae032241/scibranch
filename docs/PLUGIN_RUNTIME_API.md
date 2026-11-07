@@ -2,7 +2,8 @@
 
 The supported extension seam is the installed `scidiscovery.execution_interfaces`
 entry-point group. Core supplies `local_execution:command`; optional packages
-supply `tcad_execution:tcad` and `cov_execution:experiment`. The old
+supply `tcad_execution:tcad`, `cov_execution:experiment`, and the independent
+[`harbor_execution:experiment`](../plugins/harbor_execution/README.md). The old
 `scidiscovery.plugins` registry, Operation catalog/compiler, Artifact host,
 component finalizers and Worker-tool hosting are retired.
 
@@ -107,6 +108,14 @@ author-client bridge and old fork compilation-order metadata are not supported. 
 `LocalFileDescriptor`, global scientific references or qualification contracts.
 Authorization, consumed budgets, deadlines and recovery authority remain unchanged.
 
+An implementation that consumes the complete selected logical code directory
+declares the existing `AdapterCapability` key `frozen_code_directory`, using
+`experiment_client.frozen_code_directory_capability()`. Core freezes and checks
+that declaration before selecting or admitting directory inputs. Local and
+external implementations use the same capability rule; a provider name does not
+imply support. This capability does not grant Local's `--experiment-dir` runtime
+semantics or change the original permission, budget, or code-version owner.
+
 Control retains the original call identity, consumed budgets, prepared submission,
 external binding, terminal facts and exact collection. Lookup or reconciliation
 must reuse that identity. Unknown submissions must never be automatically renamed
@@ -122,6 +131,65 @@ frozen projection; they do not re-query a backend to reconstruct historical fact
 The optional local result/candidate protocol is explicitly frozen; arbitrary result
 fields do not opt an implementation into that protocol.
 
+Protocol 33 keeps W as the research main line. `continue` resumes the same W;
+`handoff` seals and starts a new W, `revise_h` and `review` request serial H/A
+consultation returning to a new W, and `decision` requests an ordinary A assessment.
+These are jobs under the existing single writer, not nested same-thread calls.
+H/A consultations retain the requesting W's selected implementation inputs and
+materials; consultant `implementation_selection` does not alter control selection.
+The [architecture](ARCHITECTURE.md#ownership-and-flow) owns the exact handoff rules.
+Window use is one initial window plus completed compactions, against the frozen
+one- or two-window allowance. Same-session resume preserves counts and deduplicates
+accepted compactions. A completed compaction beyond the allowance seals a partial
+W at the next supported observable boundary, without automatically invoking A;
+occupancy percentage and peaks do not control handoff. Required `PostCompact` and
+`PostModelRequest` hooks feed small control facts to the existing native helper;
+native stdout carries these and bounded assistant text, without tool/input/output
+body observation or private-rollout scans. Unavailable required hooks are explicitly
+unsupported before launch, rather than repeated fresh W attempts with unknown
+coverage. This contract concerns the supported launch path, not arbitrary backends.
+Existing owners retain time and original-call state. New W contexts preserve global
+active time, tokens, steps, consumed execution, permissions and unknown-call identities.
+Original calls must be reconciled through their existing paths.
+
+Scientific originals, arrays, artifacts, scripts/code and logs have no framework
+per-file or aggregate byte quota. Legacy output/file/total/instance/log/result byte
+configuration remains accepted and frozen as inert file-quota syntax, without UI
+file-size controls. Compact handoffs, declared-result documents, delivery manifests,
+control metadata and public views retain their document/view bounds. Exact
+`size_bytes`, changed-original and actual-truncation checks, file/entry counts,
+finite IO/execution windows, path/symlink safety and explicit permission remain.
+Transfers use chunked IO; this does not promise unlimited RAM or host hard isolation.
+
+H and W may register mechanisms through existing declarations. Their exact
+`source_step` and `source_role` are retained; a W declaration becomes executable
+only after a following W freezes the new catalog and passes admission; the current
+W cannot execute that declaration against its old catalog. H/A consultation is
+optional, without a registration prerequisite. Ordinary A consultation neither
+consumes an assessment cycle nor grants candidate recommendation or qualification.
+Ordinary A answers the W-authored high-level assessment question; an explicit W
+assessment request alone does not classify retained work as incomplete. Further
+research requires a bounded decision_request. A planning/coverage text does not
+change W focus, dispositions or grants, and no full inventory is mandatory.
+Mechanical identity/interface checks stay with control/W. Direction-round grouping,
+exact-call counting, A coverage and due supervision belong to the common accepted
+ledger/controller; launchers do not maintain separate counters. W can declare
+`exploration_rounds`; a scoped macro A returns `supervision_result` and may explicitly
+continue existing work without inventing a new decision request. The public research
+view exposes the shared counts and due reasons. Only A decides scientific finalization
+or delivery; adapters execute its exact authorized choice and report actual outcomes.
+Formal independent review retains its neutral exact-subject contract. Protocols
+29–32 require their matching old runtime; current readers reject them without
+migration. No adapter capability, permission or lifecycle operation is inferred
+from consultation or context renewal.
+
+Shared `lineage.indexes.research` navigation is produced once with the accepted node and
+links existing authored science and candidate/work indexes. Full originals remain
+readable and excerpts disclose omissions; no adapter must populate a new ledger,
+hash scientific data or supply additional mandatory scientific fields. Scientific
+ranking, confidence and qualification remain authored judgments. Private control
+paths, budgets, cursors and tokens do not enter scientific research pages.
+
 ## Native views supplied by a provider
 
 A trusted installed registration can declare `native_launcher_module`, the exact
@@ -129,7 +197,7 @@ Python module implementing selective native Skill loading and the final scientif
 read-only namespace. The generic loader
 resolves a unique declaration through the existing execution entry points and
 freezes provider/interface/module identity in `native_capabilities.native_launcher_contract`,
-including when no Skills are selected. Protocol 29 keeps this registered launcher
+including when no Skills are selected. Protocol 33 keeps this registered launcher
 on the host for preparation and its original submission service; its final scientific
 launch must apply the shared-input read-only mounts after all writable mappings.
 Other launcher argv retain the generic final-process protection. This declares native loading capability;

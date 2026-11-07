@@ -391,7 +391,16 @@ def _load_wake_facts(root, job, native):
     def original(reference):
         return resolve({key: reference[key]
             for key in ('path', 'size_bytes', 'file_stat') if key in reference})
-    for number, reference in enumerate((native['intent'].get('execution_wake') or {}).get('observations', []), 1):
+    # The same W may consume several batches before yielding its result. Keep
+    # every selected wake's original outputs available in later turns, including
+    # reentry and temporary native recovery, using the existing exact chain.
+    references=[]
+    for record in native['records']:
+        intent=(native['intent'] if record==native['record'] else
+            document(c.regular(record/'native-intent.json')))
+        for reference in (intent.get('execution_wake') or {}).get('observations', []):
+            if reference not in references:references.append(reference)
+    for reference in references:
         observed = document(resolve(reference))
         accepted = document(resolve(observed['accepted']))
         attempt = accepted.get('native_attempt', {}).get('number', 0)
@@ -399,7 +408,7 @@ def _load_wake_facts(root, job, native):
         config = document(c.regular(record / 'experiment-config.json'))
         if accepted['scope'] != config['scope'] or accepted['interface'] != config['execution_interface']:
             raise _unsupported('a selected wake original changed its accepted owner')
-        prefix = Path('work/execution-results') / f'{number:03d}'
+        prefix = Path('work/execution-results') / accepted['call_id']
         if job.get('worker_view_version') == 1:
             for output in e.scientific_outputs(config, observed):
                 mappings.append((Path(output.local_path), prefix / 'outputs' / output.name))

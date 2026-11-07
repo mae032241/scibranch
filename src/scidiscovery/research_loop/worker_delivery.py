@@ -26,14 +26,14 @@ def _obligations(job):
     if not search.get('focus'):return []
     if applicable(job):return search['coverage_obligation']
     focus=search['focus']['mechanism_ref']
-    return [{key:row[key] for key in ('mechanism_ref','source_h','source_h_ref')}
+    return [{key:row[key] for key in ('mechanism_ref','source_step','source_ref','source_role')}
         for row in search['breadth']['mechanisms'] if row['mechanism_ref']==focus]
 
 
 def _evidence_bindings(job):
     """Retain reusable observations within this exact frozen comparison."""
     if not applicable(job):return _obligations(job)
-    return [{key:row[key] for key in ('mechanism_ref','source_h','source_h_ref')}
+    return [{key:row[key] for key in ('mechanism_ref','source_step','source_ref','source_role')}
         for row in job['search']['breadth']['mechanisms']]
 
 
@@ -164,7 +164,7 @@ def _prefix_calls(root,job):
         pointer=None if mechanism is None else mechanism.get('last_terminal')
         if pointer is None:continue
         binding=pointer['mechanism_binding']
-        if any(binding.get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_ref')):
+        if any(binding.get(key)!=target[key] for key in ('mechanism_ref','source_step','source_ref','source_role')):
             continue
         source=originals.for_origin(root,pointer['origin_identity'],step=pointer['source_step'])
         if pointer.get('recovery_ref') is not None:
@@ -246,7 +246,7 @@ def _capture(root,job,record,*,inventory):
         original=row['accepted']
         if original.get('retention')!='archived':capacity=True;continue
         ref=row['mechanism_ref'];expected=obligations[ref]
-        if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_h','source_h_ref')):selected[_evidence_key(row)]=row
+        if all(mechanism.get(key)==expected[key] for key in ('mechanism_ref','source_step','source_ref','source_role')):selected[_evidence_key(row)]=row
     value=dict(version=1,binding=binding,evidence=list(selected.values()),unknown=unknown,
         prior_unknown=((job.get('search') or {}).get('breadth') or {}).get('prior_unknown',False),
         capacity=capacity,omitted_evidence=0,omitted_unknown=0,
@@ -311,7 +311,7 @@ def _validate(root,job,record,*,inventory,source_attempt=None):
             mechanism=own[1]
         if 'mechanism_ref' in row:
             target=next((item for item in _evidence_bindings(job) if item['mechanism_ref']==row['mechanism_ref']),None)
-            if target is None or mechanism is None or any(mechanism.get(key)!=target[key] for key in ('mechanism_ref','source_h','source_h_ref')):
+            if target is None or mechanism is None or any(mechanism.get(key)!=target[key] for key in ('mechanism_ref','source_step','source_ref','source_role')):
                 raise history.ObserverIntegrityError('Worker observation differs from assigned H version')
     return value
 
@@ -378,8 +378,9 @@ def assessment(root,job,science,record,*,inventory,source_attempt=None):
     file_correction=facts.get('file_correction')
     if facts['capacity'] or facts['unknown'] or facts['prior_unknown']:correction=file_correction=None
     file_blocked=(finding_coverage(science,[],[file_correction['mechanism_ref']])['blocked'] if file_correction else set())
-    file_reason=('worker_decision' if science.get('stage_intent')=='decision'
-        else 'scientific_blocked' if file_blocked else None)
+    authored_end=('worker_'+science['stage_intent']
+        if science.get('stage_intent') in {'decision','handoff','revise_h','review'} else None)
+    file_reason='scientific_blocked' if file_blocked else authored_end
     if not applicable(job):
         active=correction or file_correction
         return dict(status='partial' if file_correction and file_reason else 'incomplete' if active else 'not_applicable',
@@ -391,9 +392,10 @@ def assessment(root,job,science,record,*,inventory,source_attempt=None):
     coverage=finding_coverage(science,facts['evidence'],expected)
     known=coverage['observed'];blocked=coverage['blocked']
     missing=sorted(expected-known-blocked)
+    # A route request ends the author's stage, not its observed coverage. Only
+    # actual missing work makes that authored end a partial delivery exception.
     reason=('work_evidence_capacity' if facts['capacity'] else 'original_execution_unknown' if facts['unknown'] or facts['prior_unknown']
-        else 'worker_decision' if science.get('stage_intent')=='decision'
-        else 'scientific_blocked' if blocked else None)
+        else 'scientific_blocked' if blocked else authored_end if missing else None)
     if correction is not None:
         # This exact rejected request has no observation, even if earlier work
         # on that mechanism is retained. A later accepted correction suppresses

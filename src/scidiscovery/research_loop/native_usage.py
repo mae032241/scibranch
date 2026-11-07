@@ -6,10 +6,9 @@ usage only; a running request and platform reporting delay remain unmeasured.
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime
 from pathlib import Path
 import re
+import stat
 import time
 
 FIELDS = ('input_tokens', 'cached_input_tokens', 'output_tokens')
@@ -18,6 +17,67 @@ LINE_BYTES = 65536
 DISCOVERY_ENTRIES = 256
 DISCOVERY_DIRECTORIES = 4096
 MAX_SAFE_INTEGER = 2 ** 53 - 1
+
+
+class MetadataUnavailable(ValueError):
+    """The declared native launcher cannot provide required compact facts."""
+
+
+def stream_binding(path):
+    path = Path(path)
+    info = path.stat()
+    if path.resolve() != path or not stat.S_ISREG(info.st_mode):
+        raise ValueError('Native original is not an ordinary file')
+    return dict(path=str(path), identity=[info.st_dev, info.st_ino],
+        size_bytes=info.st_size, mtime_ns=info.st_mtime_ns)
+
+
+def validate_session_binding(value, thread, workspace, home):
+    """Check the retained native hook identity without reading transcript bytes."""
+    if (not isinstance(value, dict) or value.get('source') != 'native_metadata_hooks'
+            or value.get('thread_id') != thread or value.get('workspace') != str(workspace)
+            or value.get('home') != str(home) or not isinstance(value.get('path'), str)
+            or not isinstance(value.get('identity'), list) or len(value['identity']) != 2
+            or any(type(item) is not int for item in value['identity'])
+            or type(value.get('offset')) is not int or value['offset'] < 0):
+        raise MetadataUnavailable('worker_resume_metadata_unavailable')
+    path = Path(value['path'])
+    if (Path(home).resolve() != Path(home) or path.resolve() != path
+            or not path.is_relative_to(Path(home) / 'sessions')):
+        raise ValueError('Native session original path changed')
+    current = stream_binding(path)
+    if current['identity'] != value['identity'] or current['size_bytes'] < value['offset']:
+        raise ValueError('Native session original replaced or truncated')
+    return value
+
+
+def metadata_stop(observation, *, required, terminal=False):
+    """Missing native delivery is an operational stop, never a new W cadence."""
+    if not required:
+        return None
+    delivery = observation.get('metadata_delivery') or {}
+    if delivery.get('fault') or terminal and (not delivery.get('acknowledged') or delivery.get('pending')):
+        return 'native_metadata_unavailable'
+    return None
+
+
+def context_windows(value):
+    """Public numeric projection; private rollout cursors never leave the host."""
+    if (not isinstance(value, dict) or value.get('coverage') not in {'live', 'unknown', 'awaiting'}
+            or type(value.get('windows_started')) is not int
+            or not 0 <= value['windows_started'] <= MAX_SAFE_INTEGER):
+        return dict(coverage='unknown', windows_started=0, reason='context_observation_unavailable')
+    result = {key: value[key] for key in ('coverage', 'windows_started')}
+    allowed = {'context_observation_unavailable', 'context_history_unavailable', 'context_event_oversized',
+        'context_event_invalid', 'context_cursor_changed', 'context_read_backlog', 'context_partial_line',
+        'context_session_unavailable', 'context_awaiting_session', 'context_identity_unavailable',
+        'context_compaction_unverified', 'context_compaction_identity_unavailable', 'context_compaction_capacity',
+        'context_compaction_pending', 'context_capability_unavailable'}
+    result['reason'] = value.get('reason') if value.get('reason') in allowed else None
+    peak = value.get('peak_ratio')
+    if type(peak) in (int, float) and 0 <= peak <= MAX_SAFE_INTEGER:
+        result['peak_ratio'] = peak
+    return result
 
 
 def tokens(value):
@@ -57,7 +117,83 @@ def context(value):
         stamp = value.get(key)
         if type(stamp) in (int, float) and 0 <= stamp <= MAX_SAFE_INTEGER:
             result[key] = stamp
+    for key in ('thread_id', 'turn_id'):
+        identity = value.get(key)
+        if isinstance(identity, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,256}', identity):
+            result[key] = identity
+    if value.get('current_window') is True:
+        result['current_window'] = True
     return result
+
+
+class BasicObservation:
+    """Provider-neutral optional facts bound to the current native invocation.
+
+    Adapters supply native reported values, never estimated capacity or a ratio
+    of cumulative billing counters. Missing optional telemetry stays unknown.
+    """
+
+    def _basic_init(self):
+        self.turn = None
+        self.current_context = dict(status='unavailable')
+        self.context_blocked=False
+        self.context_min_observed_at=None
+        self.calls=dict(completed=0,failed=0,cancelled=0)
+        self.call_receipts={}
+        self.capabilities={fact:dict(status='unsupported',reason='native_observation_unqualified')
+            for fact in ('tokens','context','compactions','native_calls','terminal')}
+
+    def bind_turn(self, turn):
+        if (not isinstance(turn, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', turn)
+                or self.turn is not None and self.turn != turn):
+            self.fault = 'native_turn_identity_changed'
+            self.invalidate_context()
+            return
+        self.turn = turn
+
+    def invalidate_context(self,*,freshness_boundary=False):
+        self.current_context = dict(status='unavailable')
+        if freshness_boundary:self.context_min_observed_at=time.time()
+
+    def observe_context(self, value):
+        # Optional bad/mismatched context cannot overwrite billable usage or
+        # establish an execution failure. It only removes the optional sample.
+        selected = context(value)
+        minimum=self.context_min_observed_at
+        stamp=selected.get('observed_at')
+        if (selected.get('status') != 'last_reported' or self.fault or self.context_blocked
+                or minimum is not None and (type(stamp) not in (int,float) or stamp<=minimum)
+                or selected.get('thread_id') != self.thread
+                or self.turn is None or selected.get('turn_id') != self.turn
+                or selected.get('current_window') is not True):
+            self.invalidate_context()
+            return
+        self.current_context = selected
+        self.context_min_observed_at=None
+
+    def observe_call(self,value):
+        if not isinstance(value,dict): return
+        call=value.get('call_id');status=value.get('status')
+        if (not isinstance(call,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}',call)
+                or status not in self.calls): return
+        previous=self.call_receipts.get(call)
+        if previous is not None and previous!=status:
+            self.capabilities['native_calls']=dict(status='unsupported',reason='native_call_receipt_changed')
+            return
+        if previous is None:
+            # Keep only bounded receipts in the invocation metadata collector.
+            # Reaching capacity removes this optional capability; billing
+            # counters continue through their independent cumulative producer.
+            if len(self.call_receipts)>=4096:
+                self.capabilities['native_calls']=dict(status='unsupported',reason='native_call_receipt_capacity')
+                return
+            self.call_receipts[call]=status
+            self.calls[status]+=1
+
+    def basic_snapshot(self):
+        return dict(context=dict(status='unavailable') if self.fault or self.context_blocked else context(self.current_context), turn_id=self.turn,
+            calls=dict(self.calls),
+            observation_capabilities={key:dict(value) for key,value in self.capabilities.items()})
 
 
 def breakdown(value):
@@ -80,89 +216,59 @@ def measurement_status(observation):
     return '最近已上报用量；运行中请求与平台上报延迟未计入'
 
 
-def _counter(line):
-    # Ignore all non-meter payloads; never retain or publish conversation text.
-    if b'"token_count"' not in line:
-        return None
-    try:
-        event = json.loads(line)
-        payload = event.get('payload', {})
-        if event.get('type') != 'event_msg' or payload.get('type') != 'token_count':
-            return None
-        info = payload.get('info')
-        # Codex emits token_count with null info for rate-limit updates too.
-        if info is None:
-            return None
-        meter = tokens(info.get('total_token_usage'))
-        if meter is None:
-            return 'invalid_token_counter'
-        last = info.get('last_token_usage')
-        telemetry = dict(status='last_reported', total_tokens=last.get('total_tokens') if isinstance(last, dict) else None,
-                         model_context_window=info.get('model_context_window'), observed_at=time.time())
-        stamp = event.get('timestamp')
-        if isinstance(stamp, str) and len(stamp) <= 64:
-            try:
-                parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
-                if parsed.tzinfo is not None:
-                    telemetry['reported_at'] = parsed.timestamp()
-            except (ValueError, OverflowError):
-                pass
-        return dict(meter, context=context(telemetry))
-    except (ValueError, AttributeError):
-        return 'invalid_token_counter'
+class SessionUsage(BasicObservation):
+    """Observe the native hooks' current compact facts, never rollout bodies.
 
+    The snapshot is invocation-local. Resuming a thread carries consumed windows,
+    but starts a new request-usage sum; no historical counter subtraction occurs.
+    """
 
-class SessionUsage:
-    """Read an append-only session with fixed per-poll byte and line budgets."""
-
-    def __init__(self, home, workspace, *, session=None):
+    def __init__(self, home, workspace, *, session=None, context_state=None):
+        self._basic_init()
         self.home, self.workspace = Path(home), Path(workspace)
-        self.thread = session['thread_id'] if session else None
-        self.path = Path(session['path']) if session else None
-        self.identity = None
-        self.offset = 0
-        self.pending = b''
-        self.skipping = False
-        self.baseline = dict.fromkeys(FIELDS, 0)
-        self.high = None
-        self.known = dict.fromkeys(FIELDS, 0)
-        self.reason = 'token_counter_unreported'
+        self.thread = session.get('thread_id') if session else None
+        self.path = Path(session['path']) if session and session.get('path') else None
+        self.identity = tuple(session['identity']) if session and session.get('identity') else None
+        self.session = session
         self.fault = None
-        self.unavailable = None
+        self.reason = 'token_counter_unreported'
+        self.known = dict.fromkeys(FIELDS, 0)
+        self.high = None
+        cursor = context_state.get('cursor') if isinstance(context_state, dict) else None
+        self.baseline = (tokens(cursor.get('terminal_tokens')) if session and isinstance(cursor, dict)
+            and cursor.get('thread_id') == self.thread else None)
+        self.baseline = self.baseline or dict.fromkeys(FIELDS, 0)
+        self.terminal_tokens = None
         self.resumed = session is not None
-        self.context = dict(status='unavailable')
-        self.discovery_pending = None
-        self.discovery_entries = None
-        self.discovery_match = None
-        self.discovery_duplicate = False
-        if session:
-            # Before launch, freeze both the counter baseline and append position.
-            # Only a bounded tail is inspected, never the historical transcript.
-            try:
-                self._bind(self.path)
-                with self.path.open('rb') as stream:
-                    size = self.path.stat().st_size
-                    start = max(self.offset, size - READ_BYTES)
-                    stream.seek(start)
-                    data = stream.read(READ_BYTES)
-                if start > self.offset:
-                    data = data.partition(b'\n')[2]
-                lines = data.split(b'\n')
-                self.pending = lines.pop()
-                for line in lines:
-                    value = _counter(line) if len(line) <= LINE_BYTES else None
-                    if isinstance(value, str) or (isinstance(value, dict) and self.high is not None
-                            and any(value[k] < self.high[k] for k in FIELDS)):
-                        self.unavailable = self.reason = 'resume_usage_baseline_unavailable'
-                        break
-                    if isinstance(value, dict):
-                        self.baseline = tokens(value)
-                        self.high = tokens(value)
-                self.offset = size
-                if self.high is None or self.pending:
-                    self.unavailable = self.reason = 'resume_usage_baseline_unavailable'
-            except (OSError, ValueError):
-                self.unavailable = self.reason = 'resume_usage_baseline_unavailable'
+        retained = context_windows(context_state) if context_state is not None else None
+        self.windows_started = retained['windows_started'] if retained else 0
+        self.window_fault = (retained.get('reason') or 'context_history_unavailable'
+            if retained and retained['coverage'] == 'unknown' else None)
+        if self.resumed and retained is None:
+            self.window_fault = 'context_history_unavailable'
+        if self.resumed and (not isinstance(cursor, dict) or cursor.get('thread_id') != self.thread):
+            self.window_fault = self.window_fault or 'context_cursor_changed'
+        self.window_bound = False
+        self.window_counted = False
+        self.compactions = 0
+        self.calls = dict(completed=0, failed=0, cancelled=0)
+        self.reported_calls = 0
+        self.metadata_path = None
+        self.attempt = None
+        self.available = False
+        self.offset = session.get('offset', 0) if session else 0
+        self.binding_verified = False
+        self.pending = False
+        self.acknowledged = 0
+        self.delivery_fault = None
+
+    def configure(self, path, attempt, *, available):
+        self.metadata_path, self.attempt = Path(path), attempt
+        self.available = available
+        self.context_blocked=not available or bool(self.fault or self.delivery_fault)
+        if self.context_blocked:self.invalidate_context()
+        if not available:
+            self.window_fault = self.window_fault or 'context_observation_unavailable'
 
     def bind_thread(self, thread):
         if not isinstance(thread, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', thread):
@@ -171,132 +277,134 @@ class SessionUsage:
             self.fault = 'native_thread_identity_changed'
         else:
             self.thread = thread
+            if not self.window_counted:
+                if not self.resumed: self.windows_started += 1
+                self.window_counted = True
 
-    def _bind(self, path):
-        if (path.resolve() != path or not path.is_relative_to(self.home / 'sessions')
-                or self.home.resolve() != self.home):
-            raise ValueError('unsafe_session_path')
-        with path.open('rb') as stream:
-            line = stream.readline(LINE_BYTES + 1)
-        if len(line) > LINE_BYTES:
-            raise ValueError('session_header_oversized')
-        event = json.loads(line)
-        if not isinstance(event, dict) or not isinstance(event.get('payload'), dict):
-            raise ValueError('session_header_invalid')
-        payload = event['payload']
-        if (event.get('type') != 'session_meta' or payload.get('id') != self.thread
-                or payload.get('cwd') != str(self.workspace)):
-            raise ValueError('session_identity_changed')
-        stat = path.stat()
-        self.identity = (stat.st_dev, stat.st_ino)
-        self.path, self.offset = path, len(line)
-
-    def _clear_discovery(self):
-        if self.discovery_entries is not None:
-            self.discovery_entries.close()
-        self.discovery_entries = None
-        self.discovery_pending = None
-        self.discovery_match = None
-        self.discovery_duplicate = False
-
-    def _discover(self):
-        if self.thread is None:
+    def _session_binding(self, value):
+        path = value.get('transcript_path')
+        if path is None:
             return
-        # Count every directory entry, including directories and unrelated files.
-        # Keep one lazy iterator across polls so large homes eventually finish,
-        # while duplicates anywhere in the sweep still reject the binding.
-        if self.discovery_pending is None:
-            self.discovery_pending = [self.home / 'sessions']
-        visited = 0
-        while self.discovery_entries is not None or self.discovery_pending:
-            if visited >= DISCOVERY_ENTRIES:
-                self.reason = 'session_discovery_capacity'
-                return
-            if self.discovery_entries is None:
-                self.discovery_entries = os.scandir(self.discovery_pending.pop())
-            entry = next(self.discovery_entries, None)
-            if entry is None:
-                self.discovery_entries.close()
-                self.discovery_entries = None
-                continue
-            visited += 1
-            if entry.is_dir(follow_symlinks=False):
-                if len(self.discovery_pending) >= DISCOVERY_DIRECTORIES:
-                    self.fault = 'session_discovery_directory_capacity'
-                    self._clear_discovery()
-                    return
-                self.discovery_pending.append(Path(entry.path))
-            elif (entry.name.endswith('.jsonl') and self.thread in entry.name
-                    and entry.is_file(follow_symlinks=False)):
-                self.discovery_duplicate = self.discovery_match is not None
-                self.discovery_match = Path(entry.path)
-        match, duplicate = self.discovery_match, self.discovery_duplicate
-        self._clear_discovery()
-        if match is None or duplicate:
-            self.reason = 'session_ambiguous' if duplicate else 'session_unavailable'
-            return
-        self._bind(match)
+        path = Path(path)
+        if (not path.is_absolute() or path.resolve() != path or self.home.resolve() != self.home
+                or not path.is_relative_to(self.home / 'sessions')):
+            raise ValueError('Native session path changed')
+        info = path.stat()
+        identity = (info.st_dev, info.st_ino)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('Native session is not an ordinary file')
+        if self.path is not None and (self.path != path or self.identity != identity or info.st_size < self.offset):
+            raise ValueError('Native session original changed')
+        self.path, self.identity, self.offset = path, identity, info.st_size
 
     def poll(self):
-        if self.fault or self.unavailable:
-            self._clear_discovery()
+        if self.fault or not self.available or self.metadata_path is None:
+            self.context_blocked=True;self.invalidate_context()
             return self.snapshot()
         try:
-            if self.path is None:
-                self._discover()
-            if self.path is None:
-                return self.snapshot()
-            stat = self.path.stat()
-            if self.identity != (stat.st_dev, stat.st_ino) or stat.st_size < self.offset:
-                self.fault = 'session_log_replaced_or_truncated'
-                return self.snapshot()
-            if self.high is not None:
+            from . import budget_notice
+            value = budget_notice.read_metadata(self.metadata_path)
+            if value.get('attempt') != self.attempt or value.get('cwd') != str(self.workspace):
+                raise ValueError('Native metadata attempt changed')
+            thread = value.get('session_id')
+            if thread is not None and (not isinstance(thread, str)
+                    or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', thread)
+                    or self.thread is not None and thread != self.thread):
+                self.bind_thread(thread)
+                raise ValueError('Native metadata session identity changed')
+            acknowledged = value.get('acknowledged')
+            if (type(acknowledged) is not int or acknowledged < self.acknowledged
+                    or type(value.get('pending')) is not bool):
+                raise ValueError('Native metadata delivery acknowledgement changed')
+            if acknowledged and thread is None:
+                raise ValueError('Native metadata session identity is unavailable')
+            self.pending, self.acknowledged = value['pending'], acknowledged
+            if self.pending:
+                if not self.context_blocked:self.context_min_observed_at=time.time()
+                self.context_blocked=True;self.invalidate_context()
+                started = value.get('pending_started_at')
+                if type(started) not in (int, float) or not 0 < started <= time.monotonic():
+                    raise ValueError('Native metadata delivery clock changed')
+                if time.monotonic() - started >= 5:
+                    self.delivery_fault = 'native_metadata_delivery_timeout'
+                    self.window_fault = self.window_fault or 'context_observation_unavailable'
+            if thread is not None:
+                self.bind_thread(thread)
+                if self.fault:
+                    raise ValueError('Native metadata session identity changed')
+                self._session_binding(value)
+                if acknowledged and value.get('fault') is None and not self.fault:
+                    self.window_bound = True
+                if acknowledged and value.get('fault') is None and self.path is not None and not self.fault:
+                    self.binding_verified = True
+            count = value.get('compactions')
+            calls = value.get('calls')
+            if (type(count) is not int or count < self.compactions
+                    or not isinstance(calls, dict) or set(calls) != set(self.calls)
+                    or any(type(calls[k]) is not int or calls[k] < self.calls[k] for k in calls)):
+                raise ValueError('Native metadata counter regressed')
+            if count != self.compactions:
+                self.invalidate_context(freshness_boundary=True)
+            self.windows_started += count - self.compactions
+            self.compactions, self.calls = count, dict(calls)
+            meter = tokens(value.get('tokens'))
+            if meter is None or any(meter[k] < self.known[k] for k in FIELDS):
+                raise ValueError('Native request usage changed')
+            self.known = meter
+            reported = value.get('reported_calls')
+            if (type(reported) is not int or not self.reported_calls <= reported <= sum(calls.values())
+                    or type(value.get('usage_unknown')) is not bool):
+                raise ValueError('Native request usage is unavailable')
+            self.reported_calls = reported
+            if reported:
+                self.high = meter
+            if value.get('fault') is not None:
+                self.context_blocked=True;self.invalidate_context()
+                self.binding_verified = False
+                self.delivery_fault = 'native_metadata_delivery_failed'
+                self.window_fault = self.window_fault or 'context_event_invalid'
+                self.reason = 'native_metadata_invalid'
+            elif value.get('usage_unknown') is True:
+                self.reason = 'token_counter_unreported'
+            elif reported:
                 self.reason = None
-            with self.path.open('rb') as stream:
-                stream.seek(self.offset)
-                data = stream.read(READ_BYTES)
-            self.offset += len(data)
-            for part in data.splitlines(keepends=True):
-                complete = part.endswith(b'\n')
-                if not self.skipping:
-                    self.pending += part
-                    if len(self.pending) > LINE_BYTES:
-                        self.pending = b''
-                        self.skipping = True
-                if complete:
-                    if not self.skipping:
-                        value = _counter(self.pending)
-                        if isinstance(value, str):
-                            self.fault = value
-                        elif value is not None:
-                            if self.high is not None and any(value[k] < self.high[k] for k in FIELDS):
-                                self.fault = 'token_counter_regressed'
-                            else:
-                                delta = {k: value[k] - self.baseline[k] for k in FIELDS}
-                                if tokens(delta) is None:
-                                    self.fault = 'invalid_token_delta'
-                                else:
-                                    self.high = tokens(value)
-                                    self.known = delta
-                                    self.context = value['context']
-                                    self.reason = None
-                    self.pending = b''
-                    self.skipping = False
-            if self.pending or self.skipping:
-                self.reason = 'session_partial_line'
-            elif self.offset < stat.st_size:
-                self.reason = 'session_read_backlog'
-        except (OSError, ValueError, AttributeError):
-            self._clear_discovery()
-            self.reason = 'session_unavailable'
+            self.context_blocked=bool(self.pending or self.delivery_fault or self.fault)
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.context_blocked=True;self.invalidate_context()
+            self.binding_verified = False
+            self.delivery_fault = 'native_metadata_unavailable'
+            self.window_fault = self.window_fault or 'context_identity_unavailable'
+            self.reason = 'native_metadata_unavailable'
+        return self.snapshot()
+
+    def finish_context(self):
+        if (not self.available or not self.window_bound or not any(self.calls.values())
+                or self.pending or self.delivery_fault):
+            self.window_fault = self.window_fault or 'context_observation_unavailable'
+            self.delivery_fault = self.delivery_fault or 'native_metadata_delivery_incomplete'
+            self.context_blocked=True;self.invalidate_context()
         return self.snapshot()
 
     def snapshot(self):
-        return dict(source='native_session_token_count', thread_id=self.thread,
-                    coverage='unknown' if self.fault or self.reason else 'live',
-                    reason=self.fault or self.reason, tokens=dict(self.known),
-                    baseline_tokens=dict(self.baseline) if self.resumed and not self.unavailable else None,
-                    has_observation=self.high is not None and not (self.resumed and self.high == self.baseline),
-                    context=dict(status='unavailable') if self.fault or self.reason else dict(self.context),
-                    unreported_usage='Running requests and reporting delay are unmeasured.',
-                    individual_request_usage='unavailable')
+        windows = dict(coverage='unknown' if self.window_fault or self.fault else
+            'live' if self.window_bound and self.available and not self.pending else 'awaiting',
+            windows_started=self.windows_started, reason=self.window_fault or
+            ('context_cursor_changed' if self.fault else None if self.window_bound and self.available else 'context_awaiting_session'))
+        if self.window_bound:
+            windows['cursor'] = dict(thread_id=self.thread, compactions=self.compactions)
+            if self.terminal_tokens is not None:
+                windows['cursor']['terminal_tokens'] = dict(self.terminal_tokens)
+        binding = None
+        if self.binding_verified and self.path is not None and self.identity is not None:
+            binding = dict(thread_id=self.thread, home=str(self.home), workspace=str(self.workspace),
+                path=str(self.path), identity=list(self.identity), offset=self.offset,
+                source='native_metadata_hooks')
+        return dict(source='native_post_model_request', thread_id=self.thread,
+            coverage='unknown' if self.fault or self.reason else 'live', reason=self.fault or self.reason,
+            tokens=dict(self.known), baseline_tokens=dict(self.baseline) if self.resumed else None,
+            has_observation=self.high is not None, **self.basic_snapshot(), context_windows=windows,
+            session_binding=binding,
+            metadata_delivery=dict(acknowledged=self.acknowledged, pending=self.pending,
+                fault=self.delivery_fault),
+            unreported_usage='Running requests and reporting delay are unmeasured.',
+            individual_request_usage='native_post_model_request')

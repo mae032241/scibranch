@@ -4,6 +4,7 @@ import copy
 import pytest
 
 from scidiscovery.research_loop import accepted_budget, contracts as c, controller, decision, native, protocol
+from scidiscovery.research_loop.output_repair import OutputRepairRequired
 from test_history_handoff import finish, fixture_portfolio_review, fixture_final_coverage
 
 REQUEST = dict(decision='candidate', question='Should the candidate be retained under the declared target condition?',
@@ -53,44 +54,25 @@ def next_worker(root, *, text):
 
 
 @pytest.mark.parametrize('action', ['continue_w', 'revise_h', 'extract'])
-def test_minimal_route_does_not_require_optional_decision_request(tmp_path, action):
-    root = prepare(tmp_path)
-    job, payload = author(root, 3, [1, 2], None, action=action, omit_request=True)
-    validated = c.validate(c.workspace(root, 3))
-    assert validated['next_action'] == action and 'decision_request' not in validated
-    outcome = c.read(c.host_record(c.workspace(root, 3)) / 'result-identity.json')['control_outcome']
-    assert outcome['decision_status'] == 'applied'
-    assert decision.reason(root, job, payload) is None
-
-
-def test_minimal_route_still_rejects_completed_repetition_without_new_evidence(tmp_path):
-    root = prepare(tmp_path)
-    author(root, 3, [1, 2], None, omit_request=True)
-    next_worker(root, text='A retained response to the original scientific question.')
-    # Reassessing the old exact W adds no evidence to that completed request.
-    job, payload = author(root, 5, [1, 2, 3], None, omit_request=True)
-    assert decision.reason(root, job, payload) == 'a_decision_request_repeated'
-    changed = dict(payload, route_reason='A different scientific question for the same evidence.')
-    # A sealed result keeps its saved gate, even if a caller supplies new prose.
-    assert decision.reason(root, job, changed) == 'a_decision_request_repeated'
-    assert decision.assess(root, job, changed) == []
+@pytest.mark.parametrize('authored_request',[None,{},dict(decision='mechanism',question='',change_criterion=''),
+    dict(decision='mechanism',question='Concrete missing target observation',change_criterion='  ')])
+def test_further_research_requires_same_output_concrete_request(tmp_path, action, authored_request):
+    root=prepare(tmp_path)
+    with pytest.raises(OutputRepairRequired,match='decision_request'):
+        author(root,3,[1,2],authored_request,action=action)
+    record=c.host_record(c.workspace(root,3))
+    raw=c.read(record/'science-output.json')
+    assert raw['decision_request']==authored_request and raw['next_action']==action
+    assert not (record/'result-identity.json').exists()
+    assert not (root/'jobs/004.json').exists()
 
 
 @pytest.mark.parametrize('action', ['continue_w', 'revise_h', 'extract'])
-@pytest.mark.parametrize('decision_request',[None,{},dict(decision='mechanism',question='',change_criterion='')])
-def test_unconsumable_optional_decision_uses_route_fallback_and_preserves_raw(tmp_path, action,decision_request):
-    root = prepare(tmp_path)
-    job, payload = author(root, 3, [1, 2], decision_request, action=action)
-    record = c.host_record(c.workspace(root, 3))
-    raw = (record / 'science-output.json').read_bytes()
-    assert c.validate(c.workspace(root, 3))['next_action'] == action
-    receipt = c.read(record / 'result-identity.json')['control_outcome']
-    assert receipt['decision_status'] == 'applied'
-    omitted=dict(payload);omitted.pop('decision_request')
-    assert decision._key(job,payload,None)==decision._key(job,omitted,None)
-    assert decision.reason(root,job,payload) is None
-    assert (record / 'science-output.json').read_bytes() == raw
-    assert not (root/'jobs/004.json').exists()
+def test_omitted_request_cannot_fall_back_to_generic_route_reason(tmp_path,action):
+    root=prepare(tmp_path)
+    with pytest.raises(OutputRepairRequired,match='change_criterion'):
+        author(root,3,[1,2],None,action=action,omit_request=True)
+    assert 'decision_request' not in c.read(c.host_record(c.workspace(root,3))/'science-output.json')
 
 
 def test_exact_completed_request_without_new_original_is_rejected_but_negative_new_result_is_allowed(tmp_path):

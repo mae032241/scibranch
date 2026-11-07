@@ -1,5 +1,8 @@
 """Exact review through existing native nodes; scripted transport is not Codex qualification."""
 import sys
+import json
+import os
+from pathlib import Path
 
 import jsonschema
 import pytest
@@ -18,11 +21,34 @@ def choice_inventory(root,job,payload):
         selected_inputs=selected,selection_diagnostics=diagnostics)
 
 
+def formal_native_diagnostic(root,result):
+    """Only the expected formal node's exact receipts and bounded stderr tails."""
+    record=root/'native-evidence/004'
+    paths=(record/'native-outcome.json',record/'native.stderr',record/'runner.stderr')
+    retained={}
+    for path in paths:
+        if not path.is_file():
+            retained[str(path.relative_to(root))]=dict(status='missing')
+            continue
+        with path.open('rb') as stream:
+            stream.seek(0,2)
+            size=stream.tell()
+            stream.seek(max(0,size-8192))
+            retained[str(path.relative_to(root))]=dict(size_bytes=size,tail=stream.read(8192).decode('utf-8',errors='replace'))
+    diagnostic=dict(result=result,formal_step_004=retained)
+    log_root=Path(os.environ.get('SCID_TEST_LOG_DIR',str(root.parent)))
+    log_root.mkdir(parents=True,exist_ok=True)
+    log_path=log_root/('formal-native-'+root.parent.name+'.log')
+    log_path.write_text(json.dumps(diagnostic,ensure_ascii=False,indent=2)+'\n')
+    return dict(diagnostic_log=str(log_path),status=result['status'],
+        completed_steps=result['completed_steps'],reason=result.get('reason'))
+
+
 # This independent local process supplies protocol-shaped native/session events.
 # It never calls a model, backend or solver. Its identities are synthetic.
 LAUNCHER = '''import json,os,pathlib,sys,uuid
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);step=int(work.name)
-task=json.loads((work/'science-task.json').read_text());prompt=sys.stdin.read()
+task=json.loads((work/'science-task.json').read_text());prompt=sys.stdin.read();args=sys.argv[1:]
 anchor='REQUESTER_INSISTS_PASS_WITHOUT_COUNTEREVIDENCE'
 thread=str(uuid.uuid5(uuid.NAMESPACE_URL,'formal-native-'+str(2 if step==4 and os.environ.get('REVIEW_REUSE_AUTHOR') else step)))
 home=pathlib.Path(os.environ['CODEX_HOME']);sessions=home/'sessions';sessions.mkdir(parents=True,exist_ok=True)
@@ -30,15 +56,24 @@ if not (step==2 and os.environ.get('REVIEW_MISSING_AUTHOR')):
  (sessions/(thread+'.jsonl')).write_text(json.dumps({'type':'session_meta','payload':{'id':thread,'cwd':str(work)}})+'\\n')
 print(json.dumps({'type':'thread.started','thread_id':thread}),flush=True)
 if 'review' in task:
- instruction=task['review']['instruction']
- assert instruction in prompt
+ # Codex transports the full neutral review instruction through one JSON-valued
+ # developer_instructions argv field; science-task keeps only neutral inputs.
+ developer=[json.loads(args[index+1].split('=',1)[1]) for index,value in enumerate(args[:-1])
+            if value=='-c' and args[index+1].startswith('developer_instructions=')]
+ assert len(developer)==1,developer
+ instruction=developer[0]
+ assert isinstance(instruction,str) and instruction
+ assert 'instruction' not in task['review']
+ assert instruction not in prompt and instruction not in json.dumps(task)
+ actual_input=prompt+chr(10)+instruction
+ assert actual_input.count(instruction)==1
  for concept in ('exact requested claims','original objective','authorized scope','locatable sources','experiment conditions',
                  'measurements','inferences','assumptions','target metrics','proxies','sensitivity',
                  'conflicting evidence','uncertainty','missing inputs','favorable verdict'):
   assert concept in instruction,concept
  assert 'scientific_judgment' not in task and 'candidate_recommendation' not in task['final_response']
  assert 'history' not in task and 'parents' not in task
- assert anchor not in json.dumps(task) and anchor not in prompt
+ assert anchor not in json.dumps(task) and anchor not in actual_input
  assert not (work/'inputs/history').exists()
  assert not list((work/'inputs/parents').glob('*/conclusion.json'))
  assert all(anchor.encode() not in path.read_bytes() for path in (work/'inputs').rglob('*') if path.is_file())
@@ -51,11 +86,15 @@ else:
  if role=='H':value.update(next_action='experiment',route_reason='Implement the question',search_plan=None)
  if role=='W':
   (work/'artifacts/model.txt').write_text('a scientific implementation')
-  value.update(stage_intent='review',mechanism_findings=None)
+  value.update(stage_intent='decision',mechanism_findings=None)
  if role=='A':
   mode=os.environ.get('REVIEW_UNAVAILABLE_ROUTE','finish')
   request=step==3 or bool(os.environ.get('REVIEW_MISSING_AUTHOR')) and mode=='repeat'
   value.update(next_action='extract' if step==4 and mode=='extract' else 'formal_review' if request else 'finish',route_reason='Assess the selected implementation '+str(step),candidate_recommendation=None,search_review=None,progress_assessment=None,decision_request=None,portfolio_review=None)
+  if value['next_action']=='extract':
+   value['decision_request']=dict(decision='mechanism',
+    question='Which public observations support or contradict the exact subject scientific claim?',
+    change_criterion='Locatable independent contradictory observations would change whether the scientific claim can be retained.')
   if request:value['implementation_selection']=['W002-I001']
   if step==3:value.update(summary=anchor,scientific_result=anchor,route_reason=anchor)
   if step==5 and not os.environ.get('REVIEW_MISSING_AUTHOR'):assert task['formal_review_feedback']['status']==('not_qualified' if os.environ.get('REVIEW_REUSE_AUTHOR') else 'passed')
@@ -114,8 +153,8 @@ def test_formal_review_scientific_prose_has_no_minimum_length_and_keeps_verdict_
 def test_real_native_route_freezes_exact_review_and_uses_actual_home(tmp_path,monkeypatch):
     root,home=scripted(tmp_path,monkeypatch)
     result=controller.run(root)
-    assert result['status']=='finish' and result['completed_steps']==5
-    job=c.read(root/'jobs/004.json');record=c.host_record(c.workspace(root,4))
+    assert result['status']=='finish' and result['completed_steps']==5,formal_native_diagnostic(root,result)
+    job=c.read_job(root/'jobs/004.json');record=c.host_record(c.workspace(root,4))
     assert job['role']=='A' and job['purpose']=='formal_review'
     request=c.read(root/job['formal_review']['path'])
     assert request['requester_rationale']=='REQUESTER_INSISTS_PASS_WITHOUT_COUNTEREVIDENCE'
@@ -141,7 +180,8 @@ def test_real_native_route_freezes_exact_review_and_uses_actual_home(tmp_path,mo
 @pytest.mark.process_e2e
 def test_native_author_session_cannot_review_itself_even_with_pass(tmp_path,monkeypatch):
     root,_=scripted(tmp_path,monkeypatch,reuse=True)
-    assert controller.run(root)['status']=='finish'
+    result=controller.run(root)
+    assert result['status']=='finish',formal_native_diagnostic(root,result)
     seal=c.read(c.host_record(c.workspace(root,4))/'result-identity.json')
     proof=c.read(root/seal['formal_review']['path'])
     assert proof['verdict']=='pass' and proof['independence']=='overlap' and proof['status']=='not_qualified'
@@ -192,19 +232,26 @@ def test_unavailable_review_does_not_force_delivery_closeout_across_extraction(t
         cleanup_seconds=0,submit_seconds=0,confirm_seconds=0,adapter=None)
     root,_=scripted(tmp_path,monkeypatch,missing=True,unavailable_route='extract',delivery_policy=policy)
     result=controller.run(root)
-    assert result['status']=='finish' and result['last_step']==6,result
+    assert result['status']=='finish' and result['last_step']==6,formal_native_diagnostic(root,result)
     assert result['goal_completion']=='not_asserted'
     assert [c.validate(c.workspace(root,step))['role'] for step in range(1,7)]==['H','W','A','A','E','A']
     assert [c.read(root/'jobs'/f'{step:03d}.json')['role'] for step in (4,5,6)]==['A','E','A']
     requester=c.validate(c.workspace(root,4))
     assert requester['next_action']=='extract'
+    assert requester['decision_request']==dict(decision='mechanism',
+        question='Which public observations support or contradict the exact subject scientific claim?',
+        change_criterion='Locatable independent contradictory observations would change whether the scientific claim can be retained.')
     assert c.read(root/'jobs/005.json')['evidence_return']==dict(role='A',step=4)
-    assert c.read(root/'jobs/006.json')['instruction']==requester['route_reason']
+    returned=c.read(root/'jobs/006.json')
+    assert 'inputs/parents/004/conclusion.json' in returned['instruction']
+    assert 'inputs/parents/005/conclusion.json' in returned['instruction']
+    assert {'inputs/parents/004/conclusion.json','inputs/parents/005/conclusion.json'} <= {
+        ref['path'] for ref in returned['direct_refs']}
     state=budget.closeout_state(root)
     assert state['begin'] is None and state['actions']==[]
     assert budget.final_a_barrier(root) is None
     assert not (root/'jobs/007.json').exists()
-    job=c.read(root/'jobs/006.json')
+    job=c.read_job(root/'jobs/006.json')
     assert job['formal_review_choices']['unavailable']==c.read(root/'jobs/004.json')['formal_review_choices']['unavailable']
     assert 'author_correction' not in job
     science=c.validate(c.workspace(root,6))
@@ -289,11 +336,23 @@ def test_unsupported_launcher_removes_review_action_without_blocking_science(tmp
     job=c.build_job(root,3,'A',[1,2])
     schema=c.result_schema('A',**c.response_options(job))
     assert 'formal_review' not in schema['properties']['next_action']['enum']
-    with pytest.raises(OutputRepairRequired,match='Correct required fields'):
+    with pytest.raises(OutputRepairRequired,match='Correct next_action'):
         finish(root,3,'A',[1,2],action='formal_review',selection=['W002-I001'])
-    finish(root,3,'A',[1,2],action='finish',selection=['W002-I001'])
-    assert c.validate(c.workspace(root,3))['next_action']=='finish'
+    record=c.host_record(c.workspace(root,3))
+    rejected={path:path.read_bytes() for path in (root/'jobs/003.json',record/'native-intent.json',
+        record/'science-output.json',record/'native-outcome.json')}
+    assert not (record/'result-identity.json').exists()
+    # A separate valid task proves ordinary science remains available without
+    # relaunching the closed invalid native original through this thin fixture.
+    ordinary=tmp_path/'ordinary';ordinary.mkdir()
+    valid=prepare(ordinary,['unsupported-launcher'])
+    finish(valid,1,'H',[],action='experiment')
+    finish(valid,2,'W',[1],files={'model.txt':'scientific implementation'})
+    finish(valid,3,'A',[1,2],action='finish',selection=['W002-I001'])
+    assert c.validate(c.workspace(valid,3))['next_action']=='finish'
+    assert all(path.read_bytes()==value for path,value in rejected.items())
     assert review.unavailable(root,3) is None
+    assert review.unavailable(valid,3) is None
 
 
 def test_ordinary_a_and_pass_text_do_not_gain_formal_qualification(tmp_path):
@@ -305,7 +364,12 @@ def test_ordinary_a_and_pass_text_do_not_gain_formal_qualification(tmp_path):
     assert set(review.schema()['properties'])=={'verdict','summary','scientific_result','limitations'}
     ordinary=c.build_job(root,3,'A',[2],instruction='Ordinary scientific continuation')
     assert ordinary['direct_refs'][0]['path']=='inputs/parents/002/conclusion.json'
-    assert 'pass: independent and ready to execute' in (c.workspace(root,3)/ordinary['direct_refs'][0]['path']).read_text()
+    c._validate_inputs(root,c.workspace(root,3),ordinary)
+    original=c.read(record/'result-identity.json')['raw_ref']
+    assert ordinary['direct_refs'][0]['size_bytes']==original['size_bytes']
+    assert Path(original['path'])==record/'science-output.json'
+    assert c.read(Path(original['path']))['scientific_result']=='pass: independent and ready to execute'
+    assert not (c.workspace(root,3)/ordinary['direct_refs'][0]['path']).exists()
 
 
 def test_review_default_packet_keeps_exact_source_without_requester_arguments(tmp_path,monkeypatch):
@@ -319,9 +383,45 @@ def test_review_default_packet_keeps_exact_source_without_requester_arguments(tm
     route=review.request_route(root,requester,c.validate(c.workspace(root,3)),[1,2,3])
     assert route[1]==[2] and route[2]==review.QUESTION
     job=c.build_job(root,4,'A',route[1],instruction=route[2],evidence_return=route[3])
+    # Exact review material production supplies a sparse known seal/job view.
+    # Qualification completes only its missing control locators and cannot
+    # reopen the already loaded scientific producer originals or its admission.
+    from scidiscovery.research_loop import accepted_budget,accepted_prefix
+    known={}
+    binding=review.input_binding(root,job['formal_review'],sources=known)
+    head=accepted_budget.read(root);base=c.settings(root)
+    original_read=c.read
+    original_ref=q._ref
+    seal_probes=[]
+    producer_originals={root/'jobs/002.json',root/'native-evidence/002/result-identity.json'}
+    rereads=[]
+    def counted_read(path):
+        if Path(path) in producer_originals:rereads.append(path)
+        return original_read(path)
+    def counted_ref(instance,path,**options):
+        if Path(path)==root/'native-evidence/002/result-identity.json':seal_probes.append(Path(path))
+        return original_ref(instance,path,**options)
+    with monkeypatch.context() as observed:
+        observed.setattr(c,'read',counted_read)
+        observed.setattr(q,'_ref',counted_ref)
+        observed.setattr(accepted_prefix,'reconcile',lambda *args,**kwargs:pytest.fail('Qualification must not renew producer admission'))
+        facts=q.input_facts(root,job,base=base,head=head,sources=known,review_binding=binding)
+    assert rereads==[] and seal_probes==[root/'native-evidence/002/result-identity.json']
+    assert 'seal_path' in facts['producers'][2] and 'raw_path' in facts['producers'][2]
+    assert [edge['step'] for edge in facts['producer_edges']]==[2]
+    with monkeypatch.context() as missing:
+        missing.setattr(review,'input_binding',lambda *args,**kwargs:pytest.fail('Missing explicit binding must not lazily reload review inputs'))
+        with pytest.raises(q.IntegrityError,match='explicit review binding'):
+            q.input_facts(root,job,base=base,head=head,sources={})
     work=c.workspace(root,4);c._validate_inputs(root,work,job)
     assert job['direct_refs']==[] and len(job['direct_materials'])==1
-    assert job['history']['files']==[] and job['history']['view']=={}
+    assert set(job['history'])=={'prefix','breadth_snapshot','inputs','view'}
+    assert job['history']==binding['history']
+    assert job['history']['inputs']==[] and job['history']['view']=={}
+    view=c.read(work/'science-task.json')
+    assert not {'history','parents','lineage','research'} & set(view)
+    assert view['review']['subject']==job['direct_materials'][0]['path']
+    assert view['global_inputs']==[row['path'] for row in job['global_materials']]
     assert not (work/'inputs/history').exists() and not (work/'inputs/parents/003').exists()
     assert all(anchor.encode() not in path.read_bytes() for path in (work/'inputs').rglob('*') if path.is_file())
     assert anchor in c.read(record/'science-output.json')['scientific_result']
@@ -329,28 +429,38 @@ def test_review_default_packet_keeps_exact_source_without_requester_arguments(tm
     assert [edge['step'] for edge in source['edges'] if edge['kind']=='producer']==[2]
     assert not any(edge['kind']=='unknown' for edge in source['edges'])
     changed=dict(job,selected_inputs=[dict(job['selected_inputs'][0],origin_step=1)])
-    with pytest.raises(ValueError,match='neutral input boundary'):
-        c._validate_inputs(root,work,changed)
+    retained={path:path.read_bytes() for path in (
+        root/'jobs/004.json',work/'science-task.json',root/job['source_provenance']['path'])}
+    with monkeypatch.context() as rejected:
+        rejected.setattr(c,'load_validated_input_facts',lambda *args,**kwargs:
+            pytest.fail('Canonical mismatch must reject before consuming polluted scientific inputs'))
+        with pytest.raises(ValueError,match='Scientific inputs differ from their accepted canonical job'):
+            c._validate_inputs(root,work,changed)
+    assert all(path.read_bytes()==contents for path,contents in retained.items())
 
 
 def test_review_subject_from_requester_keeps_artifact_but_not_its_conclusion(tmp_path):
-    from scidiscovery.research_loop import qualification as q
+    from scidiscovery.research_loop import accepted_budget, qualification as q
     root=prepare(tmp_path,['codex'])
     finish(root,1,'H',[],action='analyze')
     anchor='REQUESTER_SELF_ASSESSMENT_MUST_NOT_BE_DEFAULT_CONTEXT'
     _,_,record=finish(root,2,'A',[1],text=anchor,files={'subject.txt':'the exact subject','unrelated.txt':anchor})
     seal=q._ref(root,record/'result-identity.json')
-    material=next(item for item in c.read(record/'result-identity.json')['materials'] if item['path'].endswith('/subject.txt'))
+    materials=c._public_materials(c.read(record/'result-identity.json')['materials'])
+    material=next(item for item in materials if item['path'].endswith('/subject.txt'))
+    head=accepted_budget.read(root)
     # A host-bound exact request fixture, not an independence/production qualification.
     reference=q._save(root,record/'formal-review-request.json',dict(contract=review.contract(root),question=review.QUESTION,
         requester_rationale=anchor,requester=dict(step=2,seal=seal),
+        prefix=head['prefix'],breadth_snapshot=head['search_ref'],
         subject=dict(producer_step=2,producer_seal=seal,material=material),
         authors=dict(complete=False,participants=[]),unresolved_selection=None,reason=None))
     back=dict(kind='formal_review',request=reference)
     job=c.build_job(root,3,'A',[2],instruction=review.QUESTION,evidence_return=back)
     work=c.workspace(root,3);c._validate_inputs(root,work,job)
     assert job['direct_materials']==[material] and job['direct_refs']==[]
-    assert (work/material['path']).read_text()=='the exact subject'
+    assert Path(material['source']).read_text()=='the exact subject'
+    assert not (work/material['path']).exists()
     assert not (work/'inputs/parents/002/conclusion.json').exists()
     assert not (work/'inputs/parents/002/artifacts/unrelated.txt').exists()
     assert not (work/'inputs/history').exists()
@@ -358,20 +468,59 @@ def test_review_subject_from_requester_keeps_artifact_but_not_its_conclusion(tmp
 
 
 def test_unavailable_review_preserves_existing_nonreview_author_correction(tmp_path):
-    root=prepare(tmp_path,['codex'],decision_contract_version=1)
+    from test_decision_contract import REQUEST, author, next_worker
+    root=prepare(tmp_path,['codex'],steps=8,decision_contract_version=1)
     finish(root,1,'H',[],action='experiment')
-    finish(root,2,'W',[1],files={'model.txt':'a scientific implementation'})
-    job,_,_=finish(root,3,'A',[1,2],action='continue_w',selection=['W002-I001'])
-    science=c.validate(c.workspace(root,3))
-    route=semantic.effective_route(root,3,science,job,(*controller._route(root,3,'A',science,job,1,2),None))
+    _,_,record=finish(root,2,'W',[1],files={'model.txt':'a scientific implementation'})
+    author(root,3,[1,2],REQUEST)
+    next_worker(root,text=c.read(record/'science-output.json')['scientific_result'])
+    # A completed bounded request with no new assessed originals is a genuine
+    # nonreview correction; a missing request is same-output repair instead.
+    job,science=author(root,5,[1,2,3],dict(REQUEST))
+    route=semantic.effective_route(root,5,science,job,(*controller._route(root,5,'A',science,job,1,4),None))
     prior=route[7]
-    assert prior['reason']=='a_decision_request_missing' and prior['root']['step']==3
-    c.build_job(root,4,'A',route[1],instruction=route[2],author_correction=prior)
-    job,_,_=finish(root,4,'A',route[1],action='formal_review',selection=['W002-I001'])
-    science=c.validate(c.workspace(root,4))
-    route=semantic.effective_route(root,4,science,job,(*controller._route(root,4,'A',science,job,1,2),None))
+    assert prior['reason']=='a_decision_request_repeated' and prior['root']['step']==5
+    c.build_job(root,6,'A',route[1],instruction=route[2],author_correction=prior)
+    job,_,_=finish(root,6,'A',route[1],action='formal_review',selection=['W002-I001'])
+    science=c.validate(c.workspace(root,6))
+    route=semantic.effective_route(root,6,science,job,(*controller._route(root,6,'A',science,job,1,4),None))
     assert route[7]['root']==prior['root'] and route[7]['reason']==prior['reason']
-    assert route[7]['source']['step']==4 and route[3]['kind']=='formal_review_unavailable'
-    assert semantic.accepted(root,route[7],5)==1
-    child=c.build_job(root,5,'A',route[1],instruction=route[2],evidence_return=route[3],author_correction=route[7])
+    assert route[7]['source']['step']==6 and route[3]['kind']=='formal_review_unavailable'
+    assert semantic.accepted(root,route[7],7)==1
+    child=c.build_job(root,7,'A',route[1],instruction=route[2],evidence_return=route[3],author_correction=route[7])
     assert child['author_correction']==route[7] and not child.get('formal_review')
+
+
+def compact_identity_fixture():
+    """Synthetic authentic shape, never a replacement session_meta header."""
+    thread='11111111-2222-4333-8444-555555555555'
+    session=dict(source='native_metadata_hooks', thread_id=thread, home='/native',
+        workspace='/workspace', path='/native/sessions/original.jsonl', identity=[1,2], offset=100)
+    event=dict(type='thread.started', thread_id=thread)
+    outcome=dict(thread_id=thread, native_identity=dict(backend='codex',
+        participant_scope='codex_exec_single_agent_v1',session=session), native_thread_event=event,
+        budget_notification=dict(status='available'))
+    row=dict(attempt=0, proof_kind='native_metadata_hooks_v1',intent={'path':'intent'},
+        outcome={'path':'outcome'}, session=dict(session,thread_event=event))
+    metadata=dict(version=1,kind='native_metadata_hooks_v1',intent=row['intent'],outcome=row['outcome'],session=row['session'])
+    return row,metadata,outcome,dict(task_ref={'path':'job'}),dict(task_ref={'path':'job'})
+
+
+def test_compact_native_authorship_proof_keeps_exact_session_and_attempt():
+    row,metadata,outcome,intent,process=compact_identity_fixture()
+    assert review._metadata_participant(row,metadata,outcome,intent,process,'/workspace',{'path':'intent'}) == (
+        'codex_exec','11111111-2222-4333-8444-555555555555')
+    assert 'header' not in row and 'header' not in metadata
+
+
+@pytest.mark.parametrize('mutation',['borrowed_thread','borrowed_workspace','borrowed_process','unqualified_hook','replaced_receipt'])
+def test_compact_native_authorship_rejects_borrowed_or_unqualified_facts(mutation):
+    import copy
+    row,metadata,outcome,intent,process=copy.deepcopy(compact_identity_fixture())
+    if mutation=='borrowed_thread':outcome['native_thread_event']['thread_id']='another'
+    elif mutation=='borrowed_workspace':outcome['native_identity']['session']['workspace']='/another'
+    elif mutation=='borrowed_process':process['task_ref']={'path':'another-job'}
+    elif mutation=='unqualified_hook':outcome['budget_notification']['status']='unavailable'
+    else:metadata['outcome']={'path':'another-outcome'}
+    with pytest.raises(ValueError,match='compact native identity'):
+        review._metadata_participant(row,metadata,outcome,intent,process,'/workspace',{'path':'intent'})

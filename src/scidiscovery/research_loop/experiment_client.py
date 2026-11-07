@@ -8,6 +8,40 @@ import re
 import stat
 
 VERSION = 1
+FROZEN_CODE_DIRECTORY_KEY = 'frozen_code_directory'
+FROZEN_CODE_DIRECTORY_SCHEMA = 'scidiscovery.frozen-code-directory.v1'
+
+
+def frozen_code_directory_capability():
+    """Declare consumption of the complete host-selected, Git-frozen code tree."""
+    from scidiscovery.operations.execution import AdapterCapability
+    contract=dict(version=1,selection='directory',
+        content='complete_selected_logical_code_directory',binding='host_code_version')
+    content=(json.dumps(contract,ensure_ascii=False,sort_keys=True,allow_nan=False)+'\n').encode()
+    return AdapterCapability(FROZEN_CODE_DIRECTORY_KEY,'code_input',FROZEN_CODE_DIRECTORY_SCHEMA,1,
+        'application/json',content,contract)
+
+
+def supports_frozen_code_directory(interface):
+    """Validate only a frozen declaration; do not load an adapter or task record."""
+    from .experiments import IntegrityError
+    if not isinstance(interface,dict):
+        raise IntegrityError('Frozen execution interface is malformed')
+    rows=interface.get('public_capabilities',[])
+    if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):
+        raise IntegrityError('Frozen public execution capabilities are malformed')
+    selected=[row for row in rows if row.get('key')==FROZEN_CODE_DIRECTORY_KEY]
+    if not selected:return False
+    item=frozen_code_directory_capability()
+    expected=dict(key=item.key,kind=item.kind,schema_id=item.schema_id,
+        payload_schema_version=item.payload_schema_version,media_type=item.media_type,
+        public_summary=dict(item.public_summary),size_bytes=len(item.content))
+    try:
+        same=json.dumps(selected,sort_keys=True,allow_nan=False)==json.dumps([expected],sort_keys=True,allow_nan=False)
+    except (ValueError,TypeError):same=False
+    if not same:
+        raise IntegrityError('Frozen code directory capability differs from its declared contract')
+    return True
 
 
 def record_directory(root, step):
@@ -277,7 +311,7 @@ def _observe_code_selection(config,path,*,resolved,experiment_directory,facts):
             raise CallerError('Choose an explicit current-W experiments/<name> runtime directory outside code/.')
         selection='directory';selected=code_root
         entry=path.relative_to(code_root).as_posix()
-    elif project is not None:
+    elif project is not None or supports_frozen_code_directory(config.get('execution_interface',{})):
         selection='directory';selected=code_root;entry=path.relative_to(code_root).as_posix()
     else:
         code_root=path.parent;selection='file';selected=path;entry=path.name

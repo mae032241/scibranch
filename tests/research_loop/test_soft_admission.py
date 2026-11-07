@@ -95,6 +95,7 @@ def test_soft_target_admission_still_refuses_exhausted_shared_budget(tmp_path,mo
 
 
 def test_known_failed_resume_does_not_require_unused_soft_target(tmp_path):
+    from scidiscovery.research_loop import continuation
     from test_soft_node_budget import scene
     from test_worker_resume import wait_runner
     root=scene(tmp_path,mode='known_failure',tokens=1000,seconds=900,total_tokens=100,total_seconds=30,resume=True,sleep=0)
@@ -102,8 +103,17 @@ def test_known_failed_resume_does_not_require_unused_soft_target(tmp_path):
     first=wait_runner(root)
     originals={path:path.read_bytes() for path in first.iterdir() if path.is_file()}
     assert native.usage(root)['observed_tokens']==15
-    assert controller.worker_resume(root,1)['status']=='wait'
-    assert native.usage(root)['observed_tokens']==30 and budget.used_steps(root)==2
+    # Budget admission owns only the retained consumption and finite allowance.
+    # The scripted transport's raw session header grants no hook qualification.
+    anchor=budget.accept_continuation(root,c.read_job(root/'jobs/001.json'),[first])
+    assert anchor['previous_tokens']==15
+    assert anchor['limits']==dict(max_observed_tokens=1000,max_seconds=900)
+    assert anchor['shared_limits']==dict(max_tokens=100,max_seconds=30)
+    assert 0<budget.snapshot(root)['seconds_remaining']<anchor['limits']['max_seconds']
+    with pytest.raises(continuation.ResumeUnavailable,match='^worker_resume_metadata_unavailable$'):
+        continuation.session(root,1,first)
+    assert controller.worker_resume(root,1)['status']=='worker_resume_unavailable'
+    assert native.usage(root)['observed_tokens']==15 and budget.used_steps(root)==1
     assert all(path.read_bytes()==value for path,value in originals.items())
 
 

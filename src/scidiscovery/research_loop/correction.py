@@ -64,7 +64,7 @@ def _proofs(root, job, assessment, *, sealed=False):
 
 
 def validate_payload(root, job, payload):
-    if job.get('purpose') in {'closeout','formal_review'}:
+    if job.get('purpose') in {'closeout','formal_review','worker_consultation'}:
         return
     if job.get('handoff_protocol', 1) >= 6 and job['role'] == 'A' and c.settings(root, job).get('correction_policy') is not None:
         _proofs(root, job, c.scientific_field(job,payload,'progress_assessment'))
@@ -206,7 +206,7 @@ def project(root, before_step=None):
             for review in reviews.values():
                 if review is not None and review['trigger']['trigger_id'] == request['trigger_id']:
                     review['response_h'] = step
-        if (job['role'] != 'A' or job.get('purpose') in {'closeout','formal_review'} or job.get('handoff_protocol', 1) < 6
+        if (job['role'] != 'A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'} or job.get('handoff_protocol', 1) < 6
                 or job.get('author_correction') is not None
                 or seal.get('control_outcome', {}).get('decision_status') == 'unresolved'
                 or seal.get('control_outcome', {}).get('portfolio_status') == 'unresolved'
@@ -323,6 +323,8 @@ def effective_route(root, step, result, job, route):
     """Historical cutoff protects retained jobs from later progress or ack."""
     role, parents, instruction, evidence_return, current_h, current_w = route
     request = None
+    if job.get('purpose')=='worker_consultation':
+        return role,parents,instruction,evidence_return,current_h,current_w,None
     state = project(root, step + 1)
     review = state['review_request']
     if job['role'] == 'A' and review is not None and result['next_action'] in {'continue_w', 'revise_h'}:

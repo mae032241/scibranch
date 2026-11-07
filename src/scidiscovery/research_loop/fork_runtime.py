@@ -13,6 +13,7 @@ FROZEN_TASK_SETTINGS = (
     'final_a_completion_policy', 'live_feedback_version', 'experiment_interface_version',
     'managed_admission_version', 'worker_view_version', 'storage_policy',
     'skills', 'worker_profiles', 'role_profile_declarations', 'project',
+    'supervision_policy', 'supervision_budget_basis',
 )
 
 
@@ -311,7 +312,7 @@ def build_selected_job(root, step):
             row['source'].mkdir(parents=True,exist_ok=True)
     from . import storage_policy as storage
     from scidiscovery import archive_io as files
-    context=storage.Deadline(frozen['max_seconds'])
+    context=storage.Deadline(65 if frozen['max_seconds'] is None else frozen['max_seconds'])
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
     for relative, source, entry in _selected_files(root, selected):
         inventory.entry();inventory.file(entry['size_bytes'])

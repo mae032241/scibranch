@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from scidiscovery.research_loop import budget, configuration_updates as updates, contracts as c, controller, history, research_config
+from test_composed_execution_results import composed_registry
 
 
 def instance(tmp_path):
@@ -44,6 +45,37 @@ def test_pending_revision_binds_only_new_jobs_and_keeps_original_bytes(tmp_path,
     assert (root / 'settings.json').read_bytes() == base
     third = c.build_job(root, 3, 'H', [])
     assert third['configuration_revision'] == second['configuration_revision']
+
+
+def test_context_cadence_revision_projects_new_node_and_preserves_original_job_binding(tmp_path, monkeypatch, composed_registry):
+    public = tmp_path / 'public'
+    public.mkdir()
+    objective = public / 'objective.md'
+    objective.write_text('Preserve the original cadence until an explicit new-node revision.')
+    binary = tmp_path / 'codex'
+    binary.write_text('#!/bin/sh\nexit 99\n')
+    binary.chmod(0o755)
+    root = tmp_path / 'research'
+    controller.prepare(root, objective, public, [str(binary)], max_tokens=10000,
+        max_seconds=120, max_steps=8, model='original-model', reasoning_effort='high', search_policy=None,
+        execution_config=dict(executor='composed_execution:fixture',
+            configuration=dict(synchronous=True,collect=True,terminal_status='known_success')),
+        node_budget_policy={role: dict(max_observed_tokens=10000,max_seconds=120) for role in 'HWAE'},
+        resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
+            output_repair=True,output_only=True,native_home=str(tmp_path/'native-home')),
+        worker_fragment_policy=dict(context='same_session'))
+    monkeypatch.setattr(history, 'source_sequence', lambda *args, **kwargs: [])
+    first = c.build_job(root, 1, 'H', [])
+    original = (root/'settings.json').read_bytes()
+    saved = edit(root, model='next-model')
+    assert 'worker_context_windows' not in saved['configuration']['policies']
+    assert 'max_context_windows' not in updates.for_new_job(root, 2)['worker_fragment_policy']
+    state = updates.status(root)
+    state['configuration']['policies']['worker_context_windows'] = 1
+    updates.submit(root, state['configuration'], expected_revision=state['revision'])
+    assert 'max_context_windows' not in updates.for_job(root, first)['worker_fragment_policy']
+    assert updates.for_new_job(root, 2)['worker_fragment_policy']['max_context_windows'] == 1
+    assert (root/'settings.json').read_bytes() == original
 
 
 def test_automatic_recovery_edit_binds_new_nodes_and_preserves_original_policy_and_meters(tmp_path, monkeypatch):

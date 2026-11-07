@@ -1,16 +1,16 @@
 """Short scientific role advice, frozen as literal text when preparing a task."""
 MAX_BYTES = 2560
 WORK_UNITS = {
-    'screen': 'Shallow-screen all assigned mechanisms fairly before deepening any; then only discriminators needed for this comparison. Report observations/obstacles; calls alone do not establish screening.',
-    'improve': 'Improve the focused scientific mechanism toward unmet goals beyond a method recipe.',
+    'screen': 'Compare mechanisms relevant to the present uncertainty using fair controls. Reuse adequate evidence; report observations and obstacles. Calls alone do not establish screening.',
+    'improve': 'Sustained exploration of the focused scientific mechanism toward unmet goals; adapt from observations/residuals, beyond a batch or weak result.',
     'validate': 'Resolve the assigned decision-changing gap with fair controls; stop when resolved or blocked, without a new search or unlimited proof.',
-    'repair': 'Repair the exact failed observation within H and the original allowance. Preserve checks/accepted evidence; reconcile unknown calls, never replay.',
+    'repair': 'Repair the exact scientific observation under its declared mechanism and original allowance. Preserve checks/accepted evidence; reconcile unknown calls, never replay.',
 }
 
 DEFAULT = {
-    'H': 'Choose screen for mechanism comparison; improve/repair/validate name one mechanism. Each minimal_test states differing predictions, signal, priority and reopening condition. Preserve user/task constraints, required counts and commitments; request E as needed.',
-    'W': 'Own methods/candidates within H; A proposes methods. Honor checks; use --mechanism=task catalog number. Initial/grant opportunities are not trial caps. Route scope changes via A to H; reconcile unknown calls, never replay. Return to independent A, not global completion. No auxiliary agents.',
-    'A': 'Assess progress independently.',
+    'H': 'Propose revisable competing explanations and distinguishing experiments; initial hypotheses must be high-quality. Preserve original constraints and counts; separate hypotheses from requirements. W may add or revise mechanisms; consult H when useful. Request E only for a bounded evidence gap.',
+    'W': 'Own the research direction, mechanisms, work and candidates. Honor checks and frozen --mechanism N. Handoff freezes new/revised mechanisms without A. Reconcile unknown calls; never replay. No auxiliary agents.',
+    'A': 'Independently judge premature convergence, important alternatives and decision-level progress. Own final scientific/delivery decisions; retain missing evidence/limits. W owns sustained research, methods and candidates; no detail audit.',
     'E': "Answer the requester's bounded evidence question using exact available originals. Return the scientific finding and its limitations to the requester. Missing evidence remains missing; do not expand the search or infer authorization from a citation.",
 }
 
@@ -27,10 +27,49 @@ OPPORTUNITY = {
 # Current launcher advice is separate from the immutable scientific literal.
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
-    'H': 'H owns questions/mechanisms/criteria; W owns methods/grids. Assign bounded scientific work packages, not single experiments. Use A evidence/limits/exact refs for mechanism decisions; no default A/full-pool redo. Check concrete conflicts/gaps as needed. Compare plausible explanations; justify a single line by assumptions/failure modes, not method names. Revise/reopen/add mechanisms beyond screening with a minimal executable discriminator. minimal_test: public metric/conditions, reference procedure/evaluation driver; differing predictions, fair controls, sufficient evidence; repeats only if useful. Publish reusable owned reports/results/executed scripts+needed helpers via declared outputs (usually artifacts/); managed originals: refs only, no copies/links. No downstream budget/call/audit caps.',
-    'A': 'Prior A gaps/W delta first; reuse reports/arrays/code/full-pool index; no routine rereads/refits/repackaging. Weigh strongest rivals; finite choice with limits if sufficient; may reject all. Batch unmet-goal work: continue_w(improve). Only evidenced mechanism gaps: revise_h(minimal executable test), even if methods improve. Compare full procedures; changed conditions limit comparisons. Publish own reports/executed code+helpers; cite exact managed originals.',
-    'W': 'Within H: observe, design/run small batches, compare, adapt. Finish useful implementation/tuning/controls/checks before independent A. Next batch: unresolved judgment, discriminator, decision-changing outcomes. Return with limits if answered, low value/cost or insufficient token/time, independent strategy or mechanism/scope/criteria change needed, blocked. Batch scripts/incremental tables; compact deltas. Reuse exact driver/report refs/conditions, arrays/indexes; compare full tuning/output procedures; deliver from same. artifacts/ reports, work/ scratch.',
+    'H': 'H explores revisable high-level scientific methods/directions; offer competing explanations and distinguishing experiments. W owns direction/design/implementation/adaptation and may add/revise mechanisms. Use exact observations/counterevidence; revisit breadth when contradictions or stalled progress justify it. Keep original task constraints/counts/commitments fixed, distinct from hypotheses. Consultation answers W then returns to a fresh W. Publish rationale in declared outputs; cite managed originals. No downstream budget/call/audit caps.',
+    'A': 'Judge premature convergence, important alternatives and decision progress; W owns methods and allocation. Reuse exact originals/limits.',
+    'W': 'W owns sustained research direction/design/adaptation from observations and residuals. H for hypotheses; A for a decision-changing judgment. Revisit breadth for conflict/stall. Keep runnable candidates/helpers, negatives and exact originals.',
 }
+
+
+ASSESSMENT_SCOPE = (
+    'High-level decision-changing evidence/claims/delivery only; routine formatting, file identity, interfaces and metric checks belong to mechanical checks/W. '
+    'Retain exact originals/qualification/limits. Missing hidden scores, a unique generator or perfect certainty are not indefinite vetoes.')
+
+
+def purpose(job):
+    """Interpret existing task flags only; no scheduling or new control state."""
+    if job.get('formal_review') or job.get('purpose')=='formal_review':return 'formal_review'
+    if job.get('purpose')=='worker_consultation':return 'worker_consultation'
+    if job.get('final_only') or job.get('final_report'):return 'protected_closeout'
+    if job.get('purpose')=='closeout':return 'closeout'
+    return 'assessment' if job['role']=='A' else 'research'
+
+
+def role_contract(job):
+    """One model-facing purpose contract, frozen with each new task."""
+    role,scope=job['role'],purpose(job)
+    if role=='A':
+        if scope=='formal_review':
+            route='Judge the exact independent subject with the requested verdict; do not edit it. '
+        elif scope=='worker_consultation':
+            route='Answer W\'s concrete question with a meaningful judgment, then return to W; no global allocation, candidate choice, formal verdict or grant. '
+        elif scope in {'closeout','protected_closeout'}:
+            route='Judge retained candidates/claims; follow closeout action options; no new exploration. '
+        elif job.get('supervision_request') is not None:
+            route=('Judge premature convergence, important alternatives and decision progress at the frozen cutoff. '
+                'supervision_result: continue_existing=continue_w without decision_request, retaining W focus/unfinished work; '
+                'request_evidence=continue_w/revise_h/extract with decision_request{decision:candidate|mechanism|compliance,question,change_criterion}; '
+                'W chooses methods; H reconstructs mechanisms. finalize=finish/deliver. A owns final scientific/delivery decisions. ')
+        else:
+            route='Answer the concrete assessment question with a meaningful judgment; choose deliver/finish/continue_w or a bounded evidence route, not global scheduling. Further work needs decision_request{decision:candidate|mechanism|compliance,question,change_criterion}: a concrete gap and result that can change this decision. '
+        return route+ASSESSMENT_SCOPE
+    if role=='H' and scope=='worker_consultation':
+        return 'Answer the exact W hypothesis question; revise explanations/search_plan when useful, then return to W. No formal verdict or execution grant.'
+    if role=='W':
+        return 'Batches/progress/windows alone do not require A; ask a concrete decision-changing question.'
+    return ''
 
 
 

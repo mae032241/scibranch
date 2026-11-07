@@ -3,7 +3,7 @@ from pathlib import Path
 import time
 
 from scidiscovery.operations.execution import PENDING_EXECUTION_STATES, execution_status
-from . import configuration_updates
+from . import budget_limits, configuration_updates
 from . import budget, contracts as c, execution, experiments as e, checkpoint, experiment_client
 
 POLL_SECONDS = 1.
@@ -24,8 +24,9 @@ def capability(root,job):
     return dict(wake_authorized=allowed,
         unavailable_reason=None if allowed else ('worker_resume_unsupported' if limits is None else 'worker_execution_wake_unauthorized'),
         instruction=('Follow each executor response handoff.action and instruction; pending is not terminal. '
-            'Wake requires frozen permission, the original session, attempts and budget, checked at runtime. '
-            'Output-only wake may interpret retained results and finalize, not start experiments or training. '
+            'Wake requires frozen permission, the original W task and session, and cumulative shared budget, checked at runtime. '
+            'After consuming verified terminal results, continue that task; distinct follow-up experiments require normal admission. '
+            'Output repair remains a separate JSON-only turn and cannot start scientific execution. '
             'If wake is unavailable, report that limitation before choosing asynchronous work. '
             'Unknown submissions require same-call reconciliation, never resubmission.'))
 
@@ -58,6 +59,14 @@ def handoff(config,result,command,call_id=None):
             instruction=('This request was not accepted; there is no original call from this request to look up. '
                 'Correct the reported arguments or inputs, then submit the corrected request. '
                 'Preserve any separately accepted original call and its unresolved status; never resubmit it.'))
+    if (result.get('accepted') is False and result.get('status')=='review_required'
+            and result.get('reason') in {'worker_progress_review_due',
+                'worker_context_review_due','worker_context_observation_unknown'}):
+        return hint('finalize_response',result['reason'],
+            'This new execution was not accepted. Independent A assessment is due for this W stage. '
+            'Consume verified results from separately accepted original calls; reconcile or wait for those same calls as required. '
+            'Return normal scientific JSON with stage_intent=review, retaining findings, uncertainty and any unresolved original-call limitations. '
+            'Do not submit another batch, repair this request, rerun or resubmit accepted calls.')
     if (result.get('accepted') is False
             and (result.get('status'),result.get('reason')) in {
                 ('budget_exhausted','shared_time_exhausted'),
@@ -257,13 +266,15 @@ def wait_and_wake(root,step):
                 raise ExecutionWaiting('managed_execution_terminal_unverified')
             terminals.append(e.proof(path))
         if (root/'pause.request').exists():raise ExecutionWaiting('paused_before_execution_wake')
-        if budget.snapshot(root)['seconds_remaining']<=0:
+        remaining=budget.snapshot(root)['seconds_remaining']
+        if budget_limits.reached(remaining):
             raise ExecutionWaiting('managed_execution_wait_deadline' if has_pending else 'managed_execution_terminal_wake_deadline')
         if not has_pending:
             continuation.wake_start(root,step,terminals)
             return
         budget.transition(root,'waiting','managed_execution_pending')
-        time.sleep(min(POLL_SECONDS,budget.snapshot(root)['seconds_remaining']))
+        remaining=budget.snapshot(root)['seconds_remaining']
+        time.sleep(POLL_SECONDS if remaining is None else min(POLL_SECONDS,max(0.,remaining)))
 
 
 def wake_packet(root,job,intent):
@@ -273,18 +284,18 @@ def wake_packet(root,job,intent):
     shared_input_views.dynamic_root(root,work,'execution-results')
     from . import storage_policy as storage
     frozen=c.settings(root,job)
-    context=storage.Deadline(frozen['max_seconds'])
+    context=storage.Deadline(65 if frozen['max_seconds'] is None else frozen['max_seconds'])
     inventory=storage.Inventory(frozen.get('storage_policy'),context=context)
-    for number,proof in enumerate(intent['execution_wake']['observations'],1):
+    for proof in intent['execution_wake']['observations']:
         if e.proof(proof['path'])!=proof:raise e.IntegrityError('Execution wake observation original changed')
         observed=c.read(Path(proof['path']));directory=Path(proof['path']).parent
         completed=c.read(Path(observed['completed']['path']))
         shared_input_views.dynamic_root(root,work,'execution-results')
-        prefix=f'work/execution-results/{number:03d}'
+        accepted=c.read(c.regular(Path(observed['accepted']['path'])))
+        prefix='work/execution-results/'+accepted['call_id']
         if type(job.get('worker_view_version')) is int and job['worker_view_version'] == 1:
             if e.proof(proof['path']) != proof:
                 raise e.IntegrityError('Execution wake observation original changed')
-            accepted=c.read(c.regular(Path(observed['accepted']['path'])))
             _,config=_config(root,job,accepted)
             e.verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
             result=e.scientific_result(config,accepted,completed,observed)
@@ -300,7 +311,6 @@ def wake_packet(root,job,intent):
             rows.append(dict(status=observed['status'],result=prefix+'/result.json',outputs=outputs,
                 **(dict(native_state=observed['native_state']) if 'native_state' in observed else {})))
             continue
-        accepted=c.read(c.regular(Path(observed['accepted']['path'])))
         _,config=_config(root,job,accepted)
         e.verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
         outputs=[]

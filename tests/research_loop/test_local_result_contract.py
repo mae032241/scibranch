@@ -131,7 +131,7 @@ def test_only_explicit_list_members_register_candidates(tmp_path,declaration):
 
 
 def test_long_scientific_text_is_retained_with_bounded_public_preview(tmp_path):
-    text='科学说明'*5000
+    text='scientific description '*500
     value=declaration(dict(target=text));metric=value['metrics'][0]
     metric.update(name=text,unit=text,evaluation_key=text)
     value['candidates'][0].update(label=text,metric=text)
@@ -146,6 +146,17 @@ def test_long_scientific_text_is_retained_with_bounded_public_preview(tmp_path):
     assert public['result']['candidates'][0]['details_ref']=='result.json'
     assert all(row['details_ref']=='result.json' for row in public['result']['metrics']+public['result']['outputs'])
     assert e._run_view(public)['result']==public['result']
+    assert path.read_bytes()==original
+
+
+def test_oversized_result_declaration_is_retained_without_parsing(tmp_path,monkeypatch):
+    path=tmp_path/'result.json';path.write_bytes(b'{"unparsed":"'+b'x'*80+b'"}')
+    original=path.read_bytes()
+    monkeypatch.setattr(e,'MAX_BYTES',64)
+    monkeypatch.setattr(e,'read',lambda *args,**kwargs:pytest.fail('Oversized declaration must not be read'))
+    result=LocalExecution.read_result(tmp_path,[dict(name='result.json'),dict(name='model.bin')])
+    assert result==dict(status='unavailable',metrics=[],outputs=[],
+        diagnostic='result_declaration_limit',details_ref='result.json')
     assert path.read_bytes()==original
 
 
@@ -228,7 +239,7 @@ def test_unreadable_json_has_fixed_bounded_detail(tmp_path):
     assert len(public['detail'].encode())<=512 and 'private_control' not in public
 
 
-@pytest.mark.parametrize('output_kind',['mutable_alias','frozen_alias','exclusive'])
+@pytest.mark.parametrize('output_kind',['mutable_alias','frozen_alias','exclusive','declaration_limit'])
 def test_code_version_completion_checks_all_mutable_aliases_before_sealing(tmp_path,monkeypatch,output_kind):
     from scidiscovery.research_loop import experiment_client, local_experiments
     directory=tmp_path/'call';directory.mkdir()
@@ -243,16 +254,18 @@ def test_code_version_completion_checks_all_mutable_aliases_before_sealing(tmp_p
     value['candidates'][0]['artifact']='artifacts/z-model.bin'
     (artifacts/'result.json').write_text(json.dumps(value));(artifacts/'result.json').chmod(0o640)
     alias=tmp_path/'model-alias'
-    if output_kind!='exclusive':os.link(model,alias)
+    if output_kind in {'mutable_alias','frozen_alias'}:os.link(model,alias)
     if output_kind=='frozen_alias':model.chmod(0o400)
     before={path:path.stat().st_mode for path in artifacts.iterdir()}
     backend=LocalExecution.__new__(LocalExecution)
-    backend.config=dict(max_seconds=10)
+    backend.config=dict(max_seconds=10,storage_policy=dict(version=1,enabled=True,
+        max_file_bytes=1,max_total_bytes=1,max_instance_bytes=1))
     backend.records=SimpleNamespace(root=tmp_path)
     monkeypatch.setattr(e,'_code_version_binding',lambda *args:tmp_path)
     monkeypatch.setattr(e,'_code_export_entry',lambda *args:None)
     monkeypatch.setattr(experiment_client,'root_for_configuration',lambda *args,**kwargs:None)
     monkeypatch.setattr(local_experiments,'artifact_directory',lambda *args:artifacts)
+    if output_kind=='declaration_limit':monkeypatch.setattr(e,'MAX_BYTES',64)
     accepted=dict(call_id='call',scope=dict(step=2),script=e.proof(script),code_version={},
         parent={},local_observation_version=1,experiment_directory=str(tmp_path))
     completed=backend.completion(directory,accepted,0,True,True)
@@ -265,8 +278,14 @@ def test_code_version_completion_checks_all_mutable_aliases_before_sealing(tmp_p
         assert all(path.stat().st_mode==mode for path,mode in before.items())
         assert alias.stat().st_mode==before[model]
     else:
-        assert completed['result']['status']=='available'
-        assert completed['result']['candidates']==value['candidates']
+        if output_kind=='declaration_limit':
+            assert completed['result']==dict(status='unavailable',metrics=[],outputs=[],
+                diagnostic='result_declaration_limit',details_ref='result.json')
+            assert {row['name'] for row in completed['outputs']}=={'a-first.bin','z-model.bin','result.json'}
+            assert (artifacts/'result.json').read_text()==json.dumps(value)
+        else:
+            assert completed['result']['status']=='available'
+            assert completed['result']['candidates']==value['candidates']
         assert all(path.stat().st_mode&0o777==0o400 for path in before)
         retained=next(row for row in completed['outputs'] if row['name']=='z-model.bin')
         assert Path(retained['path']).samefile(model) and retained['path']==str(model)

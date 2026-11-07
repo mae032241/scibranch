@@ -40,12 +40,14 @@ def save(work,value):
 def hook_metadata(work,*,declared=None):
     hooks=[]
     if declared is not None:
-        handler=declared['PostToolUse'][0]['hooks'][0]
-        hooks=[dict(key='/<session-flags>/config.toml:post_tool_use:0:0',currentHash='sha256:'+'1'*64,
-            displayOrder=0,enabled=True,source='sessionFlags',sourcePath='/<session-flags>/config.toml',
-            isManaged=False,trustStatus='untrusted',eventName='postToolUse',matcher=None,
-            handlerType='command',command=handler['command'],**{'async':False},timeoutSec=handler['timeout'],
-            additionalContextLimit=handler['additionalContextLimit'])]
+        for name, key, event in (('PostToolUse','post_tool_use','postToolUse'),
+                ('PostModelRequest','post_model_request','postModelRequest'), ('PostCompact','post_compact','postCompact')):
+            handler=declared[name][0]['hooks'][0]
+            hooks.append(dict(key='/<session-flags>/config.toml:'+key+':0:0',currentHash='sha256:'+'1'*64,
+                displayOrder=0,enabled=True,source='sessionFlags',sourcePath='/<session-flags>/config.toml',
+                isManaged=False,trustStatus='untrusted',eventName=event,matcher=None,
+                handlerType='command',command=handler['command'],**{'async':False},timeoutSec=handler['timeout'],
+                additionalContextLimit=handler.get('additionalContextLimit')))
     return dict(data=[dict(cwd=str(work),hooks=hooks,warnings=[],errors=[])])
 
 
@@ -190,6 +192,76 @@ def test_expired_formal_review_keeps_independent_verdict_scope():
     assert 'deliver' not in alert['text'] and len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
 
 
+@pytest.mark.parametrize('maximum,started,ratio,expected',[(1,1,.84,False),(1,1,.85,False),
+    (2,1,.99,False),(2,2,.85,False),(2,3,.1,True)])
+def test_worker_context_cadence_counts_completed_compactions_without_fullness(maximum,started,ratio,expected):
+    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,
+        max_context_windows=maximum,context_observation=dict(
+            context_windows=dict(coverage='live',windows_started=started,peak_ratio=ratio),context=dict(ratio=ratio)))
+    assert notice.worker_progress_due(dict(role='W'),{},**facts) is expected
+    alert=notice.worker_progress_notice(dict(role='W'),{},**facts)
+    assert (alert is not None) is expected
+    if alert:
+        assert 'context' in alert['text'] and 'overshoot' in alert['text']
+        assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
+
+
+def test_worker_context_unknown_requests_reconciliation_but_initial_awaiting_does_not():
+    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,max_context_windows=2)
+    observation=dict(context_windows=dict(coverage='awaiting',windows_started=0))
+    assert not notice.worker_progress_due(dict(role='W'),{},context_observation=observation,**facts)
+    observation['context_windows'].update(coverage='unknown',windows_started=1)
+    alert=notice.worker_progress_notice(dict(role='W'),{},context_observation=observation,**facts)
+    assert 'lower bound' in alert['text'] and 'never replay' in alert['text']
+    assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
+    assert notice.worker_progress_due(dict(role='W'),{},active_seconds=901,target_seconds=900,fragment_enabled=True)
+
+
+def test_absent_optional_provider_capability_does_not_schedule_context_handoffs():
+    observation=dict(context_windows=dict(coverage='unknown',windows_started=0,
+        reason='context_capability_unavailable'),context=dict(status='unavailable'))
+    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,
+        max_context_windows=2,context_observation=observation)
+    assert notice.worker_context_reason(2,observation) is None
+    assert notice.worker_progress_notice(dict(role='W'),{},**facts) is None
+    observation['context_windows']['windows_started']=3
+    assert notice.worker_context_reason(2,observation)=='worker_context_review_due'
+
+
+@pytest.mark.parametrize('started,used,current,expected',[
+    (1,99,True,False),(2,84,True,False),(2,85,True,True),
+    (2,99,False,False),(2,None,True,False)])
+def test_current_context_fullness_is_only_early_advice(started,used,current,expected):
+    observation=dict(context_windows=dict(coverage='live',windows_started=started),
+        context=dict(status='last_reported',total_tokens=used,model_context_window=100,
+            current_window=current,observed_at=123.))
+    facts=dict(active_seconds=10,target_seconds=900,fragment_enabled=True,
+        max_context_windows=2,context_observation=observation)
+    assert notice.worker_context_reason(2,observation) is None
+    assert not notice.worker_progress_due(dict(role='W'),{},**facts)
+    alert=notice.worker_progress_notice(dict(role='W'),{},**facts)
+    assert (alert is not None) is expected
+    if alert:
+        assert alert['text']==notice.WORKER_CONTEXT_NEAR_TEXT
+        assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
+    for job,intent,extra in [(dict(role='A'),{},{}),(dict(role='W'),dict(output_repair=True),{}),
+            (dict(role='W'),{},dict(author=True)),(dict(role='W'),{},dict(final_return=True))]:
+        assert notice.worker_progress_notice(job,intent,**dict(facts,**extra)) is None
+
+
+def test_early_context_advice_reuses_once_per_logical_worker_marker(tmp_path):
+    alert=dict(cause='node',text=notice.WORKER_CONTEXT_NEAR_TEXT)
+    value=dict(scope=notice.SCOPE,updated_at_unix=123.,inflight_usage_unknown=True,
+        target_state='near',closeout_notices=dict(progress=alert))
+    save(tmp_path,value)
+    assert notice.hook_output(tmp_path,0)['hookSpecificOutput']['additionalContext']==alert['text']
+    assert notice.hook_output(tmp_path,0) is None
+    value['target_state']='reached'
+    value['closeout_notices']['progress']=dict(cause='node',text=notice.WORKER_CONTEXT_TEXT)
+    save(tmp_path,value)
+    assert notice.hook_output(tmp_path,1) is None
+
+
 def test_followup_notice_does_not_copy_unbounded_configured_numbers():
     alert=notice.closeout_notice(dict(role='H'),{},dimension='token',target_reached=False,shared_reached=False,
         shared_risk=True,followup_tokens=dict(W=10**500,A=10**500))
@@ -226,14 +298,52 @@ def test_internal_hook_whole_definition_must_match(tmp_path,mutation):
     with pytest.raises(ValueError):notice.validate_hook_trust(hook_metadata(tmp_path),candidate,declared,tmp_path)
 
 
-def test_warning_or_duplicate_hook_is_not_qualified(tmp_path):
+def test_warning_alone_qualifies_exact_hooks_but_duplicate_does_not(tmp_path):
     declared=notice.definition(tmp_path,0)
     candidate=hook_metadata(tmp_path,declared=declared)
     candidate['data'][0]['warnings']=['Hook configuration changed']
-    with pytest.raises(ValueError):notice.validate_hook_trust(hook_metadata(tmp_path),candidate,declared,tmp_path)
+    assert notice.validate_hook_trust(hook_metadata(tmp_path),candidate,declared,tmp_path)
     candidate['data'][0]['warnings']=[]
     candidate['data'][0]['hooks']*=2
     with pytest.raises(ValueError):notice.validate_hook_trust(hook_metadata(tmp_path),candidate,declared,tmp_path)
+
+
+def test_metadata_only_hooks_omit_context_limit_and_qualify_native_null(tmp_path):
+    declared=notice.definition(tmp_path,0)
+    assert declared['PostToolUse'][0]['hooks'][0]['additionalContextLimit']==0
+    for name in ('PostModelRequest','PostCompact'):
+        handler=declared[name][0]['hooks'][0]
+        assert 'additionalContextLimit' not in handler
+        assert handler['async'] is False and handler['timeout']==5
+    candidate=hook_metadata(tmp_path,declared=declared)
+    assert {hook['eventName']:hook['additionalContextLimit'] for hook in candidate['data'][0]['hooks']}==dict(
+        postToolUse=0,postModelRequest=None,postCompact=None)
+    assert notice.validate_hook_trust(hook_metadata(tmp_path),candidate,declared,tmp_path)
+    for event in ('postModelRequest','postCompact'):
+        altered=copy.deepcopy(candidate)
+        next(hook for hook in altered['data'][0]['hooks'] if hook['eventName']==event)['additionalContextLimit']=0
+        with pytest.raises(ValueError,match='definition did not qualify'):
+            notice.validate_hook_trust(hook_metadata(tmp_path),altered,declared,tmp_path)
+
+
+def test_native_warning_for_old_metadata_context_declaration_remains_unqualified(tmp_path):
+    # Observed Codex 0.166.0 hooks/list response: invalid zero limits are ignored,
+    # projected as null, and accompanied by warnings on metadata-only events.
+    declared=notice.definition(tmp_path,0)
+    for name in ('PostModelRequest','PostCompact'):
+        declared[name][0]['hooks'][0]['additionalContextLimit']=0
+    candidate=hook_metadata(tmp_path,declared=declared)
+    for hook in candidate['data'][0]['hooks']:
+        if hook['eventName'] in ('postModelRequest','postCompact'):
+            hook['additionalContextLimit']=None
+    candidate['data'][0]['warnings']=[
+        'ignoring additionalContextLimit for '+name+' hook in /<session-flags>/config.toml: '
+        'this event cannot emit additionalContext' for name in ('PostModelRequest','PostCompact')]
+    with pytest.raises(ValueError,match='definition did not qualify'):
+        notice.validate_hook_trust(hook_metadata(tmp_path),candidate,declared,tmp_path)
+    candidate['data'][0]['warnings']=[]
+    with pytest.raises(ValueError,match='definition did not qualify'):
+        notice.validate_hook_trust(hook_metadata(tmp_path),candidate,declared,tmp_path)
 
 
 def test_hook_inventory_and_launch_preserve_native_config_and_only_qualified_bypass(tmp_path):
@@ -244,9 +354,10 @@ def test_hook_inventory_and_launch_preserve_native_config_and_only_qualified_byp
     declared=notice.definition(tmp_path,0)
     candidate=backend.budget_hook_args(args,declared)
     import tomllib
-    hook_config=next(candidate[index+1] for index,item in enumerate(candidate[:-1])
-        if item=='-c' and candidate[index+1].startswith('hooks.PostToolUse='))
-    assert tomllib.loads(hook_config)['hooks']['PostToolUse']==declared['PostToolUse']
+    for name in ('PostToolUse','PostModelRequest','PostCompact'):
+        hook_config=next(candidate[index+1] for index,item in enumerate(candidate[:-1])
+            if item=='-c' and candidate[index+1].startswith('hooks.'+name+'='))
+        assert tomllib.loads(hook_config)['hooks'][name]==declared[name]
     assert '--dangerously-bypass-hook-trust' not in candidate and args[-1]=='-'
     final=backend.budget_hook_args(args,declared,trusted=True)
     assert '--dangerously-bypass-hook-trust' in final
@@ -267,10 +378,10 @@ def test_hook_flags_preserve_resume_model_in_ordinary_and_resumed_exec(tmp_path,
     original=list(args)
     result=backend.budget_hook_args(args,notice.definition(tmp_path,0),trusted=True)
     assert args==original
-    assert result[:2]==args[:2] and result[5:]==args[2:]
+    assert result[:2]==args[:2] and result[9:]==args[2:]
     assert result[result.index('--model')+1]=='resume'
     assert result.count('resume')==(2 if resumed else 1)
-    assert result[2]=='-c' and result[4]=='--dangerously-bypass-hook-trust'
+    assert result[2]=='-c' and result[8]=='--dangerously-bypass-hook-trust'
 
 
 def test_untrusted_admin_hook_preflight_keeps_original_invocation_runnable_without_bypass(tmp_path,monkeypatch):
@@ -340,7 +451,7 @@ def test_unsupported_launchers_cannot_claim_native_hook_channel(settings,tmp_pat
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize(('role','shared'),[('H',False),('A',True)])
+@pytest.mark.parametrize(('role','shared'),[('H',False),('A',True),('W',False)])
 def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_namespace(tmp_path,monkeypatch,role,shared):
     """Local Responses fixture only: no external model, authentication or billing."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -353,6 +464,8 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     expected_result=dict(goal=None,remainingTokens=None,completionBudgetReport=None)
     final=dict(summary='Fixture completed',scientific_result='Tool output and closeout context received',limitations=['Transport fixture'],
         next_action='finish' if role=='A' else 'wait',route_reason='No scientific claim')
+    if role=='W':
+        final.pop('next_action');final.pop('route_reason');final['stage_intent']='handoff'
 
     class Provider(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
@@ -412,14 +525,16 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
         argv=launch(self,*args,**kwargs)
         config=dict(name='scid-budget-local-fixture',base_url=f'http://127.0.0.1:{provider.server_port}/v1',
             wire_api='responses',requires_openai_auth=False)
-        argv[-1:-1]=['-c','model_provider="scid_budget_fixture"','-c','model_providers.scid_budget_fixture='+backends._toml(config)]
+        argv[-1:-1]=['-c','model_provider="scid_budget_fixture"',
+            '-c','model_context_window=1000',
+            '-c','model_providers.scid_budget_fixture='+backends._toml(config)]
         return argv
     monkeypatch.setattr(backends.Codex,'launch',fixture_provider)
     public=tmp_path/'public';public.mkdir();goal=public/'goal';goal.write_text('Deterministic budget notice fixture')
     root=tmp_path/'instance'
     controller.prepare(root,goal,public,[codex],native_options=dict(workspace='workspace-write',network=False,web='disabled',subagents=False),
         model='fixture',reasoning_effort='high',max_tokens=10000,max_seconds=60,max_steps=3,search_policy=None,
-        experiment_mode='external',node_budget_policy={role:dict(max_observed_tokens=1,max_seconds=30) for role in 'HWAE'})
+        experiment_mode='local' if role=='W' else 'external',node_budget_policy={role:dict(max_observed_tokens=1,max_seconds=30) for role in 'HWAE'})
     job=c.build_job(root,1,role,[])
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','Local provider fixture')
     anchor=budget.accept_node(root,job)
@@ -452,6 +567,15 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
                 except OSError:pass
     assert outcome['returncode']==0 and outcome['stop_reason'] is None
     assert outcome['budget_notification']==dict(status='available',mechanism='codex_post_tool_use'), (record/'native.stderr').read_text()[-2000:]
+    identity=backends.participant_provider(outcome['native_identity']).validate_participant_event(
+        outcome['native_thread_event'],outcome,native_intent,c.workspace(root,1))
+    assert identity==('codex_exec',outcome['thread_id'])
+    observation=c.read(record/'usage-observation.json')
+    current=observation['context']
+    assert current['status']=='last_reported' and current['current_window'] is True
+    # Codex reports its effective window (95% of the configured capacity).
+    assert current['model_context_window']==950 and current['total_tokens']==12
+    assert current['ratio']==12/950
     assert len(requests)==2
     packet=requests[1]
     text=published(role=role,shared=shared)['closeout_notices']['token']['text']
@@ -477,3 +601,4 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     if role=='A':assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
     assert c.read(record/'science-output.json')==final
     assert (home/'config.toml').read_text()==original_config
+    assert observation['tokens']['input_tokens']+observation['tokens']['output_tokens']==24

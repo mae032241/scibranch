@@ -49,17 +49,18 @@ def test_actual_prepared_worker_and_a_views_deliver_symmetric_choice_and_adaptiv
     expected=guidance.OPPORTUNITY if opportunity and supplied is guidance.DEFAULT else supplied
     assert c.settings(root)['role_guidance']==expected
     assert sum(len(text.encode()) for text in expected.values())<=guidance.MAX_BYTES==2560
-    assert 'Compare plausible explanations' in guidance.STAGE_PLANNING['H']
-    assert 'justify a single line' in guidance.STAGE_PLANNING['H']
+    assert 'offer competing explanations and distinguishing experiments' in guidance.STAGE_PLANNING['H']
+    assert 'revisit breadth when contradictions or stalled progress justify it' in guidance.STAGE_PLANNING['H']
     text=worker_job['native_role_instruction']
     assert text==expected['W']
     assert 'role_guidance' not in worker_view and 'role_instruction' not in worker_view
     worker_prompt,worker_instruction,_=native.render_scientific_request(worker_job,worker_view,{},
         backend_name='codex',instruction_transport='prompt')
     assert worker_prompt.startswith(text+'\n') and worker_instruction.startswith(text+'\n')
-    assert 'Initial/grant opportunities are not trial caps' in text
-    assert '--mechanism=task catalog number' in text
-    assert 'reconcile unknown calls, never replay' in text
+    assert 'Own the research direction' in text
+    assert '--mechanism N from the frozen catalog' in text
+    assert '--mechanism=' not in text
+    assert 'Reconcile unknown calls, never replay' in text
     assert 'Honor checks' in text and 'No auxiliary agents' in text
     judge_text=judge_job['native_role_instruction']
     assert judge_text==expected['A']
@@ -67,7 +68,7 @@ def test_actual_prepared_worker_and_a_views_deliver_symmetric_choice_and_adaptiv
     judge_prompt,judge_instruction,_=native.render_scientific_request(judge_job,judge_view,{},
         backend_name='codex',instruction_transport='prompt')
     assert judge_prompt.startswith(judge_text+'\n') and judge_instruction.startswith(judge_text+'\n')
-    assert 'no incumbent or unknown-optimality veto' in judge_instruction
+    assert 'no incumbent/unknown-optimality veto' in judge_instruction
     assert c.AUTHOR_EVIDENCE_GUIDANCE in judge_instruction
     assert guidance.STAGE_PLANNING['A'] in judge_prompt
     if kind.endswith('_domain'):
@@ -105,11 +106,9 @@ def test_a_breadth_judgment_reaches_actual_native_prompt_with_custom_guidance(tm
     work = c.workspace(root, 1)
     task = c.read(work / 'science-task.json')
     judgment = guidance.STAGE_PLANNING['A']
-    for concept in ('Prior A gaps/W delta first', 'reuse reports/arrays/code/full-pool index',
-            'no routine rereads/refits/repackaging', 'finite choice with limits if sufficient',
-            'Batch unmet-goal work: continue_w(improve)',
-            'Only evidenced mechanism gaps: revise_h(minimal executable test)',
-            'even if methods improve'):
+    for concept in ('answer only the requested evidence question',
+            'return to W', 'Formal assessment independently judges evidence and claims',
+            'distinguishing implementation/candidate/mechanism failure', 'Reuse exact originals'):
         assert concept.lower() in judgment.lower()
     record = execution.origin(root, 1)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'),
@@ -211,7 +210,7 @@ def test_local_improve_multiple_calls_already_share_original_scope_without_a_sin
     assert (root/'jobs/004.json').read_bytes()==job_bytes
     view=c.read(c.workspace(root,4)/'science-task.json')
     assert guidance.WORK_UNITS['improve'] in view['question']
-    assert 'Initial/grant opportunities are not trial caps' in job['native_role_instruction']
+    assert 'Own the research direction' in job['native_role_instruction']
 
 
 @pytest.mark.parametrize('recommended',['old','new'])

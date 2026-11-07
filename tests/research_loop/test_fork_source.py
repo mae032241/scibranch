@@ -185,7 +185,7 @@ def test_fork_restores_current_code_and_output_drafts_without_publishing_result(
 @pytest.mark.parametrize('name',['result.pending.json','science-output.json'])
 def test_inert_continuation_draft_does_not_create_child_execution_facts(tmp_path,name):
     """A private-entry fixture exercises the real new-child execution readers."""
-    from scidiscovery.research_loop import execution,fork_runtime,fork_service
+    from scidiscovery.research_loop import accepted_budget,execution,fork_runtime,fork_service
     root=completed_source(tmp_path);child=tmp_path/'continuation-child'
     limits=dict(max_tokens=1000,max_seconds=30,max_steps=1)
     preview=fork_service.preview(root,2,child,budget=limits)
@@ -203,6 +203,12 @@ def test_inert_continuation_draft_does_not_create_child_execution_facts(tmp_path
     assert not (execution.origin(child,2)/'continuations').exists()
     assert originals.resolve_ref(originals.selected_source(child),entry).read_bytes()==b'B\n\n'
     intent=execution.origin(child,2)/'native-intent.json'
-    c.write(intent,dict(task_ref=c.record_ref(child/'jobs/002.json')))
+    value=dict(task_ref=c.record_ref(child/'jobs/002.json'))
+    c.write(intent,value)
+    with pytest.raises(ValueError,match='Original native intent has not been accepted'):
+        list(execution.accepted_intents(child,2))
+    accepted_budget.accept_native(child,2,execution.origin(child,2),value)
     assert [record for record,_ in execution.accepted_intents(child,2)]==[execution.origin(child,2)]
     assert execution.record(child,2)==execution.origin(child,2)
+    assert not (execution.origin(child,2)/'continuations').exists()
+    assert originals.resolve_ref(originals.selected_source(child),entry).read_bytes()==b'B\n\n'

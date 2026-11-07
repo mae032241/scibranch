@@ -71,7 +71,7 @@ def worker(root, step, parents, *, observed=P):
     payload = dict(summary='A retained mechanical comparison',
         scientific_result=f'Mechanical comparison at W{step}; scientific adequacy remains unknown.',
         limitations=['A tiny command is not scientific effectiveness evidence'], implementation_selection=None,
-        stage_intent='review', mechanism_findings=findings(observed, blocked=[ref for ref in assigned if ref != observed]),
+        stage_intent='decision', mechanism_findings=findings(observed, blocked=[ref for ref in assigned if ref != observed]),
         candidate_nominations=dict(representatives=[], extras=[], gaps=[dict(
             mechanism_ref=row['mechanism_ref'], reason='The mechanical command supplies no scientifically suitable model candidate.')
             for row in job.get('candidate_nomination_mechanisms', []) if row['status'] != 'waived']))

@@ -50,6 +50,43 @@ def test_local_process_launch_without_original_host_owner_is_rejected(tmp_path):
     finally:bridge._LOCAL_LAUNCH.reset(token)
 
 
+def test_stopped_deliverables_ignore_legacy_byte_quotas_and_keep_exact_sizes(tmp_path):
+    root=tmp_path/'instance';work=c.workspace(root,1)
+    (work/'artifacts').mkdir(parents=True)
+    first=work/'artifacts/array.bin';first.write_bytes(b'array payload')
+    second=work/'artifacts/report.txt';second.write_bytes(b'original report')
+    inventory=c.CurrentInventory(root,dict(step=1,role='H'),c.host_record(work),0,[],{},
+        policy=dict(max_output_item_bytes=1,max_output_total_bytes=1))
+    rows,mutable=c._material_inventory(root,1,inventory=inventory)
+    assert [(row['path'],row['size_bytes']) for row in rows]==[
+        ('inputs/parents/001/artifacts/array.bin',len(b'array payload')),
+        ('inputs/parents/001/artifacts/report.txt',len(b'original report'))]
+    assert set(mutable)=={first,second}
+    inventory.materials=rows;inventory.mutable_materials=mutable
+    assert c.collect_materials(root,1,inventory=inventory)==rows
+    assert all(path.stat().st_mode&0o777==0o400 for path in mutable)
+    assert first.read_bytes()==b'array payload' and second.read_bytes()==b'original report'
+
+
+def test_assessment_retains_full_materials_and_accepted_legacy_omission():
+    material=dict(path='inputs/parents/002/artifacts/array.bin',size_bytes=50)
+    prior=dict(step=2,role='A')
+    current=dict(step=3,role='W',decision_context=dict(
+        source_original='inputs/parents/002/conclusion.json',source_action='continue_w'))
+    sources={2:dict(job=prior,seal=dict(materials=[material]),seal_ref={'path':'seal-2'}),
+        3:dict(job=current,seal_ref={'path':'seal-3'})}
+    members={step:dict(seal_ref={'path':f'seal-{step}'},navigation=dict(path=f'{step}.json')) for step in (2,3)}
+    job=dict(step=4,role='A',instruction='assess',direct_materials=[],
+        direct_refs=[dict(path='inputs/parents/003/conclusion.json')])
+    policy=dict(max_output_item_bytes=1,max_output_total_bytes=1)
+    handoff=c._assessment_handoff(job,sources=sources,members=members,policy=policy)
+    assert handoff['previous_a']['materials']==[material['path']]
+    legacy=dict(handoff,previous_a=dict(handoff['previous_a'],materials=[],
+        materials_unavailable_reason='input_material_bound'))
+    job['assessment_handoff']=legacy
+    assert c._assessment_handoff(job,sources=sources,members=members,policy=policy)==legacy
+
+
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('option,value',[
     ('--change-intent','Training-only calibration'),

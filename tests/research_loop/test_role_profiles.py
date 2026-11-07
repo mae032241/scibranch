@@ -82,16 +82,17 @@ def test_sparse_fields_and_unlisted_model_names_are_explicitly_inherited():
         profiles.selected(DEFAULTS,'Root')
 
 
-def test_no_configuration_preserves_legacy_job_and_intent_binding(tmp_path):
+def test_global_profile_is_bound_to_new_intent_and_legacy_intent_stays_readable(tmp_path):
     root=prepare(tmp_path)
     settings=c.settings(root);job=c.build_job(root,1,'H',[])
     assert 'role_profiles' not in settings and 'native_profile' not in job
-    assert profiles.binding(settings,job)=={}
+    assert profiles.binding(settings,job)==dict(native_profile=DEFAULTS)
     assert profiles.validate_intent(settings,job,{})==DEFAULTS
 
 
 @pytest.mark.parametrize('damage',['job','intent','missing_intent'])
 def test_changed_profile_rejected_before_native_submission(tmp_path,monkeypatch,damage):
+    from scidiscovery.research_loop import accepted_budget
     root=prepare(tmp_path,role_profiles=OVERRIDES)
     job=c.build_job(root,1,'H',[])
     intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),native_profile=job['native_profile'])
@@ -100,7 +101,7 @@ def test_changed_profile_rejected_before_native_submission(tmp_path,monkeypatch,
         c.write(root/'jobs/001.json',job);intent['task_ref']=c.record_ref(root/'jobs/001.json')
     elif damage=='intent':intent['native_profile']=dict(DEFAULTS,service_tier='different')
     else:intent.pop('native_profile')
-    c.write(execution.origin(root,1)/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,execution.origin(root,1),intent)
     monkeypatch.setattr(native.subprocess,'Popen',lambda *a,**kw:pytest.fail('must reject before submission'))
     with pytest.raises(ValueError,match='profile changed'):native.run_native(root,1)
 

@@ -85,6 +85,19 @@ def test_blank_page_has_no_implicit_inputs_or_budgets(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ['research.toml']
 
 
+def test_retired_byte_quota_controls_preserve_imported_legacy_declaration(tmp_path):
+    draft=complete(tmp_path)
+    draft['document']['budget'].update(max_output_item_bytes=8,max_output_total_bytes=1)
+    assert not any(field.path in {'budget.max_output_item_bytes','budget.max_output_total_bytes'}
+        for field in form.FIELDS)
+    html=form.render(draft)
+    assert '单项输出字节上限' not in html and '单节点输出合计字节上限' not in html
+    parsed=form.parse(submitted(draft),base=tmp_path)
+    assert form.declaration(parsed)==form.declaration(draft)
+    checked=form.preview(parsed)
+    assert checked['max_output_item_bytes']==8 and checked['max_output_total_bytes']==1
+
+
 def test_complex_cov_declaration_roundtrips_all_typed_controls_and_export(tmp_path):
     draft = complete(tmp_path)
     document = draft['document']
@@ -385,8 +398,10 @@ def test_compact_numeric_groups_keep_units_and_collapsible_help(tmp_path):
     for group in ('探索切片', '补正阈值', '输出与候选'):
         assert '<legend>'+group+'</legend>' in html
     for label in ('模型用量（tokens）', '活动时间（秒）', '节点上限（步）',
-                  '单项输出（字节）', 'W 时间目标（秒）', '暂停阈值（次）'):
+                  'W 时间目标（秒）', '暂停阈值（次）'):
         assert label in html
+    assert 'name="cfg.budget.max_output_item_bytes"' not in html
+    assert 'name="cfg.budget.max_output_total_bytes"' not in html
     assert '<details class="config-help">' in html
     assert 'aria-describedby="config-budget-max_seconds-help"' in html
     assert '<p id="config-budget-max_seconds-help">单位：秒。' in html
@@ -434,7 +449,7 @@ def test_advanced_standard_controls_keep_closed_category_disclosures_and_roundtr
         'research', 'project', 'skills', 'agent', 'budget', 'executor', 'delivery', 'policies', 'ui', 'version']
     assert parsed_controls.categories == [('advanced-category', prefix, False) for prefix in categories]
     for path in ('agent.backend', 'agent.native.features.fast_mode', 'budget.breadth.initial_calls',
-                 'budget.correction.pause_after', 'budget.max_output_item_bytes',
+                 'budget.correction.pause_after', 'budget.candidate_extra_slots',
                  'budget.role_shares.min_w_share', 'executor.mode', 'executor.config.executor',
                  'policies.formal_review', 'policies.resume.output_only', 'policies.resume.native_home'):
         assert controls['cfg.'+path] == (('advanced-settings', None, False),
@@ -526,3 +541,86 @@ def test_normalized_breadth_seconds_survive_invalid_edit_correction_and_save(tmp
     retry['cfg.budget.breadth.max_w_observed_tokens'] = '1.5'
     with pytest.raises(form.FormError, match='W 软目标 tokens'):
         form.parse_edit(retry, base=root, configuration=state['configuration'])
+
+
+def test_registered_provider_describes_native_controls_and_keeps_typed_roundtrip(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import backends
+    class Independent(backends.Protocol):
+        name='native_fields_fixture'
+        @staticmethod
+        def configuration_fields():
+            return (dict(path='agent.native.resource',label='Exact provider resource',
+                description='Use the selected provider resource.'),
+                dict(path='agent.native.enabled',label='Provider feature enabled',kind='boolean'))
+    monkeypatch.setitem(backends._PROVIDERS,Independent.name,Independent)
+    def forbidden():
+        raise AssertionError('Independent form requested the default provider schema')
+    monkeypatch.setattr(backends.Codex,'configuration_fields',forbidden)
+    draft=complete(tmp_path)
+    draft['document']['agent'].update(backend=Independent.name,
+        native=dict(resource='resource.toml',enabled=False,extension=dict(keep=[1,'two'])))
+    html=form.render(draft)
+    fields=Controls(html).fields
+    assert fields['cfg.agent.native.resource']=='resource.toml'
+    assert fields['cfg.agent.native.enabled']=='false'
+    assert 'Use the selected provider resource.' in html
+    assert 'cfg.agent.native.features.fast_mode' not in fields
+    assert form.declaration(form.parse(fields,base=tmp_path))==form.declaration(draft)
+
+
+def test_backend_switch_consumes_rendered_controls_and_preserves_each_provider_draft(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import backends
+    class Independent(backends.Protocol):
+        name='switch_fields_fixture'
+        @staticmethod
+        def configuration_fields():
+            return (dict(path='agent.native.resource',label='Provider resource'),
+                dict(path='agent.native.enabled',label='Provider feature',kind='boolean'))
+        @staticmethod
+        def declaration_options(options,*,base): return dict(options)
+    monkeypatch.setitem(backends._PROVIDERS,Independent.name,Independent)
+    draft=complete(tmp_path)
+    original_native=dict(features=dict(fast_mode=True),
+        sandbox_workspace_write=dict(writable_roots=['original-native-root']))
+    draft['document']['agent'].update(native=original_native,model='retained-model')
+    draft['document']['permissions']=dict(network=False,subagents=False)
+    original_permissions=dict(draft['document']['permissions'])
+    def switch(current, backend_name, edits=None):
+        # Submit every successful control from the actual previous rendering,
+        # exactly as a browser does when only the backend select changes.
+        fields=submitted(current)
+        fields['cfg.agent.backend']=backend_name
+        fields.update(edits or {})
+        with pytest.raises(form.FormError,match='后端已切换') as caught:
+            form.parse(fields,base=tmp_path)
+        changed=caught.value.draft
+        assert changed['document']['agent']['backend']==backend_name
+        assert changed['document']['agent']['model']=='retained-model'
+        assert changed['document']['permissions']==original_permissions
+        assert not (tmp_path/'instance').exists()
+        return changed
+    draft=switch(draft,'protocol')
+    assert 'native' not in draft['document']['agent']
+    assert draft['native_drafts']['codex']==original_native
+    assert 'cfg.agent.native.features.fast_mode' not in submitted(draft)
+    draft=switch(draft,Independent.name,{'enabled.agent.native':'yes'})
+    assert 'native' not in draft['document']['agent']
+    assert draft['native_drafts']['protocol']=={}
+    assert 'cfg.agent.native.resource' in submitted(draft)
+    draft=switch(draft,'codex',{'cfg.agent.native.resource':'independent-resource.toml',
+        'cfg.agent.native.enabled':'false'})
+    assert draft['document']['agent']['native']==original_native
+    independent_native=dict(resource='independent-resource.toml',enabled=False)
+    assert draft['native_drafts'][Independent.name]==independent_native
+    draft=switch(draft,'protocol')
+    assert draft['document']['agent']['native']=={}
+    draft=switch(draft,Independent.name)
+    assert draft['document']['agent']['native']==independent_native
+    stable=form.parse(submitted(draft),base=tmp_path)
+    assert form.declaration(stable)==form.declaration(draft)
+    assert stable['native_drafts']['codex']==original_native
+    assert stable['native_drafts']['protocol']=={}
+    exported=form.export_toml(stable)
+    assert 'rendered_backend' not in exported and 'native_drafts' not in exported
+    assert 'independent-resource.toml' in exported
+    assert 'original-native-root' not in exported

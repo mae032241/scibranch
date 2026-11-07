@@ -1,7 +1,6 @@
 """Small public projections. Scientific originals are never rewritten."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import re
 
@@ -18,9 +17,13 @@ def cleaner(root, settings=None):
     """Build once per bounded read; do not traverse native homes or sessions."""
     root = Path(root).resolve()
     settings = contracts.settings(root) if settings is None else settings
-    private = {str(root), str(Path.home() / '.codex')}
+    private = {str(root)}
+    # Workspace/input error rendering may have no accepted launcher yet.
+    try:home=backends.provider(settings.get('native_backend',backends.DEFAULT_BACKEND)).default_home()
+    except ValueError:home=None
+    if home is not None:private.add(str(home))
     for value in ((settings.get('resume_policy') or {}).get('native_home'),
-                  (settings.get('ui') or {}).get('approval_secret_file'), os.environ.get('CODEX_HOME')):
+                  (settings.get('ui') or {}).get('approval_secret_file')):
         if isinstance(value, str) and value:
             private.add(value)
     # Known host-private declarations may contain nested absolute paths, argv or
@@ -35,7 +38,7 @@ def cleaner(root, settings=None):
             for item in value: collect(item)
         elif isinstance(value, str) and value.startswith('/'):
             private.add(value)
-    for key in ('resume_policy', 'ui', 'native_launcher_argv', 'history_observer', 'delivery_policy'):
+    for key in ('resume_policy', 'ui', 'native_options', 'native_launcher_argv', 'history_observer', 'delivery_policy'):
         collect(settings.get(key))
     private = sorted(private, key=len, reverse=True)
 
@@ -62,7 +65,10 @@ def event(value, clean):
         return dict(type=kind)
     if kind == 'message' and isinstance(value.get('text'), str):
         text = clean(value['text'])
-        return dict(type=kind, text=text, omitted_characters=max(0, len(value['text']) - 16384))
+        truncated=value.get('text_truncated') is True or len(value['text'])>16384
+        if truncated:text+='\n[显示片段；完整回答保留在原结果中。]'
+        return dict(type=kind, text=text, omitted_characters=max(0, len(value['text']) - 16384),
+            **(dict(text_truncated=True) if truncated else {}))
     if kind == 'tool' and isinstance(value.get('tool'), str) and value.get('status') in {'started', 'updated', 'completed', 'failed'}:
         return dict(type=kind, tool=clean(value['tool'], 128), status=value['status'])
     if kind == 'usage' and isinstance(value.get('usage'), dict):
@@ -82,8 +88,7 @@ def settings_view(settings):
     value = {key: settings[key] for key in keys if key in settings}
     options = value.get('native_options')
     if isinstance(options, dict):
-        value['native_options'] = {key: item for key, item in options.items()
-                                   if key in {'workspace', 'network', 'web', 'subagents', 'features'}}
+        value['native_options'] = backends.selected(settings).public_options(options)
     value['ui'] = {key: item for key, item in settings.get('ui', {}).items() if key in {'port', 'open_browser'}}
     value['ui']['approval_secret_source_configured'] = bool(settings.get('ui', {}).get('approval_secret_file'))
     value['native_permissions'] = backends.permission_summary(settings)

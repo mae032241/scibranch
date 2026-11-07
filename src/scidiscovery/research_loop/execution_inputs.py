@@ -1037,8 +1037,6 @@ class NativeInputHost:
             if original['producer_step'] >= self.job['step']:
                 raise e.CallerError(f'Scientific-files slot {slot["semantic_name"]!r} must select a preceding sealed original.')
             inputs.append(dict(slot, alias=alias, original=original, size_bytes=material['size_bytes']))
-        if c.output_quota_exceeded(c.settings(self.root, self.job), (item['size_bytes'] for item in inputs)):
-            raise ValueError('Scientific inputs exceed the explicit frozen handoff quota')
         attempt = self.config['native_attempt']['number']
         projection = self.root / 'host-runtime/experiment-control' / f'{self.config["scope"]["step"]:03d}' / 'interfaces' / f'{attempt:03d}.json'
         invocation = dict(job=q._ref(self.root, self.root / 'jobs' / f'{self.job["step"]:03d}.json'),
@@ -1114,8 +1112,6 @@ class NativeInputHost:
             raw = builder(authored, [{key: item[key] for key in item if key != 'alias'} for item in inputs])
             if type(raw) is not bytes or atomic_files._generation(source.lstat()) != source_generation:
                 raise q.IntegrityError('Compiler author original changed during compilation')
-            if c.output_quota_exceeded(c.settings(self.root, self.job), [len(raw)]):
-                raise ValueError('Compiled package exceeds explicit output quota')
             directory.mkdir(parents=True, exist_ok=True)
             q._check(capability)
             author_binding = dict(code_version=code_version, author_input=None)

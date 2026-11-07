@@ -45,7 +45,7 @@ def test_a_reopens_screened_mechanism_into_unfinished_plan(tmp_path, execution_r
     assert state['focus'] == focus('h001.m1', 'screen')
     assert state['mechanisms']['h001.m1']['disposition'] == dict(
         reason=choice['dispositions'][0]['reason'], source_a=4)
-    assert state['mechanisms']['h001.m1']['source_h'] == 1
+    assert state['mechanisms']['h001.m1']['source_step'] == 1
     assert state['opportunity_counts'] == before['opportunity_counts'] == {'h001.m1': 1}
     assert state['portfolio']['invested'] == before['portfolio']['invested'] == {'h001.m1': 1}
     assert state['order']['seen_w'] == before['order']['seen_w']
@@ -78,16 +78,14 @@ def test_repeated_pending_preserves_original_disposition_and_single_queue_entry(
     assert (execution.record(root, 4) / 'science-output.json').read_bytes() == original
 
 
-def test_reopen_does_not_refund_initial_calls_or_renew_used_grant(tmp_path, execution_registry):
+def test_reopen_preserves_calls_and_does_not_require_a_grant(tmp_path, execution_registry):
     root = prepare(tmp_path, qualified_local=True, portfolio=True)
     h(root, labels=('P', 'Q'))
     worker(root, 2, [1], observed=['h001.m1'], qualified_local=True)
     assess(root, 3, [1, 2], search_choice=dict(dispositions=[], next_focus=focus('h001.m1', 'screen')))
     _, granted = configure_worker(root, tmp_path, 4, [1, 2, 3], qualified_local=True)
     accepted = run(root, granted, 'h001.m1', qualified_local=True)
-    assert accepted['mechanism_binding']['grant']['source_a'] == 3
-    with pytest.raises(breadth.OpportunityRequired):
-        run(root, granted, 'h001.m1', qualified_local=True)
+    assert accepted['mechanism_binding']['grant'] is None
     finish(root, 4, 'W', [1, 2, 3], mechanism_findings=findings('h001.m1', blocked=('h001.m2',)),
         preserve_native_intent=True)
     assess(root, 5, [1, 4], action='finish', search_choice=review())
@@ -102,12 +100,12 @@ def test_reopen_does_not_refund_initial_calls_or_renew_used_grant(tmp_path, exec
     assert config['breadth']['initial_calls'] == 1
     assert {row['mechanism_ref']: row['accepted_count'] for row in config['breadth']['baseline']} == {
         'h001.m1': 2, 'h001.m2': 0}
-    assert config['breadth']['grant']['extra_calls'] == config['breadth']['grant']['used_calls'] == 1
-    with pytest.raises(breadth.OpportunityRequired):
-        run(root, config, 'h001.m1', qualified_local=True)
+    assert config['breadth']['grant']['extra_calls'] == 1
+    assert config['breadth']['grant']['used_calls'] == 0
+    assert run(root, config, 'h001.m1', qualified_local=True)['status'] == 'known_success'
     run(root, config, 'h001.m2', qualified_local=True)
-    # Once all initial opportunities are consumed, the one-call exception no
-    # longer limits ordinary calls; reopening does not introduce a W quota.
+    # Counts remain cumulative; neither the other branch's initial opportunity
+    # nor the retained A recommendation creates an execution quota.
     assert run(root, config, 'h001.m1', qualified_local=True)['status'] == 'known_success'
 
 
@@ -118,8 +116,8 @@ def test_h_existing_ref_reopen_preserves_calls_and_investment(tmp_path, executio
     state = search.project(root, 5)
     assert state['opportunity_counts'] == before['opportunity_counts'] == {'h001.m1': 1}
     assert state['portfolio']['invested'] == before['portfolio']['invested'] == {'h001.m1': 1}
-    assert state['mechanisms']['h001.m1']['original_h'] == 1
-    assert state['mechanisms']['h001.m1']['source_h'] == 4
+    assert state['mechanisms']['h001.m1']['original_step'] == 1
+    assert state['mechanisms']['h001.m1']['source_step'] == 4
     assert state['mechanisms']['h001.m1']['status'] == 'pending'
     assert 'disposition' not in state['mechanisms']['h001.m1']
     assert state['authorized'] == {'h001.m1', 'h004.m2'}
@@ -129,7 +127,7 @@ def test_h_existing_ref_reopen_preserves_calls_and_investment(tmp_path, executio
     assert [row['mechanism_ref'] for row in job['search']['breadth']['mechanisms']] == ['h001.m1', 'h004.m2']
 
 
-def test_explicit_a_focus_after_reopen_retains_fresh_exact_grant(tmp_path, execution_registry):
+def test_explicit_a_focus_after_reopen_is_advice_without_a_call_quota(tmp_path, execution_registry):
     root = screened(tmp_path, labels=('P', 'Q'))
     choice = reopen_choice()
     choice['next_focus'] = focus('h001.m1', 'screen')
@@ -140,9 +138,8 @@ def test_explicit_a_focus_after_reopen_retains_fresh_exact_grant(tmp_path, execu
     _, config = configure_worker(root, tmp_path, 5, [1, 4], qualified_local=True)
     assert config['breadth']['grant']['source_a'] == 4
     assert config['breadth']['grant']['used_calls'] == 0
-    assert run(root, config, 'h001.m1', qualified_local=True)['mechanism_binding']['grant']['source_a'] == 4
-    with pytest.raises(breadth.OpportunityRequired):
-        run(root, config, 'h001.m1', qualified_local=True)
+    assert run(root, config, 'h001.m1', qualified_local=True)['mechanism_binding']['grant'] is None
+    assert run(root, config, 'h001.m1', qualified_local=True)['status'] == 'known_success'
 
 
 def test_screened_without_reopen_stays_visible_outside_unfinished_plan(tmp_path, execution_registry):

@@ -15,7 +15,7 @@ def validate(value):
     if value is None:
         return None
     if (not isinstance(value, dict) or set(value) != {'version','initial_calls','mechanisms','baseline','grant','prior_unknown','outside_initial_owed','catalog'}
-            or value['version'] != 2 or type(value['initial_calls']) is not int or value['initial_calls'] < 1
+            or value['version'] != 3 or type(value['initial_calls']) is not int or value['initial_calls'] < 1
             or type(value['prior_unknown']) is not bool):
         raise ValueError('Exact frozen scientific opportunity configuration required')
     if 'outside_initial_owed' in value and (type(value['outside_initial_owed']) is not int or value['outside_initial_owed']<0):
@@ -31,10 +31,10 @@ def validate(value):
         raise ValueError('Scientific opportunity combination requires mechanisms')
     refs = set();ordinals=set()
     for row in rows:
-        if (not isinstance(row,dict) or set(row) != {'mechanism_ref','label','source_h','source_h_ref','minimal_test','status','ordinal','origin_ref','source_goal_id'}
+        if (not isinstance(row,dict) or set(row) != {'mechanism_ref','label','source_step','source_ref','source_role','minimal_test','status','ordinal','origin_ref','source_goal_id'}
                 or row['mechanism_ref'] in refs or any(not isinstance(row[key],str) or not row[key] for key in ('mechanism_ref','label','minimal_test'))
-                or type(row['source_h']) is not int or row['source_h'] < 1
-                or not isinstance(row['source_h_ref'], dict) or set(row['source_h_ref']) != {'path'} or not isinstance(row['source_h_ref']['path'],str)
+                or row['source_role'] not in {'H','W'} or type(row['source_step']) is not int or row['source_step'] < 1
+                or not isinstance(row['source_ref'], dict) or set(row['source_ref']) != {'path'} or not isinstance(row['source_ref']['path'],str)
                 or row['status'] not in {'pending','screened','deferred','waived'}):
             raise ValueError('Scientific opportunity mechanism binding differs')
         _catalog_binding(dict(ordinal=row['ordinal'],origin_ref=row['origin_ref'],source_goal_id=row['source_goal_id']),row['mechanism_ref'],catalog)
@@ -60,18 +60,18 @@ def check_binding(value, binding, scope, *, _validated=False, _rows=None):
     if value is None:
         if binding is not None:raise ValueError('Unexpected scientific call binding')
         return None
-    if not isinstance(binding,dict) or set(binding) != {'mechanism_ref','source_h','source_h_ref','job_ref','grant','catalog_binding'}:
+    if not isinstance(binding,dict) or set(binding) != {'mechanism_ref','source_step','source_ref','source_role','job_ref','grant','catalog_binding'}:
         raise ValueError('Accepted scientific call binding missing')
     row = _rows.get(binding['mechanism_ref']) if _rows is not None else next((row for row in value['mechanisms'] if row['mechanism_ref'] == binding['mechanism_ref']),None)
     proof=_catalog_binding(binding['catalog_binding'],binding['mechanism_ref'],value['catalog'])
-    if (binding['job_ref'] != scope['job_ref'] or type(binding['source_h']) is not int
-            or not 0<binding['source_h']<=value['catalog']['prefix']['cutoff']
-            or not isinstance(binding['source_h_ref'],dict) or set(binding['source_h_ref'])!={'path'}
-            or not isinstance(binding['source_h_ref']['path'],str)):
+    if (binding['job_ref'] != scope['job_ref'] or binding['source_role'] not in {'H','W'} or type(binding['source_step']) is not int
+            or not 0<binding['source_step']<=value['catalog']['prefix']['cutoff']
+            or not isinstance(binding['source_ref'],dict) or set(binding['source_ref'])!={'path'}
+            or not isinstance(binding['source_ref']['path'],str)):
         raise ValueError('Accepted scientific call escaped frozen combination')
-    if proof['origin_ref']['source_h']>binding['source_h']:
+    if proof['origin_ref']['source_step']>binding['source_step']:
         raise ValueError('Accepted mechanism predates its original declaration')
-    if row is not None and (any(binding[key]!=row[key] for key in ('source_h','source_h_ref'))
+    if row is not None and (any(binding[key]!=row[key] for key in ('source_step','source_ref','source_role'))
             or proof!=dict(ordinal=row['ordinal'],origin_ref=row['origin_ref'],source_goal_id=row['source_goal_id'])):
         raise ValueError('Accepted scientific call changed its frozen model')
     grant = binding['grant']
@@ -88,10 +88,10 @@ def _catalog_binding(proof,ref,catalog):
             or not isinstance(proof['source_goal_id'],str) or not proof['source_goal_id']):
         raise ValueError('Exact accepted mechanism catalog proof required')
     origin=proof['origin_ref']
-    if (not isinstance(origin,dict) or set(origin)!={'goal_id','source_h','mechanism_ref'}
+    if (not isinstance(origin,dict) or set(origin)!={'goal_id','source_step','source_role','mechanism_ref'}
             or not isinstance(ref,str) or not ref
             or not isinstance(origin['goal_id'],str) or not origin['goal_id']
-            or type(origin['source_h']) is not int or not 0<origin['source_h']<=catalog['prefix']['cutoff']
+            or origin['source_role'] not in {'H','W'} or type(origin['source_step']) is not int or not 0<origin['source_step']<=catalog['prefix']['cutoff']
             or origin['mechanism_ref']!=ref):
         raise ValueError('Accepted mechanism original identity changed')
     return proof
@@ -116,65 +116,49 @@ def resolve_choice(value,choice,scope,*,head=None,_root=None,_focus=None,_valida
     from . import accepted_search
     if not _validated:validate(value)
     if value is None:
-        if choice is not None:raise OpportunityRequired('No H mechanism is authorized for this stage')
+        if choice is not None:raise OpportunityRequired('No mechanism is authorized for this stage')
         return None
     try:
         root,focus=_catalog_root(value,scope) if _root is None else (_root,_focus)
         ref,item,head,member=accepted_search.catalog_item(root,value['catalog'],choice,head=head)
-        if focus and focus['action']!='screen' and ref!=focus['mechanism_ref']:
-            raise ValueError('This scientific task permits only its frozen focused mechanism')
+        if focus and focus['action']!='screen' and ref not in {row['mechanism_ref'] for row in value['mechanisms']}:
+            raise ValueError('This scientific task permits only its frozen assigned mechanisms')
     except (ValueError,FileNotFoundError) as error:
         raise OpportunityRequired(str(error)) from error
     return dict(mechanism_ref=ref,label=item['label'],minimal_test=item['minimal_test'],status=item['status'],
-        source_h=item['source_h'],source_h_ref=member['seal_ref'],ordinal=item['ordinal'],origin_ref=item['origin_ref'],
+        source_step=item['source_step'],source_ref=member['seal_ref'],source_role=item['source_role'],ordinal=item['ordinal'],origin_ref=item['origin_ref'],
         source_goal_id=item['source_origin_identity']['goal_id'],accepted_count=item['accepted_calls'],_head=head,_root=root,_focus=focus)
 
 
 _REFUSALS={
     'original_execution_unknown': 'Preserve the original unknown execution; resolve its identity before a new submission',
     'mechanism_waived': 'This mechanism was scientifically waived by A',
-    'focused_mechanism_required': 'This scientific task permits only its frozen focused mechanism',
-    'initial_opportunities_owed': 'Other H mechanisms retain initial call opportunities; report the scientific question to A for justified extra allocation',
+    'focused_mechanism_required': 'This scientific task permits only its frozen assigned mechanisms',
     'mechanism_choice_required': 'Choose one mechanism number from this task frozen catalog',
 }
 
 
 def _availability(value,scope,accepted,*,head,focus):
     """Use one accepted table for both admission and public numeric choices."""
-    from . import accepted_search
     items=head['search']['table']['mechanisms']
-    counts={ref:item['accepted_calls'] for ref,item in items.items()}
-    owed=head['search']['owed_count']
-    grant=value['grant'];used=grant['used_calls'] if grant else 0
     rows={row['mechanism_ref']:row for row in value['mechanisms']}
     for original in accepted:
         binding=check_binding(value,original.get('mechanism_binding'),scope,_validated=True,_rows=rows)
         ref=binding['mechanism_ref'];item=items.get(ref)
-        if (item is None or binding['source_h']!=item['source_h']
-                or binding['source_h_ref']!=item['source_h_ref']
+        if (item is None or binding['source_step']!=item['source_step']
+                or binding['source_ref']!=item['source_ref'] or binding['source_role']!=item['source_role']
                 or binding['catalog_binding']!=dict(ordinal=item['ordinal'],origin_ref=item['origin_ref'],
                     source_goal_id=item['source_origin_identity']['goal_id'])):
             raise ValueError('Accepted scientific call changed its frozen catalog member')
-        before=accepted_search._owed(dict(item,accepted_calls=counts[ref]),value['initial_calls'])
-        counts[ref]+=1
-        owed+=int(accepted_search._owed(dict(item,accepted_calls=counts[ref]),value['initial_calls']))-int(before)
-        if binding['grant'] is not None:used+=1
     focused=focus and focus['action']!='screen'
     decisions={};available=[]
     for ref,item in items.items():
         extra=None
         if head['search']['opportunity_unknown_count']:reason='original_execution_unknown'
-        elif focused and ref!=focus['mechanism_ref']:reason='focused_mechanism_required'
+        elif focused and ref not in rows:reason='focused_mechanism_required'
         elif item['status']=='waived':reason='mechanism_waived'
         else:
-            selected_owed=accepted_search._owed(dict(item,accepted_calls=counts[ref]),value['initial_calls'])
-            awaiting=not focused and owed-int(selected_owed)>0
-            if awaiting and counts[ref]>=value['initial_calls']:
-                if grant is None or grant['mechanism_ref']!=ref or used>=grant['extra_calls']:
-                    reason='initial_opportunities_owed'
-                else:
-                    reason=None;extra={key:grant[key] for key in ('source_a','source_a_ref')}
-            else:reason=None
+            reason=None
         decisions[ref]=dict(reason=reason,grant=extra)
         if reason is None:
             available.append(dict(number=str(item['ordinal']),mechanism_ref=ref))
@@ -186,7 +170,7 @@ def admit(value, choice, scope, accepted):
     from . import accepted_budget,accepted_search
     validate(value)
     if value is None:
-        if choice is not None:raise OpportunityRequired('No H mechanism combination is authorized for this stage')
+        if choice is not None:raise OpportunityRequired('No mechanism combination is authorized for this stage')
         return None
     root,focus=_catalog_root(value,scope)
     head=accepted_budget.read(root)
@@ -202,5 +186,5 @@ def admit(value, choice, scope, accepted):
     if decision['reason'] is not None:
         reason=decision['reason']
         raise OpportunityRequired(_REFUSALS[reason],reason=reason,available_mechanisms=available)
-    return dict(mechanism_ref=ref,source_h=selected['source_h'],source_h_ref=selected['source_h_ref'],job_ref=scope['job_ref'],grant=decision['grant'],
+    return dict(mechanism_ref=ref,source_step=selected['source_step'],source_ref=selected['source_ref'],source_role=selected['source_role'],job_ref=scope['job_ref'],grant=decision['grant'],
         catalog_binding=dict(ordinal=selected['ordinal'],origin_ref=selected['origin_ref'],source_goal_id=selected['source_goal_id']))

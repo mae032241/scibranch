@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from ui_html import element_texts
 import pytest
 
@@ -22,12 +24,12 @@ def node(role, payload=None, observation=None, **job):
 
 
 def commitment(label='Alpha', **changes):
-    return dict(label=label, minimal_test='Does the response distinguish the mechanism?', existing_ref=None, **changes)
+    return {**dict(label=label, minimal_test='Does the response distinguish the mechanism?', existing_ref=None), **changes}
 
 
 def h(*rows):
     return node('H', dict(search_plan=dict(scope='Compare explicit mechanisms',
-        commitments=list(rows), focus=dict(label=None, action='screen'))))
+        commitments=list(rows), focus=dict(index=None, action='screen'))))
 
 
 def w(finding, *, calls=None, candidates=None, summary='Shared W summary', **job):
@@ -45,18 +47,18 @@ def clean(text, limit=16384):
     return str(text)[:limit]
 
 
-def test_continuous_w_and_a_keep_original_findings_and_deferred_reason():
+def test_continuous_w_keeps_findings_without_adopting_a_advice():
     reader = Reader({1: h(commitment()), 2: w('Measured first response.'),
         3: a('screened', 'The first discriminator was observed.'),
         4: w('Measured second response; uncertainty remains.'),
         5: a('deferred', 'Await independent evidence; this is not a rejection.')})
     value = trail.project(reader, range(1, 6), clean)
     item, = value['mechanisms']
-    assert [event['role'] for event in item['events']] == ['H', 'W', 'A', 'W', 'A']
-    assert item['status'] == 'deferred'
-    assert item['reason'] == 'Await independent evidence; this is not a rejection.'
+    assert [event['role'] for event in item['events']] == ['H', 'W', 'W']
+    assert item['status'] is None and item['reason'] is None
     rendered = trail.render(value)
-    assert '暂缓' in rendered and '淘汰' not in rendered
+    assert '暂缓' not in rendered and '淘汰' not in rendered
+    assert 'Await independent evidence; this is not a rejection.' not in rendered
     assert 'Measured first response.' in rendered and 'Measured second response' in rendered
     assert '/nodes/2/science' in rendered and '/nodes/4/materials' in rendered
     assert 'Shared W summary' not in rendered  # breadth summaries are never copied to each branch
@@ -92,25 +94,26 @@ def test_cards_keep_short_original_excerpts_above_complete_collapsed_trails():
     alpha = rendered.split('<article class="mechanism-card">', 1)[1].split('</article>', 1)[0]
     overview, details = alpha.split('<details', 1)
     assert element_texts(overview, 'h3') == ['Alpha']
-    assert '暂缓' in element_texts(overview, 'span', cls='mechanism-status')
+    assert element_texts(overview, 'span', cls='mechanism-status')
+    assert value['mechanisms'][0]['status'] is None and value['mechanisms'][0]['reason'] is None
     assert 'Can the measurement distinguish Alpha?' in overview
-    assert 'The response remains uncertain.' in overview and 'Await independent evidence.' in overview
+    assert 'The response remains uncertain.' in overview and 'Await independent evidence.' not in rendered
     assert 'Full question' not in overview and 'Full finding' not in overview and 'Full disposition' not in overview
-    assert question in details and finding in details and reason in details
+    assert question in details and finding in details and reason not in rendered
     assert ' open' not in details.split('>', 1)[0]
     assert 'data-details-key="mechanism:h001.m1"' in details
     assert 'data-live-focus="mechanism:h001.m1"' in details
-    assert details.index('role-H') < details.index('role-W') < details.index('role-A')
-    assert '/nodes/3/science' in details and '/nodes/3/materials' in details
+    assert details.index('role-H') < details.index('role-W') and 'role-A' not in details
+    assert '/nodes/1/science' in details and '/nodes/2/materials' in details
     beta = rendered.split('<article class="mechanism-card">', 2)[2].split('<details', 1)[0]
-    assert '当前声明暂无 A 处置记录' in beta and '本窗口尚未记录逐机制的作者发现。' in beta
+    assert '本窗口尚未记录逐机制的作者发现。' in beta
 
 
 def test_empty_evidence_and_dispatch_do_not_invent_experiment_counts():
     reader = Reader({1: h(commitment()), 2: node('W', dict(summary='Unbound summary'),
         observation=dict(candidates=[], managed_calls=[]),
         search=dict(focus=dict(mechanism_ref='h001.m1', action='screen'), breadth=dict(mechanisms=[
-            dict(mechanism_ref='h001.m1', label='Alpha', minimal_test='Prediction', source_h=1)])))})
+            dict(mechanism_ref='h001.m1', label='Alpha', minimal_test='Prediction', source_step=1, source_role='H')])))})
     value = trail.project(reader, [1, 2], clean)
     assert value['unbound'] == [2]
     assert [row['role'] for row in value['mechanisms'][0]['events']] == ['H']
@@ -126,7 +129,7 @@ def test_local_author_summary_is_not_a_completed_experiment(action):
         dict(summary='Analysis of available inputs.', mechanism_findings=None),
         observation=dict(candidates=[], managed_calls=[]),
         search=dict(focus=dict(mechanism_ref='h001.m1', action=action), breadth=dict(mechanisms=[
-            dict(mechanism_ref='h001.m1', label='Alpha', minimal_test='Prediction', source_h=1)])))})
+            dict(mechanism_ref='h001.m1', label='Alpha', minimal_test='Prediction', source_step=1, source_role='H')])))})
     value = trail.project(reader, [1, 2], clean)
     event = value['mechanisms'][0]['events'][-1]
     assert not value['unbound'] and event['role'] == 'W'
@@ -135,13 +138,15 @@ def test_local_author_summary_is_not_a_completed_experiment(action):
     assert '已接受的受管调用' not in trail.render(value)
 
 
-def test_revision_preserves_history_but_does_not_inherit_previous_a_disposition():
+def test_revision_preserves_h_history_without_adopting_previous_a_advice():
     revised = dict(label='Revised Alpha', minimal_test='A new discriminator.', existing_ref='h001.m1')
     value = trail.project(Reader({1: h(commitment()), 2: a('screened', 'For the earlier question.'),
         3: h(revised)}), [1, 2, 3], clean)
     item, = value['mechanisms']
     assert item['label'] == 'Revised Alpha' and item['status'] is None
-    assert item['events'][1]['status'] == 'screened'
+    assert [event['role'] for event in item['events']] == ['H', 'H']
+    assert [event['label'] for event in item['events']] == ['Alpha', 'Revised Alpha']
+    assert item['events'][0]['text']=='Does the response distinguish the mechanism?'
     assert item['question'] == 'A new discriminator.'
 
 
@@ -161,7 +166,7 @@ def test_large_detail_history_preserves_summary_and_links_with_complete_bounded_
     value = trail.project(Reader(nodes), nodes, clean)
     rendered = trail.render(value)
     assert len(rendered.encode('utf-8')) <= trail.MAX_RENDER_BYTES
-    assert 'Alpha' in rendered and '当前声明暂无 A 处置记录' in rendered
+    assert 'Alpha' in rendered and value['mechanisms'][0]['status'] is None
     assert '因显示长度限制未展开' in rendered
     assert '/results/2' in rendered and '/results/' + str(ui_view.WINDOW) in rendered
     assert rendered.count('<article') == rendered.count('</article>')
@@ -204,9 +209,9 @@ def sealed_fixture(tmp_path, findings):
     controller.prepare(root, objective, public, ['never-invoked'], max_tokens=100000,
         max_seconds=600, max_steps=6, model='fixture', reasoning_effort='high',
         experiment_mode='external', search_policy=search.DEFAULT_POLICY)
-    plan = dict(scope='One mechanism comparison', commitments=[commitment()], focus=dict(label=None, action='screen'))
+    plan = dict(scope='One mechanism comparison', commitments=[commitment()], focus=dict(index=None, action='screen'))
     finish(root, 1, 'H', [], action='experiment', search_choice=plan)
-    finish(root, 2, 'W', [1], mechanism_findings=findings,stage_intent='decision' if not isinstance(findings,list) else 'review')
+    finish(root, 2, 'W', [1], mechanism_findings=findings,stage_intent='decision')
     key = tmp_path / 'operator.key'
     key.write_bytes(b'mechanism-ui-fixture-secret-32bytes')
     key.chmod(0o600)
@@ -232,15 +237,17 @@ def test_sealed_results_and_sse_share_real_mechanism_evidence_without_writes(tmp
         status='deferred', reason='Await the missing observation; keep the mechanism open.')], next_focus=None))
     before = _originals(root)
     updated = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-mechanisms']
-    assert updated != first and '暂缓' in updated
-    assert 'Await the missing observation; keep the mechanism open.' in updated
+    assert updated == first and '暂缓' not in updated
+    assert 'Await the missing observation; keep the mechanism open.' not in updated
+    advice=ui_view.Reader(root).node(3)['payload']['search_review']
+    assert advice['dispositions'][0]['reason']=='Await the missing observation; keep the mechanism open.'
     assert 'data-details-key="mechanism:h001.m1"' in updated
     assert 'data-live-focus="mechanism:h001.m1"' in updated
     assert _originals(root) == before
 
 
 @pytest.mark.parametrize('raw_findings', ['Scientific narrative instead of a table', {'finding': 'Partial explanation'}])
-def test_sealed_unparsed_w_findings_keep_h_and_later_a_visible(tmp_path, raw_findings):
+def test_sealed_unparsed_w_findings_keep_h_visible_and_a_original_unchanged(tmp_path, raw_findings):
     from test_history_handoff import finish
 
     root, _ = sealed_fixture(tmp_path, raw_findings)
@@ -254,10 +261,12 @@ def test_sealed_unparsed_w_findings_keep_h_and_later_a_visible(tmp_path, raw_fin
     value = trail.project(reader, [1, 2, 3], ui_view.cleaner(root))
     assert not value['errors']
     item, = value['mechanisms']
-    assert [event['role'] for event in item['events']] == ['H', 'A']
+    assert [event['role'] for event in item['events']] == ['H']
+    assert item['status'] is None and item['reason'] is None
+    assert reader.node(3)['payload']['search_review']['dispositions'][0]['status']=='deferred'
     assert value['unresolved'] == [dict(step=2, field='W 逐机制发现')]
     rendered = trail.render(value)
-    assert 'Alpha' in rendered and '暂缓' in rendered and '可证伪问题' in rendered
+    assert 'Alpha' in rendered and '暂缓' not in rendered and '可证伪问题' in rendered
     assert '尚未解析为结构化信息' in rendered and '/results/2' in rendered
     assert _originals(root) == before
 
@@ -267,10 +276,10 @@ def test_unparsed_h_or_a_fields_preserve_other_stage_records(role, field):
     reader = Reader({1: h(commitment()), 2: node(role, {field: 'Narrative in an auxiliary field'}),
         3: a('deferred', 'Keep this mechanism open.')})
     value = trail.project(reader, [1, 2, 3], clean)
-    assert not value['errors'] and len(value['unresolved']) == 1
-    assert [event['role'] for event in value['mechanisms'][0]['events']] == ['H', 'A']
-    assert value['mechanisms'][0]['reason'] == 'Keep this mechanism open.'
-    assert '尚未解析为结构化信息' in trail.render(value)
+    assert not value['errors'] and len(value['unresolved']) == (1 if role=='H' else 0)
+    assert [event['role'] for event in value['mechanisms'][0]['events']] == ['H']
+    assert value['mechanisms'][0]['reason'] is None
+    assert ('尚未解析为结构化信息' in trail.render(value)) is (role=='H')
 
 
 def _originals(root):
@@ -293,8 +302,75 @@ def _originals(root):
 def test_sparse_optional_scientific_rows_preserve_other_mechanism_records(role,field,value):
     reader=Reader({1:h(commitment()),2:node(role,{field:value}),3:a('deferred','Keep the precise unresolved route visible.')})
     projected=trail.project(reader,[1,2,3],clean)
-    assert not projected['errors'] and projected['unresolved']
+    assert not projected['errors'] and bool(projected['unresolved']) is (role!='A')
     item,=projected['mechanisms']
-    assert item['label']=='Alpha' and item['status']=='deferred'
-    assert [event['role'] for event in item['events']]==['H','A']
-    assert '尚未解析为结构化信息' in trail.render(projected)
+    assert item['label']=='Alpha' and item['status'] is None and item['reason'] is None
+    assert [event['role'] for event in item['events']]==['H']
+    assert ('尚未解析为结构化信息' in trail.render(projected)) is (role!='A')
+
+
+def test_w_sealed_declarations_keep_true_producer_and_next_w_evidence_sources():
+    declared=node('W',dict(summary='New competing explanation; not yet executed.',
+        search_plan=dict(scope='Retain two authored explanations',commitments=[
+            commitment('Revised Alpha',existing_ref='h001.m1'),commitment('Beta')],
+            focus=dict(index=2,action='screen'))),observation=dict(managed_calls=[],candidates=[]))
+    following=node('W',dict(summary='Bounded analysis of the newly frozen mechanism.',mechanism_findings=[]),
+        observation=dict(managed_calls=[],candidates=[]),search=dict(
+            focus=dict(mechanism_ref='w003.m2',action='improve'),breadth=dict(mechanisms=[dict(
+                mechanism_ref='w003.m2',label='Beta',minimal_test='The retained competing explanation',
+                source_step=3,source_role='W')])))
+    value=trail.project(Reader({1:h(commitment()),2:a('deferred','Earlier evidence is incomplete.'),
+        3:declared,4:following}),[1,2,3,4],clean)
+    assert not value['errors'] and not value['unresolved'] and not value['unbound']
+    alpha,beta=value['mechanisms']
+    assert alpha['ref']=='h001.m1' and alpha['label']=='Revised Alpha'
+    assert alpha['status'] is None and alpha['reason'] is None
+    assert alpha['source_step']==3 and alpha['source_role']=='W'
+    assert [row['role'] for row in alpha['events']]==['H','W']
+    assert beta['ref']=='w003.m2' and beta['source_role']=='W'
+    assert beta['events'][0]['kind']=='declaration' and beta['events'][0]['step']==3
+    assert beta['events'][1]['source_authors']==[dict(source_step=3,source_role='W')]
+    assert beta['events'][1]['calls'] is None
+    rendered=trail.render(value)
+    assert '关联机制声明' in rendered and 'W · 第 3 阶段' in rendered
+    assert '关联 H 声明' not in rendered and '/nodes/3/science' in rendered
+    assert '已接受的受管调用' not in rendered
+
+
+@pytest.mark.parametrize('review',[
+    dict(dispositions=[dict(mechanism_ref='h001.m1',status='waived',reason='Consultation advice only.')],next_focus=None),
+    'Unstructured consultation evidence',
+])
+def test_a_consultation_never_adopts_advice_or_adds_unknown_review(review):
+    consultation=node('A',dict(summary='Optional evidence consultation',search_review=review),
+        purpose='worker_consultation')
+    value=trail.project(Reader({1:h(commitment()),2:a('deferred','The formal evidence judgment remains open.'),
+        3:consultation}),[1,2,3],clean)
+    assert not value['errors'] and not value['unresolved']
+    item,=value['mechanisms']
+    assert item['status'] is None and item['reason'] is None
+    assert [event['step'] for event in item['events']]==[1]
+    assert 'Consultation advice only.' not in trail.render(value)
+
+
+@pytest.mark.parametrize('status',['pending','screened','deferred','waived'])
+def test_a_advice_remains_in_exact_original_without_changing_w_source_or_preview(status):
+    declared=node('W',dict(search_plan=dict(commitments=[commitment('W explanation')],
+        focus=dict(index=1,action='improve'))),observation=dict(managed_calls=[],candidates=[]))
+    evidence=node('W',dict(summary='A bounded W observation.',mechanism_findings=[dict(
+        mechanism='w001.m1',basis='observed',finding='Only the retained authored observation.')]),
+        observation=dict(managed_calls=[],candidates=[]),search=dict(breadth=dict(mechanisms=[dict(
+            mechanism_ref='w001.m1',label='W explanation',minimal_test='A discriminating question.',
+            source_step=1,source_role='W')])))
+    advice=node('A',dict(search_review=dict(dispositions=[dict(mechanism_ref='w001.m1',
+        status=status,reason='High-level advice; no adopted mechanism disposition.')],next_focus=None)))
+    reader=Reader({1:declared,2:evidence,3:advice})
+    originals=deepcopy(reader.nodes)
+    before=trail.project(reader,[1,2],clean)
+    after=trail.project(reader,[1,2,3],clean)
+    assert after['mechanisms']==before['mechanisms'] and not after['unresolved']
+    item,=after['mechanisms']
+    assert (item['ref'],item['source_step'],item['source_role'])==('w001.m1',1,'W')
+    assert item['events'][1]['source_authors']==[dict(source_step=1,source_role='W')]
+    assert trail.render(after)==trail.render(before)
+    assert reader.nodes==originals and reader.node(3)['payload']==advice['payload']

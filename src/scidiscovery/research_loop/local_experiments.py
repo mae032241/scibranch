@@ -58,6 +58,7 @@ class LocalExecution:
 
     @staticmethod
     def capabilities():
+        from .experiment_client import frozen_code_directory_capability
         content=e.encoded(dict(kind='local_command',domain_metrics=False,
             optional_result=dict(protocol=e.LOCAL_RESULT_PROTOCOL,path='artifacts/result.json',schema=RESULT_SCHEMA,
                 constraints='Metric names, output paths and candidate artifact paths must be unique. Outputs must be retained originals. Scientific descriptions are optional and preserved without scientific interpretation. The optional candidates array declares every retained model available to A; each member requires its exact retained artifact. Missing measurements stay unknown. Invalid individual declarations are diagnosed without discarding other observations. Execution success alone is not scientific success.')))
@@ -65,7 +66,8 @@ class LocalExecution:
             'application/json',content,dict(kind='local_command')),
             AdapterCapability(e.INPUT_SOURCES_KEY,'source_provenance',e.INPUT_SOURCES_SCHEMA,1,
                 'application/json',e.encoded(e.INPUT_SOURCES_CONTRACT),
-                dict(scope='Explicit current-job experiments/<name> authoring snapshots and exact bound input copies only; not arbitrary shell reads.')))
+                dict(scope='Explicit current-job experiments/<name> authoring snapshots and exact bound input copies only; not arbitrary shell reads.')),
+            frozen_code_directory_capability())
 
     def input_sources(self, payload, metadata):
         from . import execution_inputs
@@ -514,11 +516,22 @@ class LocalExecution:
     def read_result(directory,outputs):
         path=directory/'result.json'
         if not path.exists():return dict(status='missing',metrics=[],outputs=[])
-        detail='result.json must contain strict JSON'
         try:
+            if path.stat().st_size>e.MAX_BYTES:
+                return dict(status='unavailable',metrics=[],outputs=[],diagnostic='result_declaration_limit',
+                    details_ref='result.json')
             def nonfinite(_):raise ValueError('Nonfinite JSON value')
-            value=json.loads(e.read(path),parse_constant=nonfinite)
-            detail='result requires version=1 and metrics and outputs arrays'
+            value=json.loads(e.read(path,e.MAX_BYTES),parse_constant=nonfinite)
+        except (OSError,ValueError,OverflowError,RecursionError) as error:
+            return dict(status='invalid',metrics=[],outputs=[],diagnostic='result_io' if isinstance(error,OSError) else 'result_json_invalid',
+                detail='result.json original could not be read' if isinstance(error,OSError) else 'result.json must contain strict JSON')
+        return LocalExecution.parse_result(value,outputs)
+
+    @staticmethod
+    def parse_result(value,outputs):
+        """Project an owner-decoded result over its already retained output rows."""
+        detail='result requires version=1 and metrics and outputs arrays'
+        try:
             if (not isinstance(value,dict) or type(value.get('version')) is not int or value['version']!=1
                     or not isinstance(value.get('metrics'),list) or not isinstance(value.get('outputs'),list)):
                 raise ValueError('Expected version 1 metrics and outputs')

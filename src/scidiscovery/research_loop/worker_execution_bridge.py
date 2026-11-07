@@ -64,6 +64,23 @@ def local_process_available():
     if check is not None:check()
 
 
+def _option_arguments(arguments):
+    """Split known value options in a derived view, preserving values and script tails."""
+    result=[];index=0
+    while index<len(arguments):
+        argument=arguments[index]
+        if argument=='--':
+            result.extend(arguments[index:]);break
+        if isinstance(argument,str):
+            option,separator,value=argument.partition('=')
+            if separator and option in VALUE_OPTIONS:
+                result.extend([option,value]);index+=1;continue
+        result.append(argument);index+=1
+        if isinstance(argument,str) and argument in VALUE_OPTIONS and index<len(arguments):
+            result.append(arguments[index]);index+=1
+    return result
+
+
 def _arguments(arguments, work, config=None):
     from .experiments import CallerError
     if (not isinstance(arguments,list) or not arguments
@@ -72,14 +89,15 @@ def _arguments(arguments, work, config=None):
         raise CallerError('Choose an existing scientific command with exp help.')
     result=[arguments[0]];index=1
     while index<len(arguments):
-        option=arguments[index]
+        tokens=_option_arguments([arguments[index]])
+        option=tokens[0];inline=len(tokens)==2
         if option=='--' and arguments[0]=='run':
             result.extend(arguments[index:]);break
         if option in FLAG_OPTIONS:
             result.append(option);index+=1;continue
-        if option not in VALUE_OPTIONS or index+1>=len(arguments):
+        if option not in VALUE_OPTIONS or not inline and index+1>=len(arguments):
             raise CallerError('Check required options with exp help <command>; separate scientific script arguments with --.')
-        value=arguments[index+1]
+        value=tokens[1] if inline else arguments[index+1]
         if option=='--mechanism' and arguments[0] in {'run','compile'}:
             if re.fullmatch(r'[1-9][0-9]*',value) is None:
                 raise CallerError('Use the exact positive decimal mechanism number from the frozen public catalog.')
@@ -105,7 +123,10 @@ def _arguments(arguments, work, config=None):
                 except FileNotFoundError:
                     raise CallerError(f'The selected {option} scientific input is missing. Write or select its task file; script paths are relative to the task workspace, independently of --experiment-dir.',error='scientific_input_not_found') from None
             value=str(path)
-        result.extend([option,value]);index+=2
+        # Inline values may themselves start with an option prefix. Preserve
+        # their argparse meaning after owner validation and path resolution.
+        result.extend([f'{option}={value}'] if inline else [option,value])
+        index+=1 if inline else 2
     return result
 
 
@@ -186,7 +207,8 @@ def _client_request(reference,arguments):
     result['handoff']=managed_wait.handoff(None,result,'run')
     response=dict(code=2,result=result,submission_ref=reference,request=request)
     if len(raw)<=MAX_BYTES and len(_encoded(response))<=MAX_BYTES:return request
-    control=arguments[:arguments.index('--')] if '--' in arguments else arguments
+    control=_option_arguments(arguments)
+    if '--' in control:control=control[:control.index('--')]
     selected=control[:1]
     if '--mechanism' in control:
         index=control.index('--mechanism')
@@ -223,8 +245,10 @@ def _execute(server, arguments):
     from . import experiments as e
     config=_configuration(server)
     arguments=_arguments(arguments,server.work,config)
-    from . import contracts as c,experiment_client,budget
-    deadline=_bridge_deadline(experiment_client.root_for_configuration(config),config)
+    from . import contracts as c,experiment_client,budget,budget_limits
+    shared_deadline=_bridge_deadline(experiment_client.root_for_configuration(config),config)
+    deadline=budget_limits.minimum(shared_deadline,
+        time.clock_gettime(time.CLOCK_BOOTTIME)+config['max_seconds']+8)
     c.write(server.record/'bridge-operation.json',dict(boot_id=budget.clock_stamp()['boot_id'],deadline_boottime=deadline))
     if server.stop.is_set():return _unknown()
     out=io.StringIO();err=io.StringIO()
@@ -239,11 +263,11 @@ def _execute(server, arguments):
         _configuration(server)
         if server.stop.is_set():raise e.IntegrityError('Original task submission lifetime ended')
         if not accepted.get('execution_authority'):
-            # Plain local execution owns its finite max_seconds independently
-            # of soft node targets and later shared-balance changes. Retain its
-            # existing wait(5)+group-cleanup(3) grace before forced bridge exit.
+            # Retain the local call's finite max_seconds and existing wait(5)
+            # plus group-cleanup(3) grace within the frozen shared permission.
             c.write(server.record/'bridge-operation.json',dict(boot_id=budget.clock_stamp()['boot_id'],
-                deadline_boottime=time.clock_gettime(time.CLOCK_BOOTTIME)+config['max_seconds']+8))
+                deadline_boottime=budget_limits.minimum(shared_deadline,
+                    time.clock_gettime(time.CLOCK_BOOTTIME)+config['max_seconds']+8)))
         return server.launch(config,accepted,command,cwd)
     trusted_launch.check_available=getattr(server.launch,'check_available',lambda:None)
     token=_LOCAL_LAUNCH.set(trusted_launch)
@@ -388,7 +412,8 @@ def _pending_cache(response,calls):
 def _response_calls(server, request, response, before):
     from . import experiments as e
     records=e.Records(server.configuration)
-    references={path.name for path in records.calls()}-before
+    current={path.name for path in records.calls()}
+    references=current-before
     result=response.get('result',{})
     if result.get('accepted') is False and not references:return []
     if isinstance(result.get('call_id'),str):references.add(result['call_id'])
@@ -397,10 +422,12 @@ def _response_calls(server, request, response, before):
     arguments=request['arguments']
     if not isinstance(arguments,list) or any(not isinstance(item,str) for item in arguments):
         arguments=[]
+    arguments=_option_arguments(arguments)
     if '--' in arguments:arguments=arguments[:arguments.index('--')]
     if '--call-id' in arguments:
         index=arguments.index('--call-id')
-        if index+1<len(arguments):references.add(arguments[index+1])
+        if index+1<len(arguments) and arguments[index+1] in current:
+            references.add(arguments[index+1])
     calls=[];preparations=None
     for reference in sorted(references):
         directory=records.root/'calls'/reference
@@ -461,6 +488,18 @@ def _handle(server, raw, *, retained=False):
             try:
                 if request.get('client_error')=='submission_frame_too_large':raise _frame_refusal()
                 if len(raw)>MAX_REQUEST_BYTES:raise _frame_refusal(len(raw))
+                if (not retained and isinstance(request['arguments'],list)
+                        and request['arguments'] and isinstance(request['arguments'][0],str)
+                        and request['arguments'][0] in {'query','lookup','collect','cancel','reconcile','retire'}):
+                    purpose=_request_consumption(request['arguments'])
+                    if purpose.call_id not in before:
+                        # Only reject this operation's current addressing scope;
+                        # absence here says nothing about another original's state.
+                        raise e.CallerError(f'{purpose.command} requires an original call record addressable by the current W task. '
+                            'This refusal concerns this operation request only. '
+                            'Read earlier retained files from the assigned inputs/history node index and its material IDs. '
+                            'Preserve any existing unknown submission and reconcile it with its original owner. '
+                            'Do not resubmit the earlier experiment.',error='call_outside_current_task')
                 response=_unknown() if retained else _execute(server,request['arguments'])
             except e.CallerError as error:
                 response=dict(code=2,result=e.caller_feedback(error))
@@ -483,12 +522,13 @@ def _handle(server, raw, *, retained=False):
     arguments=request['arguments']
     if (isinstance(arguments,list) and arguments and isinstance(arguments[0],str)
             and (arguments[0] in {'run','query','lookup','collect','cancel','reconcile'}
-                or arguments[0]=='compile' and response['result'].get('status')=='caller_error'
+                or arguments[0] in {'compile','retire'} and response['result'].get('status')=='caller_error'
                 and response['result'].get('accepted') is False)):
         # Recompute only the public projection, never cached claim originals.
         # A retained unknown remains unknown even if its old hint said to wait.
         from . import managed_wait
-        control=arguments[:arguments.index('--')] if '--' in arguments else arguments
+        control=_option_arguments(arguments)
+        if '--' in control:control=control[:control.index('--')]
         call_id=None
         if '--call-id' in control:
             index=control.index('--call-id')
@@ -694,7 +734,7 @@ def _bridge_process(server,initial,parent_pid,ready):
 
 
 def _bridge_deadline(root,configuration):
-    """Freeze the original task's finite remaining wall permission, never extend it."""
+    """Freeze the original task's remaining wall permission, never extend it."""
     from . import budget,execution,native,contracts as c
     job=c.read(c.regular(root/'jobs'/f'{configuration['scope']['step']:03d}.json'))
     record=execution.record(root,job['step'],configuration['native_attempt']['number'])
@@ -702,7 +742,7 @@ def _bridge_deadline(root,configuration):
     stamp=budget.clock_stamp();limits=budget.snapshot(root,sample_stamp=stamp)
     seconds=budget.execution_available(root,job,limits,native.usage(root))['seconds']
     budget.node_mode(root)  # Historical hard settings remain read-only.
-    return time.clock_gettime(time.CLOCK_BOOTTIME)+max(0.,seconds)
+    return None if seconds is None else time.clock_gettime(time.CLOCK_BOOTTIME)+max(0.,seconds)
 
 
 @contextmanager
@@ -761,7 +801,7 @@ def serve(directory, config_path, work, *, launch, environment=None):
                 operation=c.read(c.regular(path))
                 if operation.get('boot_id')==budget.clock_stamp()['boot_id']:
                     deadline=operation['deadline_boottime']
-            if time.clock_gettime(time.CLOCK_BOOTTIME)>=deadline:break
+            if deadline is not None and time.clock_gettime(time.CLOCK_BOOTTIME)>=deadline:break
             time.sleep(.05)
         if receipt is not None and runtime.process_matches(receipt,identity):
             descendants=_descendants(receipt)

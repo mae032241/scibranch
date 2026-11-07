@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import budget, budget_notice, contracts as c, controller, execution, native
+from scidiscovery.research_loop import accepted_budget, budget, budget_notice, contracts as c, controller, execution, native, protocol
 from test_node_budget import instance, policy, target
 from test_soft_node_budget import start_clock
 
@@ -46,16 +46,26 @@ def advice(tmp_path, monkeypatch):
         limits=budget.snapshot(root)
         if anchor:limits['advance_seconds']=anchor['advance_seconds']+5
         limits['seconds_remaining']=100.
-        shared=dict(observed_tokens=25,accounted_tokens=25,unknown_steps=[])
-        monkeypatch.setattr(native,'usage',lambda *_:dict(shared))
+        head=accepted_budget.read(root)
+        shared=accepted_budget.usage_from_facts(head,
+            job_rows=accepted_budget.load_usage_rows(head),current_native=None)
+        shared.update(observed_tokens=25,accounted_tokens=25,unknown_steps=[])
+        facts=dict(settings=c.settings(root),head=head,shared=shared,stamp=budget.clock_stamp(),
+            task=intent['task_ref'],scope=protocol.stage_scope(root,job),
+            final_return=None,closeout_preparation_seconds=None,
+            native_attempt=dict(number=0,execution_key=intent['task_ref']))
         publications=[]
-        monkeypatch.setattr(budget,'publish_review',lambda *a,**kw:publications.append(True))
+        original_publish=budget.publish_review
+        def publish_review(*args,**kwargs):
+            publications.append(True)
+            return original_publish(*args,**kwargs)
+        monkeypatch.setattr(budget,'publish_review',publish_review)
         for name in ('snapshot','node_admission','accept_node'):
             monkeypatch.setattr(budget,name,lambda *a,**kw:pytest.fail('Advice must use the supplied observation, never reenter admission'))
         path=c.workspace(root,1)/'work/budget-status.json'
         def publish(meter=None,*,observed=True,author_limits=None):
             budget.write_node_hint(root,job,intent,limits,meter or dict(input_tokens=20,cached_input_tokens=19,output_tokens=5),
-                observed=observed,author_limits=author_limits)
+                facts=facts,observed=observed,author_limits=author_limits)
             assert path.stat().st_size<=4096
             return c.read(path)
         return root,job,intent,limits,shared,publications,publish
@@ -225,8 +235,8 @@ def test_node_risk_starts_at_eighty_percent_without_changing_soft_targets(advice
 
 @pytest.mark.parametrize('elapsed,alert',[(23.99,False),(24.,True)])
 def test_node_time_risk_uses_the_existing_eighty_percent_target(advice,monkeypatch,elapsed,alert):
-    _,_,_,_,_,_,publish=advice(role='E')
-    monkeypatch.setattr(budget,'_node_duration',lambda *args:elapsed)
+    _,_,intent,limits,_,_,publish=advice(role='E')
+    limits['advance_seconds']=intent['budget_slice']['advance_seconds']+elapsed
     hint=publish()
     assert ('closeout_notices' in hint) is alert
     if alert:assert set(hint['closeout_notices'])=={'time'}
@@ -318,7 +328,7 @@ def test_later_token_notice_concludes_when_shared_time_expired_after_its_notice(
 
 
 def test_later_time_notice_concludes_when_shared_tokens_exhausted_after_their_notice(advice,monkeypatch):
-    root,_,_,_,shared,_,publish=advice(role='A')
+    root,_,intent,limits,shared,_,publish=advice(role='A')
     meter=dict(input_tokens=80,cached_input_tokens=0,output_tokens=0)
     first=publish(meter)
     assert set(first['closeout_notices'])=={'token'}
@@ -328,7 +338,7 @@ def test_later_time_notice_concludes_when_shared_tokens_exhausted_after_their_no
     exhausted=publish(meter)
     assert set(exhausted['closeout_notices'])=={'token'}  # Token exhaustion does not invent a time-risk trigger.
     assert budget_notice.hook_output(work,1) is None
-    monkeypatch.setattr(budget,'_node_duration',lambda *args:24.)
+    limits['advance_seconds']=intent['budget_slice']['advance_seconds']+24.
     both=publish(meter)
     assert set(both['closeout_notices'])=={'time','token'}
     text=budget_notice.hook_output(work,2)['hookSpecificOutput']['additionalContext']
@@ -374,6 +384,8 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     for text in ('Soft targets','work/budget-status.json','input has cache',
             'unknown tokens!=0','no grant','no control wrappers/hashes'):
         assert text in prompt
-    if role in 'HW':assert 'Allow for suggested follow-up token targets' in prompt
+    if role in 'HW':
+        assert 'Follow-up token targets' in prompt and 'advise planning' in prompt
+        assert 'no grant or required handoff' in prompt
     if role=='A':assert_a_instruction_scopes_global_closeout(prompt)
     assert c.read(execution.record(root,step)/'native-outcome.json')['stop_reason'] is None

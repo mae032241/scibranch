@@ -3,7 +3,7 @@
 Optional H/A thinking is refused once its reported exploration usage reaches
 the configured share of the current total authorization, or when
 the same role repeats without new sealed W/E evidence or an audit receipt.
-Required reviews stay legal: A after W, A after an audit receipt, control
+Required reviews stay legal: formal A decisions after W, A after an audit receipt, control
 correction review and closeout.
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ def usage(root, through_step):
 
 
 def _required(root, step, job, result, role, correction_request):
-    if correction_request is not None or job['role'] == 'W' and role == 'A':
+    if correction_request is not None or job['role'] == 'W' and role == 'A' and result.get('stage_intent')=='decision':
         return True
     if job['role'] == 'A' and role == 'A' and result.get('next_action') == 'audit' and c.settings(root, job).get('candidate_audit_policy'):
         from . import candidate_audit
@@ -56,6 +56,8 @@ def reason(root, step, job, result, role, correction_request=None, *, allow_repe
     if not allow_repeat and job['role'] == role and not (job.get('formal_review') or result.get('next_action')=='formal_review'):
         return 'role_repeat_without_evidence'
     meter, total = usage(root, step), budget.ceilings(root)['max_tokens']
+    if total is None:
+        return None
     if meter['thinking'] >= limits['max_thinking_share'] * total:
         return 'role_share_thinking_reached'
     if meter['thinking'] + meter['E'] >= (1 - limits['min_w_share']) * total:

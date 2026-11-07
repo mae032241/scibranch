@@ -11,7 +11,19 @@ import os
 from pathlib import Path
 import time
 
-from . import accepted_budget, contracts, history, originals
+from . import accepted_budget, budget_limits, contracts, history, originals
+
+
+def supervision_fraction(*,initial_tokens,initial_seconds,observed_tokens,active_seconds):
+    """Consume supplied initial ceilings and observations; unknown is not zero."""
+    ratios=[]
+    for ceiling,consumed in ((initial_tokens,observed_tokens),(initial_seconds,active_seconds)):
+        if ceiling is None or consumed is None:continue
+        if (type(ceiling) not in (int,float) or not 0<ceiling<float('inf')
+                or type(consumed) not in (int,float) or not 0<=consumed<float('inf')):
+            raise ValueError('Direction supervision budget observations must be finite and nonnegative')
+        ratios.append(consumed/ceiling)
+    return max(ratios) if ratios else None
 
 
 def clock_stamp():
@@ -125,9 +137,11 @@ def _read_events(root, settings, *, resources=False):
         if event['kind'] == 'budget_amend':
             for limits in (event.get('before'), event.get('after')):
                 if (not isinstance(limits, dict) or set(limits) != {'max_tokens', 'max_seconds'}
-                        or type(limits['max_tokens']) is not int or limits['max_tokens'] <= 0
-                        or type(limits['max_seconds']) not in (int, float)
-                        or not 0 < limits['max_seconds'] < float('inf')):
+                        or limits['max_tokens'] is not None and (
+                            type(limits['max_tokens']) is not int or limits['max_tokens'] <= 0)
+                        or limits['max_seconds'] is not None and (
+                            type(limits['max_seconds']) not in (int, float)
+                            or not 0 < limits['max_seconds'] < float('inf'))):
                     raise ValueError('Invalid audited budget ceilings')
             if not isinstance(event.get('authorization_note'), str) or not event['authorization_note'].strip():
                 raise ValueError('Budget amendment has no operator decision')
@@ -596,8 +610,9 @@ def execution_available(root, job, limits, usage):
         reserve = closeout_floor(settings, preparation_seconds=begin['preparation_seconds'])
     else:
         reserve = delivery_reserve(settings) or dict(seconds=0, tokens=0)
-    return dict(seconds=max(0., limits['seconds_remaining'] - reserve['seconds']),
-                tokens=max(0, limits['max_tokens'] - usage.get('accounted_tokens', usage['observed_tokens']) - reserve['tokens']))
+    return dict(seconds=budget_limits.remaining(limits['seconds_remaining'], reserve['seconds']),
+                tokens=budget_limits.remaining(limits['max_tokens'],
+                    usage.get('accounted_tokens', usage['observed_tokens']) + reserve['tokens']))
 
 
 @contextmanager
@@ -880,7 +895,7 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
             advance_seconds=durations['advance'], waiting_seconds=durations['waiting'],
             paused_seconds=durations['paused'], unclassified_seconds=durations['unclassified'],
             elapsed_seconds=elapsed, consumed_seconds=consumed,
-            seconds_remaining=max(0., state['ceilings']['max_seconds']-consumed), clock_phase=phase,
+            seconds_remaining=budget_limits.remaining(state['ceilings']['max_seconds'], consumed), clock_phase=phase,
             ledger_events=state['seq'], historical_time='unknown_before_ledger' if clock['basis'] == 'elapsed'
                 else 'recorded_active_with_unmeasured_paused_gap' if clock['bridged'] else 'recorded',
             **(dict(unmeasured_paused_gap=True) if clock['bridged'] else {}),
@@ -910,7 +925,7 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
     consumed = advance + waiting if basis == 'active' else elapsed
     return dict(**limits, max_steps=max_steps, original_max_steps=settings['max_steps'], time_budget_basis=basis, advance_seconds=advance, waiting_seconds=waiting,
                 paused_seconds=paused, unclassified_seconds=unclassified, elapsed_seconds=elapsed, consumed_seconds=consumed,
-                seconds_remaining=max(0., limits['max_seconds'] - consumed), clock_phase=phase,
+                seconds_remaining=budget_limits.remaining(limits['max_seconds'], consumed), clock_phase=phase,
                 ledger_events=len(events), historical_time='unknown_before_ledger' if basis == 'elapsed' else
                 'recorded_active_with_unmeasured_paused_gap' if bridged else 'recorded',
                 **(dict(unmeasured_paused_gap=True) if bridged else {}),
@@ -1148,7 +1163,16 @@ def amend(root, *, max_tokens=None, max_seconds=None, max_steps=None, authorizat
                              authorization_note=authorization_note, authorization_statement=authorization_statement)
 
 
-def _validate_amendment(root, *, max_tokens=None, max_seconds=None, max_steps=None, authorization_note, authorization_statement=None):
+def _validate_unlimited_node_targets(limits, settings):
+    """Unlimited globals need finite targets from this produced configuration."""
+    if any(limits[key] is None for key in ('max_tokens', 'max_seconds')):
+        targets = settings.get('node_budget_policy')
+        if targets is None:
+            raise ValueError('Unlimited global budgets require explicit finite all-role node budget targets')
+        node_policy(targets)
+
+
+def _validate_amendment(root, *, max_tokens=None, max_seconds=None, max_steps=None, authorization_note, authorization_statement=None, applicable_settings=None):
     """Operator entry only. A note records a decision; it authenticates nobody."""
     from .protocol import require_current
     require_current(root)
@@ -1156,22 +1180,29 @@ def _validate_amendment(root, *, max_tokens=None, max_seconds=None, max_steps=No
         raise ValueError('An explicit operator authorization note is required')
     if max_tokens is None and max_seconds is None and max_steps is None:
         raise ValueError('Specify a revised token, seconds or step ceiling')
-    if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
-        raise ValueError('max_tokens must be a positive integer')
-    if max_seconds is not None and (type(max_seconds) not in (int, float) or not 0 < max_seconds < float('inf')):
-        raise ValueError('max_seconds must be positive and finite')
+    if max_tokens not in (None, 'unlimited') and (type(max_tokens) is not int or max_tokens <= 0):
+        raise ValueError('max_tokens must be a positive integer or unlimited')
+    if max_seconds not in (None, 'unlimited') and (type(max_seconds) not in (int, float) or not 0 < max_seconds < float('inf')):
+        raise ValueError('max_seconds must be positive and finite or unlimited')
     if max_steps is not None and (type(max_steps) is not int or max_steps <= 0):
         raise ValueError('max_steps must be a positive integer')
     if max_steps is not None and authorization_statement is None:
         raise ValueError('A step ceiling amendment requires the original operator statement')
     if authorization_statement is not None and (not isinstance(authorization_statement, str) or not authorization_statement.strip()):
         raise ValueError('The original operator statement must be nonempty')
+    if applicable_settings is not None:
+        limits = {key: applicable_settings[key] for key in ('max_tokens', 'max_seconds')}
+        for key, value in (('max_tokens', max_tokens), ('max_seconds', max_seconds)):
+            if value is not None:
+                limits[key] = None if value == 'unlimited' else value
+        _validate_unlimited_node_targets(limits, applicable_settings)
 
 
-def _amend_locked(root, *, max_tokens=None, max_seconds=None, max_steps=None, authorization_note, authorization_statement=None, operation_id=None):
+def _amend_locked(root, *, max_tokens=None, max_seconds=None, max_steps=None, authorization_note, authorization_statement=None, operation_id=None, applicable_settings=None):
     """Original amendment policy, called only by an existing controller writer."""
     _validate_amendment(root, max_tokens=max_tokens, max_seconds=max_seconds, max_steps=max_steps,
-                      authorization_note=authorization_note, authorization_statement=authorization_statement)
+                      authorization_note=authorization_note, authorization_statement=authorization_statement,
+                      applicable_settings=applicable_settings)
     if execution_blocked(root):
         raise RuntimeError('Budget amendment requires no running or unknown original execution')
     settings = contracts.settings(root)
@@ -1184,8 +1215,12 @@ def _amend_locked(root, *, max_tokens=None, max_seconds=None, max_steps=None, au
                 return dict(status='budget_amended', amendment_seq=prior['seq'], before=prior['before'], after=prior['after'], consumption='retained')
         value = _snapshot(root, settings, events)
         before = {key: value[key] for key in ('max_tokens', 'max_seconds')}
-        after = dict(before, **({} if max_tokens is None else dict(max_tokens=max_tokens)),
-                     **({} if max_seconds is None else dict(max_seconds=max_seconds)))
+        after = dict(before, **({} if max_tokens is None else dict(max_tokens=None if max_tokens == 'unlimited' else max_tokens)),
+                     **({} if max_seconds is None else dict(max_seconds=None if max_seconds == 'unlimited' else max_seconds)))
+        if applicable_settings is None:
+            from . import configuration_updates
+            applicable_settings = configuration_updates.current_policy(root, base=settings, head=events.state)
+        _validate_unlimited_node_targets(after, applicable_settings)
         event = _append(root, settings, events, parent, kind='budget_amend', **(dict(operation_id=operation_id) if operation_id else {}), before=before,
                         after=after, authorization_note=authorization_note.strip(),
                         **(dict(before_max_steps=value['max_steps'], after_max_steps=max_steps, max_steps_delta=max_steps-value['max_steps']) if max_steps is not None else {}),
@@ -1231,6 +1266,8 @@ def node_limits(root, job, *, settings=None):
         if job.get('final_only') and job.get('role') == 'A':
             if job.get('purpose') == 'closeout' and settings.get('delivery_policy') is not None:
                 return dict(settings['delivery_policy']['closeout_a'])
+            if settings['max_tokens'] is None or settings['max_seconds'] is None:
+                raise ValueError('Unlimited global budgets require explicit finite node budget targets for final A')
             return dict(max_observed_tokens=settings['max_tokens'], max_seconds=settings['max_seconds'])
         return None
     limits = node_policy(policy)[job['role']]
@@ -1508,10 +1545,14 @@ def _event_ref(root, event):
 def _validate_cursor(root, cursor, before_step, events):
     from . import fork_runtime, handoff_state
     fields = {'role','parents','instruction','evidence_return','correction_request','author_correction','source_refs'}
-    if (not isinstance(cursor,dict) or set(cursor) != fields or cursor['role'] not in ('H','W','A','E')
+    if (not isinstance(cursor,dict) or set(cursor) not in (fields,fields|{'supervision_request'}) or cursor['role'] not in ('H','W','A','E')
             or not isinstance(cursor['instruction'],str) or not isinstance(cursor['parents'],list)
             or not isinstance(cursor['source_refs'],list)):
         raise ValueError('Final resume requires its exact pending scientific route')
+    if 'supervision_request' in cursor:
+        if cursor['role']!='A' or cursor['evidence_return'] is not None:
+            raise ValueError('Final resume supervision requires its pending ordinary A route')
+        contracts.supervision_binding(cursor['supervision_request'],step=before_step)
     steps = []
     for ref in cursor['source_refs']:
         number = ref.get('step')
@@ -1557,11 +1598,13 @@ def _threshold_raised(events, after_seq):
         ref = events.state['explicit_amendment']
         latest = events.event(ref) if ref is not None else None
         return latest is not None and latest['seq'] > after_seq and (any(
-            latest['after'][key] > latest['before'][key] for key in ('max_tokens','max_seconds'))
+            latest['before'][key] is not None and (latest['after'][key] is None
+                or latest['after'][key] > latest['before'][key]) for key in ('max_tokens','max_seconds'))
             or latest.get('after_max_steps',0) > latest.get('before_max_steps',0))
     latest = next((row for row in reversed(events) if row['kind'] == 'budget_amend' and row['seq'] > after_seq
                    and not str(row.get('operation_id', '')).startswith('configuration-')), None)
-    return latest is not None and (any(latest['after'][key] > latest['before'][key] for key in ('max_tokens','max_seconds'))
+    return latest is not None and (any(latest['before'][key] is not None and (
+        latest['after'][key] is None or latest['after'][key] > latest['before'][key]) for key in ('max_tokens','max_seconds'))
         or latest.get('after_max_steps',0) > latest.get('before_max_steps',0))
 
 
@@ -1692,8 +1735,11 @@ def _validate_final_a_event(root, settings, event, previous):
             or type(selection['max_steps']) is not int or selection['max_steps'] != max_steps
             or type(selection['used_steps']) is not int or not _selection_accounts_job(root, job, selection['used_steps'])
             or type(selection['accounted_tokens']) is not int or selection['accounted_tokens'] < 0
-            or type(selection['seconds_remaining']) not in (int, float)
-            or not math.isfinite(selection['seconds_remaining']) or not 0 <= selection['seconds_remaining'] <= ceilings['max_seconds']
+            or ceilings['max_seconds'] is None and selection['seconds_remaining'] is not None
+            or ceilings['max_seconds'] is not None and (
+                type(selection['seconds_remaining']) not in (int, float)
+                or not math.isfinite(selection['seconds_remaining'])
+                or not 0 <= selection['seconds_remaining'] <= ceilings['max_seconds'])
             or reserve != _final_a_reserve(settings, job, previous)
             or event['basis'] != 'final_state' or _final_boundary(previous, job) is None
             or _active_final(previous) != _final_boundary(previous, job)):
@@ -1854,7 +1900,7 @@ def final_a_receipt(accepted, intent, meter, shared):
     receipt = dict(final_return=intent['budget_slice']['final_return'], scope='original_final_a_only',
         final_overrun=dict(original_shared_max_tokens=ceiling, original_local_target_tokens=target,
             accounted_shared_tokens=accounted, observed_node_tokens=observed,
-            shared_tokens_over_ceiling=max(0, accounted-ceiling),
+            shared_tokens_over_ceiling=None if ceiling is None else max(0, accounted-ceiling),
             local_tokens_over_target=None if observed is None else max(0, observed-target)),
         accounting='All actual usage retained; original ceilings unchanged; no further scientific dispatch.')
     if meter is None or accepted['step'] in shared.get('unknown_steps', []):
@@ -2046,7 +2092,9 @@ def _attempt_consumption_from_facts(root,job,receipts,*,policy,limits,task_ref,
     tokens, seconds = 0, 0.
     for number,(path,intent,original,meter,interrupted) in enumerate(receipts):
         anchor = intent.get('budget_slice', {})
-        if meter is None and not interrupted and not native_completion_known(dict(original,stop_reason=None),policy):
+        from . import native_recovery
+        if (meter is None and not interrupted and not native_recovery.never_started(original)
+                and not native_completion_known(dict(original,stop_reason=None),policy)):
             from . import continuation
             successor = receipts[number+1][1] if number+1<len(receipts) else automatic_successor or {}
             automatic = ((automatic_recovery is not None and number == len(receipts) - 1)
@@ -2168,9 +2216,10 @@ def node_admission(root, job, *, ignore_step=None, intent=None, final_report=Non
             return 'step_limit'
     if intent is not None:
         _node_duration(root, job, intent, limits)
-    if limits['seconds_remaining'] <= 0:
+    if budget_limits.reached(limits['seconds_remaining']):
         return 'node_budget_unavailable_seconds'
-    if final_report is None and limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= 0:
+    if final_report is None and budget_limits.reached(budget_limits.remaining(
+            limits['max_tokens'], meter.get('accounted_tokens', meter['observed_tokens']))):
         return 'node_budget_unavailable_tokens'
     if job.get('purpose') == 'closeout':
         begin = events.state['closeout']
@@ -2178,8 +2227,9 @@ def node_admission(root, job, *, ignore_step=None, intent=None, final_report=Non
             raise ValueError('Closeout node has no exact model boundary')
         floor = closeout_floor(settings, preparation_seconds=begin['preparation_seconds'])
         additional = 0 if (root / 'jobs' / f'{job["step"]:03d}.json').exists() else 1
-        seconds_unavailable = limits['seconds_remaining'] <= floor['seconds']
-        tokens_unavailable = limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= floor['tokens']
+        seconds_unavailable = budget_limits.reached(limits['seconds_remaining'], floor['seconds'])
+        tokens_unavailable = budget_limits.reached(budget_limits.remaining(
+            limits['max_tokens'], meter.get('accounted_tokens', meter['observed_tokens'])), floor['tokens'])
         if (seconds_unavailable or tokens_unavailable
                 or limits['max_steps'] - used_steps(root, events=events) < additional + floor['steps']):
             return 'closeout_budget_unavailable'
@@ -2283,8 +2333,9 @@ def accept_continuation(root, job, paths, *, output_repair=None, automatic_recov
         if job.get('purpose') == 'closeout' else delivery_reserve(settings)) or dict(tokens=0, seconds=0, steps=0)
     unknown = _usage_unknown(meter, (job['step'],) if automatic_recovery is not None else ())
     if (unknown
-            or limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= reserve['tokens']
-            or limits['seconds_remaining'] <= reserve['seconds']
+            or budget_limits.reached(budget_limits.remaining(
+                limits['max_tokens'], meter.get('accounted_tokens', meter['observed_tokens'])), reserve['tokens'])
+            or budget_limits.reached(limits['seconds_remaining'], reserve['seconds'])
             or step_limit(root) - used_steps(root) < 1 + reserve['steps']):
         raise NodeBudgetUnavailable('worker_resume_budget_unavailable')
     return dict(task_ref=contracts.record_ref(root / 'jobs' / f'{job["step"]:03d}.json'), role=job['role'],
@@ -2414,11 +2465,12 @@ def exploration_admission(root, job, *, ignore_step=None, intent=None,
     if _usage_unknown(meter, () if ignore_step is None else (ignore_step,)):
         return 'usage_unknown'
     node_mode(root, settings=settings)
-    if limits['max_tokens'] - meter.get('accounted_tokens', meter['observed_tokens']) <= reserve['tokens']:
+    if budget_limits.reached(budget_limits.remaining(
+            limits['max_tokens'], meter.get('accounted_tokens', meter['observed_tokens'])), reserve['tokens']):
         return 'closeout_reserve_tokens'
     if intent is not None and node is not None:
         _node_duration(root, job, intent, limits)
-    if limits['seconds_remaining'] <= reserve['seconds']:
+    if budget_limits.reached(limits['seconds_remaining'], reserve['seconds']):
         return 'closeout_reserve_seconds'
     additional = 0 if (root / 'jobs' / f'{job["step"]:03d}.json').exists() else 1
     if limits['max_steps'] - used_steps(root, events=events) < additional + reserve['steps']:
@@ -2470,9 +2522,11 @@ def accept_action(root, kind, operation_id, decision, binding, max_seconds):
     # The final exception covers shared billing, not unresolved execution:
     # the original-effect gate above and the sealed-choice gate still apply.
     if final_return is None and not direct and (_usage_unknown(meter)
-            or meter.get('accounted_tokens', meter['observed_tokens']) >= limits['max_tokens']):
+            or budget_limits.reached(budget_limits.remaining(
+                limits['max_tokens'], meter.get('accounted_tokens', meter['observed_tokens'])))):
         raise NodeBudgetUnavailable('closeout_budget_unavailable')
-    if final_return is None and not direct and (limits['seconds_remaining'] < max_seconds or used_steps(root) >= step_limit(root)):
+    if final_return is None and not direct and (limits['seconds_remaining'] is not None
+            and limits['seconds_remaining'] < max_seconds or used_steps(root) >= step_limit(root)):
         raise NodeBudgetUnavailable('closeout_budget_unavailable')
     with _ledger_writer(root):
         events, parent = _events(root)
@@ -2556,26 +2610,32 @@ def action_process(root, intent, phase, identity):
     contracts.write(path, dict(action_id=intent['action_id'], operation_id=intent['operation_id'], phase=phase, identity=identity))
 
 
-def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits=None, notice_channel=None):
+def _advice_duration(intent, limits):
+    """Project time from the already-accepted intent; never repeat acceptance."""
+    anchor=intent['budget_slice']
+    duration=limits['advance_seconds']-anchor['advance_seconds']+anchor.get('previous_seconds',0.)
+    if type(duration) not in (int,float) or not math.isfinite(duration) or duration<0:
+        raise ValueError('Node consumption cannot move backwards')
+    return duration
+
+
+def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author_limits=None, notice_channel=None,
+        context_observation=None):
     """Optional replaceable advice; never read as a grant, meter or evidence."""
-    from .protocol import require_current
-    require_current(root,job)
-    settings = contracts.settings(root, job)
-    mode=node_mode(root,settings=settings)
-    publish_review(root,job,intent,limits,meter,observed=observed)
-    targets=node_limits(root,job,settings=settings)
-    duration=_node_duration(root,job,intent,limits) if targets else None
-    if targets is None and job['role']=='W' and job.get('search'):
-        from . import search
-        search.stop_reason(root,job,intent,limits,meter)
-        targets=dict(max_observed_tokens=job['search']['limits']['max_w_observed_tokens'],max_seconds=job['search']['limits']['max_w_seconds'])
-        duration=limits['advance_seconds']-intent['search_slice']['advance_seconds']
+    from . import checkpoint
+    review=publish_review(root,job,intent,limits,meter,facts=facts,observed=observed,
+        context_observation=context_observation)
+    settings=facts['settings'];shared=facts['shared'];mode=review['mode']
+    direction_review=review['direction_review']
+    fragment_enabled=checkpoint.enabled_for_policy(job,settings=settings)
+    context_max=(settings.get('worker_fragment_policy') or {}).get('max_context_windows') if fragment_enabled else None
+    targets=review['targets'];duration=review['duration']
     prior=intent.get('budget_slice',{}).get('previous_tokens',0)
     known=prior+meter['input_tokens']+meter['output_tokens']
     consumed=known  # Retain prior/current reported counters even when coverage is unknown.
     node_seconds=max(0.,targets['max_seconds']-duration) if targets else None
     author=intent.get('continuation_kind')=='author_closeout'
-    final_return=final_a_return(root,job,intent) if (intent.get('budget_slice') or {}).get('final_return') is not None else None
+    final_return=facts['final_return']
     boundary='node_slice' if targets else 'shared_only'
     if author:
         # The caller already verified this exact permit before native launch.
@@ -2585,14 +2645,12 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
         duration=(duration-intent['budget_slice'].get('previous_seconds',0.)) if duration is not None else None
         consumed=meter['input_tokens']+meter['output_tokens']
     closeout = job.get('purpose') == 'closeout'
-    reserve = (closeout_floor(settings, preparation_seconds=closeout_state(root)['begin']['preparation_seconds'])
+    reserve = (closeout_floor(settings, preparation_seconds=facts['closeout_preparation_seconds'])
         if closeout else delivery_reserve(settings)) or dict(tokens=0,seconds=0,steps=0)
     if final_return is not None:
         reserve=final_return['reserve']
         boundary='final_a_return'
-    from . import native
-    shared=native.usage(root)
-    remaining=limits['max_tokens']-shared.get('accounted_tokens', shared['observed_tokens'])
+    remaining=budget_limits.remaining(limits['max_tokens'], shared.get('accounted_tokens', shared['observed_tokens']))
     shared_seconds=limits['seconds_remaining']
     ordinary=not (author or final_return is not None or job.get('formal_review') or closeout
         or job.get('final_report') or job.get('final_only') or intent.get('output_repair') or intent.get('work_repair'))
@@ -2601,13 +2659,13 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
         for role in ('W','A') if job['role']=='H' else ('A',) if job['role']=='W' else ():
             suggestion=node_limits(root,dict(role=role),settings=settings)
             if suggestion is not None:followup_tokens[role]=suggestion['max_observed_tokens']
-    available_tokens=max(0,remaining-reserve['tokens'])
-    available_seconds=max(0.,limits['seconds_remaining']-reserve['seconds'])
+    available_tokens=budget_limits.remaining(remaining, reserve['tokens'])
+    available_seconds=budget_limits.remaining(limits['seconds_remaining'], reserve['seconds'])
     if author:
         if targets is None or duration is None:
             available_tokens=available_seconds=None
         else:
-            available_seconds=min(available_seconds,max(0.,targets['max_seconds']-duration))
+            available_seconds=budget_limits.minimum(available_seconds,max(0.,targets['max_seconds']-duration))
     state=('reached' if targets and ((consumed is not None and consumed>=targets['max_observed_tokens']) or duration is not None and duration>=targets['max_seconds'])
            else 'near' if targets and ((consumed is not None and consumed>=.8*targets['max_observed_tokens']) or duration is not None and duration>=.8*targets['max_seconds']) else 'within')
     hint=dict(scope='advice_only_not_authorization_or_scientific_evidence',updated_at_unix=time.time(),mode=mode,
@@ -2620,12 +2678,37 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
         target_kind='unavailable' if targets is None else 'soft_target',
         unknown_usage=not observed or bool(shared.get('unknown_steps')),
         shared_remaining_basis='configured_ceiling_minus_reported_usage',
-        shared_observed_tokens_remaining_upper_bound=max(0,remaining),shared_active_seconds_remaining=shared_seconds,
-        reserve_state='reached' if remaining<=reserve['tokens'] or limits['seconds_remaining']<=reserve['seconds'] else 'within',
+        shared_observed_tokens_remaining_upper_bound=remaining,shared_active_seconds_remaining=shared_seconds,
+        reserve_state='reached' if budget_limits.reached(remaining,reserve['tokens'])
+            or budget_limits.reached(limits['seconds_remaining'],reserve['seconds']) else 'within',
         reserve_scope='external_closeout_floor' if closeout else 'minimal_closeout_reserve',
         current_work_observed_tokens_remaining_upper_bound=available_tokens,
         current_work_active_seconds_available=available_seconds,
         instruction='Near/reached limits, targets or reserve: finish bounded actions and return your scientific JSON. Unknown coverage is not zero usage; reported consumption is a lower bound, and remaining upper bounds are not grants or request/billing caps. Shared ceilings are checked before the next node, without terminating this accepted node for a soft target. Original finite external-call and resource limits still apply.')
+    if ordinary and job['role']=='W' and fragment_enabled:
+        hint['instruction'] = ('Continue useful work within original permissions; retain progress/best/residuals. '
+            'Token targets alone do not require A. W time target bounds handoff: finish/reconcile original in-flight work; '
+            'return a checkpoint for a fresh W to retain its focus and unfinished work. Direction supervision is separate, when the host ledger/control says due. '
+            'Time is no stagnation/overfitting verdict; W adaptation/low scores alone do not end research. '
+            'Never replay unknown calls. Near/reached shared budgets/reserves: finish bounded actions and return scientific JSON. '
+            'Unknown usage!=0; remaining upper bounds are advice, not grants or billing/request caps. '
+            'Notice: next local tool boundary only; running model requests and hosted web cannot be interrupted. '
+            'Original finite external-call and resource limits still apply.')
+        if context_max is not None:
+            from . import native_usage
+            hint['worker_context_windows'] = dict(maximum=context_max, advice_ratio=.85,
+                **native_usage.context_windows((context_observation or {}).get('context_windows')))
+            current_context=native_usage.context((context_observation or {}).get('context'))
+            hint['worker_context'] = {key:current_context[key] for key in ('status','total_tokens',
+                'model_context_window','ratio','reported_at','observed_at','current_window') if key in current_context}
+            hint['instruction'] = ('Continue useful work within original permissions; preserve progress/best/residuals. '
+                f'Handoff after exceeding {context_max} observed context windows or losing required event coverage. '
+                'A current native report at 85% of the final allowed window advises preparing a safe checkpoint; '
+                'missing fullness telemetry adds no stop. Reconcile originals; retain focus/unfinished work. '
+                'Direction supervision is separate, when the host ledger/control says due. '
+                'Node time/token targets do not set this cadence. Unknown calls never replay. '
+                'Shared budgets and original finite experiment/resource limits hold. '
+                'Soft next-tool/checkpoint boundary: native compaction/requests may overshoot; unknown usage is not zero.')
     if followup_tokens:
         hint['instruction'] += (' Allow for at least the suggested follow-up token targets '
             +', '.join(f'{role}={tokens}' for role,tokens in followup_tokens.items())
@@ -2647,19 +2730,34 @@ def write_node_hint(root, job, intent, limits, meter, *, observed, author_limits
     from . import budget_notice
     notices={}
     for dimension,used,target,shared_reached,shared_risk in (
-            ('time',duration,targets['max_seconds'] if targets else None,shared_seconds<=0,
-                shared_seconds<.1*limits['max_seconds']),
-            ('token',consumed,targets['max_observed_tokens'] if targets else None,remaining<=0,
-                bool(followup_tokens) and remaining<=sum(followup_tokens.values()))):
+            ('time',duration,targets['max_seconds'] if targets else None,budget_limits.reached(shared_seconds),
+                shared_seconds is not None and limits['max_seconds'] is not None
+                    and shared_seconds<.1*limits['max_seconds']),
+            ('token',consumed,targets['max_observed_tokens'] if targets else None,budget_limits.reached(remaining),
+                bool(followup_tokens) and budget_limits.reached(remaining,sum(followup_tokens.values())))):
         notice=budget_notice.closeout_notice(job,intent,dimension=dimension,
             target_reached=target is not None and used is not None and used>=target,
             target_near=target is not None and used is not None and used>=.8*target,
             shared_reached=shared_reached,shared_risk=shared_risk,
-            shared_expired=dimension=='time' and shared_seconds<=0,
-            shared_exhausted=remaining<=0 or shared_seconds<=0,
+            shared_expired=dimension=='time' and budget_limits.reached(shared_seconds),
+            shared_exhausted=budget_limits.reached(remaining) or budget_limits.reached(shared_seconds),
             followup_tokens=followup_tokens if dimension=='token' else None,
             author=author,final_return=final_return is not None)
         if notice is not None:notices[dimension]=notice
+    progress_notice=budget_notice.worker_progress_notice(job,intent,active_seconds=duration,
+        target_seconds=targets['max_seconds'] if targets else None,
+        fragment_enabled=fragment_enabled,
+        author=author,final_return=final_return is not None,
+        max_context_windows=context_max,context_observation=context_observation)
+    if progress_notice is not None:
+        notices['progress']=progress_notice
+        hint['target_state']=('near' if progress_notice['text']==budget_notice.WORKER_CONTEXT_NEAR_TEXT
+            and hint['target_state']!='reached' else 'reached')
+    if direction_review is not None:
+        hint['direction_review']=direction_review
+        hint['target_state']='reached'
+        hint['instruction']=budget_notice.WORKER_DIRECTION_TEXT
+        notices['review']=budget_notice.worker_direction_notice(direction_review)
     if notices:hint['closeout_notices']=notices
     data=(json.dumps(hint,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode()
     if len(data)>4096:raise ValueError('Budget advice exceeds byte bound')
@@ -2697,76 +2795,103 @@ def review_configuration(root,job):
     """Host-owned projection, shared by every implementation of this stage."""
     from .protocol import require_current
     require_current(root,job)
-    from . import execution,experiments
+    from . import accepted_budget,execution,experiments
+    from .protocol import stage_scope
     settings=contracts.settings(Path(root), job)
     if settings.get('managed_admission_version')!=experiments.ADMISSION_VERSION or job.get('managed_admission_version')!=experiments.ADMISSION_VERSION:
         raise experiments.UnsupportedExecution('Preserved review contract is read-only; prepare a new instance')
-    node_mode(root)
+    node_mode(root,settings=settings)
     directory=_review_directory(root,job);directory.mkdir(parents=True,exist_ok=True)
     if directory.resolve()!=directory:raise ValueError('Host review directory changed')
     fd=os.open(directory/'accept.lock',os.O_RDONLY|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o444);os.close(fd)
     record=execution.record(root,job['step'])
     intent=contracts.read(contracts.regular(record/'native-intent.json'))
-    meter=contracts.read(record/'usage.json') if (record/'usage.json').exists() else dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
-    publish_review(root,job,intent,None,meter,observed=(record/'usage.json').exists())
+    observed=(record/'usage.json').exists()
+    meter=contracts.read(record/'usage.json') if observed else dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
+    context_observation=(contracts.read(contracts.regular(record/'usage-observation.json'))
+        if (record/'usage-observation.json').exists() else None)
+    head=accepted_budget.read(root);stamp=clock_stamp()
+    current=head['current_native'];live=None
+    if current is not None:
+        outcome_present=(record/'native-outcome.json').exists()
+        metadata=contracts.native_outcome(record).get('metering') if outcome_present else context_observation
+        live=dict(record=record.relative_to(root).as_posix(),meter=meter if observed else None,
+            metering=metadata,outcome_present=outcome_present,interrupted=(record/'interruption.json').exists())
+    shared=accepted_budget.usage_from_facts(head,job_rows=accepted_budget.load_usage_rows(head),current_native=live)
+    facts=dict(settings=settings,head=head,shared=shared,stamp=stamp,
+        task=contracts.record_ref(Path(root)/'jobs'/f'{job["step"]:03d}.json'),scope=stage_scope(root,job),
+        native_attempt=dict(number=len(execution.records(root,job['step']))-1,execution_key=execution.identity(root,job['step'])))
+    limits=_snapshot(root,head.base,accepted_budget.AcceptedEvents(head),sample_stamp=stamp)
+    publish_review(root,job,intent,limits,meter,facts=facts,observed=observed,
+        context_observation=context_observation)
     return dict(version=experiments.ADMISSION_VERSION,mode='soft',directory=str(directory),
-        stage_anchor=contracts.record_ref(Path(root)/'jobs'/f'{job["step"]:03d}.json'))
+        stage_anchor=facts['task'])
 
 
-def publish_review(root,job,intent,limits,meter,*,observed):
+def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observation=None):
     """Derive replaceable facts from original anchors, never an additional budget."""
-    from .protocol import require_current
-    require_current(root,job)
-    from . import execution,experiments,native,search
-    from .protocol import stage_scope
-    root=Path(root);settings=contracts.settings(root, job)
+    from . import budget_notice,checkpoint,experiments,supervision
+    root=Path(root);settings=facts['settings'];head=facts['head'];shared=facts['shared']
     if job.get('managed_admission_version')!=experiments.ADMISSION_VERSION or settings.get('managed_admission_version')!=experiments.ADMISSION_VERSION:
         raise experiments.UnsupportedExecution('Preserved review contract is read-only; prepare a new instance')
-    node_mode(root)
+    mode=node_mode(root,settings=settings)
     directory=_review_directory(root,job);directory.mkdir(parents=True,exist_ok=True)
     if directory.resolve()!=directory:raise ValueError('Host review directory changed')
     fd=os.open(directory/'accept.lock',os.O_RDONLY|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o444)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX)
-        stamp=clock_stamp()
-        limits=snapshot(root,sample_stamp=stamp)
-        record=execution.record(root,job['step'])
-        intent=contracts.read(contracts.regular(record/'native-intent.json'))
-        observed=(record/'usage.json').exists()
-        meter=contracts.read(contracts.regular(record/'usage.json')) if observed else dict(input_tokens=0,output_tokens=0)
-        task=contracts.record_ref(root/'jobs'/f'{job["step"]:03d}.json')
+        stamp=facts['stamp'];task=facts['task']
         if intent.get('task_ref')!=task:raise ValueError('Review publication has no exact native task')
-        targets=node_limits(root,job);duration=None
-        if targets is not None:duration=_node_duration(root,job,intent,limits)
+        targets=node_limits(root,job,settings=settings);duration=None
+        if targets is not None:duration=_advice_duration(intent,limits)
         elif job['role']=='W' and job.get('search'):
-            search.stop_reason(root,job,intent,limits,meter)
             targets=dict(max_observed_tokens=job['search']['limits']['max_w_observed_tokens'],max_seconds=job['search']['limits']['max_w_seconds'])
             duration=limits['advance_seconds']-intent['search_slice']['advance_seconds']
         prior=intent.get('budget_slice',{}).get('previous_tokens',0)
         consumed=prior+meter['input_tokens']+meter['output_tokens'] if observed else prior
         reserve=delivery_reserve(settings) or dict(tokens=0,seconds=0,steps=0)
-        shared=native.usage(root)
+        basis=settings.get('supervision_budget_basis')
+        direction_review=supervision.worker_review(job,intent,summary=head['search'],
+            budget_fraction=(supervision_fraction(initial_tokens=basis['max_tokens'],
+                initial_seconds=basis['max_seconds'],
+                observed_tokens=shared.get('accounted_tokens',shared['observed_tokens']),
+                active_seconds=limits['consumed_seconds']) if basis is not None else None),
+            selected_policy=settings.get('supervision_policy') if settings.get('search_policy') is not None else None)
         # The original grant remains the ceiling for this accepted stage.
         grant=intent.get('budget_slice',{}).get('shared_limits',dict(max_tokens=settings['max_tokens'],max_seconds=settings['max_seconds']))
-        available_tokens=min(limits['max_tokens'],grant['max_tokens'])-shared.get('accounted_tokens', shared['observed_tokens'])-reserve['tokens']
-        available_seconds=min(limits['seconds_remaining'],max(0.,grant['max_seconds']-limits['consumed_seconds']))-reserve['seconds']
-        # Soft stage targets advise the Worker; only the original shared window
-        # bounds admission and optional managed execution time reservations.
+        available_tokens=budget_limits.remaining(budget_limits.minimum(limits['max_tokens'],grant['max_tokens']),
+            shared.get('accounted_tokens', shared['observed_tokens'])+reserve['tokens'])
+        available_seconds=budget_limits.remaining(budget_limits.minimum(limits['seconds_remaining'],
+            budget_limits.remaining(grant['max_seconds'],limits['consumed_seconds'])),reserve['seconds'])
+        # Shared ceilings retain priority. The ordinary W time target also
+        # bounds its review window, without judging scientific progress:
+        # pause new work, never accepted calls.
         remaining=available_seconds
+        context_max=((settings.get('worker_fragment_policy') or {}).get('max_context_windows')
+            if checkpoint.enabled_for_policy(job,settings=settings) else None)
+        progress_due=budget_notice.worker_progress_due(job,intent,active_seconds=duration,
+            target_seconds=targets['max_seconds'] if targets else None,
+            fragment_enabled=checkpoint.enabled_for_policy(job,settings=settings),
+            max_context_windows=context_max,context_observation=context_observation)
         reason=('shared_usage_unknown' if _usage_unknown(shared, (job['step'],)) else
-            'reserve_reached' if available_seconds<=0 or available_tokens<=0 else
-            'target_time_reached' if targets and duration>=targets['max_seconds'] else
-            'target_tokens_reached' if targets and consumed>=targets['max_observed_tokens'] else None)
+            'reserve_reached' if budget_limits.reached(available_seconds) or budget_limits.reached(available_tokens) else
+            'worker_direction_review_due' if direction_review is not None else
+            budget_notice.worker_context_reason(context_max,context_observation) if context_max is not None and progress_due else
+            'worker_progress_review_due' if progress_due else
+            'target_time_reached' if context_max is None and targets and duration>=targets['max_seconds'] else
+            'target_tokens_reached' if context_max is None and targets and consumed>=targets['max_observed_tokens'] else None)
         value=dict(version=experiments.ADMISSION_VERSION,stage_anchor=task,
-            scope=stage_scope(root,job),
-            native_attempt=dict(number=len(execution.records(root,job['step']))-1,execution_key=execution.identity(root,job['step'])),
-            boot_id=stamp['boot_id'],observed_at=stamp['at_unix'],deadline_boottime=stamp['at_boottime']+max(0.,remaining),
+            scope=facts['scope'],native_attempt=facts['native_attempt'],
+            boot_id=stamp['boot_id'],observed_at=stamp['at_unix'],
+            deadline_boottime=None if remaining is None else stamp['at_boottime']+remaining,
             valid_until_boottime=stamp['at_boottime']+10,pending=bool(reason),reason=reason,
             observed_tokens_lower_bound=consumed,inflight_usage_unknown=True,targets=targets)
+        if direction_review is not None:value['direction_review']=direction_review
         path=directory/'review.json'
         if path.exists():
             old=contracts.read(contracts.regular(path))
             if old.get('stage_anchor')!=task or old.get('scope')!=value['scope']:
                 raise ValueError('Host review projection binding changed')
         contracts.write(path,value);path.chmod(0o400)
+        return dict(mode=mode,targets=targets,duration=duration,direction_review=direction_review)
     finally:os.close(fd)

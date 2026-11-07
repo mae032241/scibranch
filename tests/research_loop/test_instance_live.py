@@ -142,6 +142,44 @@ def test_shared_snapshot_cache_reuses_briefly_then_reads_saved_state_without_tre
     assert len(calls) == 2
 
 
+@pytest.mark.process_e2e
+def test_current_worker_execution_receipt_changes_reach_get_and_readonly_sse(tmp_path):
+    from scidiscovery.research_loop import contracts as c,experiments,experiment_client
+    root,key=prepare(tmp_path,enabled=False)
+    finish(root,1,'H',[],action='analyze')
+    c.build_job(root,2,'W',[1])
+    job=c.read(root/'jobs/002.json')
+    records=experiment_client._record_directory_from_facts(root,2,job)
+    records.mkdir(parents=True,exist_ok=True)
+    owner=experiments.Records(dict(record_dir=str(records),scope=dict(step=2,private_binding='private-binding-marker')))
+    accepted=dict(_display_first_call=True,native_attempt=dict(number=0,execution_key='private-native-path'))
+    owner.live_status('original-call-only','submitted',accepted=accepted)
+    originals={path:path.read_bytes() for path in (root/'jobs/002.json',root/'native-evidence/001/result-identity.json')}
+    assert not (root/'native-evidence/002/result-identity.json').exists()
+    with host(root,key,workspace=False) as (connection,url,endpoint):
+        read_url=urlsplit(endpoint['read_url'])
+        cookie=login(connection,read_url)
+        page=request(connection,'GET','/',cookie=cookie)[1]
+        assert '已提交，运行状态待观察' in page.decode()
+        client,response=stream(url,'/live',cookie)
+        try:
+            initial=snapshot(response)
+            assert 'original-call-only' in initial['fragments']['live-usage']
+            assert '已提交，运行状态待观察' in initial['fragments']['live-usage']
+            owner.live_status('original-call-only','running',accepted=accepted)
+            changed=snapshot(response)
+            assert '已观察运行' in changed['fragments']['live-usage']
+            assert 'action="/control/' not in changed['fragments']['live-usage']
+            assert 'private-binding-marker' not in json.dumps(changed)
+            assert 'private-native-path' not in json.dumps(changed)
+            assert all(path.read_bytes()==value for path,value in originals.items())
+            assert not (root/'native-evidence/002/result-identity.json').exists()
+            page=request(connection,'GET','/',cookie=cookie)[1]
+            assert '已观察运行' in page.decode()
+        finally:
+            response.close();client.close()
+
+
 def test_stream_disconnection_releases_slot_and_has_bounded_transport(tmp_path, monkeypatch):
     monkeypatch.setattr(live, 'INTERVAL', .001)
     stop = threading.Event(); gate = threading.BoundedSemaphore(1)

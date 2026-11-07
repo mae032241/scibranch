@@ -244,6 +244,35 @@ def recoverable_source(outcome):
         and outcome.get('cleanup') == 'observed_group_cleaned')
 
 
+PRELAUNCH_REASONS = frozenset({'native_metadata_unsupported', 'shared_input_view_unsupported'})
+
+
+def never_started(outcome):
+    """Positive compact writer evidence of failure before native submission.
+
+    Missing telemetry is not this evidence. In particular, a missing thread or
+    an unknown process exit alone never permits another submission.
+    """
+    if not isinstance(outcome, dict):return False
+    identity = outcome.get('native_identity')
+    stream = outcome.get('native_stream')
+    metering = outcome.get('metering') or {}
+    if not isinstance(metering,dict) or not isinstance(metering.get('tokens',{}),dict):return False
+    return (outcome.get('stop_reason') in PRELAUNCH_REASONS
+        and outcome.get('native_started') is False
+        and outcome.get('returncode') is None
+        and outcome.get('terminal_observed') is False
+        and outcome.get('native_activity_observed') is False
+        and outcome.get('thread_id') is None and outcome.get('native_thread_event') is None
+        and outcome.get('native_failure') is None
+        and outcome.get('cleanup') is None and not outcome.get('execution_processes')
+        and isinstance(identity, dict) and identity.get('path') is None and identity.get('session') is None
+        and isinstance(stream, dict) and type(stream.get('size_bytes')) is int and stream['size_bytes'] == 0
+        and (outcome.get('shared_inputs') or {}).get('enforcement') == 'not_started'
+        and metering.get('has_observation') is not True
+        and not any(metering.get('tokens', {}).values()))
+
+
 def work_decision(limits, used, *, session_available):
     """A verified delivery failure spends the same original continue budget."""
     result = dict(action='stop', reason='automatic_recovery_continue_limit', counters=dict(used))

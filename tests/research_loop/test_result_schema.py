@@ -65,16 +65,17 @@ def test_base_payload_retains_extra_scientific_content_without_nested_schema(tmp
     with pytest.raises(OutputRepairRequired):c.science_payload(raw,'A')
 
 
-def test_breadth_consumers_are_enabled_without_expanding_base_schema():
+def test_assessment_request_replaces_global_planning_consumers():
     job=dict(role='A',search={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')])
     fields=c.response_fields(job,dict(search_policy={}))
-    assert {'portfolio_review','final_coverage'}<=set(fields)
+    assert 'decision_request' in fields
+    assert not {'search_review','portfolio_review','final_coverage'} & set(fields)
     assert not {'portfolio_review','final_coverage'}&set(c.result_schema('A')['properties'])
-    assert c.response_fields(dict(role='A'),dict(search_policy=None))==[]
+    assert c.response_fields(dict(role='A'),dict(search_policy=None))==['decision_request']
 
 
 def notice_context_bytes(job,intent,backend,**context):
-    """Count one plain developer notice per token/time dimension at most.
+    """Count each reachable token/time/progress developer notice once.
 
     The hook marks each dimension once, regardless of later cause changes.
     Use its longest reachable node/shared/global-exhaustion text for this branch.
@@ -95,7 +96,28 @@ def notice_context_bytes(job,intent,backend,**context):
             author=author,final_return=final_return)['text'].encode())
             for shared,exhausted in ((False,False),(False,True),(True,True))
             for followup in followups)
+    progress=budget_notice.worker_progress_notice(job,intent,active_seconds=1,target_seconds=1,
+        fragment_enabled=bool(job.get('worker_fragment_policy')),author=author,final_return=final_return)
+    if progress is not None:total+=len(progress['text'].encode())
     return total
+
+
+@pytest.mark.parametrize('scope',['ordinary','wake','repair','author','final','closeout'])
+def test_fixed_contract_counts_progress_notice_only_for_eligible_worker(scope):
+    from scidiscovery.research_loop import backends,budget_notice
+    backend=backends.selected(dict(native_backend='codex',native_launcher_argv=['codex'],native_options={}),
+        schema_transport='prompt')
+    job=dict(role='W',worker_fragment_policy=dict(context='same_session'))
+    intent={};context={}
+    if scope=='wake':intent['execution_wake']={}
+    elif scope=='repair':intent['output_repair']=dict(code='fixture')
+    elif scope=='author':context['author']=dict(facts='retained')
+    elif scope=='final':context['final_return']=True
+    elif scope=='closeout':job['purpose']='closeout'
+    enabled=notice_context_bytes(job,intent,backend,**context)
+    disabled=notice_context_bytes(dict(job,worker_fragment_policy=None),intent,backend,**context)
+    assert enabled-disabled==(len(budget_notice.WORKER_PROGRESS_TEXT.encode())
+        if scope in {'ordinary','wake'} else 0)
 
 
 def rendered_contract(tmp_path,job,task,intent,backend,**context):
@@ -118,7 +140,8 @@ def rendered_contract(tmp_path,job,task,intent,backend,**context):
 @pytest.mark.parametrize(('role','scope'),[('H','ordinary'),('W','ordinary'),('A','ordinary'),('A','closeout'),('A','final'),('E','ordinary')])
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
 @pytest.mark.parametrize('branch',['ordinary','automatic','repair','fragment'])
-def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,scope,backend_name,branch):
+@pytest.mark.parametrize('shared_balance',[0,None],ids=['finite','unlimited'])
+def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,scope,backend_name,branch,shared_balance):
     """Measure the production's final renderer and transport, never an AST slice.
 
     Dynamic goals/original references/budget observations and transport settings
@@ -134,7 +157,8 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
     if role=='A':job.update(portfolio_context={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')])
     if scope in {'closeout','final'}:job.update(purpose='closeout',search=None)
     if scope=='final':job.update(final_only=True,delivery_sources=dict(items=[{}]))
-    if role=='W':job['scientific_work_unit']=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode()))
+    if role=='W':job.update(worker_fragment_policy=dict(context='same_session'),
+        scientific_work_unit=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode())))
     task=c.response_instructions(job)
     intent={};remaining=None
     diagnosis=OutputRepairRequired('candidate_recommendation_missing','D'*512).request()
@@ -149,7 +173,7 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
     interface=dict(capabilities={},result_protocol='local-result-v1',executor='local_execution:command') if role=='W' else None
     context=dict(remaining=remaining,final_return=scope=='final',
         execution_interface=interface,managed_command=['experiment'] if role=='W' else None,
-        budget_status=dict(shared_seconds_remaining=0,shared_observed_tokens_remaining=0))
+        budget_status=dict(shared_seconds_remaining=shared_balance,shared_observed_tokens_remaining=shared_balance))
     size,prompt,instruction,packet=rendered_contract(tmp_path,job,task,intent,backend,**context)
     diagnostic_bytes=0
     if branch=='repair':
@@ -164,6 +188,7 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
         report=Path(os.environ['SCID_TEST_LOG_DIR'])/'response-contract-sizes.jsonl'
         report.parent.mkdir(parents=True,exist_ok=True)
         with report.open('a') as stream:stream.write(json.dumps(dict(role=role,scope=scope,backend=backend_name,branch=branch,
+            shared_balance=shared_balance,
             fixed_bytes=fixed_size,diagnostic_bytes=diagnostic_bytes,rendered_bytes=size,
             diagnostic_allowance_bytes=512 if branch=='repair' else 0,
             cumulative_notice_bytes=notice_context_bytes(job,intent,backend,**context),
@@ -219,8 +244,9 @@ def test_diagnostic_allowance_counts_actual_escaped_renderer_and_backend_wire(tm
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
-@pytest.mark.parametrize('scope',['wake','output_only_wake','author_closeout','protected_final'])
-def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,scope):
+@pytest.mark.parametrize('scope',['wake','author_closeout','protected_final'])
+@pytest.mark.parametrize('shared_balance',[0,None],ids=['finite','unlimited'])
+def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,scope,shared_balance):
     import json
     from scidiscovery.research_loop import backends,guidance,native
     role='A' if scope=='protected_final' else 'W'
@@ -230,6 +256,7 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
         scientific_response_fields=['portfolio_review','final_coverage'])
     else:
         job['managed_execution_wait']={}
+        job['worker_fragment_policy']=dict(context='same_session')
         job['scientific_work_unit']=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode()))
     intent=dict(execution_wake={}) if 'wake' in scope else {}
     if 'wake' in scope:intent['execution_wake']=dict(original='retained')
@@ -238,11 +265,12 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
     backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent'],
         native_options={} if backend_name=='codex' else None),schema_transport='prompt' if backend_name=='codex' else None)
     prompt,instruction,projection=native.render_scientific_request(job,task,intent,backend_name=backend_name,
-        instruction_transport=backend.instruction_transport,remaining={},output_only_wake=scope=='output_only_wake',
+        instruction_transport=backend.instruction_transport,remaining={},
         author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
         final_return=scope=='protected_final',
         execution_interface=dict(capabilities={},result_protocol='local-result-v1',executor='local_execution:command') if scope=='wake' else None,
-        managed_command=['experiment'] if scope=='wake' else None)
+        managed_command=['experiment'] if scope=='wake' else None,
+        budget_status=dict(shared_seconds_remaining=shared_balance,shared_observed_tokens_remaining=shared_balance))
     schema=tmp_path/'schema.json';c.write(schema,projection)
     packet=backend.request(prompt,schema=schema,profile={},work=tmp_path,response_schema=projection)
     wire=packet if backend_name=='codex' else json.dumps({key:value for key,value in json.loads(packet).items() if key in {'prompt','response_schema'}},ensure_ascii=False,separators=(',',':')).encode()
@@ -252,6 +280,8 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
     size+=notice_context_bytes(job,intent,backend,
         author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
         final_return=scope=='protected_final')
+    if scope=='wake':
+        assert prompt.count(guidance.STAGE_PLANNING['W'])==1
     assert size<=c.MAX_FIXED_RESPONSE_BYTES==3072,(backend_name,scope,size)
 
 
@@ -265,17 +295,16 @@ def test_protected_final_delivery_repairs_missing_explicit_candidate(tmp_path,ch
     assert error.value.code=='candidate_recommendation_missing'
 
 
-@pytest.mark.parametrize('gate',['portfolio','coverage'])
-def test_same_task_output_repair_runs_conditional_breadth_gates(tmp_path,monkeypatch,gate):
+def test_same_task_output_repair_requires_bounded_assessment_request(tmp_path,monkeypatch):
     from scidiscovery.research_loop import continuation,candidate_refs,formal_review,candidate_nominations,search,semantic
     root=tmp_path/'instance';record=c.host_record(c.workspace(root,1))
     job=dict(role='A',step=1,handoff_protocol=c.HANDOFF_PROTOCOL,worker_view_version=1,lineage_projection_version=1,
-        direct_materials=[],history=dict(nodes=[]))
+        direct_materials=[],history=dict(nodes=[]),scientific_response_fields=['decision_request'])
     c.write(root/'settings.json',dict(handoff_protocol=c.HANDOFF_PROTOCOL,search_policy=None))
     c.write(root/'settings-identity.json',dict(path='settings.json'))
     c.write(root/'jobs/001.json',job)
     raw=record/'science-output.json'
-    science=dict(summary='Finding',scientific_result='Retained evidence',limitations=[],next_action='finish',route_reason='Stop')
+    science=dict(summary='Finding',scientific_result='Retained evidence',limitations=[],next_action='continue_w',route_reason='More evidence is needed')
     c.write(raw,science)
     c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),raw_ref=c.file_ref(raw)))
     inventory=c.CurrentInventory(root,job,record,0,[],{},policy=dict(search_policy=None),
@@ -284,11 +313,11 @@ def test_same_task_output_repair_runs_conditional_breadth_gates(tmp_path,monkeyp
     monkeypatch.setattr(candidate_refs,'control_payload',lambda job,science,**kwargs:science)
     monkeypatch.setattr(formal_review,'validate_choice',lambda *args,**kwargs:None)
     monkeypatch.setattr(semantic,'author_choices',lambda *args,**kwargs:(inventory.interpretation,[]))
-    def required(*args,**kwargs):raise OutputRepairRequired(gate+'_incomplete','Fill the conditional scientific declaration in this same task.')
-    monkeypatch.setattr(search,'require_portfolio_review',required if gate=='portfolio' else lambda *args,**kwargs:None)
-    monkeypatch.setattr(candidate_nominations,'require_final_coverage',required if gate=='coverage' else lambda *args,**kwargs:None)
+    def forbidden(*args,**kwargs):pytest.fail('Retired global inventory cannot gate an assessment request')
+    monkeypatch.setattr(search,'require_portfolio_review',forbidden)
+    monkeypatch.setattr(candidate_nominations,'require_final_coverage',forbidden)
     request=continuation.output_request(root,1,record,inventory=inventory,source_attempt=0)
-    assert request['code']==gate+'_incomplete'
+    assert request['code']=='a_decision_request_incomplete'
     assert request['raw_ref']==c.file_ref(raw) and request['source_attempt']==0
 
 

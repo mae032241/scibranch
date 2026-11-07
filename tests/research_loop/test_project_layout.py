@@ -83,7 +83,7 @@ def test_existing_metadata_rejects_protected_alias_inside_base(tmp_path):
         layout.prepare(declaration, protected=[protected_alias], existing=frozen)
 
 
-@pytest.mark.parametrize('dimension', ['max_file_bytes', 'max_total_bytes', 'max_files', 'max_scan_entries'])
+@pytest.mark.parametrize('dimension', ['max_files', 'max_scan_entries'])
 def test_seed_inventory_shares_limits_and_counts_implicit_and_empty_directories(monkeypatch, dimension):
     from scidiscovery.research_loop import code_versions
     project = dict(editable=['src', 'tools', 'empty/deep'])
@@ -95,6 +95,16 @@ def test_seed_inventory_shares_limits_and_counts_implicit_and_empty_directories(
     monkeypatch.setattr(code_versions, 'DEFAULT_LIMITS', {**limits, dimension: limits[dimension] - 1})
     with pytest.raises(StorageQuotaExceeded, match=dimension):
         layout.seed_directories(project, records)
+
+
+def test_seed_inventory_keeps_exact_sizes_without_legacy_byte_quota(monkeypatch):
+    from scidiscovery.research_loop import code_versions
+    monkeypatch.setattr(code_versions, 'DEFAULT_LIMITS',
+        dict(max_file_bytes=1, max_total_bytes=1, max_files=2, max_scan_entries=4))
+    records = [dict(relative='src/main.py', signature=(0, 0, 0, 7)),
+               dict(relative='tools/helper.py', signature=(0, 0, 0, 5))]
+    assert layout.seed_directories(dict(editable=['src', 'tools']), records) == {'src', 'tools'}
+    assert [row['signature'][3] for row in records] == [7, 5]
 
 
 def test_validate_code_preserves_legacy_file_and_project_boundaries():
@@ -348,10 +358,10 @@ def test_later_stat_cannot_hide_earlier_file_replacement(tmp_path, monkeypatch):
 
 
 @pytest.mark.process_e2e
-def test_rejects_metadata_capacity_and_expired_deadline(tmp_path, monkeypatch):
+def test_rejects_entry_count_and_expired_deadline(tmp_path, monkeypatch):
     declaration = project(tmp_path)
-    monkeypatch.setattr(layout, 'MAX_METADATA_BYTES', 5)
-    with pytest.raises(StorageQuotaExceeded, match='metadata capability'):
+    monkeypatch.setattr(layout, 'MAX_ENTRIES', 2)
+    with pytest.raises(StorageQuotaExceeded, match='tracked entries'):
         layout.prepare(declaration, protected=[])
     class Expired:
         def remaining_seconds(self):

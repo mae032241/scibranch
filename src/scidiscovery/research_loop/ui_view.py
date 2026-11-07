@@ -852,6 +852,11 @@ def token_details(usage, context=None):
         stamp = telemetry.get('reported_at')
         age = time.time() - stamp if stamp is not None else None
         value += '；' + (f'上报于 {fmt_duration(age)}前' if age is not None and age >= 0 else '上报时间未知')
+        observed=telemetry.get('observed_at')
+        observed_age=time.time()-observed if observed is not None else None
+        if observed_age is not None and observed_age>=0:
+            value+='；本地观测于 '+fmt_duration(observed_age)+'前'
+        if telemetry.get('current_window') is False:value+='；非当前窗口，保留的历史上报'
     else:
         value = '不可用（后端未提供完整遥测或观测异常）'
     details.append(dict(label=label, value=value))
@@ -867,7 +872,8 @@ def usage_stats(view, *, used_steps=None, candidates=None):
     closeout = view.get('closeout') or {}
     observed = usage.get('observed_tokens')
     limit = budget.get('max_tokens')
-    tokens = dict(label='模型用量（tokens）', value=fmt_tokens(observed), limit=fmt_tokens(limit) if limit else '未记录',
+    tokens = dict(label='模型用量（tokens）', value=fmt_tokens(observed),
+                  limit='不限' if 'max_tokens' in budget and limit is None else fmt_tokens(limit) if limit else '未记录',
                   raw=observed, raw_limit=limit, notes=[], details=token_details(usage, usage.get('context')))
     tokens['percent'] = percent(observed, limit)
     overrun = closeout.get('final_overrun') if isinstance(closeout.get('final_overrun'), dict) else None
@@ -884,7 +890,8 @@ def usage_stats(view, *, used_steps=None, candidates=None):
         tokens['notes'].append('另有预留 ' + fmt_tokens(usage['reserved_tokens']))
     consumed = budget.get('consumed_seconds')
     seconds = budget.get('max_seconds')
-    duration = dict(label='研究时间', value=fmt_duration(consumed), limit=fmt_duration(seconds) if seconds is not None else '未记录',
+    duration = dict(label='研究时间', value=fmt_duration(consumed),
+                    limit='不限' if 'max_seconds' in budget and seconds is None else fmt_duration(seconds) if seconds is not None else '未记录',
                     raw=consumed, raw_limit=seconds, notes=[])
     duration['percent'] = percent(consumed, seconds)
     duration['over'] = bool(consumed is not None and seconds is not None and consumed > seconds)

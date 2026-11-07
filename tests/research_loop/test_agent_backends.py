@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import backends, budget, contracts as c, controller, execution, native
+from scidiscovery.research_loop import accepted_budget, backends, budget, contracts as c, controller, execution, native
 
 
 SCRIPT = r'''import json,sys,pathlib
@@ -20,7 +20,7 @@ print(json.dumps(dict(type='session',session_id='independent-session')),flush=Tr
 print(json.dumps(dict(type='usage',usage=dict(input_tokens=12,output_tokens=3))),flush=True)
 properties=request['response_schema']['properties']
 result={key:None for key in properties}
-result.update(summary='Completed bounded work',scientific_result='No scientific success asserted',limitations=['Fixture'],next_action='finish' if 'This is your final scientific return' in request['prompt'] else 'wait',route_reason='Retain exact original')
+result.update(summary='Completed bounded work',scientific_result='No scientific success asserted',limitations=['Fixture'],next_action='finish' if properties.get('next_action',{}).get('enum')==['finish'] else 'wait',route_reason='Retain exact original')
 print(json.dumps(dict(type='result',result=result)),flush=True)
 if not (work/'work/no-terminal').exists():
  print(json.dumps(dict(type='completed',usage=dict(input_tokens=12,output_tokens=3))),flush=True)
@@ -43,7 +43,7 @@ def intent(root, role='H'):
     anchor=budget.accept_node(root,job)
     value=dict(task_ref=c.record_ref(root/'jobs/001.json'),**native.profiles.binding(c.settings(root),job))
     if anchor is not None:value['budget_slice']=anchor
-    c.write(execution.origin(root,1)/'native-intent.json',value)
+    accepted_budget.accept_native(root,1,execution.origin(root,1),value)
     return execution.origin(root,1)
 
 
@@ -256,7 +256,7 @@ def test_ordinary_protocol_projects_current_schema_over_retained_strict_original
     packet=json.loads(backend.request(prompt,profile={},work=tmp_path,schema=schema,response_schema=current))
     assert packet['response_schema']==c.result_schema('A',**c.response_options(job))
     assert 'legacy_large_required_table' not in packet['prompt']
-    assert 'Current response rules replace older output shapes' in packet['prompt']
+    assert 'Current response rules; scope binds:' in packet['prompt']
     assert instruction.startswith(job['native_role_instruction']+'\n')
     assert schema.read_bytes()==before and task['final_response']==['summary','legacy_large_required_table']
 
@@ -310,6 +310,23 @@ def test_public_parser_excludes_reasoning_and_raw_tool_details():
     assert backend.public_events(dict(type='item.completed',item=dict(type='reasoning',text='private')))==[]
     value=backend.public_events(dict(type='item.completed',item=dict(type='command_execution',command='secret',aggregated_output='private')))
     assert value==[dict(type='tool',tool='command_execution',status='completed')]
+
+
+def test_public_final_preview_keeps_truncation_visible_without_becoming_terminal():
+    from scidiscovery.research_loop import public_output
+    backend=backends.selected(dict(native_backend='codex',native_launcher_argv=['codex']))
+    event=dict(type='item.completed',item=dict(type='agent_message',text='final preview',text_truncated=True))
+    projected=public_output.event(backend.public_events(event)[0],lambda text:text)
+    assert projected['text_truncated'] is True and '显示片段' in projected['text']
+    assert backend.terminal_message(event) is None and backend.terminal_binding(event) is None
+
+
+@pytest.mark.parametrize('settings',[{},dict(native_backend='unregistered-draft-provider')])
+def test_public_error_cleaner_accepts_unprepared_backend_settings(tmp_path,settings):
+    from scidiscovery.research_loop import public_output
+    clean=public_output.cleaner(tmp_path,settings)
+    assert 'private-value' not in clean('api_key="private-value"')
+    assert clean(str(tmp_path))=='[private]'
 
 
 @pytest.mark.parametrize('unknown_usage',[False,True])
@@ -461,6 +478,8 @@ def test_formal_review_task_retains_subject_and_uses_launcher_for_independent_ru
     from scidiscovery.research_loop import formal_review, user_guidance
     public=dict(role='A',question='Assess exact claims',review=dict(subject='inputs/subject',instruction='Independent exact-subject assessment',scope='No execution permission'),final_response=['verdict','findings'])
     monkeypatch.setattr(formal_review,'public',lambda *args:public)
+    # This test owns a synthetic empty review packet, not review qualification.
+    monkeypatch.setattr(formal_review,'input_binding',lambda *args,**kwargs:dict(materials=[]))
     monkeypatch.setattr(user_guidance,'public',lambda *args:{})
     run=tmp_path/'run';run.mkdir()
     root=prepare(run)
