@@ -888,7 +888,7 @@ def run_native(root: Path, step: int, attempt=0):
             # Native process startup alone does not prove request rejection.
             original_call_state='not_submitted' if process is None else
                 'terminal' if terminal_observed else 'unknown',
-            thread_bound=thread_id is not None,turn_bound=live_meter.turn is not None))
+            thread_bound=thread_id is not None,turn_bound=outcome['metering'].get('turn_id') is not None))
     if technical_diagnostic is not None:
         outcome['technical_diagnostic']=technical_diagnostic
     if error is not None:
