@@ -288,6 +288,9 @@ def supervision_binding(value, *, step, research_strategy_version=None):
     keys={'version','cutoff','due_reasons','budget_fraction','automatic','final'}
     if isinstance(value,dict) and 'investment_cutoff' in value and research_strategy_version==3:
         keys.add('investment_cutoff')
+    reflection=isinstance(value,dict) and bool({'review_kind','reflection_scope'} & set(value))
+    if reflection and research_strategy_version==3:
+        keys.update({'review_kind','reflection_scope','investment_cutoff'})
     if not isinstance(value,dict) or set(value)!=keys or type(value['version']) is not int or value['version']!=1:
         raise ValueError('Direction supervision request is invalid')
     cutoff=value['cutoff']
@@ -301,6 +304,8 @@ def supervision_binding(value, *, step, research_strategy_version=None):
                 or not 0<=value['budget_fraction']<float('inf'))
             or any(type(value[key]) is not bool for key in ('automatic','final'))
             or 'investment_cutoff' in value and (type(value['investment_cutoff']) is not int or value['investment_cutoff']<0)
+            or reflection and (value.get('reflection_scope')!='worker_question_clues_evidence'
+                or value.get('review_kind')!=('final_assessment' if value['final'] else 'ordinary_reflection'))
             or not json_field_representable('supervision_request',value)):
         raise ValueError('Direction supervision request is invalid')
     return dict(value,cutoff=dict(cutoff),due_reasons=list(value['due_reasons']))
@@ -386,7 +391,9 @@ def response_instructions(job):
             fields['stage_response']=('stage_intent:continue=W;handoff=new W;revise_h=H advice;review=A advice;decision=pre-delivery Final A. Advice returns W; no grant. '
                 'revise_h/review require nonblank consultation_question. '
                 'implementation_selection:null=keep;[]=clear;IDs=inputs. '
-                'research_memory?:{question,candidates:[{candidate,data,evaluation,evidence:[{ref,relation:supports|opposes|unknown,note}],failure_condition,open_question,limitations:[]}]}; exact candidate/ref originals; [] may be exploratory. '
+                'research_memory?:{question,candidates?:[{candidate,data,evaluation,evidence:[{ref,relation:supports|opposes|unknown,note}],failure_condition,open_question,limitations:[]}],'
+                'clues?:[{observed_fact?,applicability?,limited_negative?,open_question?,evidence:[{ref,relation:supports|opposes|unknown,note}]}]}; '
+                'clue:nonblank statement field+nonempty evidence; limited_negative needs applicability. Exact originals. '
                 'Continuation:'+(context if isinstance(context,str) else json.dumps(context,ensure_ascii=False,separators=(',',':'))
                     if job.get('worker_fragment_policy') else 'unavailable')+'; session/usage/authorization bind.')
     scoped=delivery_review.binding(job)
@@ -1721,7 +1728,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
             final_report=final_report, direct_refs=[dict(path=f'inputs/parents/{parent:03d}/conclusion.json') for parent in parents]))
     consultation=(evidence_return or {}).get('role')=='W'
     if supervision_request is not None:
-        supervision_request=supervision_binding(supervision_request,step=step)
+        supervision_request=supervision_binding(supervision_request,step=step,
+            research_strategy_version=base.get('research_strategy_version'))
     if consultation:
         if (purpose not in {None,'worker_consultation'} or role not in {'H','A'}
                 or set(evidence_return)!={'role','step'} or type(evidence_return.get('step')) is not int
@@ -1905,6 +1913,12 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     strategy=retained if retained is not None else policy
     if 'research_strategy_version' in strategy:
         job['research_strategy_version']=strategy['research_strategy_version']
+    if retained is not None:
+        if 'worker_continuity_version' in retained:
+            job['worker_continuity_version']=retained['worker_continuity_version']
+    elif (policy.get('supervision_policy') or {}).get('version')==3:
+        # New policy opts in explicitly. Retained jobs keep their exact inputs.
+        job['worker_continuity_version']=1
     advice = retained.get('role_guidance') if retained is not None else policy.get('role_guidance', {}).get(role)
     if advice is not None:
         job['role_guidance'] = advice
@@ -2052,6 +2066,14 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['correction_request'] = correction_request
         from . import correction
         correction.validate_job(root, job)
+    if retained is not None:
+        if 'worker_continuation' in retained:
+            job['worker_continuation']=retained['worker_continuation']
+    else:
+        from . import continuation
+        worker_continuation=continuation.consultation_binding(root,job,parents=parent_facts)
+        if worker_continuation is not None:
+            job['worker_continuation']=worker_continuation
     context = _decision_context(job,sources=parent_facts)
     if context is not None:
         job['decision_context'] = context

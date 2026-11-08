@@ -497,6 +497,8 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
                 state_label=native_state_label(node), sealed=state in SEALED,
                 kind=node.get('kind','ordinary'), one_line=None, facts=[], links=_links(node, False), next_action=None)
     line['role_label']=node.get('role_label') or line['role_label']
+    line['facts'].extend(reflection_facts(node.get('reflection')))
+    line['facts'].extend(worker_continuation_facts(node.get('worker_continuation')))
     if not line['sealed']:
         line['facts'].extend(native_facts(node, clean))
         recovery = node.get('automatic_recovery')
@@ -510,6 +512,8 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
     line['materials'] = len(seal.get('materials') or [])
     line['kind'] = ui_semantics.kind(job)
     line['role_label'] = ui_semantics.role_label(job) or line['role_label']
+    if 'reflection' not in node:
+        line['facts'].extend(reflection_facts(ui_semantics.reflection(job)))
     summary = payload.get('summary')
     if isinstance(summary, str) and summary.strip():
         line['one_line'] = clean(summary.strip(), 600)
@@ -549,6 +553,9 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
                               title=extreme['title'] if extreme else None))
             line['extreme'] = extreme
     elif role == 'A':
+        reflection=ui_semantics.reflection(job)
+        if reflection is not None:
+            facts.append(dict(label='反思结论',value=reflection_response(payload,line['action_label'])))
         if line['kind'] == 'formal_review':
             verdict = payload.get('verdict')
             facts.append(dict(label='评审结论', value=clean(str(verdict), 200) if verdict is not None else '未记录'))
@@ -588,6 +595,55 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
     elif action:
         facts.append(dict(label='行动', value=clean(action, 60)))
     return line
+
+
+def reflection_facts(value):
+    """Display only the frozen automatic opportunity, never a stall verdict."""
+    if not isinstance(value, dict):
+        return []
+    reasons = []
+    for reason in value.get('due_reasons') or []:
+        if reason == 'consecutive_calls':
+            reasons.append('连续原调用投入达到冻结阈值')
+        elif reason == 'consecutive_rounds':
+            reasons.append('已声明轮次达到冻结阈值')
+        elif isinstance(reason, str) and reason.startswith('budget_checkpoint:'):
+            reasons.append('预算检查点 ' + format(float(reason.split(':', 1)[1]), '.0%'))
+    facts = [dict(label='反思范围', value='W 的研究问题、线索与证据；触发事实不判断科学进展或停滞')]
+    facts.append(dict(label='触发原因', value='；'.join(reasons) if reasons else '冻结请求未记录可显示原因'))
+    fraction = value.get('budget_fraction')
+    facts.append(dict(label='请求时预算消费', value=format(fraction, '.1%') if fraction is not None else '未记录'))
+    if 'investment_cutoff' in value:
+        facts.append(dict(label='冻结原调用截止数', value=str(value['investment_cutoff'])))
+    return facts
+
+
+def reflection_response(payload, action_label):
+    if payload.get('supervision_result') == 'continue_existing':
+        return '继续现有研究（continue_existing）'
+    return action_label or '未记录'
+
+
+def worker_continuation_facts(value):
+    """Outcome observation only; a resume request never establishes a resume."""
+    if not isinstance(value, dict):
+        return []
+    labels = {'same_session': '已观察到原会话接续',
+        'new_context': '已使用新上下文接续；原会话未恢复',
+        'resume_unconfirmed': '已请求原会话接续；实际恢复尚未证实'}
+    label = labels.get(value.get('mode'))
+    if label is None:
+        return []
+    facts = [dict(label='W 接续方式', value=label)]
+    if value.get('fallback_reason'):
+        labels = {'unsupported_backend': '后端未提供原会话恢复能力', 'profile_changed': '冻结执行配置已变化',
+            'backend_changed': '执行后端已变化', 'context_replaced': '原接续已明确替换上下文',
+            'session_unavailable': '原会话不可用', 'shared_home_unavailable': '原会话所需的共享运行环境不可用',
+            'context_rotation_required': '需要轮换上下文', 'inherited_source': '原会话来自继承来源'}
+        reason = value['fallback_reason'].removeprefix('consultation_resume_')
+        if reason in labels:
+            facts.append(dict(label='接续回退原因', value=labels[reason]))
+    return facts
 
 
 # ---------------------------------------------------------------- rounds
@@ -1278,17 +1334,18 @@ def candidate_projection(root, before_step, *, job=None, reader=None, history_on
 def candidate_memory(node, clean, *, loaded_nodes=()):
     """Bounded W-selected navigation from one already loaded accepted view."""
     memory=(node.get('research') or {}).get('candidate_memory')
-    if not isinstance(memory,dict):return dict(coverage='unknown',candidates=[])
+    if not isinstance(memory,dict):return dict(coverage='unknown',candidates=[],clues=[])
     source=memory.get('source') or {}
     step=source.get('source_step')
     if type(step) is not int or step<1 or source.get('source_role')!='W':
-        return dict(coverage='unknown',candidates=[])
+        return dict(coverage='unknown',candidates=[],clues=[])
     materials={}
     for loaded in loaded_nodes:
         owner=loaded['job'].get('step')
         for index,row in enumerate(loaded.get('seal',{}).get('materials') or [],1):
             materials[row.get('path')]=f'/nodes/{owner}/materials/{index}'
     def link(reference):
+        if isinstance(reference,dict) and set(reference)=={'path'}:reference=reference['path']
         if not isinstance(reference,str):return None
         if reference in materials:return materials[reference]
         match=re.fullmatch(r'inputs/history/nodes/(?:[A-Za-z0-9._-]+/)?([0-9]{3,})/(?:science|scientific-original)\.json',reference)
@@ -1296,24 +1353,41 @@ def candidate_memory(node, clean, *, loaded_nodes=()):
         match=re.fullmatch(r'inputs/parents/([0-9]{3,})/(?:conclusion\.json|artifacts/.+)',reference)
         if match:return '/nodes/'+str(int(match[1]))+('/science' if reference.endswith('/conclusion.json') else '/materials')
         return None
+    def evidence_rows(items):
+        result=[]
+        for item in items[:8]:
+            if not isinstance(item,dict) or item.get('relation') not in {'supports','opposes','unknown'}:continue
+            result.append(dict(relation=item['relation'],note=clean(str(item.get('note') or ''),400),
+                href=link(item.get('ref'))))
+        return result
+    def source_pointer(row,field):
+        source=row.get('source') if isinstance(row.get('source'),dict) else {}
+        pointer=source.get('pointer') if source.get('source_step')==step and source.get('source_role')=='W' else None
+        # Accepted producer pointers retain the exact original array index.
+        return pointer if isinstance(pointer,str) and re.fullmatch('/research_memory/'+field+r'/[0-9]+',pointer) else None
     rows=[]
     originals=memory.get('candidates') if isinstance(memory.get('candidates'),list) else []
     for row in originals[:16]:
         if not isinstance(row,dict):continue
-        evidence=[]
         items=row.get('evidence') if isinstance(row.get('evidence'),list) else []
-        for item in items[:8]:
-            if not isinstance(item,dict) or item.get('relation') not in {'supports','opposes','unknown'}:continue
-            evidence.append(dict(relation=item['relation'],note=clean(str(item.get('note') or ''),400),
-                href=link(item.get('ref'))))
         rows.append(dict(candidate=clean(str(row.get('candidate') or '未声明'),300),
             data=clean(str(row.get('data') or ''),400),evaluation=clean(str(row.get('evaluation') or ''),400),
             failure_condition=clean(str(row.get('failure_condition') or ''),400),
             open_question=clean(str(row.get('open_question') or ''),400),
             limitations=[clean(str(value),240) for value in (row.get('limitations') or [])[:6]],
-            evidence=evidence,evidence_omitted=max(0,len(items)-8)))
+            evidence=evidence_rows(items),evidence_omitted=max(0,len(items)-8)))
+    clues=[]
+    original_clues=memory.get('clues') if isinstance(memory.get('clues'),list) else []
+    for row in original_clues[:16]:
+        if not isinstance(row,dict):continue
+        items=row.get('evidence') if isinstance(row.get('evidence'),list) else []
+        clue={key:clean(row[key],600) for key in ('observed_fact','applicability','limited_negative','open_question')
+            if isinstance(row.get(key),str)}
+        clue.update(evidence=evidence_rows(items),evidence_omitted=max(0,len(items)-8),
+            source_pointer=source_pointer(row,'clues'))
+        clues.append(clue)
     return dict(coverage='accepted',source_step=step,question=clean(str(memory.get('question') or ''),1200),
-        candidates=rows,omitted=max(0,len(originals)-16),
+        candidates=rows,clues=clues,clues_omitted=max(0,len(original_clues)-16),omitted=max(0,len(originals)-16),
         diagnostic_count=len(memory.get('diagnostics') or [])+len(memory.get('update_diagnostics') or []))
 
 
@@ -1468,7 +1542,14 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
                      if change.get(key)])
     limitations = [clean(str(item), 1200) for item in payload.get('limitations') or []]
     goal = goal_completion if goal_completion is not None else (closeout or {}).get('goal_completion')
+    reflection=ui_semantics.reflection(job)
+    reflection_rows=reflection_facts(reflection)
+    if reflection is not None:
+        reflection_rows.append(dict(label='反思结论',value=reflection_response(payload,
+            ui_semantics.action(job,payload.get('next_action'),A_OUTCOMES))))
     return dict(step=step, role=job['role'], kind=ui_semantics.kind(job),
+                reflection_facts=reflection_rows,
+                assessment_label='自动研究反思' if reflection is not None else None,
                 next_action=payload.get('next_action'), decision=ui_semantics.action(job,payload.get('next_action'),A_OUTCOMES),
                 summary=clean(payload['summary'], 1200) if isinstance(payload.get('summary'), str) else '未记录摘要',
                 delivery_state=delivery, delivery_label=delivery_label, chosen=None if audit else candidate,

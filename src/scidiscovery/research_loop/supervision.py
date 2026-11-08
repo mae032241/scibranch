@@ -13,6 +13,11 @@ DEFAULT_POLICY = dict(version=1, consecutive_rounds=4, min_budget_fraction=0.10,
     budget_checkpoints=[0.30, 0.65], max_automatic_reviews=2)
 WORKER_FIRST_POLICY = dict(version=2, mode='off', consecutive_calls=4,
     min_budget_fraction=0.10, budget_checkpoints=[], max_automatic_reviews=0)
+# Opt-in frozen policy for new W-first preparations. Historical policies retain
+# their original defaults and counters; consumption triggers an opportunity,
+# never a host judgment that scientific progress has stalled.
+AUTOMATIC_REFLECTION_POLICY = dict(version=3, mode='review', consecutive_calls=4,
+    min_budget_fraction=0.20, budget_checkpoints=[0.30, 0.65], max_automatic_reviews=2)
 _UNOBSERVED = object()
 
 
@@ -20,10 +25,10 @@ def policy(value=None):
     value = copy.deepcopy(DEFAULT_POLICY if value is None else value)
     if not isinstance(value, dict):
         raise ValueError('Exact scientific supervision policy required')
-    modern=type(value.get('version')) is int and value['version']==2
+    modern=type(value.get('version')) is int and value['version'] in (2,3)
     if set(value) != set(WORKER_FIRST_POLICY if modern else DEFAULT_POLICY):
         raise ValueError('Exact scientific supervision policy required')
-    if type(value['version']) is not int or value['version'] not in (1,2):
+    if type(value['version']) is not int or value['version'] not in (1,2,3):
         raise ValueError('Unsupported scientific supervision policy')
     if modern and value['mode'] not in {'off','notice','review'}:
         raise ValueError('Explicit investment supervision mode required')
@@ -56,7 +61,7 @@ def empty(value=None):
         total_rounds=0, covered_rounds=0, last_round=None, last_covered_cutoff=None,
         automatic_reviews=0, last_review_fraction=None, max_budget_fraction=None,
         covered_checkpoints=[], pending_due=[], count_due_round=None, recent_rounds=[], diagnostics=[])
-    if selected['version']==2:
+    if selected['version'] in (2,3):
         result.update(investment=dict(originals={},total_calls=0,consecutive_calls=0,
             mechanism_ref=None,covered_calls=0,count_due_call=None,lineage={}))
     return result
@@ -99,7 +104,7 @@ def observe(value, budget_fraction=None, *, selected_policy=None):
         state['max_budget_fraction'] = fraction if previous is None else max(previous, fraction)
     maximum = state['max_budget_fraction']
     pending = state['pending_due']
-    if chosen['version']==2:
+    if chosen['version'] in (2,3):
         if chosen['mode']=='off':return state
         investment=state['investment']
         if investment['consecutive_calls']>=chosen['consecutive_calls'] and 'consecutive_calls' not in pending:
@@ -124,10 +129,15 @@ def due(value, budget_fraction=None, policy=None):
     reviewed=state['last_covered_cutoff'] is not None
     cooldown = reviewed and spacing>0 and (last is None or fraction is None
         or fraction - last < spacing - 1e-12)
+    # New W-first instances get an exploration floor even when a handful of
+    # cheap originals has crossed the investment trigger. Unknown consumption
+    # cannot stand in for reaching that floor. Frozen v1/v2 behavior is intact.
+    minimum_met=(state['policy']['version']!=3 or fraction is not None
+        and fraction>=spacing-1e-12)
     allowed = (state['automatic_reviews'] < state['policy']['max_automatic_reviews']
         and (state['policy']['version']==1 or state['policy']['mode']=='review'))
     return dict(due=bool(state['pending_due']), reasons=copy.deepcopy(state['pending_due']),
-        cutoff=cutoff(state), automatic_allowed=bool(state['pending_due']) and allowed and not cooldown,
+        cutoff=cutoff(state), automatic_allowed=bool(state['pending_due']) and allowed and not cooldown and minimum_met,
         cooldown=cooldown, automatic_reviews=state['automatic_reviews'], budget_fraction=fraction,
         current_budget_fraction=_fraction(budget_fraction))
 
@@ -135,7 +145,7 @@ def due(value, budget_fraction=None, policy=None):
 def add_investment(value,fact):
     """Count exact original calls once, without inventing scientific rounds."""
     state=_state(value)
-    if state['policy']['version']!=2:return state
+    if state['policy']['version'] not in (2,3):return state
     state=declare_investment(state,fact)
     original=fact['original_call_id'];ref=fact['mechanism_ref']
     if not isinstance(original,str) or not original or not isinstance(ref,str) or not ref:
@@ -156,7 +166,7 @@ def add_investment(value,fact):
 def declare_investment(value,fact):
     """Retain declared ancestry for original-call unions, including no-call merges."""
     state=_state(value)
-    if state['policy']['version']!=2:return state
+    if state['policy']['version'] not in (2,3):return state
     ref=fact['mechanism_ref'];predecessors=fact.get('predecessors',[])
     if (not isinstance(ref,str) or not ref or not isinstance(predecessors,list)
             or any(not isinstance(parent,str) or not parent or parent==ref for parent in predecessors)):
@@ -169,7 +179,7 @@ def declare_investment(value,fact):
 def investment_counts(value):
     """Per-identity investments are original-call set unions, never summed receipts."""
     state=_state(value)
-    if state['policy']['version']!=2:return {}
+    if state['policy']['version'] not in (2,3):return {}
     investment=state['investment'];lineage=investment['lineage']
     refs=set(lineage)|set(investment['originals'].values())|set(investment.get('live_calls',{}))
     result={}
@@ -192,7 +202,7 @@ def _investment_ancestry(ref,lineage):
 def with_live_investment(value,live,*,scope):
     """Merge one current task projection with accepted history, without reads."""
     state=_state(value)
-    if state['policy']['version']!=2 or live is None:return state
+    if state['policy']['version'] not in (2,3) or live is None:return state
     if (not isinstance(live,dict) or live.get('version')!=1 or live.get('scope')!=scope
             or type(live.get('total_calls')) is not int or live['total_calls']<0
             or type(live.get('consecutive_calls')) is not int
@@ -228,7 +238,9 @@ def request(value, *, budget_fraction=None, policy=None, automatic=False, final=
     state = observe(value, budget_fraction, selected_policy=policy)
     status = due(state, budget_fraction)
     return dict(**(dict(investment_cutoff=state['investment']['total_calls'])
-        if state['policy']['version']==2 else {}),
+        if state['policy']['version'] in (2,3) else {}),
+        **(dict(review_kind='final_assessment' if final else 'ordinary_reflection',
+            reflection_scope='worker_question_clues_evidence') if state['policy']['version']==3 else {}),
         version=1, cutoff=status['cutoff'], due_reasons=status['reasons'],
         budget_fraction=status['budget_fraction'], automatic=bool(automatic), final=bool(final))
 
@@ -254,7 +266,8 @@ def worker_review(job, intent, *, summary, budget_fraction, selected_policy):
     status = due(summary, budget_fraction=budget_fraction, policy=selected_policy)
     if not status['automatic_allowed']:
         return None
-    return dict(reasons=status['reasons'], cutoff=status['cutoff'],
+    return dict(**(dict(review_kind='ordinary_reflection') if selected_policy['version']==3 else {}),
+        reasons=status['reasons'], cutoff=status['cutoff'],
         budget_fraction=status['budget_fraction'])
 
 
@@ -296,7 +309,7 @@ def cover(value, frozen, *, source_step, completion_fraction=_UNOBSERVED):
             if fraction >= point and point not in state['covered_checkpoints']:
                 state['covered_checkpoints'].append(point)
     state['automatic_reviews'] += int(frozen.get('automatic') is True)
-    if state['policy']['version']==2:
+    if state['policy']['version'] in (2,3):
         investment=state['investment']
         # The immutable request carries its exact call cut, separate from rounds.
         boundary=frozen.get('investment_cutoff',investment['covered_calls'])
@@ -322,7 +335,7 @@ def project(value, *, budget_fraction=None):
     status = due(state, budget_fraction)
     return dict(**(dict(investment={key:item for key,item in state['investment'].items() if key not in {'originals','lineage','live_calls'}},
         mechanism_investments=investment_counts(state),
-        mode=state['policy']['mode']) if state['policy']['version']==2 else {}),
+        mode=state['policy']['mode']) if state['policy']['version'] in (2,3) else {}),
         version=1, direction=state['direction'], consecutive_rounds=state['consecutive_rounds'],
         total_rounds=state['total_rounds'], covered_rounds=state['covered_rounds'],
         cutoff=cutoff(state), last_covered_cutoff=copy.deepcopy(state['last_covered_cutoff']),
@@ -331,4 +344,11 @@ def project(value, *, budget_fraction=None):
         rounds_omitted_count=max(0, state['total_rounds'] - len(state['recent_rounds'])),
         diagnostics=copy.deepcopy(state['diagnostics'][:4]),
         diagnostics_omitted_count=state.get('diagnostics_omitted_count',0)+max(0, len(state['diagnostics']) - 4),
-        scope='Explicit W scientific experiment batches with new exact managed originals; counts grant no scientific qualification.')
+        **(dict(review_kind='ordinary_reflection',
+            trigger_scope='consumption_and_original_call_investment',
+            automatic_allowed=status['automatic_allowed'],cooldown=status['cooldown'],
+            max_automatic_reviews=state['policy']['max_automatic_reviews'],
+            min_budget_fraction=state['policy']['min_budget_fraction'],
+            budget_fraction=status['budget_fraction']) if state['policy']['version']==3 else {}),
+        scope=('W-authored question, clues and evidence; consumption and original-call investment trigger reflection opportunities, never scientific progress verdicts.'
+            if state['policy']['version']==3 else 'Explicit W scientific experiment batches with new exact managed originals; counts grant no scientific qualification.'))

@@ -82,6 +82,19 @@ def test_h_consultation_advice_names_the_existing_no_plan_return_action():
     assert 'next_action=wait returns to W' in contract
 
 
+def test_v3_clue_guidance_preserves_scoped_claims_and_reflection_information_value():
+    assert 'optionally update research_memory' in guidance.WORKER_FIRST['W']
+    assert 'limited negatives do not reject whole mechanisms' in guidance.WORKER_FIRST['W']
+    assert 'exploratory candidates, lineage and results' in guidance.WORKER_FIRST['W']
+    assert 'low information value' in guidance.WORKER_FIRST['A']
+    ordinary=dict(role='A',research_strategy_version=3)
+    marked=dict(ordinary,supervision_request=dict(review_kind='ordinary_reflection'))
+    assert 'Reflect on W question/clues/evidence' in guidance.role_contract(marked)
+    assert 'no new issue is valid' in guidance.role_contract(marked)
+    assert 'Reflect on W question/clues/evidence' not in guidance.role_contract(ordinary)
+    assert 'Reflect on W question/clues/evidence' not in guidance.role_contract(dict(marked,research_strategy_version=2))
+
+
 @pytest.mark.parametrize('version',[None,1,2])
 def test_rebuilding_older_tasks_preserves_frozen_literals(tmp_path,version):
     root=prepare(tmp_path,None,research_strategy_version=version)
@@ -97,7 +110,8 @@ def test_rebuilding_older_tasks_preserves_frozen_literals(tmp_path,version):
     ('H','ordinary','ordinary'),('H','consultation','ordinary'),
     ('W','ordinary','ordinary'),('W','ordinary','fragment'),('W','ordinary','repair'),
     ('A','ordinary','ordinary'),('A','ordinary','repair'),('A','consultation','ordinary'),
-    ('A','supervision','ordinary'),('A','final','ordinary'),('E','ordinary','ordinary'),
+    ('A','supervision','ordinary'),('A','reflection','ordinary'),('A','reflection','repair'),
+    ('A','final','ordinary'),('E','ordinary','ordinary'),
     ('W','correction','ordinary'),('W','correction','repair'),
 ])
 def test_worker_first_actual_fixed_wire_contract_fits(tmp_path,backend_name,role,scope,branch):
@@ -111,9 +125,10 @@ def test_worker_first_actual_fixed_wire_contract_fits(tmp_path,backend_name,role
     elif scope=='correction':
         from scidiscovery.research_loop import delivery_review
         job['evidence_return']=delivery_review.make('delivery_correction',2,1)
-    elif scope=='supervision':
+    elif scope in {'supervision','reflection'}:
         job['supervision_request']=dict(version=1,cutoff=dict(total_rounds=0,source_step=None,round_id=None),
             due_reasons=['fixture'],budget_fraction=None,automatic=True,final=False)
+        if scope=='reflection':job['supervision_request'].update(review_kind='ordinary_reflection',reflection_scope='worker_question_clues_evidence')
     elif scope=='final':job.update(purpose='closeout',search=None,final_only=True,delivery_sources=dict(items=[{}]))
     job['scientific_response_fields']=c.response_fields(job,{})
     job['role_purpose_instruction']=guidance.role_contract(job)

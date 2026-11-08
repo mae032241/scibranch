@@ -1015,6 +1015,7 @@ class Codex(Backend):
 
     def recovery_capability(self, kind):
         supported=(kind=='technical_restart' or kind=='resume' and self.supports_resume
+            or kind=='consultation_resume' and self.app_server_transport and self.complete_authorship
             or kind in {'automatic_recovery','format_fallback'} and self.standard)
         return dict(status='supported' if supported else 'unsupported',reason=None if supported else 'native_recovery_unsupported')
 

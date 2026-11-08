@@ -302,7 +302,7 @@ def research_navigation(prior, job, payload, *, node_path, supervision_state=Non
         memory=research_memory.retain(prior,job,payload,
             source=dict(source_step=job['step'],source_role=role,science=science,original=original),facts=memory_facts)
         if memory is not None:result['candidate_memory']=memory
-        result['unresolved_questions']='Read candidate_memory.question, each open_question, conditional counterevidence and limitations, then the linked complete scientific originals.'
+        result['unresolved_questions']='Read candidate_memory.question, candidate entries and candidate-independent clues: authored observations, applicability, limited negatives and open questions, then their exact scientific originals. Exploratory candidates, declared lineage and results are distinct; a limited negative does not reject a whole mechanism.'
     return result
 
 

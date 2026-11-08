@@ -17,8 +17,17 @@ def test_consultation_preserves_requesting_worker_materials_and_selection(
     stopped_seals(monkeypatch)
     finish(root, 1, 'H', [], action='experiment', files={
         'other.py': 'An unselected alternative.', 'seed.py': 'The W-selected original.'})
-    finish(root, 2, 'W', [1], stage_intent=intent, selection=['H001-I002'],
-        files={'candidate.py': 'Partial candidate.', 'residual.txt': 'An unresolved residual.'})
+    original_write=c.write
+    requester_output=root/'native-evidence/002/science-output.json'
+    def requesting_science(path,value):
+        if Path(path)==requester_output:
+            value=dict(value,consultation_question=
+                'Would the retained residual change the partial candidate assessment or the selected original?')
+        return original_write(path,value)
+    with monkeypatch.context() as authored:
+        authored.setattr(c,'write',requesting_science)
+        finish(root, 2, 'W', [1], stage_intent=intent, selection=['H001-I002'],
+            files={'candidate.py': 'Partial candidate.', 'residual.txt': 'An unresolved residual.'})
     requester = c.read_job(root / 'jobs/002.json')
     science = handoff_state.read_sealed(root, 2)
     route = controller._route(root, 2, 'W', science, requester, 1, None)

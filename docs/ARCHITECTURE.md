@@ -181,8 +181,14 @@ reflection. Under strategy v2/v3, W uses `decision` for pre-delivery Final A; fr
 strategy v1 requests protected Final A directly, while unmarked legacy W uses it for ordinary A
 assessment. Consultation is a
 serial job with `purpose=worker_consultation` and an exact W return binding. Its
-return starts a new W with the exact preceding W and consultation originals;
-there is no nested same-thread call. Ordinary A consultation does not consume an
+return creates a successor W job with the exact preceding W and advice originals.
+New reflection-policy-3 jobs freeze worker_continuity_version=1: the selected
+Backend may resume the original native W session after validating its original
+workspace/home and the successor invocation. This is serial, not a nested call.
+Unsupported capability, changed profile/backend, inherited sources, unavailable
+shared home/session or required context rotation explicitly use a fresh context.
+An uncertain or failed requested resume never triggers a fresh replay. Only the
+verified native outcome reports same_session; planned resume is not success. Ordinary A consultation does not consume an
 assessment cycle, update main-line judgment, recommend a candidate or grant qualification.
 
 Window use is count-only: one initial window plus completed compactions, against
@@ -227,6 +233,10 @@ selected competing candidate references, data and evaluation basis, exact eviden
 with `supports`/`opposes`/`unknown` notes, failure conditions, open questions and
 limitations. Current candidates and artifacts bind to already loaded observations
 and retained materials; historical choices use exact accepted candidate lookups.
+Candidate-independent `clues` may retain authored observations, applicability,
+limited negative findings and open questions before a candidate exists. Each clue
+requires at least one nonblank statement and nonempty exact evidence; a limited
+negative also requires applicability. A clue grants no candidate qualification.
 The framework neither ranks these selections nor reads evidence paths supplied as
 scientific text. Invalid optional entries receive diagnostics and remain in the
 complete original. A malformed update cannot erase the last usable memory.
@@ -272,10 +282,16 @@ from similar labels. The public research index exposes bounded round excerpts,
 evidence pointers, counts, covered boundaries and due reasons. Agent-authored text
 cannot overwrite these host counters or mark supervision complete.
 
-V3 defaults to automatic A supervision off. Optional original-call investment
-notices and enforced reviews are distinct settings; an accepted original call
-counts once across continuation and recovery. Investment is neither a scientific
-round nor evidence of stagnation. Frozen earlier policies retain their own cadence.
+New W-first preparations default to frozen supervision policy version 3: review
+mode, four consecutive original calls as one trigger, shared-budget checkpoints
+at 30% and 65%, a 20% first-review floor and 20% spacing after accepted review
+completion, and at most two automatic ordinary A reviews. These are inspection
+opportunities, not stagnation verdicts. A receives the authored question, clues
+and exact evidence, may endorse continuation, and requires a decision-changing
+gap for new work. A consumption remains in the original shared budget.
+Original-call notices and enforced reviews remain separate settings; each
+original counts once across continuation and recovery. Frozen policy version 2
+keeps its original automatic-A-off default; version 1 retains its own cadence.
 The earlier default policy requests supervision after four consecutive declared rounds,
 with shared-budget checkpoints at 30% and 65% as a fallback, a 10% shared-budget
 interval after the preceding macro assessment, and at most two automatic reviews.

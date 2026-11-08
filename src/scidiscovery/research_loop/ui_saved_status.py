@@ -199,7 +199,11 @@ def _node(root, step, job, memo=None):
         blocked_reason='technical_restart_recheck_required')
     technical_diagnostic=native_usage.actionable_stop(outcome)
     from . import ui_semantics
+    reflection=ui_semantics.reflection(job)
+    worker_continuation=ui_semantics.worker_continuation(job,outcome)
     return dict(step=step, role=job['role'], kind=ui_semantics.kind(job),role_label=ui_semantics.role_label(job),
+        **(dict(reflection=reflection) if reflection is not None else {}),
+        **(dict(worker_continuation=worker_continuation) if worker_continuation is not None else {}),
         state=state, continuations=len(records) - 1,
         **(dict(technical_diagnostic=technical_diagnostic) if technical_diagnostic is not None else {}),
         **(dict(technical_stop=technical_stop) if technical_stop is not None else {}),

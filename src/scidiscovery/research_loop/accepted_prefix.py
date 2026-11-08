@@ -132,16 +132,17 @@ def candidate_for_implementation(root,prefix,identity):
 
 
 def _research_memory_facts(root, prefix, job, payload, seal, observation, *, prior=None):
-    """Resolve only W-selected candidate identities using this publication's facts."""
+    """Resolve W-selected identities/references using this publication's facts."""
     from . import candidate_refs,generic_results,research_memory
     current=candidate_refs.references([dict(step=job['step'],role=job['role'],observation=observation)])
     candidates={}
     def add(choice, public):candidates[research_memory._identity(choice)]=public
     references={}
     memory=(prior or {}).get('candidate_memory') or {}
-    for row in memory.get('candidates',[]):
+    for row in research_memory.rows(memory,'candidates'):
         choice=row.get('candidate')
         if isinstance(choice,str):add(choice,choice)
+    for row in [*research_memory.rows(memory,'candidates'),*research_memory.rows(memory,'clues')]:
         for evidence in row.get('evidence',[]):
             reference=evidence.get('ref')
             if isinstance(reference,str):references[reference]=reference
@@ -154,7 +155,7 @@ def _research_memory_facts(root, prefix, job, payload, seal, observation, *, pri
             if identity not in current:continue
             add(dict(call_id=call['call_id'],artifact=declaration['artifact']),current[identity])
     authored=payload.get('research_memory')
-    for row in authored.get('candidates',[]) if isinstance(authored,dict) and isinstance(authored.get('candidates'),list) else []:
+    for row in research_memory.rows(authored,'candidates'):
         choice=row.get('candidate') if isinstance(row,dict) else None
         if not isinstance(choice,str) or research_memory._identity(choice) in candidates:continue
         try:fact=candidate(root,prefix,choice)
@@ -171,7 +172,7 @@ def _research_memory_facts(root, prefix, job, payload, seal, observation, *, pri
     # Resolve only the exact source nodes W cites, through accepted membership;
     # a matching directory prefix alone never makes evidence available.
     members={}
-    for row in authored.get('candidates',[]) if isinstance(authored,dict) and isinstance(authored.get('candidates'),list) else []:
+    for row in [*research_memory.rows(authored,'candidates'),*research_memory.rows(authored,'clues')]:
         for evidence in row.get('evidence',[]) if isinstance(row,dict) and isinstance(row.get('evidence'),list) else []:
             reference=evidence.get('ref') if isinstance(evidence,dict) else None
             if not isinstance(reference,str) or reference in references:continue

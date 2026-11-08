@@ -64,7 +64,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if _existing_settings is not None:
         research_strategy_version = _existing_settings.get('research_strategy_version')
     if supervision_policy is _DEFAULT_SUPERVISION_POLICY:
-        supervision_policy=(supervision.WORKER_FIRST_POLICY if research_strategy_version==3 else supervision.DEFAULT_POLICY)
+        supervision_policy=(supervision.AUTOMATIC_REFLECTION_POLICY if research_strategy_version==3 else supervision.DEFAULT_POLICY)
     if research_strategy_version is not None and (type(research_strategy_version) is not int or research_strategy_version not in (1, 2, 3)):
         raise ValueError('Unsupported research strategy version')
     storage_limits = storage.configuration(storage_policy)
@@ -951,7 +951,9 @@ def _route(root, step, role, result, job, current_h, current_w):
                 + ('Requested information: '+consultation+' ' if consultation else '')
                 + 'Use its exact question, retained evidence and limitations. '
                 + ('Assess only core scientific direction, decision-changing evidence and delivery/completion at a high level. ' if intent=='review' else '')
-                + 'Return advice for a new W; no formal verdict, global decision or execution grant.',dict(role='W',step=step))
+                + ('Return advice to the requesting W work; no formal verdict, global decision or execution grant.'
+                    if job.get('worker_continuity_version')==1 else
+                    'Return advice for a new W; no formal verdict, global decision or execution grant.'),dict(role='W',step=step))
         elif intent in {'decision','continue'}:
             route=("A",_parents(current_h,step),question,None)
         else:

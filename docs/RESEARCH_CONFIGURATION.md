@@ -120,7 +120,9 @@ revisions, merges, retirement and resume retain exact declaration originals. Opt
 `research_memory` retains selected candidate/evidence references, data/evaluation basis,
 conditional negative findings, failure conditions, open questions and limitations across
 consultation and context changes. Control validates exact references and structure,
-without deciding scientific novelty or granting permissions. `--research JSON`
+without deciding scientific novelty or granting permissions. Optional candidate-independent
+`clues` retain observations, applicability, limited negatives and open questions
+with nonempty exact evidence; a limited negative requires applicability. `--research JSON`
 preflight runs under the existing writer lease: current-attempt admission, pause,
 host-review and budget gates precede write-once declaration publication. It launches
 no external execution, adds no call investment and grants no execution permission;
@@ -153,7 +155,11 @@ permits `supervision_result=continue_existing` without a new evidence request.
 Explicit W `exploration_rounds`, exact-original counting and A coverage are maintained
 by the common ledger/controller, independently of the agent backend. The architecture
 owns the reporting fields, trigger defaults and purpose-specific contract.
-V3 defaults to automatic A off. Optional original-call investment notices and
+New W-first preparations freeze supervision policy 3 with bounded automatic
+ordinary A reflection: mode=review, consecutive_calls=4, a 20% first-review floor
+and spacing, 30%/65% shared-budget checkpoints and max_automatic_reviews=2.
+The exact W question/clues/evidence are assessed; A may endorse continued work.
+Frozen policy 2 retains its automatic-A-off default. Original-call notices and
 enforced reviews are separate settings; exact original calls count once across
 continuation and recovery, without becoming scientific rounds or stagnation verdicts.
 Frozen earlier supervision policies retain their cadence. Automatic supervision is an
@@ -163,7 +169,7 @@ no new scientific classifier, search tree or knowledge database is required.
 新准备实例冻结 W 先行策略 `research_strategy_version=3`，从 W 开始，初探可无候选或成熟假设。
 受管批次前声明稳定机制身份及 `experiment_question={question,change_criterion}`，同 session 可修订、
 合并、退役和恢复，保留准确声明原件。可选 `research_memory` 以现有研究导航保存所选候选/证据引用、
-数据及评价口径、条件性负结果、失败条件、未解问题和限制，咨询返回和换上下文后仍可回读。
+数据及评价口径、条件性负结果、失败条件、未解问题和限制，咨询返回和换上下文后仍可回读。可选 `clues` 可在没有候选时记录观察、适用条件、有限负结论和开放问题；须有非空准确证据，有限负结论还须适用条件。
 控制只核结构与准确原件，不判断科学新颖度或授予权限。`--research JSON` 预检在既有 writer lease 内，
 先核对当前 attempt，并通过暂停、宿主评估及预算门槛，再一次性发布不可变声明；不启动外部执行，
 不新增调用投入，也不授执行权限，后续实际接受幂等复用准确冻结绑定。H 打开解释，普通 A 反思搜索局限，
@@ -185,13 +191,38 @@ v2/v3 即使有候选也可全部拒绝，可用性不等于资格；best-effort
 `supervision_result=continue_existing` 与 `continue_w` 放行原工作，不编造新缺口。
 旧冻结策略的 `exploration_rounds`、准确原件计数和 A 覆盖边界由公共账本/控制层维护，与 Agent
 后端无关；报告字段、默认触发策略和按目的区分的统一合同由上述架构维护。
-v3 默认关闭自动 A；可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
+新 W-first 准备默认冻结监督 policy 3：`review`、连续原调用 4、首次与间隔至少 20% 预算、30%／65% 共享预算检查点、最多两次自动普通 A。A 根据 W 作者问题／线索／证据判断，可认可继续；触发只表示检查机会。旧冻结 policy 2 仍保留自动 A 默认关闭。可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
 不把投入当科学轮次或停滞判决。旧冻结监督策略保留原节奏。
 自动监督是尚未证明收益的实验性调度启发式，不是停滞判断；直接 API 的
 `supervision_policy=None` 可关闭，不新增科学分类器、搜索树或知识库。
 
-For a new preparation, the direct API's `supervision_policy` accepts the following
-version 2 policy. `mode="off"` retains passive investment facts; `"notice"` sends
+New preparations can declare the current policy through `policies.supervision`
+in TOML, or `supervision_policy` in the direct API. For example:
+
+新准备可用 TOML 的 `policies.supervision` 或直接 API 的 `supervision_policy` 显式声明：
+
+```toml
+[policies.supervision]
+version = 3
+mode = "review"
+consecutive_calls = 4
+min_budget_fraction = 0.20
+budget_checkpoints = [0.30, 0.65]
+max_automatic_reviews = 2
+```
+
+Version 3 applies the positive minimum to the first automatic review as well as
+later spacing. Missing consumption cannot establish that threshold. This policy
+is frozen for the instance; configuration revisions do not reset its counters.
+For a new instance, `mode="off"` disables automatic reviews; direct API `None`
+also retains its existing opt-out.
+
+policy 3 的正数最低投入同时约束首次自动反思与后续间隔，缺失消费不能证明满足阈值。
+策略随实例冻结，配置修订不重置计数；新实例可用 `mode="off"` 关闭自动反思，直接 API
+也可沿用 `None`。下例保留可显式选择的旧 policy 2 投入提醒语义。
+
+The following explicit version 2 policy remains available. `mode="off"` retains
+passive investment facts; `"notice"` sends
 a bounded notice without blocking work; `"review"` requests ordinary A and pauses
 new experiments when due. Review mode also requires a positive
 `max_automatic_reviews`. These are scheduling settings, not scientific verdicts.
@@ -287,7 +318,11 @@ compactions. Fresh current-window occupancy can advise preparing a checkpoint at
 exceeds the allowed count, the next supported observable boundary seals the partial
 result and starts a new W. It does not automatically
 request A. An explicit `handoff` also starts a new W; `revise_h` and `review` request
-serial H and A consultation respectively, returning to a new W. Strategy v2 W uses
+serial H and A consultation respectively, returning to a successor W job. New
+policy-3 jobs may retain the original native W session through the selected
+Backend capability and original/successor validation; unsupported or unavailable
+continuity explicitly uses a new context. Requested resume is never reported as
+observed success, and unknown submission is not replayed. Strategy v2 W uses
 `decision` for pre-delivery Final A; frozen v1 uses
 `decision` when ready to close research and directly request protected Final A;
 an unmarked legacy W requests ordinary A assessment. Ordinary consultation grants no assessment cycle,
@@ -315,7 +350,7 @@ rejects them without migration or settings edits.
 冻结为 `worker_fragment_policy.max_context_windows`。同 session fragment 保留同一 W
 任务和额度；窗口门禁只计一个初始窗口加已完成压缩次数。当前窗口新鲜占比可在最后允许窗口的 85% 提前提示准备 checkpoint，缺失或过期占比不新增停止条件。完成压缩后超出
 允许次数，在下一受支持的可观察边界封存部分结果并交新 W，不自动交 A。显式 `handoff` 同样交新 W；`revise_h`
-和 `review` 分别请求串行 H/A 咨询，结束后交新 W；策略 v2 用 `decision` 请求提交前 Final A；已冻结 v1
+和 `review` 分别请求串行 H/A 咨询，结束后交后继 W 任务；新 policy 3 的任务可通过统一 `Backend` 校验后续接原生 W 会话，不支持或原连续性不可用时明确新上下文，未确认续接不当成功，也不重放未知提交；策略 v2 用 `decision` 请求提交前 Final A；已冻结 v1
 直接请求 protected Final A，无策略字段的旧 W 仍请求普通 A 评估。
 咨询不消费正式 A 周期，不改变主线、推荐或资格；正式独审保持精确 subject 和中性输入。
 

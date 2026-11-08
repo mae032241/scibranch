@@ -13,6 +13,155 @@ class ResumeUnavailable(ValueError):
     pass
 
 
+def consultation_binding(root, job, *, parents):
+    """Bind ordinary advice to its exact W from the producer's parent facts."""
+    if (job.get('worker_continuity_version')!=1 or job.get('role')!='W'
+            or any(job.get(key) for key in ('purpose','formal_review','final_only','final_report',
+                'engineering_repair','author_correction','correction_request','evidence_return'))
+            or job['step']-1 not in parents):
+        return None
+    advice=parents[job['step']-1]
+    consultant=advice['job']
+    if (consultant.get('role') not in {'H','A'} or consultant.get('formal_review')
+            or any(consultant.get(key) for key in ('final_only','final_report',
+                'engineering_repair','author_correction','correction_request'))
+            or consultant.get('purpose') not in {None,'worker_consultation'}
+            or (consultant.get('evidence_return') or {}).get('kind') is not None):
+        return None
+    requester=(consultant.get('evidence_return') or {}).get('step')
+    if consultant.get('purpose')!='worker_consultation':
+        if consultant['role']!='A' or advice['payload'].get('next_action')!='continue_w':
+            return None
+        workers=[step for step,facts in parents.items() if facts['job']['role']=='W'
+            and any(ref['path']==f'inputs/parents/{step:03d}/conclusion.json'
+                for ref in consultant.get('direct_refs',[]))]
+        requester=max(workers,default=None)
+    if requester not in parents or parents[requester]['job']['role']!='W':
+        return None
+    source=parents[requester]
+    return dict(version=1,requester_step=requester,advice_step=consultant['step'],
+        requester_job=source['seal']['job_ref'],advice_job=advice['seal']['job_ref'],
+        requester_seal=dict(path=str(Path(source['seal']['job_ref']['path']).parents[1]/
+            'native-evidence'/f'{requester:03d}'/'result-identity.json')),
+        advice_seal=dict(path=str(Path(advice['seal']['job_ref']['path']).parents[1]/
+            'native-evidence'/f'{consultant["step"]:03d}'/'result-identity.json')),
+        requester_native=dict(path=str(Path(source['seal']['raw_ref']['path']).parent/'native-intent.json')))
+
+
+def consultation_launch(root, job, *, settings, backend, profile):
+    """Produce one backend-qualified initial resume, or an honest fresh context.
+
+    Source originals stay at their original workspace. The selected backend's
+    resume transport must independently verify the successor invocation cwd,
+    model and permissions before it submits the new turn.
+    """
+    binding=job.get('worker_continuation')
+    if binding is None:return {}
+    source,advice=binding.get('requester_step'),binding.get('advice_step')
+    if (job.get('worker_continuity_version')!=1 or job.get('role')!='W'
+            or type(source) is not int or type(advice) is not int or not 0<source<advice<job['step']
+            or advice!=job['step']-1 or binding.get('version')!=1
+            or any(not any(ref['path']==f'inputs/parents/{step:03d}/conclusion.json'
+                for ref in job.get('direct_refs',[])) for step in (source,advice))):
+        raise ValueError('Worker consultation continuation changed its exact originals')
+    public=dict(version=1,requester_step=source,advice_step=advice)
+    def fresh(reason):
+        return dict(context_mode='new_context',worker_continuation=dict(public,
+            mode='new_context',fallback_reason=reason))
+    if (binding.get('requester_job')!=dict(path=str(root/'jobs'/f'{source:03d}.json'))
+            or binding.get('advice_job')!=dict(path=str(root/'jobs'/f'{advice:03d}.json'))):
+        return fresh('consultation_resume_inherited_source')
+    if (binding.get('requester_seal')!=dict(path=str(execution.origin(root,source)/'result-identity.json'))
+            or binding.get('advice_seal')!=dict(path=str(execution.origin(root,advice)/'result-identity.json'))):
+        raise ValueError('Worker consultation source seal locator changed')
+    if backend.recovery_capability('consultation_resume').get('status')!='supported':
+        return fresh('consultation_resume_unsupported_backend')
+    seal=c.read(c.regular(Path(binding['requester_seal']['path'])))
+    advisor=c.read(c.regular(Path(binding['advice_seal']['path'])))
+    if seal.get('job_ref')!=binding['requester_job'] or advisor.get('job_ref')!=binding['advice_job']:
+        raise ValueError('Worker consultation source seal changed')
+    record=Path(seal['raw_ref']['path']).parent
+    original_record=execution.origin(root,source)
+    relative=record.relative_to(original_record)
+    if (record.resolve()!=record or relative.parts and (len(relative.parts)!=2
+            or relative.parts[0]!='continuations' or not relative.parts[1].isdecimal()
+            or relative.parts[1]!=f'{int(relative.parts[1]):03d}')):
+        raise ValueError('Worker consultation source native namespace changed')
+    if binding.get('requester_native')!=c.record_ref(record/'native-intent.json'):
+        raise ValueError('Worker consultation source attempt changed')
+    original=c.read(c.regular(record/'native-intent.json'))
+    outcome=c.native_outcome(record)
+    if (original.get('task_ref')!=binding['requester_job'] or outcome.get('raw_ref')!={
+            key:seal['raw_ref'][key] for key in ('path','size_bytes')}
+            or outcome.get('returncode')!=0
+            or outcome.get('stop_reason') or outcome.get('terminal_observed') is not True
+            or outcome.get('cleanup')!='observed_group_cleaned'):
+        raise ResumeUnavailable('consultation_resume_original_unverified')
+    if outcome.get('native_backend')!=backend.name:
+        # Configuration revisions may legally change the selected provider.
+        # native_outcome interpreted its original provider above; that known
+        # terminal is retained, but another provider cannot resume its session.
+        return fresh('consultation_resume_backend_changed')
+    if (seal.get('control_outcome') or {}).get('stage_end_reason') in {
+            'worker_context_review_due','worker_context_observation_unknown'}:
+        return fresh('consultation_resume_context_rotation_required')
+    if original.get('native_profile')!=profile:
+        return fresh('consultation_resume_profile_changed')
+    native_identity=outcome.get('native_identity') or {}
+    retained=native_identity.get('session')
+    if not isinstance(retained,dict):return fresh('consultation_resume_session_unavailable')
+    home=(settings.get('resume_policy') or {}).get('native_home')
+    if (not (settings.get('resume_policy') or {}).get('output_only')
+            or home is None or home!=retained.get('home') or home!=native_identity.get('home')):
+        return fresh('consultation_resume_shared_home_unavailable')
+    if retained.get('thread_id')!=outcome.get('thread_id'):
+        raise ValueError('Worker consultation source thread changed')
+    from .native_usage import MetadataUnavailable
+    try:
+        backend.validate_resume_session(retained,c.workspace(root,source),Path(home))
+        backend.validate_session_event(outcome.get('native_thread_event'),outcome['thread_id'])
+    except MetadataUnavailable:
+        return fresh('consultation_resume_session_unavailable')
+    return dict(context_mode='same_context',native_home=home,session=retained,
+        worker_context_state=(outcome.get('metering') or {}).get('context_windows'),
+        worker_continuation=dict(public,mode='resume_requested',fallback_reason=None))
+
+
+def consultation_outcome(planned, *, resumed, verified):
+    """Public invocation fact; a requested resume is not an observed success."""
+    if planned is None:return None
+    value=dict(planned)
+    if value['mode']!='new_context':
+        value['mode']='same_session' if resumed and verified else 'resume_unconfirmed'
+    return value
+
+
+def consultation_intent(job, intent, *, settings, backend):
+    """Consume the accepted producer's plan; never reopen source originals."""
+    binding=job.get('worker_continuation')
+    public=intent.get('worker_continuation')
+    if (not isinstance(binding,dict) or not isinstance(public,dict)
+            or job.get('worker_continuity_version')!=1 or job.get('role')!='W'
+            or public.get('version')!=1
+            or any(public.get(key)!=binding.get(key) for key in ('requester_step','advice_step'))):
+        raise ValueError('Accepted worker consultation plan changed')
+    if public.get('mode')=='new_context':
+        if (intent.get('context_mode')!='new_context' or intent.get('session') is not None
+                or not isinstance(public.get('fallback_reason'),str) or not public['fallback_reason']):
+            raise ValueError('Accepted worker consultation fallback changed')
+        return dict(worker_continuation=public)
+    session=intent.get('session')
+    home=(settings.get('resume_policy') or {}).get('native_home')
+    if (public.get('mode')!='resume_requested' or public.get('fallback_reason') is not None
+            or intent.get('context_mode')!='same_context' or not isinstance(session,dict)
+            or not (settings.get('resume_policy') or {}).get('output_only')
+            or home is None or intent.get('native_home')!=home or session.get('home')!=home
+            or backend.recovery_capability('consultation_resume').get('status')!='supported'):
+        raise ValueError('Accepted worker consultation session changed')
+    return dict(worker_continuation=public,session=session,
+        worker_context_state=intent.get('worker_context_state'))
+
+
 class AutomaticRecoveryRequired(RuntimeError):
     """Return one finite recovery decision to the owning controller writer."""
     def __init__(self, decision, *, inventory=None):

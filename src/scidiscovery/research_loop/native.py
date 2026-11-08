@@ -121,6 +121,11 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         prompt+=json.dumps({key:request[key] for key in ('code','diagnostic')},ensure_ascii=False,separators=(',',':'))
     if intent.get('execution_wake'):
         prompt+=' Read work/execution-results.json; continue original W work; never replay accepted calls.'
+    if intent.get('worker_continuation'):
+        continuity=intent['worker_continuation']
+        prompt+=(' Same W session requested; use current task/advice/permissions; no unknown-call replay.'
+            if continuity['mode']=='resume_requested' else
+            ' New native context; retain W question/evidence; no unknown-call replay.')
     if intent.get('continuation_kind')=='fragment':prompt+='\n'+FRAGMENT_INSTRUCTION
     if author:
         prompt+=(' Author-only closeout: read '+author['facts']+'. Completed originals only; '
@@ -229,6 +234,10 @@ def execute_native(root: Path, step: int, *, final_report=None):
     intent = dict(step=step, task_ref=record_ref(job_path), prepared_at=time.time(), **profile_binding,
         **(dict(search_slice=anchor) if anchor is not None else {}),
         **(dict(budget_slice=node_anchor) if node_anchor is not None else {}))
+    if job.get('worker_continuation') is not None:
+        from . import continuation
+        intent.update(continuation.consultation_launch(root,job,settings=settings,
+            backend=initial_backend,profile=profile_binding['native_profile']))
     from . import accepted_budget
     accepted_budget.accept_native(root,step,record,intent)
     runtime.start(root, step)
@@ -377,8 +386,10 @@ def run_native(root: Path, step: int, attempt=0):
             experiments.validate_operator_configuration(selected)
             executor=selected['executor'];configuration=selected['configuration']
         experiment_config=experiments.configure(root,step,executor,configuration,work/'work/experiment-config.json')
+    origin_intent=intent
     if attempt:
-        profiles.validate_intent(settings, job, read(execution.origin(root, step) / 'native-intent.json'))
+        origin_intent=read(execution.origin(root, step) / 'native-intent.json')
+        profiles.validate_intent(settings, job, origin_intent)
     # W statistics reuse this exact node anchor, never a second acceptance clock.
     search_intent = dict(intent, search_slice=intent['budget_slice']) if intent.get('budget_slice') is not None and job.get('search') and job['role'] == 'W' else intent
     pending = record / 'result.pending.json'
@@ -389,6 +400,7 @@ def run_native(root: Path, step: int, attempt=0):
     notice_helper=None
     resume_position = None
     resume_session=None
+    consultation_context=None
     if settings.get('resume_policy') is not None:
         from . import continuation
         continuation.validate_launcher(root, step)
@@ -396,6 +408,16 @@ def run_native(root: Path, step: int, attempt=0):
     if intent.get('continuation_kind') == 'automatic_recovery':
         from . import continuation
         continuation.validate_automatic(root, step, intent)
+    if not attempt and job.get('worker_continuation') is not None:
+        from . import continuation
+        consultation_context=continuation.consultation_intent(job,intent,settings=settings,backend=backend)
+        resume_session=consultation_context.get('session')
+        if resume_session is not None:
+            # Refresh only mutable native identity at the actual launch boundary.
+            # The accepted intent already owns source/advice seal qualification.
+            backend.validate_resume_session(resume_session,
+                workspace(root,job['worker_continuation']['requester_step']),
+                execution.home(root,step,attempt))
     if attempt and intent.get('context_mode') != 'new_context' and not startup_retry:
         if not backend.supports_resume:
             from .continuation import ResumeUnavailable
@@ -477,6 +499,8 @@ def run_native(root: Path, step: int, attempt=0):
     terminal_usage_missing = False
     terminal_meter = dict(meter)
     context_state = None
+    if consultation_context is not None:
+        context_state=consultation_context.get('worker_context_state')
     empty_predecessor_context=False
     context_policy = (settings.get('worker_fragment_policy') or {}).get('max_context_windows')
     if attempt:
@@ -501,7 +525,7 @@ def run_native(root: Path, step: int, attempt=0):
         if context_state is None and not empty_predecessor_context:
             context_state = dict(coverage='unknown', windows_started=0, reason='context_history_unavailable')
     live_meter = backend.meter(meter_home, work,
-        session=intent.get('session') if attempt and intent.get('context_mode') != 'new_context' and not startup_retry else None,
+        session=resume_session,
         context_state=context_state)
     context_observation = backend.snapshot_observation(live_meter)
     from .protocol import stage_scope_for_job
@@ -861,8 +885,25 @@ def run_native(root: Path, step: int, attempt=0):
         outcome['limitation']=str(error)
     if final_return is not None:
         outcome['final_a_completion'] = control_budget.final_a_receipt(final_return, intent, meter if observed else None, outcome['usage'])
-    if attempt and intent.get('context_mode') != 'new_context' and not startup_retry and thread_id != intent['session']['thread_id']:
+    if resume_session is not None and (attempt or process is not None) and thread_id != resume_session['thread_id']:
         stop = outcome['stop_reason'] = 'native_thread_changed'
+    if origin_intent.get('worker_continuation') is not None:
+        from . import continuation
+        planned=dict(origin_intent['worker_continuation'])
+        original_thread=(origin_intent.get('session') or {}).get('thread_id')
+        if (planned['mode']=='resume_requested' and attempt
+                and (resume_session is None or resume_session.get('thread_id')!=original_thread)):
+            planned.update(mode='new_context',fallback_reason='consultation_resume_context_replaced')
+        verified=False
+        if (planned['mode']=='resume_requested' and resume_session is not None
+                and process is not None and terminal_observed and not stop):
+            try:
+                backend.validate_participant_event(native_thread_event,outcome,intent,work)
+                verified=True
+            except ValueError:
+                stop=outcome['stop_reason']='native_consultation_identity_unverified'
+        outcome['worker_continuation']=continuation.consultation_outcome(planned,
+            resumed=resume_session is not None,verified=verified)
     if (attempt or settings.get('resume_policy') is not None or intent.get('continuation_kind') == 'author_closeout') and process is not None:
         outcome['execution_processes'] = {name: record_ref(record / name) for name in ('runner-process.json', 'native-process.json')}
     if intent.get('budget_slice') is not None:

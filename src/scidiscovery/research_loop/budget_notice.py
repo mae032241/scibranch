@@ -32,6 +32,8 @@ WORKER_CONTEXT_NEAR_TEXT = ('W final context window is at least 85% full. Prepar
     'Advice only; original permissions and count-based handoff still hold.')
 WORKER_DIRECTION_TEXT = ('W direction review due. Finish/reconcile bounded existing work; never replay unknown calls. '
     'Save a checkpoint and return for independent A. No new work or scientific verdict; permissions hold.')
+WORKER_REFLECTION_TEXT = ('W reflection opportunity: reconcile existing originals; never replay unknown calls. '
+    'Save question, clues and evidence; return for independent A. No progress verdict; original permissions hold.')
 WORKER_INVESTMENT_TEXT = ('Repeated calls under this mechanism: inspect retained evidence and choose continuation or H/A. '
     'Counts measure effort, not scientific stagnation. Original permissions and budgets hold.')
 HELPER = '.scid-budget-notice.py'
@@ -212,7 +214,10 @@ def worker_context_near(maximum, observation):
 
 def worker_direction_notice(review):
     """Render the producer's independent direction checkpoint, without reads."""
-    return dict(cause='node', text=WORKER_DIRECTION_TEXT) if review is not None else None
+    if review is None:return None
+    text=(WORKER_REFLECTION_TEXT if isinstance(review,dict)
+        and review.get('review_kind')=='ordinary_reflection' else WORKER_DIRECTION_TEXT)
+    return dict(cause='node',text=text)
 
 
 def worker_investment_notice():
@@ -246,9 +251,11 @@ def published_notices(value):
                 or value['research_investment'].get('mode')!='notice'
                 or value['research_investment'].get('due') is not True):
             return None
-        if dimension == 'review' and (notice != dict(cause='node', text=WORKER_DIRECTION_TEXT)
+        if dimension == 'review' and (notice != worker_direction_notice(value.get('direction_review'))
                 or value.get('target_state') != 'reached'):
-            return None
+            # Historical hints carried only the original direction notice.
+            if notice != dict(cause='node',text=WORKER_DIRECTION_TEXT) or value.get('target_state')!='reached':
+                return None
         if dimension == 'progress':
             early = notice == dict(cause='node', text=WORKER_CONTEXT_NEAR_TEXT)
             if (not early and (notice not in [dict(cause='node', text=text)

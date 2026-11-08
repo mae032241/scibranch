@@ -2772,8 +2772,8 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
     if direction_review is not None:
         hint['direction_review']=direction_review
         hint['target_state']='reached'
-        hint['instruction']=budget_notice.WORKER_DIRECTION_TEXT
         notices['review']=budget_notice.worker_direction_notice(direction_review)
+        hint['instruction']=notices['review']['text']
     if review.get('research_investment') is not None:
         hint['research_investment']=review['research_investment']
     if review.get('investment_notice'):
@@ -2890,7 +2890,7 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
         investment=None;investment_notice=False
         if job.get('research_strategy_version')==3:
             chosen=supervision.policy(settings['supervision_policy']) if settings.get('supervision_policy') else None
-            if chosen is not None and chosen['version']==2:
+            if chosen is not None and chosen['version'] in (2,3):
                 status=supervision.due(current_search,budget_fraction=fraction,policy=chosen)
                 state=supervision.observe(current_search,fraction,selected_policy=chosen)
                 counts=state['investment']

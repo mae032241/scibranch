@@ -1165,11 +1165,11 @@ scid-research closeout --root /绝对路径/实例 --export-only
 任意本地 shell 仍是软隔离；
 框架管理的外部执行应按原执行身份恢复，不重发不确定提交。
 
-v3 默认关闭自动 A，可选的投入提醒与强制评估分别配置，原调用在接续和恢复后只计一次，不当作科学轮次或停滞判断。旧冻结方向监督保留原轮次及共享预算检查点；达到强制评估边界时暂停新实验准入，提示核对原调用、保留 checkpoint 并返回，再由既有串行普通 A 评估准确的 accepted cutoff。原调用 query／collect 仍可用；耗时或低分不制造科学结论。
+新 W-first 准备默认冻结监督 policy 3：`review` 模式、连续原调用 4、首次及两次反思之间至少 20% 共享预算、30%／65% 检查点、最多两次自动普通 A。触发仅为检查机会，A 根据作者问题／线索／证据判断并可认可继续。旧冻结 policy 2 保留自动 A 默认关闭；可选的投入提醒与强制评估仍分别配置，原调用在接续和恢复后只计一次，不当作科学轮次或停滞判断。旧冻结方向监督保留原轮次及共享预算检查点；达到强制评估边界时暂停新实验准入，提示核对原调用、保留 checkpoint 并返回，再由既有串行普通 A 评估准确的 accepted cutoff。原调用 query／collect 仍可用；耗时或低分不制造科学结论。
 
 ## 可选的 Worker 原线程续接
 
-标准单命令 `codex` 的新 `prepare` 默认启用同 session 普通 fragment，冻结 `worker_fragment_policy.max_context_windows=1`；TOML `policies.worker_context_windows` 仅接受整数 1 或 2。`stage_intent=continue` 续接同一 W，`handoff` 封存并交新 W；`revise_h` 请求 H 咨询，`review` 请求 A 咨询，v3 须同时给出具体 `consultation_question`。v3/v2 的 `decision` 请求提交前 Final A，普通 A 的 `finish`/`deliver` 同样只请求 Final A；v1 的 `decision` 直接进入 protected Final A，无策略字段的旧 W 保留普通 A 正式阶段评估原义。咨询是单 writer 下的串行 `purpose=worker_consultation` job，绑定原 W，返回后用准确原件新建 W，不是同 thread 嵌套调用。普通 A 咨询不消费正式周期，不改变主线、候选推荐或资格。
+标准单命令 `codex` 的新 `prepare` 默认启用同 session 普通 fragment，冻结 `worker_fragment_policy.max_context_windows=1`；TOML `policies.worker_context_windows` 仅接受整数 1 或 2。`stage_intent=continue` 续接同一 W，`handoff` 封存并交新 W；`revise_h` 请求 H 咨询，`review` 请求 A 咨询，v3 须同时给出具体 `consultation_question`。v3/v2 的 `decision` 请求提交前 Final A，普通 A 的 `finish`/`deliver` 同样只请求 Final A；v1 的 `decision` 直接进入 protected Final A，无策略字段的旧 W 保留普通 A 正式阶段评估原义。咨询是单 writer 下的串行 `purpose=worker_consultation` job，绑定原 W，返回后用准确原件新建逻辑 W 任务。新 policy 3 任务通过统一 `Backend` 能力与原会话／目标调用校验，支持时续接原生 W 会话；能力不支持、backend/profile 改变、继承来源、home/session 不可用或上下文需轮换时明确新上下文。只有已验证 outcome 可标记原会话续接成功，失败或未确认续接不自动重放。这不是同 thread 嵌套调用。普通 A 咨询不消费正式周期，不改变主线、候选推荐或资格。
 
 窗口只计一个初始窗口加已完成压缩次数，完成压缩后超出冻结的 1 或 2 个窗口额度，在下一受支持可观察边界封存部分结果并交新 W，不自动 A；当前 thread／turn 的新鲜占比达到最后允许窗口的 85% 时提前建议准备安全 checkpoint，缺失或过期占比不新增停止条件。`policies.worker_context` 仍选择 `same_session` 或 `new_context`；同 session 续接保留计数，已接受的完成压缩事件去重。既有 native helper 通过必需的 `PostCompact`/`PostModelRequest` hooks 接收小型控制事实，native stdout 只含这些事实及有界助手文字；不观察工具/输入/输出正文，不扫描私有 rollout。缺少必需 hooks 时启动前明确 unsupported，不能在未知覆盖下反复新建 W；此能力仅适用于受支持启动路径，不保证任意后端。时间和原调用状态沿用既有 owner，原调用仍可 query/collect/核对，不重放或强杀在途工作。新 W 不重置全局活动时间、token、步骤、执行消费、权限或 unknown；实际共享和单实验限制继续有效，W 时间和累计 token 目标为建议。下一新节点修订保留已接受任务；直接 API `worker_fragment_policy=None` 仍可禁用普通 fragment。协议 29、30、31、32 实例需保留匹配旧 runtime，新版拒绝读取，不迁移或手改版本。
 

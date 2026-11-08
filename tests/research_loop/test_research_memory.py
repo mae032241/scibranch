@@ -100,6 +100,17 @@ def test_valid_explicit_empty_update_can_clear_previous_candidates():
     assert result['source']=={'original':'second.json'}
 
 
+def test_legacy_partial_candidate_update_still_keeps_its_valid_new_entries():
+    prior=dict(candidate_memory=research_memory.project(selected_memory(),**memory_facts(),source={'original':'first.json'}))
+    value=selected_memory();value['candidates'][0]['open_question']='A new authored question'
+    value['candidates'].append(dict(value['candidates'][0],candidate='unavailable-candidate'))
+    result=research_memory.retain(prior,dict(role='W',research_strategy_version=3),
+        dict(research_memory=value),source={'original':'second.json'},facts=memory_facts())
+    assert result['candidates'][0]['open_question']=='A new authored question'
+    assert result['source']=={'original':'second.json'}
+    assert result['diagnostics'][0]['reason']=='candidate_original_unavailable'
+
+
 def test_same_worker_live_declaration_enters_existing_table_without_call_or_h_parent():
     origin=dict(goal_id='goal',settings_ref={'path':'/instance/settings.json'})
     source={'path':'/instance/experiments/001/research/000001.json'}

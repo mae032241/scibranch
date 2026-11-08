@@ -205,12 +205,12 @@ def test_real_admission_refuses_new_work_but_cli_can_query_and_collect_original(
     with pytest.raises(experiments._AdmissionReviewRequired,match='worker_direction_review_due'):
         experiments._prepare_descriptor(config,payload,adapter,records,[],client_facts=dict(root=None))
     assert operations==[]
-    def new_dispatch(*args,**kwargs):
-        return experiments._prepare_descriptor(config,payload,adapter,records,[],client_facts=dict(root=None))
-    monkeypatch.setattr(experiments,'dispatch',new_dispatch)
+    # Exercise the CLI's current _dispatch_script entry and real descriptor
+    # admission path; only the synthetic provider's lifecycle facts are stubbed.
     monkeypatch.setattr(experiments,'load',lambda *args,**kwargs:adapter)
     monkeypatch.setattr(experiments,'original_adapter',lambda original,identity,operation:(original,adapter))
-    monkeypatch.setattr(experiments,'lifecycle_capabilities',lambda provider:SimpleNamespace(query=True,collect=True))
+    monkeypatch.setattr(experiments,'lifecycle_capabilities',lambda provider:SimpleNamespace(
+        atomic_admission=True,query=True,collect=True))
     monkeypatch.setattr(experiments.Records,'accepted',lambda self,identity,*args,**kwargs:dict(call_id=identity))
     monkeypatch.setattr(experiments.Records,'directory',lambda self,identity:tmp_path/'retained'/identity)
     monkeypatch.setattr(experiments,'record_observation',lambda *args,**kwargs:dict(status='known_success'))

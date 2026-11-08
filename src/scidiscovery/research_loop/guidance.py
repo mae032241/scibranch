@@ -42,8 +42,8 @@ WORKER_LED_PLANNING = {
 # New preparations choose v3 explicitly; older literal dictionaries stay frozen.
 WORKER_FIRST = {
     'H': 'Answer W\'s concrete question from relevant originals, candidates and unresolved gaps. Offer alternative mechanisms, representations or decompositions and cheap observations that could distinguish them. Mark speculation. Say when no useful alternative is found; return to W. Preserve original constraints; no execution grant.',
-    'W': 'Start and own research/methods/candidates. For ordinary research, bind stable mechanisms and experiment_question via --research JSON before batches; discovery/diagnosis is valid. Keep research_memory exact candidates/evidence/limits/questions across advice/context changes. H offers alternatives; A checks omissions/inefficiency; W chooses methods. Separate adaptive evidence from final checks. Reconcile unknown calls; never replay. No auxiliary agents.',
-    'A': 'Use relevant originals and W\'s concrete question, candidate memory and unresolved gaps. Ordinary advice finds consequential omissions, misjudgment or inefficient validation; endorse continued work or say no new issue when appropriate. Extra work needs a concrete decision-changing gap, not a checklist. Final A independently checks delivery claims, reproducibility and limits; reject all or request one bounded correction when permitted. Preserve formal review independence and original qualification.',
+    'W': 'Start and own research. Bind mechanisms/experiment_question via --research JSON. At results optionally update research_memory; limited negatives do not reject whole mechanisms. Separate exploratory candidates, lineage and results; adaptive evidence from final checks. W chooses methods; never replay unknown calls. No auxiliary agents.',
+    'A': 'Use W\'s question, clues/candidate memory and exact evidence. Ordinary A checks omissions, misjudgment or low information value; endorse continuation or say no new issue. Keep negative claims scoped. New work needs a decision-changing gap. Final A checks delivery, reproducibility and limits; reject all or request one permitted bounded correction. Preserve formal independence and qualification.',
     'E': DEFAULT['E'],
 }
 
@@ -106,6 +106,9 @@ def role_contract(job):
                     'Extra work requires concrete bounded decision-changing decision_request{decision:candidate|mechanism|compliance,question,change_criterion}; W chooses methods. '
                     'deliver/finish requests mandatory final A assessment before delivery, not authorization. ')
                 if job.get('supervision_request') is not None:
+                    if (job.get('research_strategy_version')==3
+                            and job['supervision_request'].get('review_kind')=='ordinary_reflection'):
+                        route+='Reflect on W question/clues/evidence; no new issue is valid. '
                     route+=('supervision_result: continue_existing=continue_w without decision_request; request_evidence=continue_w/revise_h/extract with decision_request; finalize=finish/deliver requests final assessment. ')
             return route+ASSESSMENT_SCOPE
     if role=='A':

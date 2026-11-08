@@ -146,7 +146,7 @@ def test_optional_round_reporting_never_adds_a_transport_or_repair_gate(tmp_path
     assert c.science_payload(raw,'W',**c.response_options(job))==payload
     assert c.scientific_field(job,payload,'exploration_rounds')==(rounds if isinstance(rounds,list) else None)
     assert not c.scientific_diagnostics(job,payload)
-    assert 'exploration_rounds?:[{mechanism:ref,question,call_ids:[current W managed IDs],finding}]' in c.response_instructions(job)['stage_response']
+    assert 'exploration_rounds?:[{mechanism,question,call_ids:[],finding}]' in c.response_instructions(job)['stage_response']
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
