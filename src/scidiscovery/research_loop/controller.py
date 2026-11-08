@@ -59,6 +59,16 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             _user_update_texts: list[str] | None = None,
             _source_facts_factory=None, _on_created=None, _fork_search_seed=None) -> dict:
     """Freeze an explicit goal, global ceilings and finite node budgets."""
+    from . import backends as agent_backends
+    agent_backends.provider(native_backend).validate_declaration(dict(
+        model=model, reasoning_effort=reasoning_effort, service_tier=service_tier,
+        native_options=native_options, native_launcher_argv=launcher,
+        role_profiles=role_profiles, worker_profiles=worker_profiles, skills=skills,
+        project=project, experiment_mode=experiment_mode, execution_config=execution_config,
+        execution_resource_policy=execution_resource_policy, resume_policy=resume_policy,
+        worker_fragment_policy=worker_fragment_policy, formal_review_policy=formal_review_policy,
+        execution_authority_policy=execution_authority_policy, candidate_audit_policy=candidate_audit_policy,
+        delivery_policy=delivery_policy, selection_policy=selection_policy, history_observer=history_observer))
     from . import candidate_nominations
     from . import storage_policy as storage
     if _existing_settings is not None:
@@ -109,7 +119,6 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if (_existing_settings is not None and _existing_settings.get('project') is None
             and project is not None):
         raise ValueError('Project declaration is immutable for an existing instance')
-    from . import backends as agent_backends
     backend_home=(resume_policy or {}).get('native_home')
     if backend_home is None:backend_home=agent_backends.provider(native_backend).default_home()
     native_homes=[] if backend_home is None else [Path(backend_home).absolute()]
@@ -343,6 +352,9 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         settings['formal_review_policy'] = dict(review_policy)
     if authority_policy is not None:
         settings['execution_authority_policy'] = dict(authority_policy)
+    # The operation owner passes the complete normalized declarations before
+    # publishing originals/control state, including for direct prepare callers.
+    agent_backends.selected(backend_settings).validate_preparation(settings)
     if validate_only:
         if _existing_settings is not None:
             skill_supply.validate(root, settings)
@@ -422,8 +434,12 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 prefix_seed,search_rows,search_seed=accepted_prefix.fork_seed(
                     root,settings,search_seed=search_seed,identity_root=identity_root)
             search_ref=accepted_prefix.initialize(root,search_seed=search_seed,identity_root=identity_root)
+            # fork_seed has accepted the manifest's exact scientific cut. Pass
+            # that birth fact before any first-task quota check; discovering a
+            # manifest during later job admission must not change accounting.
             accepted_budget.initialize(root,settings,identity_root=identity_root,search_seed=search_seed,
-                search_ref=search_ref,prefix_seed=prefix_seed,search_rows=search_rows)
+                search_ref=search_ref,prefix_seed=prefix_seed,search_rows=search_rows,
+                is_fork=prefix_seed is not None)
             with storage.mutation(root,0,policy=storage_limits,
                                   context=storage.Deadline(65 if max_seconds is None else max_seconds)):
                 pass

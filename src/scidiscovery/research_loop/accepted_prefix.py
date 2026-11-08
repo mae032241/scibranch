@@ -332,6 +332,19 @@ def _publish_breadth(directory,summary,*,candidate_references=None):
             lambda identity:references.get(identity,identity))))
 
 
+def _validate_publication_prefix(job, admitted, prefix, *, review_binding):
+    """Keep local publication admission distinct from a frozen review context."""
+    if admitted.get('prefix') != prefix:
+        raise ValueError('Scientific output lost its admitted accepted prefix')
+    if job.get('formal_review'):
+        if (job.get('purpose') != 'formal_review' or admitted.get('purpose') != 'formal_review'
+                or not isinstance(review_binding, dict)
+                or job.get('history') != review_binding.get('history')):
+            raise ValueError('Formal review publication lost its validated input boundary')
+    elif for_job(job) != prefix:
+        raise ValueError('Scientific output lost its admitted accepted prefix')
+
+
 def prepare_node(root, job, payload, seal, *, inventory):
     """Prepare this node's mechanical publication before its acceptance marker."""
     from . import accepted_budget, accepted_search, contracts as c, originals,history,candidate_refs,lineage,budget
@@ -345,8 +358,7 @@ def prepare_node(root, job, payload, seal, *, inventory):
             or slot.get('status')!='terminal'
             or slot.get('job_ref')!=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')):
         raise ValueError('Public publication requires its exact admitted scientific owner')
-    if for_job(job)!=prefix:
-        raise ValueError('Scientific output lost its admitted accepted prefix')
+    _validate_publication_prefix(job,slot,prefix,review_binding=inventory.review_binding)
     origin=dict(goal_id=inventory.base['goal_id'],settings_ref=dict(state['settings_ref']))
     if prefix['branch']!=origin:
         raise ValueError('Scientific publication lost its local original identity')

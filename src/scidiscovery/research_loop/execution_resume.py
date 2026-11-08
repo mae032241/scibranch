@@ -330,11 +330,70 @@ def verify_rebind(root, proof, before, after):
             raise q.IntegrityError('Reservation rebind lost original authority receipt')
 
 
+def _resume_writers(root, job, pending):
+    """Load exact sealed owners once for this current fresh-dispatch operation."""
+    attempts = pending.get('attempts')
+    if not isinstance(attempts, list) or not attempts:
+        raise ValueError('Original live or unknown writers block host recovery')
+    writers = []
+    for number, proofs in enumerate(attempts):
+        if not isinstance(proofs, dict):
+            raise ValueError('Original live or unknown writers block host recovery')
+        record = execution.origin(root, job['step'])
+        if number:
+            record = record / 'continuations' / f'{number:03d}'
+        binding = dict(path=str(record / 'native-intent.json')) if number else dict(
+            path=str(root / 'jobs' / f'{job["step"]:03d}.json'))
+        processes = []
+        for name in ('runner-process.json', 'native-process.json'):
+            proof = proofs.get(name)
+            if (not isinstance(proof, dict) or not isinstance(proof.get('path'), str)
+                    or root / proof['path'] != record / name):
+                raise ValueError('Original live or unknown writers block host recovery')
+            processes.append(q._read(root, proof))
+        # A bridge has its own detached group. Retain its existing positive
+        # cleanup contract, then observe that exact group along with the native
+        # owners on every admission check. No bridge is required for old attempts.
+        bridge = record / 'bridge-process.json'
+        if bridge.exists() or bridge.is_symlink():
+            try:
+                receipt = c.read(c.regular(bridge))
+                outcome = c.read(c.regular(record / 'bridge-outcome.json'))
+                if (not isinstance(receipt, dict) or not isinstance(outcome, dict)
+                        or not isinstance(outcome.get('process'), dict)
+                        or outcome.get('cleanup') != 'observed_group_cleaned'
+                        or any(outcome['process'].get(key) != receipt.get(key)
+                            for key in ('pid', 'boot_id', 'start_ticks', 'pgid', 'sid', 'task_ref'))):
+                    raise ValueError('Original execution bridge cleanup is unconfirmed')
+                processes.append(receipt)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise ValueError('Original live or unknown writers block host recovery') from error
+        writers.append((binding, tuple(processes)))
+    return tuple(writers)
+
+
+def _observe_resume_writers(writers):
+    """Acquire current owner/group facts only at the explicit resume boundary.
+
+    Positive historical cleanup remains necessary, but cannot stand in for this
+    observation. Missing or unbound owners never prove non-submission. These
+    read-only runtime APIs confer no signal authority and create no replay proof.
+    """
+    from . import runtime
+    try:
+        for binding, processes in writers:
+            if not all(runtime.bound_group_stopped(process, binding) for process in processes):
+                raise ValueError('Original owner/group is not positively stopped')
+    except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
+        raise ValueError('Original live or unknown writers block host recovery') from error
+
+
 class _RecoveryAdmission:
     """One synchronous host operation, never serialized into Worker configuration."""
-    def __init__(self,root,job,seal,seal_sha,allocation,config,*,max_seconds,note,valid_seconds):
+    def __init__(self,root,job,seal,seal_sha,allocation,config,*,max_seconds,note,valid_seconds,writers):
         from . import budget, execution_authority as authority
         self.root,self.job,self.seal,self.config=root,job,seal,config
+        self.writers=writers
         self.allocation_ref=allocation;self.allocation=q._read(root,allocation)
         from . import worker_research
         if worker_research.enabled(config):
@@ -376,6 +435,7 @@ class _RecoveryAdmission:
 
     def check(self):
         from . import budget, native
+        _observe_resume_writers(self.writers)
         stamp=budget.clock_stamp();q._read(self.root,self.operation)
         if self.expired() or self.receipt['scientific_authorization']!=budget.authorization_revision(self.root):
             raise ValueError('Current finite host recovery admission expired or ceiling changed')
@@ -613,7 +673,11 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
     root=Path(root).resolve();job,_,seal,sha=history._source(root,step)
     if job['role']!='W' or not e.ID.fullmatch(call_id):raise ValueError('Exact sealed W and original call required')
     allocation=q._ref(root,root/'execution-authority/calls'/call_id/'allocation.json')
-    row=verify_pending_set(root,seal,allocation,require_complete=False)
+    pending=verify_pending_set(root,seal,require_complete=False)
+    matches=[row for row in pending['allocations'] if row['allocation']==allocation]
+    if len(matches)!=1:
+        raise ValueError('Original pending execution set is incomplete or has no exact allocation')
+    row=matches[0]
     original=q._read(root,allocation)
     attempt=original['binding']['native_attempt']['number']
     config=c.read(c.regular(execution.record(root,step,attempt)/'experiment-config.json'))
@@ -626,7 +690,11 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
             observed=e.Records(config).directory(call_id)/'execution-observation.json'
             if observed.exists():e._cleanup_terminal_code_export(config,call_id,c.read(observed))
         return dict(status='execution_resume_recorded',call_id=call_id,note='Verified original terminal fact is already retained; no dispatch occurred.')
-    operation=_RecoveryAdmission(root,job,seal,sha,allocation,config,max_seconds=max_seconds,note=authorization_note,valid_seconds=request_valid_seconds)
+    # Accepted/uncertain reentry remains query-only. Only a fresh preparation
+    # needs current sealed-writer exclusion; cold validators never probe PIDs.
+    writers=_resume_writers(root,job,pending) if prior is None and row['disposition']=='unprepared' else ()
+    _observe_resume_writers(writers)
+    operation=_RecoveryAdmission(root,job,seal,sha,allocation,config,max_seconds=max_seconds,note=authorization_note,valid_seconds=request_valid_seconds,writers=writers)
     if budget.execution_blocked(root,include_managed=False,ignore_recovery=(step,call_id)):
         raise ValueError('Another live or unknown original owner blocks host recovery')
     records=e.Records(config)
@@ -658,6 +726,7 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
         identity=original['binding']['payload_alias'];q._check(identity)
         descriptor=e.LocalFileDescriptor(name=call_id,local_path=identity['path'],size_bytes=identity['size_bytes'],media_type='application/json')
         try:
+            operation.check()
             prepared=adapter.prepare(descriptor,preparation_profile='research_loop.v1',exchange_directory=records.root)
         except authority.AuthorityRequired as error:
             return error.feedback
@@ -671,7 +740,9 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
             recovery_binding=binding if config.get('research_strategy_version')==3 else None,operation_context=operation.context)
         row=c.accept_recovery_call(root,job,call_id,context=operation.context)
         _publish(root,job,operation.base,adapter,row=row,query=False,context=operation.context)
+        operation.check()
         adapter.dispatch_lease(accepted)
+        operation.check()
         external,state=adapter.submit(prepared);records.bind_external(call_id,external,state)
         prior=operation.base
     # Reentry only queries original accepted/prepared identity. submit is never retried.

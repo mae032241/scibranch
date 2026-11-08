@@ -28,6 +28,7 @@ ROOT_FILES = (
     "conftest.py",
     "pyproject.toml",
     "research.example.toml",
+    "research.pi.example.toml",
 )
 
 SOURCE_TREES = (

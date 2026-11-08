@@ -25,7 +25,7 @@ There is no LLM Root, MCP scheduling service or background Root daemon.
 The core exposes the thin CLI and instance UI; the old CLI/MCP/UI, Root host,
 platform-profile generator and legacy systemd deployment are retired.
 
-`research_config.py` owns the shared TOML, CLI and host preparation, defaulting and validation path. New instances freeze effective settings; editing a declaration does not amend an existing instance. `backends.py` separates Codex and explicit protocol transport from scientific judgment, budgets and execution authority. Protocol permissions are launcher hints, not isolation; native resume and complete authorship attestation are unsupported, so formal independent review is unavailable. Enabling subagents also establishes neither complete authorship nor complete usage. See the [configuration and backend reference](RESEARCH_CONFIGURATION.md).
+`research_config.py` owns the shared TOML, CLI and host preparation, defaulting and validation path. New instances freeze effective settings; editing a declaration does not amend an existing instance. `backends.py` separates Codex, explicit protocol transport and experimental Pi from scientific judgment, budgets and execution authority. Protocol permissions are launcher hints, not isolation; native resume and complete authorship attestation are unsupported, so formal independent review is unavailable. Enabling subagents also establishes neither complete authorship nor complete usage. See the [configuration and backend reference](RESEARCH_CONFIGURATION.md).
 
 Each native backend implements the complete `Backend` abstract class. Preparation,
 profile and permission projection, launch/resume, observations, terminal evidence,
@@ -37,8 +37,122 @@ tool/input bodies; complete assistant final bytes are streamed separately from t
 bounded public preview. Host clocks, scientific decisions and managed experiment
 adapters retain their existing owners.
 
+**Experimental Pi — common research path.** Pi implements the same `Backend`
+boundary, not Codex/protocol inheritance or a separate workflow. Ordinary H/W/A/E,
+current response schemas, root-scoped Local execution, declared projects, selected
+Skills and historical-task forks use their existing common owners. The profile
+requires an exact `provider/model-id` and explicit supported thinking level
+(`reasoning_effort`), with one configured executable (default `pi`), no arguments,
+model substitution or thinking clamp. `service_tier`, Codex-native options and a
+native response-schema flag are unsupported. Scientific JSON is model-authored:
+Pi receives the current schema in the prompt, not a provider JSON-mode guarantee.
+
+New Pi preparations default to Local and a finite `pi_rpc_v1`, turn-scoped resume
+policy: `max_attempts=2`, `output_repair=true`, `output_only=true`,
+`execution_wake=true`. This is not Codex's default automatic-recovery policy.
+The shared preparation cadence still freezes same-session W fragments with
+`max_context_windows=1` and finite all-role node targets from the original global
+ceilings when none are supplied. Explicit policies keep their own common gates;
+Pi no longer blanket-vetoes common scientific policies. Accepting a declaration
+is neither formal qualification nor an execution grant.
+
+New supported Pi preparations freeze controlled single-native-session authorship
+support. Actual retained launch/resource and observer-source/start proof, accepted
+prompt and persisted session contributions, terminal delivery and stopped-writer
+process/prefix evidence establish the participant; a session label alone does not.
+The SDK session is the stable author across repair/resume, so a new attempt cannot
+make that actor an independent reviewer. Under its explicit frozen review policy,
+the existing formal A workflow can qualify only the exact subject with complete
+author and reviewer evidence, disjoint participants and a sealed `pass`. Formal A
+uses the ordinary native lifecycle, declared permissions and read-only exact-subject
+inputs, not the auxiliary tool-less read-only service. Retained
+authorship/review validation does not reopen live native sessions and remains
+usable after private-home deletion and through framework historical-task forks,
+including nested forks. Frozen false capabilities and old unsupported receipts
+retain their original meaning. This proof covers actual controlled native
+participants, not arbitrary shell activity; same-user access remains a trusted
+soft boundary. None of this automatically supplies a verdict, execution permission
+or scientific-study
+qualification. Stronger NoNetwork and tool-less auxiliary read-only calls remain
+unsupported; ordinary read-only scientific tasks are a distinct supported profile.
+This integration claims neither complete scientific qualification nor backend parity.
+
+All four permission fields must be explicit: `workspace=read-only` or
+`workspace-write`, `network=true`, `web=disabled`, `subagents=false`.
+Default/implied Local and declared projects require `workspace-write` before
+preparation effects; read-only requires explicit external mode. Linux mounts are
+mandatory, without an unsandboxed fallback. The framework-owned workspace top
+level stays read-only, including absent publication names. Workspace-write opens
+`work/`, `artifacts/`, `experiments/`, the current W code draft and declared project
+slots, not arbitrary workspace or host output paths. Exact originals, metadata,
+live Skill sources and their known aliases are protected by final read-only
+overlays. Published controls inside `work/` are read-only; mounts cannot reserve
+absent names inside that writable slot. Inherited `HOME`, `PI_CODING_AGENT_DIR` and
+authentication remain unchanged for Native only; narrow auth/runtime and private
+session write exceptions do not open the whole home. The existing Local child
+receives an empty scientific HOME, limited runtime and no native auth/session or
+control storage. Pi's Local projection requires no Codex binary. Same-user
+processes remain trusted: this is not a confidentiality or hostile-worker boundary.
+
+Skill schema v3 freezes selection and installation source bindings, not copied
+assets or a hash registry. Explicit live `SKILL.md` sources must appear exactly in
+native `get_commands`, with valid native-parsed frontmatter and original-source
+provenance before each invocation's sole prompt; Python metadata parsing alone
+is not proof of native loading. Selected assets and workspace inode aliases remain
+read-only. Exact source-original overlays are applied after write grants, including
+the native auth-directory exception. Automatic context/resource discovery is filtered; arbitrary user extensions are
+unsupported in this profile because hooks can change tools, permissions or model
+calls, not because Native cannot load extensions. Only the known read-only internal
+observer is admitted by exact native command-source proof and private startup
+framing; it adds no tool, model call, second prompt or continuation.
+
+Here `<agent-dir>` is the inherited `PI_CODING_AGENT_DIR`, or `$HOME/.pi/agent`
+when unset; `<workspace>` is the exact scientific task workspace. Before native
+startup, both `<agent-dir>/settings.json` and `<workspace>/.pi/settings.json` must
+have absent/empty `packages` and no custom `npmCommand`.
+The four prompt candidates must be absent: `<agent-dir>/SYSTEM.md`,
+`<agent-dir>/APPEND_SYSTEM.md`, `<workspace>/.pi/SYSTEM.md` and
+`<workspace>/.pi/APPEND_SYSTEM.md`. `--no-context-files` does not suppress these
+hidden prompt sources, and offline mode does not disable package resolution.
+No user configuration or authentication is edited or copied. `PI_OFFLINE` governs
+automatic resource fetch/catalog activity; explicit provider and bash network
+access remain allowed. Disabling web plugins is not network isolation.
+
+Qualified metadata binds the actual persisted native user-entry ID, exact session,
+current window and freshness. Completed compactions use a unique new append after
+the saved cursor, not an old entry with equal summary text. Session resume retains
+window counts and deduplicates accepted events. Current occupancy remains an SDK
+estimate, not exact token occupancy or cumulative billing; native null after
+compaction stays unavailable until new usage. Exhaustive `native_calls` remains
+unsupported: SDK auxiliary summarization, retries and warming have incomplete
+receipts. Persisted response receipts are only a lower bound; optional caller
+policies cannot treat them as complete counts. Native IDs, private paths and
+nonces never enter public numeric telemetry or scientific evidence.
+
+Required metadata delivery synchronously completes the parent control callback's
+existing budget/review/admission publication before acknowledgement. Dropped,
+late, spoofed or timed-out metadata stops required-policy work; later success
+cannot erase the fault. Advice is independent: bounded existing reminders append
+at most 200 UTF-8 bytes to a naturally occurring top-level tool result, once per
+notice kind per logical node across resumes, preserving the original result,
+error, details and usage without another LLM turn. Read-only marker failures
+honestly leave advice unavailable; they do not qualify or invalidate metadata.
+
+Each RPC invocation verifies the exact model/thinking before its sole prompt.
+Completion requires idle settlement, RPC drain, clean process exit and group
+cleanup. Original final UTF-8 bytes, including whitespace, fences and malformed
+JSON, remain intact; required output uses the common finite repair path. Post-exit
+billing reconciliation is unconditional and separate from metadata success,
+retaining auxiliary usage, lower bounds and unknown coverage rather than context
+estimates or zero. Exact-session repair/wake/recovery retains all previous spend
+and windows. Corrupt or migrated originals and unaccounted appends refuse before
+new effects; a dead PID proves no permission to replay. Unknown external effects,
+including `caller.unknown`, require same-call reconciliation, never resubmission.
+See the [Pi configuration and example](RESEARCH_CONFIGURATION.md#experimental-pi--common-research-path--实验性-pi公共研究路径).
+
 Ordinary scientific responses require only summary, scientific_result and limitations,
-plus H/A next_action and route_reason or W stage_intent. Standard Codex requests JSON
+plus H/A next_action and route_reason or W stage_intent. Under v3, W's `revise_h`
+and `review` also require a concrete nonblank `consultation_question`. Standard Codex requests JSON
 in the prompt; local validation checks required fields and the explicit control choices
 actually consumed. Output repair names the exact role, JSON path and expected
 shape, preserving unrelated scientific content. Other scientific content stays open, without nested optional-field
@@ -91,8 +205,8 @@ batches, new mechanisms and context renewal do not require A. Breadth is reconsi
 when it can change the research decision, without a mandatory full comparison cycle.
 
 New preparations freeze `research_strategy_version=3` and start with W. W can
-begin discovery with no candidate or mature hypothesis. Before a managed batch it
-declares a stable mechanism and `experiment_question={question,change_criterion}`
+begin discovery with no candidate or mature hypothesis. During ordinary research,
+before a managed batch it declares a stable mechanism and `experiment_question={question,change_criterion}`
 through `--research JSON`:
 what it wants to learn and what observations would change the next step. Discovery,
 representation search and implementation or optimizer diagnosis are valid purposes.
@@ -125,8 +239,8 @@ it does not manufacture defects, mandatory experiments or proof obligations.
 evidence request still requires a concrete question and change criterion; repeated
 completed requests without new originals retain their existing guard.
 
-An ordinary A's `deliver` or `finish` requests Final A; it does not authorize
-submission. With original budget remaining, v2/v3 W's voluntary `decision` or an
+Under strategies v1/v2/v3, an ordinary A's `deliver` or `finish` requests Final A;
+it does not authorize submission. With original budget remaining, v2/v3 W's voluntary `decision` or an
 ordinary A's closeout request first
 requests one pre-delivery Final A before irreversible final lock. That same A may
 accept exact `deliver`, reject every candidate with `finish` and no recommendation,
@@ -172,12 +286,13 @@ mechanical publication, without manufacturing scientific judgments or making mod
 repeat hash inventories. Workers retain ordinary scientific files; exact identity
 and declared sizes remain privately bound by the existing host contract.
 
-New standard single-command Codex preparations default to same-session W fragments
+New standard single-command Codex and supported Pi preparations default to same-session W fragments
 with `worker_fragment_policy.max_context_windows=1`; TOML
 `policies.worker_context_windows` accepts 1 or 2. `stage_intent=continue` keeps the
 same logical W job and cumulative allowance. `handoff` seals the current result
 and starts a new W; `revise_h` asks H for consultation and `review` asks A for
-reflection. Under strategy v2/v3, W uses `decision` for pre-delivery Final A; frozen
+reflection. Under v3, both consultation routes require a concrete nonblank
+`consultation_question`. Under strategy v2/v3, W uses `decision` for pre-delivery Final A; frozen
 strategy v1 requests protected Final A directly, while unmarked legacy W uses it for ordinary A
 assessment. Consultation is a
 serial job with `purpose=worker_consultation` and an exact W return binding. Its
@@ -193,9 +308,10 @@ boundary and hands it to a new W; this boundary alone does not request A. New ca
 pause while querying, collecting and reconciling original calls remain available.
 Fresh current-thread/turn occupancy is optional early advice: at 85% of the final
 allowed window W is asked to prepare a safe checkpoint. This does not replace the
-completed-compaction gate. Missing or stale occupancy adds no stop. The existing native
+completed-compaction gate. Missing or stale occupancy adds no stop. For standard Codex, the existing native
 helper receives small control facts through required `PostCompact` and
-`PostModelRequest` hooks and bounded assistant text on native stdout. It does not
+`PostModelRequest` hooks and bounded assistant text on native stdout. Pi supplies
+persisted-boundary metadata through its controlled observer described above. It does not
 observe tool/input/output bodies or scan private rollout files. Required hooks
 that are unavailable produce an explicit unsupported result before launch, rather
 than repeated fresh W attempts with unknown coverage. These are capabilities of
@@ -422,7 +538,9 @@ available for a decision-changing comparison, without mandatory reranking; the
 sealed W declaration is unchanged and no new experiment is implied. Tasks without H search commitments
 do not invent mechanism coverage.
 
-Protocol 33 H `search_plan.focus` uses `{"index": 1, "action": "screen"}`:
+The frozen v1/v2 and unmarked legacy catalog routes retain the following
+`search_plan` contract; this is not v3 ordinary research's live `--research JSON`
+interface. Protocol 33 H `search_plan.focus` uses `{"index": 1, "action": "screen"}`:
 `index` is a 1-based integer selecting the same payload's `commitments`. An H
 `experiment` needs a top-level `search_plan` and explicit focus when no authorized,
 nonwaived focus is retained; a plan nested only in scientific prose does not supply
@@ -435,8 +553,9 @@ omitted focus still retains an existing authorized focus. A revision selects an 
 its commitment with the canonical `existing_ref`; omitted commitments retain the prior breadth. Control
 assigns stable references such as `h001.m1` independently of UI sorting. Subsequent
 W `mechanism_findings[].mechanism` uses those exact canonical references; A
-may cite them in its judgment without selecting the next research focus. W `--mechanism` takes the positive decimal number from the
-frozen task catalog; control binds it to the exact mechanism and its H/W source. Display
+may cite them in its judgment without selecting the next research focus. Catalog-bound W
+and v3 bounded delivery correction use `--mechanism N`, taking the positive decimal
+number from the frozen task catalog; control binds it to the exact mechanism and its H/W source. Display
 labels never resolve identities. Refusals expose the fixed public reason and
 available numbers from the same admission calculation.
 
@@ -456,10 +575,13 @@ explanations and distinguishing work; control does not classify scientific merit
 A's requested assessment concerns the original scientific goal and a concrete
 candidate or claim. A may return a bounded decision-changing gap; W chooses how to
 resolve it. H consultation can reconsider explanations without proving the old route
-impossible. W may declare new mechanisms in its existing `search_plan`; a following W
-freezes the new catalog before executing them. This handoff does not require H/A.
-Local algorithm and representation adaptations remain W work. A requested assessment
-preserves W's exact question and factual missing/blocked evidence; merely choosing
+impossible. On frozen v1/v2 and unmarked legacy catalog routes, W may declare new
+mechanisms in its existing `search_plan`; a following W freezes the new catalog
+before executing them, without requiring H/A. V3 ordinary research instead declares
+or revises mechanisms through `--research JSON` in the same session, without a W
+handoff. Bounded delivery correction retains its frozen catalog and permits no new
+live declarations. Local algorithm and representation adaptations remain W work.
+A requested assessment preserves W's exact question and factual missing/blocked evidence; merely choosing
 `stage_intent=decision` does not mark observed work incomplete or confer qualification.
 
 Custom and prepared role literals stay frozen. Purpose-specific task rules are sent
@@ -520,11 +642,11 @@ Ordinary W guidance favors incremental implementation and validation, sizing the
 
 H offers revisable scientific mechanisms and method suggestions, without making a provisional method an extra boundary against W revision. W owns experimental design, implementation, parameters and batches within the original user/task constraints, frozen dispatch/catalog, explicit focus/evidence gaps and execution permissions; A proposes necessary result validation. A's `continue_w` identifies a scientific decision or evidence gap, except when scoped `continue_existing` explicitly retains the current work. Within that direction, W observes, runs experiments, compares and adjusts through a coherent exploration before independent A judgment. A single completed experiment, weak score or locally repairable issue does not require a role handoff. Existing reports and indexes carry local observations, counterevidence, unresolved combinations and questions with exact source locators, alongside reusable drivers/helpers and residuals. The next A or H checks how its previous decision actually changed the work and what the resulting evidence supports; no new report schema is required.
 
-Each next batch addresses an unresolved judgment with a discriminator and outcomes that could change the next step. W may continue, seal a handoff to a new W, or request H/A consultation as needed; a mechanism or scope change does not require A first. When ready for an ordinary stage assessment or finite closure, W requests `decision` with explicit limitations. Final judgment remains with independent A. Remaining token/time and suggested downstream A needs guide planning without adding quotas or reserves. Token and time targets guide current-batch closeout; the context-window policy seals the current partial result and starts a new W at its observable boundary. Saved legacy policies without that field retain their original time review cadence. Actual execution limits and consumed budgets remain binding.
+Each next batch addresses an unresolved judgment with a discriminator and outcomes that could change the next step. W may continue, seal a handoff to a new W, or request H/A consultation as needed; a mechanism or scope change does not require A first. When ready for finite closure, W requests `decision` with explicit limitations: v2/v3 requests pre-delivery Final A, frozen v1 directly enters protected Final A, and only unmarked legacy W requests ordinary stage assessment. Final judgment remains with independent A. Remaining token/time and suggested downstream A needs guide planning without adding quotas or reserves. Token and time targets guide current-batch closeout; the context-window policy seals the current partial result and starts a new W at its observable boundary. Saved legacy policies without that field retain their original time review cadence. Actual execution limits and consumed budgets remain binding.
 
 Initial `screen` fairly compares plausible mechanisms through informative shallow checks. Unresolved alternatives remain explicit while W chooses discriminating follow-ups within the frozen focus and original task constraints, without requiring every alternative to be resolved before deepening. Ordinary `improve` concentrates on one scientific mechanism, rather than an algorithm label, and does not end merely because a suggested comparison is complete. `validate` stops when its assigned gap is resolved or blocked, and `repair` stays bound to the exact retained scientific observation; neither expands into a new search. These work-unit definitions add no experiment quota or required reporting fields; user/task counts, stopping conditions and purpose-specific response contracts remain binding.
 
-Task navigation uses a direct parent conclusion as the primary reading route only when its frozen source seal matches the historical source. Its optional `history_alias` retains the alternate text-page route; the two representations describe the same scientific source, not necessarily identical bytes. Full historical pages and complete indexes remain available. Agents inspect JSON shapes and selected fields, analyze numerical arrays with their own local code, and reread missing or conflicting evidence as needed. Ordinary `decision` assessments and final judgment retain independent A; control does not author scientific summaries or impose a read-once limit.
+Task navigation uses a direct parent conclusion as the primary reading route only when its frozen source seal matches the historical source. Its optional `history_alias` retains the alternate text-page route; the two representations describe the same scientific source, not necessarily identical bytes. Full historical pages and complete indexes remain available. Agents inspect JSON shapes and selected fields, analyze numerical arrays with their own local code, and reread missing or conflicting evidence as needed. The ordinary assessment or Final A requested by `decision` under the frozen strategy retains independent A; control does not author scientific summaries or impose a read-once limit.
 
 Historical index entries identify retained originals; they do not mount every artifact into the current task. All ordinary roles can return `implementation_selection` with exact listed artifact IDs from their frozen history. Control accepts the selection after the turn and binds those originals to the next task. Select needed originals before requesting E; E can select newly identified originals for its returning requester. Prose evidence requests do not select inputs. Private execution records are outside this scientific artifact interface. Execution commands address the current W's call records; a scope refusal describes the operation request, without changing the original call's known or unknown state.
 
@@ -686,8 +808,11 @@ registered Cov, Codex/namespace, replay/model, solver or SSH paths. Those paths 
 their own exact independent CLI evidence. Source changes establish neither scientific
 qualification nor a real sandbox guarantee.
 
-The default local command backend resolves the selected Codex installation's native
-binary and uses its sandbox with a restricted scientific subprocess file view. The
+The default local command backend consumes the selected provider's permission
+projection through the existing native execution bridge. Pi uses its Linux mount
+projection described above, without Codex configuration, binary or authentication.
+On the standard Codex path, it resolves that installation's native binary and uses
+its sandbox with a restricted scientific subprocess file view. The
 accepted Git code export is read-only at its logical scientific code directory;
 pre-Git calls retain their saved directory/script snapshot behavior. The backend
 receives runtime files, the scientific workspace and a task-native permission
@@ -696,7 +821,7 @@ originals or the submission slot. The native Worker
 and backend honor the same supported legacy `workspace-write` declaration, including
 declared network access and temporary-directory exclusions, interpreted equivalently
 for their respective working directories, `TMPDIR` values and namespaces. The
-native Worker retains `--sandbox workspace-write` and the captured legacy
+Codex native Worker retains `--sandbox workspace-write` and the captured legacy
 configuration overrides; only the backend sandbox uses an internal permission
 profile that expresses the same declaration in its namespace. This requires Linux,
 `bwrap` and a resolvable native Codex binary.
@@ -749,8 +874,9 @@ requires those directories to exist already.
 
 Run cwd may be the exact base root; the backend's internal permission policy
 retains the task-work cwd and adds only declared scratch/output writable targets.
-The native Worker retains its frozen Codex `workspace-write` policy with exact
-project targets projected into it. Unsupported native permission or launcher
+The native Worker retains its frozen provider policy with exact project targets
+projected into it: Codex `workspace-write` or Pi's supported workspace-write
+mount projection. Unsupported native permission or launcher
 configurations are rejected before launch rather than replaced. Network, web,
 subagent, Skill and authentication contracts remain unchanged. TCAD retains the
 self-contained implementation-JSON compiler/review/package path; DeckFiles and
@@ -934,8 +1060,8 @@ closes, A may request a small affordable comparison of complete procedures using
 shared conditions and useful repetitions. This advice adds no quota, score-based
 default or acceptance gate. Ordinary A assessments and non-protected closeout
 may reject all candidates or report missing comparisons with a finite conclusion.
-Protected FINAL uses existing evidence and its frozen response options. Strategy v2
-permits reject-all `finish` even with retained delivery sources; `deliver` requires
+Protected FINAL uses existing evidence and its frozen response options. Strategies v2/v3
+permit reject-all `finish` with no recommendation even with retained delivery sources; `deliver` requires
 an exact candidate reference. Frozen v1/unmarked final contracts retain their original
 menu: retained delivery-source items require `deliver`, otherwise `finish`.
 These options do not waive original,
@@ -997,23 +1123,31 @@ Parent `inputs/parents/<step>/conclusion.json` may alias those raw authored byte
 including a BOM or fence. Programmatic consumers must use the same narrow scientific
 parser rather than assume a directly readable JSON document.
 
-Standard single-command `codex` CLI preparation freezes up to two output-only
-repairs or original managed-execution wakes and a separate bounded automatic-recovery
-policy by default, binding the original native home privately so configuration,
+Standard single-command `codex` CLI preparation freezes up to two same-task
+output-only repairs, a separate bounded automatic-recovery policy and ordinary W
+fragments by default, binding the original native home privately so configuration,
 authentication and permissions remain unchanged. It freezes the absolute invoked
 launcher and its target without replacing invocation symlinks. If no node policy
 was supplied, per-role soft targets reference the original global ceilings; they
 allocate nothing. Explicit policies override this default, including disabling
-repair; custom launchers and direct controller API calls remain explicit. This
-default freezes `execution_wake: true` as a narrow exception to `output_only`.
+repair; custom launchers and direct controller API calls remain explicit.
+Ordinary managed-execution wake uses the independent `execution_wake: true`
+full-W-task permission, also supplied by the supported Pi defaults above.
 When W normally returns scientific JSON while an original managed call is still
-pending, control retains an unsealed waiting checkpoint and monitors that call
-without a native turn. Only verified terminal facts for those exact calls may
-resume the same W session to interpret results and finalize its response. The
-host rejects new managed calls during this narrow wake, including through an old
-client; ordinary same-user shell access remains a soft boundary. The exception
-shares the original finite attempt limit, cumulative budget, permissions and
-home/session. It grants no failed-task retry, work-repair or fragment continuation.
+pending/running, control retains an unsealed waiting checkpoint and monitors that
+call without a native turn. Only verified terminal facts for those exact calls
+may resume the same W session. W first consumes the original results and may then
+submit new useful calls within the original task scope, permissions, budgets and
+normal admission gates. At its frozen context boundary, W instead seals the
+partial result and hands off to a new W before starting another batch.
+Ordinary execution wakes and fragments use their separate full-task permissions;
+neither consumes output-repair attempts. Cumulative shared budgets, existing step
+limits, permissions and original home/session/context bindings remain checked.
+An output-repair turn still prohibits new experiments. Author closeout, FINAL and
+other restricted tasks retain their own scope; ordinary wake grants no failed-task
+retry or scientific work repair. Native same-user shell access remains a soft
+boundary. Transport completion grants neither execution permission nor scientific
+qualification.
 Old frozen output-only policies without the flag gain no wake permission; explicit
 full-resume policies retain their existing wake behavior unless explicitly disabled.
 The W task reports frozen wake permission and normal pending-call handoff instructions;
@@ -1081,9 +1215,9 @@ uses the same session, task and retained observations, binds the original respon
 outcome and evidence snapshot, and consumes `max_continues`. Missing required format or
 conditional breadth declarations use narrow output repair; a repaired valid response
 may then need this independently authorized work continuation. Valid partial findings,
-explicit scientific blocks and partial findings retain the declared stage intent;
-Strategy v1 `decision` requests protected Final A; an unmarked legacy W requests
-ordinary A assessment.
+explicit scientific blocks and partial findings retain the declared stage intent.
+Under strategies v2/v3, `decision` requests pre-delivery Final A; frozen v1 directly
+requests protected Final A, while an unmarked legacy W requests ordinary A assessment.
 A final typed caller rejection of a run or compile request can reopen unfinished
 work in the same task/session under the existing automatic policy, including
 improve and no-search work. An unknown command is returned verbatim for the author
@@ -1624,8 +1758,9 @@ bindings are rejected before reading their assets; no compatibility reader,
 per-instance freezing hook or migration is provided. Current forks retain the
 installation source and exact selection without copying Skill bytes.
 
-This selection does not suppress native user/system/plugin Skill sources or change
-declared native permissions. Scientific backend subprocesses receive no Skill
+On Codex this selection does not suppress native user/system/plugin Skill sources.
+Pi instead admits only its exact explicit selected manuals and controlled observer
+under the resource profile described above. Neither changes declared native permissions. Scientific backend subprocesses receive no Skill
 mounts. Standard Codex retains its frozen native home and authentication. The
 Cov adapter no longer supplies a dedicated native launcher or auth-copy path.
 Read-only mounts remain a soft boundary for trusted same-user processes. See

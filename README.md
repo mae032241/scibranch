@@ -70,7 +70,9 @@ optional plugins, update and removal.
 
 ## Start a research instance
 
-Copy [research.example.toml](research.example.toml) to `research.toml`. Declare an
+Copy [research.example.toml](research.example.toml) (Codex) or
+[research.pi.example.toml](research.pi.example.toml) (Pi's explicit supported profile)
+to `research.toml`. Declare an
 objective, exact public inputs, backend permissions and finite budgets, and create
 the files named by that declaration. Then validate and prepare it:
 
@@ -84,7 +86,12 @@ scid-research start --root /absolute/path/to/research-instance
 Use the exact instance root created by `prepare`. Configuration changes affect new
 instances; existing instances retain their frozen settings. The
 [configuration reference](docs/RESEARCH_CONFIGURATION.md) describes backend,
-permission, budget and Skill selection. The [CLI guide](docs/ROOTLESS_CLI.zh-CN.md)
+permission, budget and Skill selection. New supported Pi preparations can retain
+controlled single-native-session authorship and use the existing exact-subject
+formal independent-review workflow: complete author and reviewer evidence,
+disjoint participants and a sealed `pass` are required. This is not automatic
+scientific approval or execution permission; older frozen unsupported capabilities
+and receipts remain unsupported. The [CLI guide](docs/ROOTLESS_CLI.zh-CN.md)
 covers results, UI, pause/continue, historical task forks and recovery.
 
 The core includes `local_execution:command`. Select optional Cov execution with

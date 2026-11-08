@@ -247,6 +247,15 @@ def normalize(options, *, frozen_skill_selection=None):
         if result.get(name) is None:result[name]=copy.deepcopy(default)
     if result.get('model') is None:
         raise ValueError('The selected backend requires an explicit model')
+    launcher = result.get('launcher')
+    if launcher is None:
+        launcher = provider.default_launcher()
+        result['launcher'] = launcher
+    # Provider admission sees every explicit policy/profile before plugin or
+    # filesystem preparation. Never discard a policy to fit a narrower backend.
+    provider.validate_declaration(result)
+    backend = backends.selected(dict(result, native_backend=backend_name,
+        native_launcher_argv=launcher))
     result.setdefault('search_policy', copy.deepcopy(search.DEFAULT_POLICY))
     for name in ('root', 'objective', 'public_root'):
         if name not in result:
@@ -302,12 +311,6 @@ def normalize(options, *, frozen_skill_selection=None):
                     if key in selected_adapter and selected_adapter[key]!=value:
                         raise ValueError('Explicit delivery adapter conflicts with the selected execution provider')
                     selected_adapter.setdefault(key,copy.deepcopy(value))
-    launcher = result.get('launcher')
-    if launcher is None:
-        launcher=provider.default_launcher()
-        result['launcher']=launcher
-    backend=backends.selected(dict(native_backend=backend_name,
-        native_launcher_argv=launcher,native_options=result['native_options']))
     cadence=backend.supports_resume and backend.default_experiment_mode()=='local'
     if (cadence and result.get('node_budget_policy') is None
             and any(key in result and result[key] is None for key in ('max_tokens', 'max_seconds'))):

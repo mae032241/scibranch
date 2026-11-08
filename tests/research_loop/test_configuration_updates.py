@@ -6,8 +6,10 @@ import threading
 
 import pytest
 
-from scidiscovery.research_loop import budget, configuration_updates as updates, contracts as c, controller, history, research_config
+from scidiscovery.research_loop import atomic_files, budget, configuration_updates as updates, contracts as c, controller, history, research_config
+from test_history_handoff import finish
 from test_composed_execution_results import composed_registry
+from execution_fixtures import execution_registry
 
 
 def instance(tmp_path):
@@ -28,6 +30,12 @@ def edit(root, **agent):
     return updates.submit(root, document, expected_revision=state['revision'])
 
 
+def accounting_events(root):
+    """Explicit audit of accounting originals, excluding new-node control facts."""
+    events, _ = budget.audit_events(root)
+    return [event for event in events if event['kind'] == 'budget_amend' or event['kind'].startswith('resource_')]
+
+
 def test_pending_revision_binds_only_new_jobs_and_keeps_original_bytes(tmp_path, monkeypatch):
     root = instance(tmp_path)
     monkeypatch.setattr(history, 'source_sequence', lambda *args, **kwargs: [])
@@ -37,12 +45,14 @@ def test_pending_revision_binds_only_new_jobs_and_keeps_original_bytes(tmp_path,
     saved = edit(root, model='new-model')
     assert saved['pending'] and saved['active_revision'] == 0
     assert updates.for_job(root, first)['model'] == 'original-model'
+    finish(root, 1, 'H', [])
     second = c.build_job(root, 2, 'H', [])
     assert updates.for_job(root, second)['model'] == 'new-model'
     assert updates.status(root)['active_revision'] == 1
     assert c.build_job(root, 1, 'H', []) == first
     assert (root / 'jobs/001.json').read_bytes() == first_bytes
     assert (root / 'settings.json').read_bytes() == base
+    finish(root, 2, 'H', [])
     third = c.build_job(root, 3, 'H', [])
     assert third['configuration_revision'] == second['configuration_revision']
 
@@ -100,9 +110,9 @@ def test_automatic_recovery_edit_binds_new_nodes_and_preserves_original_policy_a
     prior_policy = copy.deepcopy(updates.for_job(root, first)['resume_policy'])
     assert 'automatic_recovery' not in prior_policy
     budget._amend_locked(root, max_tokens=12000, authorization_note='Existing allowance before recovery-policy edit')
-    meter = root / 'control-ledger/000001.json'
+    meter = root / budget.authorization_revision(root)['path']
     originals[meter] = meter.read_bytes()
-    events = budget._events(root)[0]
+    events = accounting_events(root)
     document = updates.status(root)['configuration']
     automatic = native_recovery.policy(dict(max_retries=1, max_wait_seconds=600))
     document['policies']['resume']['automatic_recovery'] = automatic
@@ -111,9 +121,10 @@ def test_automatic_recovery_edit_binds_new_nodes_and_preserves_original_policy_a
     assert updates.for_job(root, first)['resume_policy'] == prior_policy
     assert updates.for_new_job(root, 2)['resume_policy']['automatic_recovery'] == automatic
     assert saved['configuration']['policies']['resume']['automatic_recovery'] == automatic
+    finish(root, 1, 'H', [])
     second = c.build_job(root, 2, 'H', [])
     assert updates.for_job(root, second)['resume_policy']['automatic_recovery'] == automatic
-    assert budget._events(root)[0] == events
+    assert accounting_events(root) == events
     assert all(path.read_bytes() == data for path, data in originals.items())
     # Removing the independent grant is explicit and applies only to a new node.
     state = updates.status(root)
@@ -156,7 +167,7 @@ def test_bound_history_does_not_depend_on_future_pending_integrity(tmp_path):
     latest.chmod(0o600)
     latest.write_text('{}')
     assert updates.for_job(root, {'configuration_revision': ref})['model'] == 'one'
-    with pytest.raises(ValueError, match='original changed'):
+    with pytest.raises(ValueError, match='Configuration revision is missing or changed'):
         updates.current(root)
 
 
@@ -211,11 +222,11 @@ def test_pending_budget_change_rejects_later_authorization_even_when_values_matc
     budget._amend_locked(root, max_tokens=14000, authorization_note='Independent newer allowance')
     if final_tokens != 14000:
         budget._amend_locked(root, max_tokens=final_tokens, authorization_note='Explicit later amount')
-    events, _ = budget._events(root, c.settings(root))
+    events, _ = budget.audit_events(root)
     with pytest.raises(ValueError, match='budget conflicts.*reload'):
         updates.bind_new_job(root, 1)
     assert budget.ceilings(root)['max_tokens'] == final_tokens
-    assert budget._events(root, c.settings(root))[0] == events
+    assert budget.audit_events(root)[0] == events
     assert updates.revisions(root)[0] == original
     assert not (root / 'host-control/configuration/bindings/000001.json').exists()
 
@@ -272,23 +283,23 @@ def test_budget_bind_retry_recognizes_own_applied_operation_before_later_cli_cha
     document = updates.status(root)['configuration']
     document['budget']['max_tokens'] = 12000
     updates.submit(root, document, authorization_note='Queued budget allowance')
-    original_write = c.write
+    original_publish = atomic_files.publish_bytes
 
-    def interrupted_binding(path, value):
+    def interrupted_binding(path, payload, **options):
         if path.parent.name == 'bindings':
             raise InterruptedError('Crash after amendment before binding')
-        return original_write(path, value)
+        return original_publish(path, payload, **options)
 
     with monkeypatch.context() as patch:
-        patch.setattr(c, 'write', interrupted_binding)
+        patch.setattr(atomic_files, 'publish_bytes', interrupted_binding)
         with pytest.raises(InterruptedError):
             updates.bind_new_job(root, 1)
     assert budget.ceilings(root)['max_tokens'] == 12000
     budget._amend_locked(root, max_tokens=14000, authorization_note='Later CLI ceiling')
-    events, _ = budget._events(root, c.settings(root))
+    events, _ = budget.audit_events(root)
     updates.bind_new_job(root, 1)
     assert budget.ceilings(root)['max_tokens'] == 14000
-    assert budget._events(root, c.settings(root))[0] == events
+    assert budget.audit_events(root)[0] == events
     assert len([event for event in events if event.get('operation_id') == 'configuration-1']) == 1
 
 
@@ -322,12 +333,16 @@ def test_current_policy_read_does_not_read_budget_or_results(tmp_path, monkeypat
 def test_configuration_limits_reject_changed_amendment_predecessor(tmp_path):
     root = instance(tmp_path)
     budget.amend(root, max_tokens=12000, authorization_note='Allow another comparison')
-    path = root / 'control-ledger/000001.json'
+    before = updates.status(root)
+    path = root / budget.authorization_revision(root)['path']
     event = c.read(path)
     event['before']['max_tokens'] += 1
     c.write(path, event)
+    # Ordinary status consumes accepted ceilings, not a replay of its prefix.
+    assert updates.status(root) == before
+    events, _ = budget.audit_events(root)
     with pytest.raises(ValueError, match='Budget amendment predecessor changed'):
-        updates.status(root)
+        budget._ceiling_limits(c.settings(root), events)
 
 
 def test_paused_step_boundary_does_not_apply_queued_configuration(tmp_path):
@@ -369,11 +384,11 @@ def resource_instance(tmp_path, *, enabled):
 def test_model_only_revision_preserves_existing_execution_resource_grant(tmp_path):
     root = resource_instance(tmp_path, enabled=True)
     original = budget.execution_grant(root)
-    events, _ = budget._events(root, c.settings(root))
+    events = accounting_events(root)
     edit(root, model='new-model')
     updates.bind_new_job(root, 1)
     assert budget.execution_grant(root) == original
-    assert budget._events(root, c.settings(root))[0] == events
+    assert accounting_events(root) == events
 
 
 def test_first_resource_enable_uses_revision_origin_and_retains_grant_when_disabled(tmp_path):
@@ -396,11 +411,11 @@ def test_model_only_edit_preserves_separate_execution_resource_amendment(tmp_pat
     budget.execution_grant(root)
     revised = budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=20000),
                                            authorization_note='Increase cumulative execution allowance')
-    events, _ = budget._events(root, c.settings(root))
+    events = accounting_events(root)
     edit(root, model='changed')
     updates.bind_new_job(root, 1)
     assert budget.execution_grant(root) == revised
-    assert budget._events(root, c.settings(root))[0] == events
+    assert accounting_events(root) == events
 
 
 @pytest.mark.parametrize('final_wall', [100, 120, 150])
@@ -416,12 +431,12 @@ def test_resource_conflict_is_detected_before_any_queued_budget_change(tmp_path,
     if final_wall != 150:
         budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=final_wall, max_storage_bytes=10000),
             authorization_note='Explicit subsequent resource amount')
-    events, _ = budget._events(root, c.settings(root))
+    events, _ = budget.audit_events(root)
     with pytest.raises(ValueError, match='execution resources conflict.*reload'):
         updates.bind_new_job(root, 1)
     assert budget.ceilings(root)['max_tokens'] == 10000
     assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == final_wall
-    assert budget._events(root, c.settings(root))[0] == events
+    assert budget.audit_events(root)[0] == events
     assert not (root / 'host-control/configuration/bindings/000001.json').exists()
 
 
@@ -431,21 +446,21 @@ def test_resource_bind_retry_uses_original_operation_after_later_grant_change(tm
     document = updates.status(root)['configuration']
     document['executor']['resource_policy']['allowance']['wall_time_seconds'] = 120
     updates.submit(root, document, authorization_note='Queued execution resource adjustment')
-    original_write = c.write
+    original_publish = atomic_files.publish_bytes
 
-    def interrupted_binding(path, value):
+    def interrupted_binding(path, payload, **options):
         if path.parent.name == 'bindings':
             raise InterruptedError('Crash after resource amendment before binding')
-        return original_write(path, value)
+        return original_publish(path, payload, **options)
 
     with monkeypatch.context() as patch:
-        patch.setattr(c, 'write', interrupted_binding)
+        patch.setattr(atomic_files, 'publish_bytes', interrupted_binding)
         with pytest.raises(InterruptedError):
             updates.bind_new_job(root, 1)
     assert budget.execution_grant(root)['allowance']['wall_time_seconds'] == 120
     revised = budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=150, max_storage_bytes=10000),
         authorization_note='Later independent resource adjustment')
-    events, _ = budget._events(root, c.settings(root))
+    events, _ = budget.audit_events(root)
     original_event = next(event for event in events if event.get('operation_id') == 'configuration-1-resources')
     replay = budget.amend_execution_grant(root, allowance=dict(wall_time_seconds=120, max_storage_bytes=10000),
         authorization_note='Queued execution resource adjustment', operation_id='configuration-1-resources')
@@ -455,7 +470,7 @@ def test_resource_bind_retry_uses_original_operation_after_later_grant_change(tm
             authorization_note='Cannot mutate an original operation', operation_id='configuration-1-resources')
     updates.bind_new_job(root, 1)
     assert budget.execution_grant(root) == revised
-    assert budget._events(root, c.settings(root))[0] == events
+    assert budget.audit_events(root)[0] == events
     assert len([event for event in events if event.get('operation_id') == 'configuration-1-resources']) == 1
 
 
@@ -477,7 +492,7 @@ def test_first_resource_seed_interruption_is_not_a_competing_authorization(tmp_p
             updates.bind_new_job(root, 1)
     assert budget.execution_grant(root)['allowance'] == document['executor']['resource_policy']['allowance']
     updates.bind_new_job(root, 1)
-    events, _ = budget._events(root, c.settings(root))
+    events, _ = budget.audit_events(root)
     grants = [event for event in events if event['kind'] == 'resource_grant']
     assert len(grants) == 2
     assert grants[0]['previous_grant'] is None

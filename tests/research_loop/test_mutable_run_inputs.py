@@ -1,6 +1,11 @@
-"""Selected W code binds Git versions before the first adapter effect."""
+"""Current W code binding and retained originals; no scientific qualification.
+
+fixed_code replaces only the Git boundary. Explicit process_e2e cases exercise
+real Git capture/export/readback, never a native launcher, model or solver.
+"""
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
@@ -8,10 +13,10 @@ import subprocess
 import pytest
 
 from execution_fixtures import execution_registry
-from test_worker_fragments import fragment
 from scidiscovery.operations.execution import AdapterCapability, LifecycleCapabilities, LocalFileDescriptor
-from scidiscovery.research_loop import (code_versions, contracts as c, experiment_client,
-    experiments as e, local_experiments, replay_check, shared_input_views, worker_execution_bridge)
+from scidiscovery.research_loop import (accepted_budget, code_versions, contracts as c,
+    controller, experiment_client, experiments as e, local_experiments, native,
+    replay_check, shared_input_views, worker_execution_bridge)
 from scidiscovery.research_loop.local_experiments import LocalExecution
 
 
@@ -30,9 +35,11 @@ def _prepare(config, source, *, directory=None, adapter=None):
     if adapter is None:
         adapter=LocalExecution({key:value for key,value in config.items() if key!='execution_interface'},
             frozen_interface=config['execution_interface'])
-    return e._prepare_descriptor(config,payload,adapter,records,
-        [path.name for path in records.calls()],command_options=options,_source_script=str(source),
-        client_facts=experiment_client.load_client_facts(config))
+    with records._preparation_lease():
+        return e._prepare_descriptor(config,payload,adapter,records,
+            [path.name for path in records.calls()],mechanism=_research(config),
+            command_options=options,_source_script=str(source),
+            client_facts=experiment_client.load_client_facts(config))
 
 
 class _Adapter:
@@ -63,8 +70,11 @@ class _SubmissionSpy(_Adapter):
 
 
 @pytest.fixture
-def fixed_code(monkeypatch, tmp_path):
-    """Mock only the Git boundary; exercise the actual host record binding."""
+def fixed_code(monkeypatch, tmp_path, request):
+    """Mock only Git unless this exact case explicitly selects process_e2e."""
+    if getattr(request,'param',None)=='git':
+        assert request.node.get_closest_marker('process_e2e') is not None
+        return  # Real capture, export and consumption; no native launch.
     bindings={};contents={};exports={};cleaned=[]
     def capture(root,*,step,call_id,code_root,entry,selection,logical_root,**options):
         key=(Path(root),step,call_id)
@@ -75,6 +85,7 @@ def fixed_code(monkeypatch, tmp_path):
     def verify(root,*,step,call_id,code_version,**options):
         if bindings.get((Path(root),step,call_id))!=code_version:
             raise ValueError('Exact original code pin is unavailable')
+        return (code_version['entry'],)
     def materialize(root,*,step,call_id,code_version,**options):
         verify(root,step=step,call_id=call_id,code_version=code_version)
         key=(Path(root),step,call_id)
@@ -120,6 +131,10 @@ def _transformed_submission(config,payload):
     return payload.model_copy(update=dict(local_path=str(path),size_bytes=path.stat().st_size))
 
 
+@pytest.mark.parametrize('fixed_code',[
+    pytest.param('synthetic',id='source'),
+    pytest.param('git',id='git',marks=pytest.mark.process_e2e),
+],indirect=True)
 def test_generic_prepare_receives_fixed_code_and_keeps_logical_identity(fragment, execution_registry, fixed_code):
     root,job,_=fragment;config=_configuration(root,job);source=_code(root,job)
     def effect(payload):
@@ -163,7 +178,9 @@ def test_local_cli_unused_candidate_alias_and_change_do_not_block_code(fragment,
         return dict(status='unknown',accepted=True,call_id=accepted['call_id'])
     monkeypatch.setattr(e,'_submit_descriptor',submit)
     path=c.workspace(root,job['step'])/'work/version-config.json'
+    research=path.with_name('research.json');c.write(research,_research(config))
     assert e.main(['--config',str(path),'run','--script',str(source),
+        '--research',str(research),
         '--parent-plan','W999-C001','--change-intent','Training-only calibration'])==2
     result=json.loads(capsys.readouterr().out)
     assert result['status']=='unknown' and result['accepted'] is True
@@ -187,8 +204,9 @@ def test_local_subclass_metadata_failure_after_prepare_is_not_caller_error(fragm
     payload=LocalFileDescriptor(name='input',local_path=str(source),size_bytes=source.stat().st_size,
         media_type='application/octet-stream')
     records=e.Records(config)
-    with pytest.raises(ValueError,match='does not declare candidate parent semantics') as failure:
+    with records._preparation_lease(), pytest.raises(ValueError,match='does not declare candidate parent semantics') as failure:
         e._prepare_descriptor(config,payload,adapter,records,[],change='Training-only calibration',
+            mechanism=_research(config),client_facts=experiment_client.load_client_facts(config),
             command_options=dict(source_script=str(source)),_source_script=str(source))
     assert type(failure.value) is ValueError
     assert marker.read_text()=='prepare performed' and records.calls()==[]
@@ -230,7 +248,7 @@ def test_dedicated_code_scope_and_bound_data_overlap_are_explicit(fragment, tmp_
     assert experiment_client.code_selection(config,source,experiment_directory=directory)==dict(
         code_root=code_root,entry='package/opaque-entry',selection='directory',logical_root='code')
     assert experiment_client.code_selection(config,source)==dict(
-        code_root=source.parent,entry=source.name,selection='file',logical_root='code/package')
+        code_root=code_root,entry='package/opaque-entry',selection='directory',logical_root='code')
     outside=directory/'opaque-entry';outside.write_bytes(b'outside code scope')
     with pytest.raises(e.CallerError,match='code/'):
         experiment_client.code_selection(config,outside)
@@ -305,18 +323,30 @@ def test_registered_inputs_and_host_compiled_packages_keep_head_retained_slots(f
     c.write(root/'jobs'/f'{job["step"]:03d}.json',dict(job,global_materials=[*job['global_materials'],material]))
     package=Path(config['record_dir']).parent/'implementations/I001/package.json'
     package.parent.mkdir(parents=True);package.write_bytes(b'host-owned compiled bytes')
+    client=work/'artifacts/client.json'
+    value=dict(worker_implementation_version=1,implementation_ref='I001')
+    c.write(client,value)
+    c.write(package.parent/'client.json',dict(client=value,public_path=str(client),package=e.proof(package)))
     def forbidden(*args,**options):pytest.fail('A bound scientific input entered Git capture')
     monkeypatch.setattr(code_versions,'capture',forbidden)
-    for selected,logical_source in ((logical,logical),(package,work/'artifacts/client.json')):
+    for selected,logical_source in ((logical,logical),(package,client)):
         records=e.Records(config);adapter=_Adapter();identity=e.proof(selected)
         payload=LocalFileDescriptor(name='direct',local_path=str(selected),size_bytes=identity['size_bytes'],media_type='application/octet-stream')
-        _,accepted=e._prepare_descriptor(config,payload,adapter,records,[path.name for path in records.calls()],_source_script=str(logical_source))
+        with records._preparation_lease():
+            _,accepted=e._prepare_descriptor(config,payload,adapter,records,
+                [path.name for path in records.calls()],_source_script=str(logical_source),
+                mechanism=_research(config),client_facts=experiment_client.load_client_facts(config))
         retained=records.directory(accepted['call_id'])/'source.py'
-        assert accepted['script']==c.file_ref(retained) and retained.read_bytes()==selected.read_bytes()
-        assert set(accepted['script'])=={'path','size_bytes'}
-        assert 'code_version' not in accepted and e.verify_scientific_inputs(accepted)==accepted
-        assert accepted['script']['path']!=str(selected)
-    assert experiment_client.input_reference(config,logical)==reference
+        if selected==logical:
+            assert accepted['script']==c.file_ref(retained) and retained.read_bytes()==selected.read_bytes()
+            assert set(accepted['script'])=={'path','size_bytes'}
+            assert accepted['script']['path']!=str(selected)
+        else:
+            assert accepted['script']==identity and not retained.exists()
+            assert experiment_client.payload_path(config,client)==package
+        assert 'code_version' not in accepted and e.verify_scientific_inputs(accepted,config=config)==accepted
+    assert experiment_client.input_reference(config,logical)==e.proof(original)
+    assert reference==e.proof(logical)
     assert original.read_bytes()==b'global-original'
 
 
@@ -334,6 +364,10 @@ def test_accepted_control_survives_deleted_export_but_consumption_requires_exact
     assert (records.directory(accepted['call_id'])/'accepted.json').read_bytes()==saved
 
 
+@pytest.mark.parametrize('fixed_code',[
+    pytest.param('synthetic',id='source'),
+    pytest.param('git',id='git',marks=pytest.mark.process_e2e),
+],indirect=True)
 @pytest.mark.parametrize('prepared_kind',['transformed','export'])
 @pytest.mark.parametrize('drift',['changed','removed'])
 def test_pre_submit_refuses_drifted_prepared_descriptor(fragment,monkeypatch,execution_registry,fixed_code,prepared_kind,drift):
@@ -343,22 +377,33 @@ def test_pre_submit_refuses_drifted_prepared_descriptor(fragment,monkeypatch,exe
     prepared,accepted=_prepare(config,source,adapter=adapter);records=e.Records(config)
     accepted_path=records.directory(accepted['call_id'])/'accepted.json';saved=accepted_path.read_bytes()
     path=Path(prepared.local_path)
-    if drift=='changed':
-        replacement=path.with_name(path.name+'.replacement')
-        replacement.write_bytes(path.read_bytes());replacement.replace(path)
-    else:path.unlink()
+    mode=path.stat().st_mode&0o777;parent_mode=path.parent.stat().st_mode&0o777
+    # A same-user host can tamper with a readonly Git export. Restore its modes
+    # so equal-byte replacement tests descriptor identity, not mode widening.
+    path.parent.chmod(parent_mode|0o200)
+    try:
+        if drift=='changed':
+            replacement=path.with_name(path.name+'.replacement')
+            replacement.write_bytes(path.read_bytes());replacement.chmod(mode);replacement.replace(path)
+        else:path.unlink()
+    finally:path.parent.chmod(parent_mode)
     # Permanent code/data verification and control queries still do not need
     # the temporary prepared file. Only the actual submission consumes it.
     assert e.verify_scientific_inputs(accepted,config=config)==accepted
     assert records.accepted(accepted['call_id'])==accepted
     monkeypatch.setattr(e,'record_observation',lambda *args,**options:None)
-    with pytest.raises((e.IntegrityError,OSError)):
-        e._submit_descriptor(config,adapter,LifecycleCapabilities(query=False),prepared,accepted)
+    result=e._submit_descriptor(config,adapter,LifecycleCapabilities(query=False),prepared,accepted)
+    assert result['status']=='integrity_error' and result['accepted'] is True
+    assert result['call_id']==accepted['call_id']
     assert adapter.leased==[] and adapter.submitted==[]
     assert records.external(accepted['call_id']) is None
     assert accepted_path.read_bytes()==saved
 
 
+@pytest.mark.parametrize('fixed_code',[
+    pytest.param('synthetic',id='source'),
+    pytest.param('git',id='git',marks=pytest.mark.process_e2e),
+],indirect=True)
 def test_pre_submit_accepts_unchanged_transformed_descriptor_once(fragment,monkeypatch,execution_registry,fixed_code):
     root,job,_=fragment;config=_configuration(root,job);source=_code(root,job)
     adapter=_SubmissionSpy(prepare=lambda payload:_transformed_submission(config,payload))
@@ -373,9 +418,86 @@ def test_pre_submit_accepts_unchanged_transformed_descriptor_once(fragment,monke
 
 
 @pytest.fixture
-def terminal_code(fragment,monkeypatch,execution_registry,fixed_code):
+def live_fragment(tmp_path,execution_registry):
+    """Mechanical live W owner, not controlled authorship or native qualification.
+
+    Accept the real task/intent before configuring its client. The pytest process
+    supplies actual kernel writer identity only; it runs no native participant
+    and grants no native permissions, scientific result or review verdict.
+    """
+    public=tmp_path/'public-live';public.mkdir()
+    goal=public/'goal.md';goal.write_text('Compare mechanisms using only public evidence.')
+    root=tmp_path/'instance-live'
+    configuration=dict(run_argv=[sys.executable],cwd=str(c.workspace(root,1)))
+    controller.prepare(root,goal,public,['never-launched'],max_tokens=1000,
+        max_seconds=100,max_steps=8,model='no-model',reasoning_effort='high',
+        search_policy=None,experiment_mode='local',
+        execution_config=dict(executor='local_execution:command',configuration=configuration))
+    job=c.build_job(root,1,'W',[])
+    record=c.host_record(c.workspace(root,1))
+    intent=dict(step=1,task_ref=c.record_ref(root/'jobs/001.json'),
+        **native.profiles.binding(c.settings(root),job))
+    head=accepted_budget.accept_native(root,1,record,intent)
+    assert head['current_native']['record']==record.relative_to(root).as_posix()
+    assert head['current_native']['status']=='open'
+    assert c.read(record/'native-intent.json')==intent
+    assert job['research_strategy_version']==3 and job['step']==1 and job['role']=='W'
+    assert head.current_job['job_ref']==intent['task_ref']
+    writer=native.runtime.process_identity(os.getpid(),intent['task_ref'])
+    assert native.runtime.process_matches(writer,intent['task_ref'])
+    for name in ('runner-process.json','native-process.json'):
+        c.write(record/name,writer)
+    assert not (record/'native-outcome.json').exists()
+    assert not (record/'stage-end.json').exists() and not (record/'result-identity.json').exists()
+    return root,job,record
+
+
+@pytest.fixture
+def fragment(live_fragment):
+    """Every new preparation owns the default-v3 W001 active original."""
+    return live_fragment
+
+
+def _research(config):
+    """Explicit mechanical question; no hypothesis or science is qualified."""
+    # The imported archival reader intentionally freezes the v1 catalogue;
+    # supplying a v3 declaration there would invent an unauthorized choice.
+    strategy=config.get('research_strategy_version',1)  # Legacy client omits it.
+    if strategy==1:return None
+    assert strategy==3
+    mechanism='w'+f'{config["scope"]["step"]:03d}'+'.fixture'
+    return dict(declarations=[dict(mechanism_ref=mechanism,action='declare',
+        question='Can the retained public original support exact collection?')],
+        mechanism_ref=mechanism,experiment_question=dict(
+            question='Does collection preserve the declared original entity?',
+            change_criterion='A changed entity or private alias must be rejected.'))
+
+
+def _prepare_live_code(config,source,*,directory=None,adapter=None):
+    """Use the real declaration/admission writer while its native owner is live."""
+    assert config['research_strategy_version']==3
+    return _prepare(config,source,directory=directory,adapter=adapter)
+
+
+@pytest.fixture
+def terminal_code(live_fragment,monkeypatch,execution_registry,fixed_code):
+    """Retain stopped call originals, prepared under their current live W owner.
+
+    Depend on the explicit owner fixture even when imported by a module whose
+    unrelated ``fragment`` fixture has already ended its native attempt.
+    """
+    return _terminal_code(live_fragment,monkeypatch)
+
+
+@pytest.fixture
+def live_terminal_code(live_fragment,monkeypatch,execution_registry,fixed_code):
+    """Stopped Local call under a still-live, current accepted native W owner."""
+    return _terminal_code(live_fragment,monkeypatch,prepare=_prepare_live_code)
+
+
+def _terminal_code(owner,monkeypatch,*,prepare=_prepare):
     """Synthetic stopped originals only; Git and every launch entry stay mocked."""
-    root,job,_=fragment;config=_configuration(root,job)
+    root,job,_=owner;config=_configuration(root,job)
     def forbidden(*args,**options):pytest.fail('Terminal source fixture reached a process launch')
     monkeypatch.setattr(LocalExecution,'submit',forbidden)
     monkeypatch.setattr(LocalExecution,'_execute',forbidden)
@@ -399,7 +521,7 @@ def terminal_code(fragment,monkeypatch,execution_registry,fixed_code):
                 events.append('replay')
                 return dict(status='sample_replay_ok',note='Fixture stopped',cleanup_confirmed=True)
             adapter.replay_check=check
-        _,accepted=_prepare(config,source,directory=runtime,adapter=adapter)
+        _,accepted=prepare(config,source,directory=runtime,adapter=adapter)
         call_id=accepted['call_id'];records=e.Records(config);directory=records.directory(call_id)
         owner=dict(call_id=call_id,scope=accepted['scope'])
         records.publish(call_id,'process.json',dict(owner,task_ref=dict(path=str(directory/'accepted.json')),
@@ -453,7 +575,7 @@ def test_terminal_export_cleanup_follows_saved_projection_and_replay(terminal_co
     assert adapter.result(call_id)['status']==observed['status']
     assert adapter.collect_original(call_id)
     monkeypatch.setattr(code_versions,'cleanup_export',cleanup)
-    assert e.record_observation(config,adapter,call_id,verify_files=False)==observed
+    assert e.reconcile_saved_observation(config,adapter,call_id)==observed
     assert e.scientific_outputs(config,observed)
     assert row['output'].read_bytes()==b'retained scientific output'
     assert all((directory/name).read_bytes()==raw for name,raw in originals.items())
@@ -482,7 +604,7 @@ def test_terminal_cleanup_retains_exports_without_exact_replay_cleanup(terminal_
     monkeypatch.setattr(row['adapter'],'replay_check',forbidden)
     replay_check.complete(config,row['adapter'],call_id,observed)
     monkeypatch.setattr(replay_check,'complete',forbidden)
-    assert e.record_observation(config,LocalExecution(config),call_id,verify_files=False)==observed
+    assert e.reconcile_saved_observation(config,LocalExecution(config),call_id)==observed
     assert fixed_code['exports'][row['key']].exists() and fixed_code['cleaned']==[]
 
 
@@ -509,7 +631,7 @@ def test_terminal_cleanup_failure_is_private_and_preserves_originals(terminal_co
     cleanup=code_versions.cleanup_export
     def fail(*args,**options):raise OSError('fixture deletion denied')
     monkeypatch.setattr(code_versions,'cleanup_export',fail)
-    assert e.record_observation(config,LocalExecution(config),call_id,verify_files=False)==observed
+    assert e.reconcile_saved_observation(config,LocalExecution(config),call_id)==observed
     assert tree.exists() and all((directory/name).read_bytes()==raw for name,raw in originals.items())
     diagnostic,=(Path(config['record_dir']).parent/'execution-diagnostics').iterdir()
     note=c.read(diagnostic)['note']
@@ -529,18 +651,23 @@ def test_head_input_rows_without_fingerprints_bind_frozen_call_slots(fragment,ex
     material,reference,source=_frozen_material(root,work,logical,name='row-'+inventory)
     changed=dict(job)
     if inventory=='global_materials':changed['global_materials']=[material]
-    else:changed['history']=dict(files=[material],execution_recovery_materials=[])
+    else:changed['history']=dict(inputs=[material],execution_recovery_materials=[])
     c.write(root/'jobs'/f'{job["step"]:03d}.json',changed)
-    assert experiment_client.input_reference(config,logical)==reference
-    assert experiment_client.input_reference(config,source)==e.proof(source)
-    assert reference['path']==str(logical) and reference['file_stat']!=e.proof(source)['file_stat']
+    original=e.proof(source)
+    assert experiment_client.input_reference(config,logical)==original
+    assert experiment_client.input_reference(config,source)==original
+    assert reference['path']==str(logical) and reference['file_stat']!=original['file_stat']
     saved=deepcopy(material)
     replacement=logical.with_name('same-size-replacement')
     replacement.write_bytes(logical.read_bytes());replacement.replace(logical)
-    # HEAD stores no global inode: the call acquires the current ordinary slot's
-    # fingerprint only after the frozen resolver and bound size succeed.
-    assert experiment_client.input_reference(config,logical)==e.proof(logical)
+    # HEAD rows bind the canonical original, not a mutable workspace copy.
+    # Fingerprints are acquired from that exact original after its size check.
+    assert e.proof(logical)!=reference
+    assert experiment_client.input_reference(config,logical)==original==e.proof(source)
     assert material==saved and set(material)=={'path','source','size_bytes'}
+    source.write_bytes(b'changed original size plus one')
+    with pytest.raises(e.IntegrityError,match='Scientific input original is unavailable or changed'):
+        experiment_client.input_reference(config,logical)
 
 
 def test_host_preparation_snapshot_and_existing_reader_accept_owner_execution_refs(fragment,execution_registry):
@@ -609,21 +736,37 @@ def test_legacy_local_completion_freezes_first_observation_with_outputs_and_logs
     monkeypatch.setattr(LocalExecution,'_execute',forbidden)
     monkeypatch.setattr(worker_execution_bridge,'local_process_launch',forbidden)
     for name in ('Popen','run','call'):monkeypatch.setattr(subprocess,name,forbidden)
-    metadata=adapter.acceptance_metadata(payload,command_options=dict(experiment_directory=str(runtime)))
-    metadata['snapshot_files']=[{key:item[key] for key in ('name','path','size_bytes')}
-        for item in metadata['snapshot_files']]
-    accepted=records.accept(payload,metadata,config['execution_interface'],_local_preparation=True)
-    directory=records.directory(payload.name);owner=dict(call_id=payload.name,scope=accepted['scope'])
-    c.write(directory/'process.json',dict(owner,task_ref=dict(path=str(directory/'accepted.json')),
+    # Freeze the supported historical path/size envelope at first publication,
+    # not by rewriting a current accepted original. Its task/attempt remains v3
+    # and passes ordinary live admission; legacy references grant no permission.
+    current_metadata=adapter.acceptance_metadata(payload,command_options=dict(experiment_directory=str(runtime)),
+        client_facts=experiment_client.load_client_facts(config))
+    metadata=dict(current_metadata,snapshot_files=[
+        {key:item[key] for key in ('name','path','size_bytes')}
+        for item in current_metadata['snapshot_files']])
+    accepted=records.accept(payload,metadata,config['execution_interface'],
+        mechanism=_research(config),_local_preparation=True)
+    assert set(accepted['script'])=={'path','size_bytes'}
+    assert accepted['snapshot_files']==metadata['snapshot_files']
+    assert all(set(item)=={'name','path','size_bytes'} for item in accepted['snapshot_files'])
+    directory=records.directory(payload.name)
+    owner={key:accepted[key] for key in ('call_id','scope','mechanism_binding')}
+    records.publish(payload.name,'process.json',dict(owner,task_ref=dict(path=str(directory/'accepted.json')),
         pid=999999999,start_ticks=1,pgid=999999999,sid=999999999))
     (directory/'stdout.raw').write_bytes(b'legacy stdout\n');(directory/'stderr.raw').write_bytes(b'legacy stderr\n')
-    c.write(directory/'terminal.json',dict(owner,returncode=0,cleanup_confirmed=True,
-        transport_complete=True,wall_seconds=.01))
+    terminal=dict(owner,returncode=0,cleanup_confirmed=True,transport_complete=True,wall_seconds=.01)
+    records.publish(payload.name,'terminal.json',terminal)
     artifact=directory/'inputs/artifacts/result.txt';artifact.parent.mkdir();artifact.write_bytes(b'legacy retained result')
-    completed=adapter.completion(directory,accepted,0,True,True)
-    # Serialize the historical path/size contract from real completion originals.
-    completed['proofs']=[{key:item[key] for key in ('path','size_bytes')} for item in completed['proofs']]
-    completed['outputs']=[{key:item[key] for key in ('name','path','size_bytes')} for item in completed['outputs']]
+    current_completion=adapter.completion(directory,accepted,0,True,True)
+    # Serialize one legacy completion envelope before its first publication,
+    # retaining the same owner binding that Records.publish puts on every receipt.
+    completed=dict(current_completion,**owner,
+        proofs=[{key:item[key] for key in ('path','size_bytes')} for item in current_completion['proofs']],
+        outputs=[{key:item[key] for key in ('name','path','size_bytes')} for item in current_completion['outputs']])
+    assert e.local_terminal_status(accepted,completed,terminal)=='known_success'
+    # Files and a stopped synthetic PID do not substitute for a bound terminal.
+    assert e.local_terminal_status(accepted,completed,
+        {key:value for key,value in terminal.items() if key!='mechanism_binding'})=='unknown'
     records.publish(payload.name,'completed.json',completed);records.bind_external(payload.name,payload.name,'succeeded')
     originals={path:path.read_bytes() for path in (directory/'accepted.json',directory/'completed.json',
         directory/'process.json',directory/'terminal.json',directory/'stdout.raw',directory/'stderr.raw')}

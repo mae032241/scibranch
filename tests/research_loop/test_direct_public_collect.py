@@ -7,11 +7,12 @@ import pytest
 
 from execution_fixtures import execution_registry
 from test_cov_lineage import cov_completed, wrapper
-from test_mutable_run_inputs import fixed_code, terminal_code
+from test_mutable_run_inputs import (fixed_code, live_fragment, live_terminal_code,
+    terminal_code)
 from test_worker_fragments import fragment
 from scidiscovery.operations.execution import LocalFileDescriptor
-from scidiscovery.research_loop import (contracts as c, experiments as e,
-    execution, local_experiments, native, runtime, shared_input_views)
+from scidiscovery.research_loop import (contracts as c, experiment_client,
+    experiments as e, execution, local_experiments, native, runtime, shared_input_views)
 from scidiscovery.research_loop.local_experiments import LocalExecution
 
 
@@ -38,7 +39,7 @@ def stopped_attempt(root, job, record, monkeypatch):
     receipts = {}
     for number, name in enumerate(('runner-process.json', 'native-process.json', 'bridge-process.json'), 1):
         pid = 900000000 + number
-        receipt = dict(pid=pid, start_ticks=1, pgid=pid, sid=pid,
+        receipt = dict(pid=pid, ppid=1, start_ticks=1, pgid=pid, sid=pid,
             boot_id='batch-a-physical-state-fixture', task_ref=identity)
         c.write(record / name, receipt)
         receipts[name] = receipt
@@ -62,6 +63,17 @@ def observed_local(terminal_code):
     """Use the real preparation, completion and observation producers."""
     def create(**options):
         row = terminal_code(**options)
+        row['observation'] = e.record_observation(
+            row['config'], row['adapter'], row['accepted']['call_id'])
+        return row
+    return create
+
+
+@pytest.fixture
+def observed_live_local(live_terminal_code):
+    """Observe a stopped Local call without closing its live native W owner."""
+    def create(**options):
+        row = live_terminal_code(**options)
         row['observation'] = e.record_observation(
             row['config'], row['adapter'], row['accepted']['call_id'])
         return row
@@ -323,8 +335,8 @@ def test_command_tcad_first_writes_node_science_and_keeps_controls_private(tmp_p
     assert e.proof(node/'tcad_execution_facts.json')==facts and len(requests)==1
 
 
-def test_collect_returns_the_declared_actual_public_original(fragment, terminal_code):
-    root, job, _ = fragment
+def test_collect_returns_the_declared_actual_public_original(live_fragment, live_terminal_code):
+    root, job, _ = live_fragment
     work = c.workspace(root, job['step'])
     public = shared_input_views.dynamic_root(root, work, 'retained-experiments')
     bound_inode = inode(public)
@@ -332,7 +344,8 @@ def test_collect_returns_the_declared_actual_public_original(fragment, terminal_
     assert any(mounts[index:index + 3] == ['--ro-bind', str(public), str(public)]
         for index in range(0, len(mounts), 3))
 
-    row = terminal_code()
+    row = live_terminal_code()
+    assert row['root'] == root and row['job'] == job
     config, adapter, accepted = row['config'], row['adapter'], row['accepted']
     call_id = accepted['call_id']
     assert row['output'].parent == public / call_id / 'outputs'
@@ -342,17 +355,18 @@ def test_collect_returns_the_declared_actual_public_original(fragment, terminal_
     # Exercise the exact Local output-target guard while the prepared export
     # still exists. The public root is already a readonly Worker mount.
     prepared = LocalFileDescriptor.model_validate(accepted['prepared'])
+    client_facts = experiment_client.load_client_facts(config)
     protected = LocalExecution(dict(adapter.config, cwd=str(public)),
         frozen_interface=config['execution_interface'])
     with pytest.raises(ValueError, match='readonly|read-only|output'):
         protected.acceptance_metadata(prepared,
             command_options=dict(source_script=accepted['source_script']),
-            _code_version=accepted['code_version'])
+            _code_version=accepted['code_version'], client_facts=client_facts)
     with pytest.raises(ValueError, match='readonly|read-only|output'):
         adapter.acceptance_metadata(prepared,
             command_options=dict(source_script=accepted['source_script'],
                 experiment_directory=str(public)),
-            _code_version=accepted['code_version'])
+            _code_version=accepted['code_version'], client_facts=client_facts)
 
     observed = e.record_observation(config, adapter, call_id)
     saved = {item['name']: item for item in observed['scientific_outputs']}
@@ -382,9 +396,10 @@ def test_collect_returns_the_declared_actual_public_original(fragment, terminal_
         e._collected_view(config, call_id, tampered, adapter)
 
 
-def test_collect_rejects_old_private_slots_even_with_existing_same_inode_aliases(fragment, observed_local):
-    root, job, _ = fragment
-    row = observed_local()
+def test_collect_rejects_old_private_slots_even_with_existing_same_inode_aliases(live_fragment, observed_live_local):
+    root, job, _ = live_fragment
+    row = observed_live_local()
+    assert row['root'] == root and row['job'] == job
     config, adapter = row['config'], row['adapter']
     call_id = row['accepted']['call_id']
     observed = deepcopy(row['observation'])

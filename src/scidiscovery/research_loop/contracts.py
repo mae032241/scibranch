@@ -1168,6 +1168,7 @@ class CurrentInventory:
     material_sources: dict = field(default_factory=dict)
     redundant_materials: list = field(default_factory=list)
     research_state: dict | None = None
+    review_binding: dict | None = None
 
 
 def accept_current_inventory(root: Path, step: int):
@@ -1237,8 +1238,9 @@ def accept_current_inventory(root: Path, step: int):
         if needs_checkpoint:inventory.checkpoint=checkpoint._capture(root,job,record,inventory=inventory)
         return inventory
     inventory.science_available=True
-    load_validated_input_facts(root,workspace(root,step),job,base=base,policy=policy,head=head,
+    input_facts=load_validated_input_facts(root,workspace(root,step),job,base=base,policy=policy,head=head,
         sources=material_sources)
+    inventory.review_binding=input_facts.get('review_binding')
     authored=None
     try:
         from . import candidate_refs
@@ -2375,11 +2377,12 @@ def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
         facts=fork_runtime._load_selected_job_facts(root,work,job,base=base,policy=policy,head=head,
             selected=selected)
         document=facts['inputs']['document']
-        formal_review.validate_job(root, job, sources=facts['sources'])
+        review_binding=formal_review.validate_job(root, job, sources=facts['sources'])
         engineering.validate_job(root, job)
         task_view=fork_runtime._selected_science_view(job,selected=selected,policy=policy,
             qualified=facts['authority']['qualified_materials'])
-        return dict(document=document, sources=facts['sources'], inputs=facts['inputs'],task_view=task_view)
+        return dict(document=document, sources=facts['sources'], inputs=facts['inputs'],task_view=task_view,
+            review_binding=review_binding)
     from . import budget,accepted_budget,accepted_prefix
     events=budget._events_from_state(head)[0]
     report = budget._validate_final_report_inputs_from_facts(root,job,policy=policy,
@@ -2492,7 +2495,7 @@ def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
     expected = []
     previous = f'inputs/parents/{job["step"] - 1:03d}/conclusion.json'
     if job.get('formal_review'):
-        expected=formal_review.input_binding(root,job['formal_review'],sources=sources)['selected']
+        expected=review_binding['selected']
     elif any(ref['path'] == previous for ref in job['direct_refs']):
         from . import handoff_state
         predecessor = sources[job['step']-1]
@@ -2525,7 +2528,8 @@ def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
     for ref in job['direct_materials']:
         if (work/ref['path']).exists() and regular(work/ref['path']).stat().st_size!=ref['size_bytes']:
             raise ValueError('The direct material actually read by this role changed')
-    return dict(document=document, sources=sources, inputs=inputs,task_view=task_view,global_paths=global_paths)
+    return dict(document=document, sources=sources, inputs=inputs,task_view=task_view,global_paths=global_paths,
+        review_binding=review_binding)
 
 
 def _validate_inputs_from_facts(root,work,job,*,base,policy,head):

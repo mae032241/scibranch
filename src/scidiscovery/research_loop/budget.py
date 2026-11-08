@@ -230,16 +230,24 @@ def _resource_settings(root):
     A previously disabled pool starts from the first explicit revision grant;
     its immutable origin remains the baseline for all later accounting.
     """
-    settings = contracts.settings(root)
-    state = accepted_budget.read(root)
+    return _resource_origin(root, state=accepted_budget.read(root))['settings']
+
+
+def _resource_origin(root, *, state):
+    """Produce the pool's original policy and reference from one accepted head."""
     resource = state['resource']
     if resource is not None:
-        saved = contracts.read(Path(root)/resource['settings_ref']['path'])
-        return saved.get('settings', saved)
-    if settings.get('execution_resource_policy') is not None:
-        return settings
+        reference = resource['settings_ref']
+        saved = (state.base if reference == dict(path='settings.json')
+            else contracts.read(Path(root)/reference['path']))
+        return dict(settings=saved.get('settings', saved), ref=reference)
+    if state.base.get('execution_resource_policy') is not None:
+        return dict(settings=state.base, ref=dict(path='settings.json'))
     from . import configuration_updates
-    return configuration_updates.current(root)
+    selected = configuration_updates._current_revision(root, head=state)
+    if selected is None:
+        return dict(settings=state.base, ref=dict(path='settings.json'))
+    return dict(settings=selected['settings'], ref=state['configuration']['ref'])
 
 
 def _resource_owner(settings):
@@ -328,13 +336,16 @@ def _resource_state(root, settings, events, origins):
 
 def execution_grant(root, *, operation_context=None):
     """Seed exactly the operator's frozen ceiling in the existing ledger."""
-    root = Path(root).resolve(); settings = _resource_settings(root)
-    owner = _resource_owner(settings)
-    with _ledger_writer(root,context=operation_context):
-        events, parent, (grants, _) = _events(root, resources=True)
+    root = Path(root).resolve()
+    with _ledger_writer(root,context=operation_context) as base:
+        state = accepted_budget.load(root, base=base)
+        origin = _resource_origin(root, state=state)
+        settings = origin['settings']; owner = _resource_owner(settings)
+        events, parent, (grants, _) = _events_from_state(state, resources=True)
         if owner['key'] not in grants:
             event = _append(root, settings, events, parent, kind='resource_grant', owner=owner,
                 previous_grant=None, allowance=settings['execution_resource_policy']['allowance'],
+                resource_origin=origin,
                 authorization_note='Original explicit operator execution resource configuration')
             return dict(owner=owner, ref=_resource_ref(root, event), allowance=event['allowance'])
         return dict(owner=owner, **grants[owner['key']])
@@ -642,13 +653,13 @@ def _ledger_writer_from_base(root, *, base, context=None):
             os.close(fd)
 
 
-def _append(root, settings, events, parent, **fields):
+def _append(root, settings, events, parent, *, resource_origin=None, **fields):
     from .protocol import require_current_base
     require_current_base(root, base=events.state.base if isinstance(events, accepted_budget.AcceptedEvents) else settings)
     if isinstance(events, accepted_budget.AcceptedEvents):
         if 'reanchor' in fields:
             _verify_reanchor(root, settings, dict(fields, **clock_stamp()), events)
-        return accepted_budget.append_budget_event(root, events, **fields)
+        return accepted_budget.append_budget_event(root, events, resource_origin=resource_origin, **fields)
     stamp = clock_stamp()
     event = dict(seq=len(events) + 1, parent_ref=parent,
                  settings_ref=contracts.record_ref(root / 'settings.json'), **stamp, **fields)

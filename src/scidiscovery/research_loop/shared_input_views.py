@@ -64,6 +64,33 @@ def _unsupported(message):
     return UnsupportedExecution('Shared input readonly view unsupported: ' + message)
 
 
+def _record_alias_mismatch(sources, path, *, mismatch, was_protected, now_protected):
+    """Private bounded diagnosis from this producer's observations; no new reads.
+
+    The public refusal stays unchanged. A mutable publisher and a protected
+    original can trip the same guard; neither is safe to exempt by basename.
+    """
+    record = sources['native']['record']
+    if record is None:return
+    work = sources['work']
+    if path == work / 'work/experiment/response.json':entry = 'bridge_response'
+    elif path == work / 'work/experiment/submit.json':entry = 'bridge_submission'
+    elif path == work / 'work/budget-status.json':entry = 'budget_advice'
+    else:entry = 'protected_entry' if was_protected else 'other_workspace_entry'
+    # All values are fixed labels or booleans, never paths, native IDs, source
+    # hashes, authentication, exception text or scientific/tool input bytes.
+    if mismatch not in {'inode_changed', 'file_type_changed', 'link_count_changed'}:
+        return
+    from . import contracts as c
+    try:
+        c.write(Path(record) / 'shared-input-launch-diagnostic.json', dict(
+            version=1, scope='private_engineering_diagnostic_not_scientific_evidence',
+            stage='workspace_recheck', entry_kind=entry, mismatch=mismatch,
+            was_protected=bool(was_protected), now_protected=bool(now_protected)))
+    except (OSError, ValueError):
+        pass  # Diagnostic publication can never admit or replace the refusal.
+
+
 def _exact(path):
     path = Path(path)
     if not path.is_absolute() or path.resolve() != path or any(p.is_symlink() for p in (path, *path.parents)):
@@ -153,9 +180,60 @@ def project_overlap(project, mappings):
                 raise _unsupported('a declared project directory overlaps an exact scientific input')
 
 
-def _project_readonly_aliases(project, work, target, mappings, *, context=None):
+def load_project_base_facts(project, *, writable, code_tree=None, context=None):
+    """One bounded tracked-index observation, never a physical base-tree walk."""
+    from . import project_layout
+    code_view=writable or code_tree is not None
+    excluded=[*(project['editable'] if code_view else []),*project['scratch'],*project['outputs']]
+    identities=[]
+    with project_layout._base_view(project,context=context,exclude=excluded) as (base,tree,deadline):
+        for name in tree:
+            deadline.remaining_seconds();path=_exact(base/name)
+            try:info=path.lstat()
+            except FileNotFoundError:
+                if any(name.startswith(item+'/') for item in excluded):continue
+                raise _unsupported('a tracked readonly project original is missing') from None
+            if not stat.S_ISREG(info.st_mode):
+                raise _unsupported('tracked project originals must be ordinary files')
+            identities.append((info.st_dev,info.st_ino))
+    return dict(project=project,excluded=excluded,identities=tuple(identities))
+
+
+def load_execution_original_facts(root,job,work,*,native,base_facts=None):
+    """Named controls and Git originals share Pi's bounded alias inventory.
+
+    Selecting no Skill mounts must not discard the selected Skill source inodes.
+    Their exact binding was already validated by the native operation owner.
+    """
+    from . import contracts as c
+    paths=[];holders=[]
+    named=[root/'settings.json',root/'jobs'/f'{job["step"]:03d}.json']
+    named.extend(native['record']/name for name in
+        ('native-intent.json','native-execution-permissions.json','experiment-config.json'))
+    for path in named:
+        if path.exists() or path.is_symlink():paths.append(c.regular(_exact(path)))
+    holder,_=_private_git_arguments(root)
+    paths.append(holder);holders.append(holder)
+    project=job.get('project')
+    if project is not None:
+        if base_facts['project']!=project:raise _unsupported('project originals belong to another base')
+        base=_exact(project['base_root']);repository=_exact(base/'.git')
+        paths.append(repository);holders.extend((base,repository))
+    binding=job.get('skill_binding')
+    if binding is not None:
+        paths.extend(_exact(Path(binding['root'])/item) for item in binding['items'])
+    return dict(protected_sources=tuple(paths),protected_holders=tuple(holders),
+        protected_identities=() if base_facts is None else base_facts['identities'])
+
+
+def _project_readonly_aliases(project, work, target, mappings, *, context=None,
+                              output_artifacts=None, readonly_paths=()):
     """Project writable bind aliases must receive every final readonly overlay."""
     if project is None:return []
+    if output_artifacts is not None:
+        return [(path,Path(project['base_root'])/name/path.relative_to(Path(output_artifacts)/'project'/name))
+            for name in project['outputs'] for path in readonly_paths
+            if path.is_relative_to(Path(output_artifacts)/'project'/name)]
     from . import project_layout
     layout = project_layout.code_roots(project, work)
     backings = [(target / entry['source'].relative_to(work), entry['target'])
@@ -189,7 +267,7 @@ def _project_directory(path):
     return path
 
 
-def project_arguments(project, work, *, code_tree=None, artifacts, writable, context=None):
+def project_arguments(project, work, *, code_tree=None, artifacts, writable, context=None, base_facts=None):
     """Whole readonly base, hidden root .git, and declared directory overlays.
 
     A run consumes an exact materialized commit, including absent empty roots;
@@ -206,7 +284,9 @@ def project_arguments(project, work, *, code_tree=None, artifacts, writable, con
     layout = project_layout.code_roots(project, work)
     code_view = writable or code_tree is not None
     excluded = [*(project['editable'] if code_view else []), *project['scratch'], *project['outputs']]
-    project_layout.verify_base(project, context=context, exclude=excluded)
+    if base_facts is None:project_layout.verify_base(project, context=context, exclude=excluded)
+    elif base_facts['project']!=project or base_facts['excluded']!=excluded:
+        raise _unsupported('project base facts belong to another directory view')
     targets = [base / name for name in excluded]
     for protected in (work, artifacts, *([Path(code_tree)] if code_tree is not None else [])):
         if protected.is_relative_to(base) or base.is_relative_to(protected):
@@ -246,6 +326,12 @@ class _Inventory:
         from .storage_policy import Deadline
         self.context = Deadline(ALIAS_SECONDS, upstream=context)
         self.count = 0
+        self.protect_metadata = False
+        self.metadata = []
+        self.link_facts = {}
+        self.observe_links = False
+        self.reject_links = False
+        self.directory_facts = {}
 
     def check(self):
         self.context.remaining_seconds()
@@ -256,14 +342,23 @@ class _Inventory:
     def walk(self, path):
         self.check()
         info = path.lstat()
+        if self.protect_metadata and path.name in {'.git', '.agents', '.codex', '.aws', '.pi'}:
+            if stat.S_ISLNK(info.st_mode):
+                raise _unsupported('workspace metadata must not redirect through a symlink')
+            self.metadata.append(path)
         if stat.S_ISREG(info.st_mode):
+            if self.observe_links:self.link_facts[path] = info.st_nlink
             yield path, (info.st_dev, info.st_ino)
         elif stat.S_ISDIR(info.st_mode):
+            if self.protect_metadata:self.directory_facts[path] = (info.st_dev, info.st_ino)
             # Streaming metadata only: no recursive host/cache/extra-root scan.
             with os.scandir(path) as entries:
                 for entry in entries:
                     yield from self.walk(Path(entry.path))
-        elif not stat.S_ISLNK(info.st_mode):
+        elif stat.S_ISLNK(info.st_mode):
+            if self.reject_links:
+                raise _unsupported('selected Skill resources must not redirect through symlinks')
+        else:
             raise _unsupported('workspace alias inventory contains an unsupported file type')
 
 
@@ -345,7 +440,7 @@ def _load_native_facts(root, job, *, native=None, input_policy=None):
             raise _unsupported('native facts belong to another task or attempt')
         records = tuple(origin if number == 0 else origin/'continuations'/f'{number:03d}'
             for number in range(attempt + 1))
-        return dict(record=record, intent=intent, records=records, input_policy=input_policy)
+        return dict(native, record=record, intent=intent, records=records, input_policy=input_policy)
     initial = (origin/'native-intent.json').exists()
     candidates = False
     if not initial:
@@ -421,6 +516,32 @@ def _load_wake_facts(root, job, native):
     return mappings
 
 
+def validate_task_from_facts(job, task):
+    """Validate the same owner-loaded task that is rendered and mounted.
+
+    This is the ordinary input-binding contract, not a new acceptance authority
+    or a regeneration of retained scientific instructions. No filesystem reads.
+    Formal review keeps its independent exact-subject validator.
+    """
+    if job.get('formal_review'):return
+    from . import contracts as c
+    expected_global=dict(objective='inputs/global/objective.md',
+        updates=[row['path'] for row in job['global_materials'][1:]])
+    parents=task.get('parents',[]) if isinstance(task,dict) else None
+    if (not isinstance(task,dict) or task.get('role')!=job['role']
+            or task.get('global')!=expected_global or task.get('public_root')!=job['public_root']
+            or not isinstance(parents,list) or any(not isinstance(row,dict) for row in parents)):
+        raise ValueError('Frozen scientific task changed its input binding')
+    expected={row['path'] for row in job['direct_refs']}
+    actual=[row.get('conclusion') for row in parents]
+    if (any(not isinstance(path,str) for path in actual) or len(actual)!=len(expected) or set(actual)!=expected):
+        raise ValueError('Frozen scientific task changed its exact parents')
+    if task.get('consultation')!=c.consultation_view(job):
+        raise ValueError('Frozen scientific task changed its exact consultation requester')
+    if 'assessment_handoff' in job and task.get('assessment_handoff')!=job['assessment_handoff']:
+        raise ValueError('Frozen scientific task changed its assessment sources')
+
+
 def load_source_facts(root, job, work, *, target_work=None, native=None, input_policy=None,
                       policy=None, include_review=True, include_wake=True,
                       author_facts=_UNLOADED_AUTHOR, material_sources=None):
@@ -433,6 +554,17 @@ def load_source_facts(root, job, work, *, target_work=None, native=None, input_p
     producers = {} if material_sources is None else material_sources
     handoff_state.load_material_sources(root, job.get('material_refs', []), sources=producers)
     material_paths = handoff_state.material_paths(root, job, sources=producers)
+    # Bind exact current input originals at the source owner, not once per Local
+    # mount. Navigation pages keep their existing non-original path semantics.
+    from . import accepted_prefix, experiment_client, originals
+    historical={row['path']:row for row in accepted_prefix.input_rows(job)}
+    actual={row['path'] for row in [*job.get('global_materials',[]),*job.get('direct_refs',[]),
+        *job.get('direct_materials',[]),*job.get('history',{}).get('execution_recovery_materials',[]),
+        *[row['material'] for row in job.get('selected_inputs',[])]]}
+    for row in experiment_client._input_rows(job):
+        if row['path'] in material_paths or row['path'] not in actual and historical.get(row['path'])==row:continue
+        material_paths[row['path']]=originals.material_path(root,
+            dict(row,source=row.get('source',str(work/originals.relative(row['path'])))))
     native = _load_native_facts(root, job, native=native, input_policy=input_policy)
     author = None
     if native['intent'].get('author_context_version') == 1:
@@ -579,8 +711,11 @@ def logical_original(root, job, path):
     return logical_original_from_facts(facts, path, code_mounts=code_mounts)
 
 
-def load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=False,
-                     include_skills=True, context=None, selected_code=None, source_facts=None):
+def _load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=False,
+                     include_skills=True, context=None, selected_code=None, source_facts=None,
+                     protect_metadata=False, protected_paths=(), protect_external_hardlinks=False,
+                     protected_sources=(), protected_identities=(), protected_holders=(),
+                     metadata_exclude=(), output_artifacts=None, writable_output_mounts=()):
     """Produce exact source and live metadata facts for one final mount seam.
 
     Explicit readonly (source,target) mappings override the default same target.
@@ -608,7 +743,16 @@ def load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=Fa
             if destination.is_relative_to(work):
                 destination = target / destination.relative_to(work)
             mappings[str(destination)] = Path(source)
-    protected_sources=list(mappings.values())
+    # Additional protection is opt-in at Pi's final namespace boundary. Generic
+    # consumers retain their existing mount and original-loading semantics.
+    inherited_sources=list(mappings.values())
+    protected_sources=list(protected_sources)
+    for source in protected_paths:
+        source = _exact(source)
+        if not source.is_relative_to(work):
+            raise _unsupported('explicit workspace protection escaped the assigned workspace')
+        mappings[str(target / source.relative_to(work))] = source
+        protected_sources.append(source)
     for source, destination in mounts:
         if Path(destination) != target / 'inputs':
             mappings[str(destination)] = Path(source)
@@ -690,26 +834,86 @@ def load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=Fa
     host_aliases=[]
     if private:
         host_aliases,binding=_host_aliases(root,work,inventory,job,sources['native']['record'],binding)
-    protected = set()
+    if protected_holders:binding=_pin_holders(root,work,protected_holders)
+    protected = set(protected_identities)
     for path in host_aliases:
         inventory.check();info=path.lstat()
         if stat.S_ISREG(info.st_mode):protected.add((info.st_dev,info.st_ino))
-    for source in dict.fromkeys(protected_sources):
-        _exact(source)
-        protected.update(identity for _, identity in inventory.walk(source))
+    output_backings=[Path(source) for source,_ in writable_output_mounts]
+    if output_artifacts is not None:output_backings.append(Path(output_artifacts))
+    strict=set(protected)
+    explicit=set(map(Path,protected_sources))
+    skill_binding=job.get('skill_binding') or {}
+    skill_roots=({Path(skill_binding['root'])/item for item in skill_binding.get('items',[])}
+        if protect_external_hardlinks else set())
+    for source in dict.fromkeys([*inherited_sources,*protected_sources]):
+        source=_exact(source)
+        # Opt-in source validation at the actual effect boundary. Never follow
+        # selected resources into unrelated/auth/writable trees, including when
+        # Local deliberately excludes native instruction loading.
+        inventory.reject_links=protect_external_hardlinks and source in skill_roots
+        for path,identity in inventory.walk(source):
+            protected.add(identity)
+            if source in explicit or not any(path.is_relative_to(backing) for backing in output_backings):
+                strict.add(identity)
+    inventory.reject_links = False
+    inventory.protect_metadata = protect_metadata
+    inventory.observe_links = protect_external_hardlinks
     workspace_files = list(inventory.walk(work))
+    for path, identity in workspace_files:
+        if any(path.is_relative_to(Path(base)) for base in protected_paths):
+            protected.add(identity);strict.add(identity)
+    if protect_external_hardlinks:
+        links = {}
+        for path, identity in workspace_files:
+            inventory.context.remaining_seconds()
+            names, counts = links.setdefault(identity, (set(), set()))
+            names.add(path); counts.add(inventory.link_facts[path])
+        for identity, (names, counts) in links.items():
+            if len(counts) != 1 or next(iter(counts)) < len(names):
+                raise _unsupported('workspace hardlink facts changed during launch inventory')
+            if next(iter(counts)) > len(names):
+                protected.add(identity);strict.add(identity)
+    if protect_metadata:
+        metadata = set(inventory.metadata)
+        for path, identity in workspace_files:
+            inventory.context.remaining_seconds()
+            if any(parent in metadata for parent in (path, *path.parents)):
+                protected.add(identity);strict.add(identity)
+        for path in metadata:
+            if any(path.is_relative_to(base) for base in metadata_exclude):continue
+            destination=str(target/path.relative_to(work))
+            if not any(Path(destination).is_relative_to(Path(base)) for base in mappings):
+                mappings[destination]=path
     # Recheck every exact entry before handing the plan to Popen. A disappearing
     # or replaced alias fails closed, never silently drops its protection.
+    readonly_paths=[path for path in inventory.metadata
+        if not any(path.is_relative_to(base) for base in metadata_exclude)]
     for path, identity in workspace_files:
         info = path.stat(follow_symlinks=False)
-        if (info.st_dev, info.st_ino) != identity or not stat.S_ISREG(info.st_mode):
+        if ((info.st_dev, info.st_ino) != identity or not stat.S_ISREG(info.st_mode)
+                or protect_external_hardlinks and info.st_nlink != inventory.link_facts[path]):
+            if protect_external_hardlinks:
+                mismatch = ('file_type_changed' if not stat.S_ISREG(info.st_mode) else
+                    'inode_changed' if (info.st_dev, info.st_ino) != identity else 'link_count_changed')
+                _record_alias_mismatch(sources, path, mismatch=mismatch,
+                    was_protected=identity in protected,
+                    now_protected=(info.st_dev, info.st_ino) in protected)
             raise _unsupported('workspace alias changed during launch inventory')
         if identity in protected:
+            if not output_backings or identity in strict:readonly_paths.append(path)
+            if any(path.is_relative_to(base) for base in metadata_exclude):continue
             destination = str(target / path.relative_to(work))
             if Path(destination).is_relative_to(target / 'inputs') and destination not in declared:
                 continue
             if not any(Path(destination).is_relative_to(Path(base)) for base in mappings):
                 mappings[destination] = path
+    if protect_metadata:
+        for path, identity in inventory.directory_facts.items():
+            inventory.context.remaining_seconds()
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != identity:
+                raise _unsupported('workspace directory changed during launch inventory')
     if private:
         for path in host_aliases:
             if path != work / 'inputs':mappings[str(path)]=path
@@ -723,12 +927,44 @@ def load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=Fa
     input_mappings = [(Path(destination), source) for destination, source in mappings.items()
         if Path(destination).is_relative_to(target / 'inputs')]
     if input_mappings:_exact(work / 'inputs').mkdir(exist_ok=True)
-    project_aliases = (_project_readonly_aliases(job.get('project'), work, target, mappings, context=context)
+    project_aliases = (_project_readonly_aliases(job.get('project'), work, target, mappings, context=context,
+        output_artifacts=output_artifacts,readonly_paths=readonly_paths)
         if job.get('role') == 'W' else [])
+    for backing,destination in writable_output_mounts:
+        for path in readonly_paths:
+            if path.is_relative_to(backing):
+                project_aliases.append((path,Path(destination)/path.relative_to(backing)))
     if context is not None:context.remaining_seconds()
     return dict(root=root, job=job, work=work, target=target, sources=sources,
         mappings=mappings, input_mappings=input_mappings, project_aliases=project_aliases,
         code_mounts=code_mounts)
+
+
+def load_mount_facts(root, job, work, *, target_work=None, mounts=(), private=False,
+                     include_skills=True, context=None, selected_code=None, source_facts=None):
+    """Existing shared producer contract; no Pi opt-ins for other consumers."""
+    return _load_mount_facts(root, job, work, target_work=target_work, mounts=mounts,
+        private=private, include_skills=include_skills, context=context,
+        selected_code=selected_code, source_facts=source_facts)
+
+
+def load_pi_mount_facts(root, job, work, *, protected_paths, source_facts,
+                        selected_code, context=None, mounts=(), protected_sources=(),
+                        protected_identities=(), protected_holders=(), metadata_exclude=(),
+                        output_artifacts=None, writable_output_mounts=()):
+    """Pi opts into protection in the SAME bounded workspace inventory.
+
+    No extra tree scan or provider-name branch in a generic consumer. Accepted
+    output bind aliases retain fresh writes; explicit provenance still wins.
+    """
+    if source_facts is None or selected_code is None:
+        raise _unsupported('Pi requires the operation owner\'s source and selected-code facts')
+    return _load_mount_facts(root, job, work, private=False, include_skills=False,
+        context=context, mounts=mounts, selected_code=selected_code, source_facts=source_facts,
+        protect_metadata=True, protected_paths=protected_paths, protect_external_hardlinks=True,
+        protected_sources=protected_sources,protected_identities=protected_identities,
+        protected_holders=protected_holders,metadata_exclude=metadata_exclude,
+        output_artifacts=output_artifacts,writable_output_mounts=writable_output_mounts)
 
 
 def mount_arguments_from_facts(facts):

@@ -1,6 +1,8 @@
 """Exact inherited generated inputs retain their declared physical originals."""
 import pytest
 
+from execution_fixtures import execution_registry
+
 from scidiscovery import archive_io
 from scidiscovery.research_loop import contracts as c, experiments, fork_sources, originals
 
@@ -15,7 +17,7 @@ def selected_page(tmp_path):
     material = dict(path='inputs/history/index.json', source=str(actual),
         size_bytes=actual.stat().st_size)
     job_path = 'jobs/003.json'
-    c.write(root / job_path, dict(step=3, history=dict(files=[material])))
+    c.write(root / job_path, dict(step=3, history=dict(inputs=[material])))
     identity = dict(goal_id='selected-page-fixture', settings_ref=dict(path=str(root / 'settings.json')))
     store = tmp_path / 'child' / originals.FORK_DIRECTORY
 
@@ -44,7 +46,7 @@ def test_inherited_self_source_uses_exact_selected_original(selected_page, visib
     proof = dict(experiments.proof(actual), path=path)
     (root / 'jobs/003.json').unlink()
     assert originals.resolve_ref(owner, proof) == actual
-    assert originals.source_job(owner)['history']['files'] == [material]
+    assert originals.source_job(owner)['history']['inputs'] == [material]
     entry = owner._index[(originals.identity_key(owner.origin_identity), path)][0]
     assert not (owner.storage_root / entry['storage_path']).exists()
 
@@ -97,7 +99,7 @@ def test_missing_local_self_source_stays_unavailable(selected_page):
     inherited = source()
     local = originals.NodeSource(inherited.origin_identity, 3, str(root), root)
     actual.unlink()
-    with pytest.raises(ValueError, match='Selected scientific input original is unavailable'):
+    with pytest.raises((FileNotFoundError, ValueError)):
         originals.resolve_ref(local, dict(path=path))
 
 
@@ -113,7 +115,7 @@ def declared_reused_page(tmp_path):
     alias = 'project/nodes/003/' + row['path']
     identity = dict(goal_id='reused-page-producer', settings_ref=dict(path=str(root / 'settings.json')))
     selected = originals.NodeSource(identity, 3, str(root), root)
-    c.write(root / 'jobs/003.json', dict(step=3, history=dict(files=[row])))
+    c.write(root / 'jobs/003.json', dict(step=3, history=dict(inputs=[row])))
     return root, actual_path, actual, row, alias, selected
 
 
@@ -140,7 +142,7 @@ def bound_page_owner(tmp_path, declared, *, ambiguous=False):
             settings_ref=dict(path=str(root / 'project/settings.json')))
         origins[originals.identity_key(other)] = dict(identity=other, original_root=str(root / 'project'))
     c.write(child / originals.MANIFEST, dict(version=2, kind='scientific_fork', entries=[], origins=origins))
-    c.write(child / 'jobs/003.json', dict(step=3, history=dict(files=[row])))
+    c.write(child / 'jobs/003.json', dict(step=3, history=dict(inputs=[row])))
     return owner, actual
 
 

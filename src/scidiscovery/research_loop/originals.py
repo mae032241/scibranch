@@ -743,8 +743,10 @@ def history_source(source, job):
 
 
 def recovery_refs(source, job):
-    owner=history_source(source,job)
     refs=job.get('history',{}).get('execution_recoveries',[])
+    # This legacy list does not own modern accepted-search recovery bindings.
+    if not refs:return []
+    owner=history_source(source,job)
     return ([dict(ref,origin_identity=ref.get('origin_identity',owner.origin_identity)) for ref in refs]
         if owner.inherited else refs)
 

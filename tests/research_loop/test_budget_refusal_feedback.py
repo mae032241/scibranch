@@ -9,24 +9,37 @@ from types import SimpleNamespace
 
 import pytest
 
-from execution_fixtures import execution_registry
+from execution_fixtures import execution_registry, remote_registry
 from scidiscovery.research_loop import (breadth, budget, experiment_client, experiments as e,
     instance_owner, protocol, replay_check)
 
 
+def scope():
+    """An explicit standalone task identity, not a scope-validation bypass."""
+    return dict(handoff_protocol=protocol.CURRENT, step=2, role='W',
+        job_ref=dict(path='/fixture/jobs/002.json'),
+        execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'), mechanism_ref=None)
+
+
 @pytest.fixture
 def cli(tmp_path, monkeypatch, capsys):
-    config = dict(record_dir=str(tmp_path / 'records'), scope={})
+    config = dict(record_dir=str(tmp_path / 'records'), scope=scope())
+    # Reach dispatch rather than the CLI's missing-input caller-error branch.
+    (tmp_path / 'science.py').write_text('pass\n')
     path = tmp_path / 'config.json'
     path.write_text(json.dumps(config))
     monkeypatch.setattr(instance_owner, 'lease_for_configuration', lambda *args: nullcontext())
-    monkeypatch.setattr(protocol, 'require_scope', lambda *args: None)
     monkeypatch.setattr(e, 'load', lambda *args, **kwargs: SimpleNamespace())
     monkeypatch.setattr(e, '_diagnostic', lambda error, note, **kwargs: note)
 
     def invoke(dispatch):
-        monkeypatch.setattr(e, 'dispatch', dispatch)
+        entered = []
+        def operation(*args, **kwargs):
+            entered.append(True)
+            return dispatch(*args, **kwargs)
+        monkeypatch.setattr(e, '_dispatch_descriptor_operation', operation)
         code = e.main(['--config', str(path), 'run', '--script', str(tmp_path / 'science.py')])
+        assert entered == [True], 'The test must reach dispatch, not a caller-input refusal'
         return code, json.loads(capsys.readouterr().out)
     return config, invoke
 
@@ -45,14 +58,12 @@ def test_host_budget_refusal_reaches_cli_before_preparation(cli, tmp_path, monke
     monkeypatch.setattr(e, 'review_status', lambda *args: observed)
     monkeypatch.setattr(records, 'calls', lambda: [])
     monkeypatch.setattr(records, 'preflight', lambda **kwargs: records.admission_binding(None, expected_calls=[]))
-    monkeypatch.setattr(experiment_client, 'root_for_configuration', lambda *args, **kwargs: None)
-    monkeypatch.setattr(experiment_client, 'code_selection', lambda *args, **kwargs: None)
-    monkeypatch.setattr(e, '_require_new_execution', lambda *args: None)
     adapter = SimpleNamespace(prepare=lambda *args, **kwargs: pytest.fail('Refused work must not prepare'))
     payload = SimpleNamespace(local_path=str(tmp_path / 'science.py'))
 
     def dispatch(*args, **kwargs):
-        return e._prepare_descriptor(config, payload, adapter, records, [])
+        return e._prepare_descriptor(config, payload, adapter, records, [],
+            client_facts=experiment_client.load_client_facts(config))
     code, result = invoke(dispatch)
     assert code == 2
     assert result['status'] == status and result['reason'] == reason
@@ -67,7 +78,7 @@ def test_host_budget_refusal_reaches_cli_before_preparation(cli, tmp_path, monke
     'host_review_observation_expired', 'host_review_observation_unavailable',
 ])
 def test_advisory_observations_do_not_refuse_new_work(tmp_path, monkeypatch, reason):
-    records = e.Records(dict(record_dir=str(tmp_path / 'records'), scope={}))
+    records = e.Records(dict(record_dir=str(tmp_path / 'records'), scope=scope()))
     value = None if reason=='host_review_observation_unavailable' else dict(deadline_boottime=100,
         valid_until_boottime=0 if reason=='host_review_observation_expired' else 100,
         pending=True, reason=reason)
@@ -94,16 +105,16 @@ def test_formal_review_refusal_remains_separate(cli, monkeypatch):
     assert result['handoff']['action'] == 'reconcile_or_stop'
 
 
-@pytest.mark.parametrize('error', [
-    e.ReviewRequired('review_deadline_reached private/provider/path'),
-    e.ReviewRequired('reserve_reached private/provider/path'),
-    ValueError('shared_usage_unknown private/provider/path'),
+@pytest.mark.parametrize('error,expected_code,expected_status', [
+    (e.ReviewRequired('review_deadline_reached private/provider/path'), 3, 'unknown'),
+    (e.ReviewRequired('reserve_reached private/provider/path'), 3, 'unknown'),
+    (ValueError('shared_usage_unknown private/provider/path'), 2, 'unresolved'),
 ])
-def test_provider_exception_text_cannot_claim_budget_refusal(cli, error):
+def test_provider_exception_text_cannot_claim_budget_refusal(cli, error, expected_code, expected_status):
     _, invoke = cli
     def dispatch(*args, **kwargs):raise error
     code, result = invoke(dispatch)
-    assert code in {2, 3}
+    assert code == expected_code and result['status'] == expected_status
     assert result['status'] not in {'budget_exhausted', 'budget_unavailable', 'review_required'}
     assert 'accepted' not in result and 'private/provider/path' not in json.dumps(result)
     assert result['handoff']['action'] != 'finalize_response'
@@ -114,21 +125,45 @@ def test_provider_exception_text_cannot_claim_budget_refusal(cli, error):
     e._BudgetAdmissionUnavailable('review_deadline_reached'),
     e._AdmissionBudgetRefused('reserve_reached'),
 ])
-def test_accepted_provider_refusal_keeps_original_unknown(tmp_path, monkeypatch, error):
-    config = dict(record_dir=str(tmp_path / 'records'))
-    monkeypatch.setattr(e, 'verify_scientific_inputs', lambda *args, **kwargs: None)
-    def submit(*args):raise error
-    adapter = SimpleNamespace(dispatch_lease=lambda *args: None, submit=submit)
-    result = e._submit_descriptor(config, adapter, SimpleNamespace(query=True), object(),
-        dict(call_id='original-call'))
-    assert result['status'] == 'unknown' and result['call_id'] == 'original-call'
-    assert 'accepted' not in result and 'budget_exhausted' not in result
+def test_accepted_provider_refusal_keeps_original_unknown(tmp_path, monkeypatch, error, remote_registry):
+    scope = dict(handoff_protocol=protocol.CURRENT, step=2, role='W',
+        job_ref=dict(path='/fixture/jobs/002.json'),
+        execution_key=dict(path='/fixture/native-evidence/002/native-intent.json'), mechanism_ref=None)
+    config = e.freeze(dict(record_dir=str(tmp_path / 'records'), scope=scope,
+        admission=dict(version=1, mode='hard'), max_seconds=10), 'remote_execution:fixture')
+    script = tmp_path / 'science.json';script.write_text('{"message":"remote-original"}\n')
+    prepared = e.LocalFileDescriptor(name='original-call', local_path=str(script),
+        size_bytes=script.stat().st_size, media_type='application/json')
+    records = e.Records(config)
+    adapter = e.load(config)
+    accepted = records.accept(prepared, adapter.acceptance_metadata(prepared), config['execution_interface'],
+        expected_calls=[])
+    original = (records.directory(prepared.name) / 'accepted.json').read_bytes()
+    submissions = []
+    def submit(descriptor):
+        submissions.append(descriptor.name)
+        raise error
+    monkeypatch.setattr(adapter, 'submit', submit)
+    monkeypatch.setattr(adapter, 'status_details', lambda call: dict(state='unknown', call_id=call))
+    monkeypatch.setattr(e, 'load', lambda *args, **kwargs: adapter)
+    result = e._submit_descriptor(config, adapter, e.lifecycle_capabilities(adapter), prepared, accepted)
+    assert result['status'] == 'unknown' and result['call_id'] == prepared.name
+    assert result['accepted'] is True
+    assert not {'reason', 'budget_exhausted', 'budget_unavailable'}.intersection(result)
+    assert 'private/provider/path' not in json.dumps(result)
+    assert 'Never resubmit' in result['note']
+    # A second run must reconcile this exact accepted original, not call submit.
+    blocked = e._original_dispatch_state(config, prepared)
+    assert blocked['status'] == 'unknown' and blocked['call_id'] == prepared.name
+    assert submissions == [prepared.name] and records.external(prepared.name) is None
+    assert (records.directory(prepared.name) / 'accepted.json').read_bytes() == original
+    assert records.calls() == [records.directory(prepared.name)]
 
 
 def test_external_preparation_before_budget_refusal_stays_unknown(tmp_path, monkeypatch):
     script = tmp_path / 'science.py'
     script.write_text('pass\n')
-    config = dict(record_dir=str(tmp_path / 'records'), scope={}, max_seconds=10,
+    config = dict(record_dir=str(tmp_path / 'records'), scope=scope(), max_seconds=10,
         execution_interface=dict(executor='external:fixture'))
     payload = e.LocalFileDescriptor(name='input', local_path=str(script),
         size_bytes=script.stat().st_size, media_type='text/plain')
@@ -136,10 +171,7 @@ def test_external_preparation_before_budget_refusal_stays_unknown(tmp_path, monk
     monkeypatch.setattr(records, 'calls', lambda: [])
     monkeypatch.setattr(records, 'preflight', lambda **kwargs: None)
     def refuse(*args, **kwargs):raise e._BudgetAdmissionUnavailable('reserve_reached')
-    monkeypatch.setattr(records, 'accept', refuse)
-    monkeypatch.setattr(experiment_client, 'root_for_configuration', lambda *args, **kwargs: None)
-    monkeypatch.setattr(experiment_client, 'code_selection', lambda *args, **kwargs: None)
-    monkeypatch.setattr(e, '_require_new_execution', lambda *args: None)
+    monkeypatch.setattr(records, '_accept', refuse)
     monkeypatch.setattr(replay_check, 'acceptance', lambda *args: {})
     prepared = []
     def prepare(descriptor, **kwargs):
@@ -147,7 +179,8 @@ def test_external_preparation_before_budget_refusal_stays_unknown(tmp_path, monk
         return descriptor
     adapter = SimpleNamespace(prepare=prepare, acceptance_metadata=lambda *args, **kwargs: {},
         capabilities=lambda: [])
-    result = e._prepare_descriptor(config, payload, adapter, records, [])
+    result = e._prepare_descriptor(config, payload, adapter, records, [],
+        client_facts=experiment_client.load_client_facts(config))
     assert len(prepared) == 1
     assert result['status'] == 'unknown' and 'accepted' not in result
     assert 'preparation' in result['note']

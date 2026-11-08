@@ -744,6 +744,38 @@ def cleanup(root,job,*,watchdog=False):
     return result
 
 
+def _validate_artifact_owner(config,call_id,*,root,work,job):
+    """Pure binding check over the launch owner's already loaded originals."""
+    from . import contracts as c, experiment_client
+    scope=config.get('scope')
+    if (not isinstance(scope,dict) or not isinstance(job,dict)
+            or type(job.get('step')) is not int or job['step']<=0
+            or job['step']!=scope.get('step')
+            or not root.is_absolute() or '..' in root.parts
+            or work!=c.workspace(root,job['step'])
+            or config.get('record_dir')!=str(experiment_client._record_directory_from_facts(root,job['step'],job))
+            or scope.get('job_ref')!=dict(path=str(root/'jobs'/f'{job["step"]:03d}.json'))):
+        raise e.IntegrityError('Local artifacts belong to another owner-loaded task')
+    if not isinstance(call_id,str) or not e.ID.fullmatch(call_id) or call_id in ('.','..'):
+        raise e.IntegrityError('Local artifacts require the exact original call identity')
+
+
+def artifact_directory_from_facts(config,call_id,*,root,work,job):
+    """Launch-boundary producer, NOT a pure argv projector.
+
+    Immutable configuration/task facts arrive from their owner. Only the current
+    call directory and mutable retained-root binding are observed here; never
+    reload a task, accepted call, native intent or execution configuration.
+    The publication owner, not a provider's namespace, selects the output root.
+    """
+    from . import shared_input_views
+    root,work=Path(root),Path(work)
+    _validate_artifact_owner(config,call_id,root=root,work=work,job=job)
+    e.Records(config).directory(call_id)
+    retained=shared_input_views.dynamic_root(root,work,'retained-experiments')
+    return retained/call_id/'outputs'
+
+
 def artifact_directory(config,call_id):
     """One backend-owned output entity in the already-bound public root."""
     from . import contracts as c, experiment_client, shared_input_views

@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
+from execution_fixtures import execution_registry
+
 from scidiscovery.research_loop import contracts as c, controller, fork_sources, originals
 from test_execution_authority import prepare
 from test_history_handoff import finish
