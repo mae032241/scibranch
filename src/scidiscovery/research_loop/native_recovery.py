@@ -238,6 +238,9 @@ def counters(intents):
 
 
 def recoverable_source(outcome):
+    from .native_usage import transport_diagnostic
+    diagnostic=transport_diagnostic(outcome.get('technical_diagnostic')) if isinstance(outcome,dict) else None
+    if diagnostic is not None and diagnostic['original_call_state']=='unknown':return False
     return (isinstance(outcome, dict) and outcome.get('terminal_observed') is False
         and (outcome.get('native_failure') or {}).get('category') in {'temporary','incomplete'}
         and outcome.get('stop_reason') in {None,'native_failure_event'}
@@ -254,6 +257,9 @@ def never_started(outcome):
     an unknown process exit alone never permits another submission.
     """
     if not isinstance(outcome, dict):return False
+    from .native_usage import transport_diagnostic
+    diagnostic=transport_diagnostic(outcome.get('technical_diagnostic'))
+    if diagnostic is not None and diagnostic['original_call_state']!='not_submitted':return False
     identity = outcome.get('native_identity')
     stream = outcome.get('native_stream')
     metering = outcome.get('metering') or {}
@@ -290,6 +296,10 @@ def decision(outcome, limits, used, *, session_available, activity_observed=Fals
     failure = outcome.get('native_failure')
     if outcome.get('terminal_observed') is True:
         return dict(result, action='none', reason='automatic_recovery_completed_turn')
+    from .native_usage import transport_diagnostic
+    diagnostic=transport_diagnostic(outcome.get('technical_diagnostic'))
+    if diagnostic is not None and diagnostic['original_call_state']=='unknown':
+        return dict(result, reason='automatic_recovery_original_call_unknown')
     if not isinstance(failure, dict):return result
     category = failure.get('category')
     if category not in {'temporary', 'incomplete'}:

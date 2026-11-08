@@ -423,7 +423,11 @@ def result_body(step, job, payload, seal, *, clean=None):
         body+='<p class="gap">'+str(comparison['candidate_facts_omitted_count'])+'条候选方案观察未在摘要中展开，请查看完整原文。</p>'
     body+='<p>观察覆盖范围：'+escape(comparison.get('coverage','unknown'))+'</p></section>'
     body+='<section><h2>研究者的建议</h2>'
-    ordinary_a=job['role']=='A' and not job.get('formal_review') and payload.get('next_action')!='audit'
+    from . import ui_semantics, ui_view
+    body+='<p>阶段职责：'+escape(ui_semantics.role_label(job) or ui_view.ROLE_LABELS.get(job['role'],job['role']))+'</p>'
+    if payload.get('next_action') is not None:
+        body+='<p>行动含义：'+escape(ui_semantics.action(job,payload['next_action'],ui_view.A_OUTCOMES))+'</p>'
+    ordinary_a=ui_semantics.assessment(job) and payload.get('next_action')!='audit'
     recommended=payload.get('candidate_recommendation') if ordinary_a else None
     if ordinary_a:
         body+=('<p>本阶段综合评估建议：<strong>'+escape(recommended)+'</strong></p>' if recommended is not None else

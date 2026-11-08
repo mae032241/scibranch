@@ -78,6 +78,9 @@ class FakeReader:
     def role(self, step):
         return self.nodes[step]['job']['role'] if self.nodes[step] else 'W'
 
+    def candidate(self,job,value,references=None,*,strict=False):
+        return ui_view.resolve_candidate(self.root,job,value,references,strict=strict,facts=dict(resolved=value))
+
 
 def sealed(step, role, payload, *, observation=None, materials=0, **job):
     return dict(job=dict(step=step, role=role, **job), payload=payload,
@@ -249,7 +252,7 @@ def test_usage_cards_mark_overrun_unknown_usage_and_waiting():
 
 
 def test_final_coverage_displays_only_a_authored_rows_and_exact_scientific_sources():
-    job = dict(final_coverage_mechanisms=[dict(mechanism_ref='h001.m1', label='Alpha'),
+    job = dict(role='A',final_coverage_mechanisms=[dict(mechanism_ref='h001.m1', label='Alpha'),
         dict(mechanism_ref='h001.m2', label='Waived alternative')])
     payload = dict(final_coverage=[dict(mechanism_ref='h001.m1', status='screened_pending',
         reason='Evidence remains preliminary.', science_refs=[dict(source_step=2, pointer='/scientific_result')],
@@ -263,7 +266,7 @@ def test_final_coverage_displays_only_a_authored_rows_and_exact_scientific_sourc
     assert rows[1]['label'] == 'Waived alternative' and rows[1]['unanswered_questions'] == []
     assert ui_view.final_coverage(job, dict(candidates=[dict(status='ok')]), clean) is None
     assert ui_view.final_coverage(dict(job, formal_review=True), payload, clean) is None
-    reader = FakeReader({3: sealed(3, 'A', dict(payload, summary='Final', next_action='finish'), **job)})
+    reader = FakeReader({3: sealed(3, 'A', dict(payload, summary='Final', next_action='finish'), **{key:value for key,value in job.items() if key!='role'})})
     assert ui_view.result_card(reader, 3, clean=clean)['final_coverage'] == rows
 
 
@@ -480,18 +483,18 @@ def test_projection_and_result_card_read_sealed_fixture_without_writes(tmp_path)
     finish(root, 2, 'A', [1], action='finish', summary='Final judgment', limitations=['L1', 'L2', 'L3', 'L4'])
     before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
     view = control.status(root, after=0, limit=50, live_feedback=False)
-    value = ui_view.project(root, view, final_step=2)
+    value = ui_view.project(root, view, final_step=None)
     assert value['header']['title'] == 'Assess one exact declared implementation.'
     (item,) = value['trail']['rounds']
-    assert item['index'] == 1 and item['outcome'] == '结束探索' and item['h']['one_line'] == 'First <script>plan</script>'
+    assert item['index'] == 1 and item['outcome'] == '请求提交前最终评估' and item['h']['one_line'] == 'First <script>plan</script>'
     assert value['candidates'] == dict(count=0, partial=False, recommended=False, delivered=False)
-    again = ui_view.project(root, view, final_step=2, memo={})
+    again = ui_view.project(root, view, final_step=None, memo={})
     assert again['trail'] == value['trail']
     assert value['used_steps'] == 2
     card = ui_view.result_card(ui_view.Reader(root), 2, closeout=view.get('closeout'))
     assert card['delivery_state'] == 'none' and card['delivery_label'] == '未推荐' and card['chosen'] is None
     assert card['unmet'] == ['L1', 'L2', 'L3'] and card['unmet_omitted'] == 1 and card['criteria_change'] is None
-    assert card['goal_completion'] == '未记录' and card['decision'] == '结束探索'
+    assert card['goal_completion'] == '未记录' and card['decision'] == '请求提交前最终评估'
     row = ui_view.results_list_row(ui_view.Reader(root), 1, ui_view.cleaner(root))
     assert row == dict(step=1, role='H', role_label='H · 假设', one_line='First <script>plan</script>')
     assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
@@ -670,16 +673,20 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     member = ui_view.candidate_file(reader, card['chosen'], projection)
     assert member['name'] == 'P/model.py'
     assert reader.node(2)['seal']['materials'][member['index'] - 1]['path'].endswith('/P/model.py')
-    assert ui_view.resolve_candidate(root, reader.node(3)['job'], 'W002-I002', strict=True) == 'Q'
+    assert reader.candidate(reader.node(3)['job'],'W002-I002',strict=True) == 'Q'
     with pytest.raises(ValueError, match='no unique frozen candidate binding'):
-        ui_view.resolve_candidate(root, reader.node(3)['job'], 'W002-I099', strict=True)
+        reader.candidate(reader.node(3)['job'],'W002-I099',strict=True)
+    earlier=dict(reader.node(3)['job'],history=reader.node(2)['job']['history'])
+    with pytest.raises(ValueError):
+        reader.candidate(earlier,'W002-I002',strict=True)  # Existing future W cannot enlarge this original cut.
     assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
     # Re-observation can repeat an identical binding; equal bytes at P/Q still
     # remain different originals because their material identities differ.
-    bindings = history.candidate_materials(root, projection['subject'])
-    monkeypatch.setattr(history, 'candidate_materials', lambda root, job: bindings * 2)
+    import copy
+    facts=copy.deepcopy(reader.candidate_facts(reader.node(3)['job'],'W002-I002'))
+    facts['implementation']['observation']['candidates']*=2
     assert ui_view.candidate_file(reader, card['chosen'], projection)['name'] == 'P/model.py'
-    assert ui_view.resolve_candidate(root, reader.node(3)['job'], 'W002-I002', strict=True) == 'Q'
+    assert ui_view.resolve_candidate(root,reader.node(3)['job'],'W002-I002',strict=True,facts=facts)=='Q'
 
 
 @pytest.mark.process_e2e

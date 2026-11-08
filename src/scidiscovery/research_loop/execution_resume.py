@@ -336,6 +336,9 @@ class _RecoveryAdmission:
         from . import budget, execution_authority as authority
         self.root,self.job,self.seal,self.config=root,job,seal,config
         self.allocation_ref=allocation;self.allocation=q._read(root,allocation)
+        from . import worker_research
+        if worker_research.enabled(config):
+            self.research_original=worker_research.load_original(self.allocation['binding'].get('mechanism_binding'),config['scope'])
         self.call=self.allocation['call_id'];self.valid_seconds=valid_seconds
         self.secret=authority.host_secret(root);self.started=False;self.base=None;self._collection=None
         self.proof=dict(seal=q._ref(root,c.host_record(c.workspace(root,job['step']))/'result-identity.json'),
@@ -388,8 +391,11 @@ class _RecoveryAdmission:
         return budget.execution_available(self.root,self.job,budget.snapshot(self.root),native.usage(self.root))['seconds']
 
     def opportunity(self):
-        from . import breadth,search,execution_recovery
+        from . import breadth,search,execution_recovery,worker_research
         binding=self.allocation['binding'].get('mechanism_binding')
+        if worker_research.enabled(self.config):
+            worker_research.check_original(binding,self.config['scope'],self.research_original)
+            return
         if binding is None:return
         if self.started:return # The accepted opportunity was checked before resume_intent.
         from . import history
@@ -661,7 +667,8 @@ def resume(root,step,call_id,*,max_seconds,authorization_note,request_valid_seco
         metadata['engineering_check']=replay_check.acceptance(config,adapter)
         binding=original['binding'].get('mechanism_binding')
         accepted=records.accept(prepared,metadata,config['execution_interface'],expected_calls=[p.name for p in records.calls()],
-            mechanism=binding['mechanism_ref'] if binding else None,recovery_admission=operation.check,operation_context=operation.context)
+            mechanism=binding['mechanism_ref'] if binding else None,recovery_admission=operation.check,
+            recovery_binding=binding if config.get('research_strategy_version')==3 else None,operation_context=operation.context)
         row=c.accept_recovery_call(root,job,call_id,context=operation.context)
         _publish(root,job,operation.base,adapter,row=row,query=False,context=operation.context)
         adapter.dispatch_lease(accepted)

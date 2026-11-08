@@ -13,7 +13,7 @@ FROZEN_TASK_SETTINGS = (
     'final_a_completion_policy', 'live_feedback_version', 'experiment_interface_version',
     'managed_admission_version', 'worker_view_version', 'storage_policy',
     'skills', 'worker_profiles', 'role_profile_declarations', 'project',
-    'supervision_policy', 'supervision_budget_basis',
+    'supervision_policy', 'supervision_budget_basis', 'research_strategy_version',
 )
 
 
@@ -222,6 +222,17 @@ def _load_selected_base_facts(root, selected, *, base, policy, head, bind_inputs
         document = qualification.validate_inputs_from_facts(root,job,facts=inputs)
     job['source_restrictions'] = qualification.status_from_facts(job,document,facts=inputs)
     sources = dict(selected['material_sources'])
+    from . import delivery_review, handoff_state
+    scoped=delivery_review.binding(job)
+    if scoped is not None:
+        step=scoped['step']
+        known=sources.get(step)
+        owner=(known or {}).get('owner') or producers.get(step)
+        if owner is None:
+            owner=originals.dependency(source,step)
+        facts=handoff_state.sealed_facts(root,step,base=base,owner=owner,known=known)
+        sources[step]=handoff_state.source_facts_from_sealed(root,facts,resolve_choices=False)
+        delivery_review.validate_parent(job,sources)
     if policy.get('execution_authority_policy') is not None:
         for reference in job['direct_refs']:
             step = int(Path(reference['path']).parts[2])

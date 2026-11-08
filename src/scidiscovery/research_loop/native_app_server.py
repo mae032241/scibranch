@@ -429,6 +429,7 @@ class Transport:
         self.thread, self.turn, self.final = None, None, None
         self.finished = False
         self.completed = False
+        self.turn_submission_possible = False
 
     def initialize(self):
         self.send(dict(id=1, method='initialize', params=dict(
@@ -542,7 +543,11 @@ class Transport:
                         service_tier=effective_tier),
                     service_tier_wire_classification=service_tier_classification(result)))
                 self.stage = 3
-                self.send(dict(id=3, method='turn/start', params=self._turn_params(prompt)))
+                request=dict(id=3,method='turn/start',params=self._turn_params(prompt))
+                # Mark before writing: a short/broken write gives no proof
+                # that the provider did not accept this original call.
+                self.turn_submission_possible = True
+                self.send(request)
             else:
                 self._bind_turn(result.get('turn'))
                 self.stage = 4
@@ -561,7 +566,13 @@ class Transport:
             self._bind_turn(params.get('turn'))
             return
         if method in {'thread/tokenUsage/updated', 'item/completed'}:
-            if identity(params.get('turnId')) != self.turn:
+            reported_turn = identity(params.get('turnId'))
+            if method == 'thread/tokenUsage/updated' and self.turn is None:
+                # Resume may report thread usage before the new turn is bound.
+                # This optional sample cannot establish current-turn identity
+                # or be retained as current context after a later binding.
+                return
+            if reported_turn != self.turn:
                 raise ValueError('Native notification turn changed')
         if method == 'thread/tokenUsage/updated':
             usage = params.get('tokenUsage')
@@ -622,6 +633,13 @@ class Transport:
     def close(self):
         if self.final is not None:self.final.close();self.final=None
 
+    def diagnostic(self, phase, code):
+        selected=dict(phase=phase,code=code,
+            original_call_state='terminal' if self.finished else
+                'unknown' if self.turn_submission_possible else 'not_submitted',
+            thread_bound=self.thread is not None,turn_bound=self.turn is not None)
+        self.emit(dict(type='transport.diagnostic',diagnostic=selected))
+
     def _bind_turn(self, turn):
         if not isinstance(turn, dict): raise ValueError('Native turn metadata unavailable')
         current = identity(turn.get('id'))
@@ -632,13 +650,19 @@ class Transport:
 
 
 def run(argv, prompt, *, output=sys.stdout):
-    d = invocation(argv)
+    try:d = invocation(argv)
+    except Exception as error:
+        error._scid_never_submitted=True
+        raise
     def emit(value):
         output.write(json.dumps(value, ensure_ascii=False, separators=(',', ':'))+'\n')
         output.flush()
     # Inherit the outer native group. The existing controller owns group
     # termination; this helper must never create an untracked new session.
-    process = subprocess.Popen(d['command'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
+    try:process = subprocess.Popen(d['command'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None)
+    except Exception as error:
+        error._scid_never_submitted=True
+        raise
     def send(value):
         process.stdin.write((json.dumps(value, ensure_ascii=False, separators=(',', ':'))+'\n').encode())
         process.stdin.flush()
@@ -662,20 +686,45 @@ def run(argv, prompt, *, output=sys.stdout):
                 if isinstance(spool,AssistantSpool) and spool is not transport.final:spool.close()
             if transport.finished: break
         if not transport.finished:
+            transport.diagnostic('event_stream','native_terminal_unreported')
             print('Native app-server transport diagnostic: '+json.dumps(dict(error_stage='event_stream',
                 error_code='native_terminal_unreported')),file=sys.stderr)
+        elif not transport.completed:
+            transport.diagnostic('turn_completion','native_execution_stopped')
         return 0 if transport.completed else 1
     except Exception as error:
         error._scid_transport_stage=phase
+        transport.diagnostic(phase,diagnostic_code(error))
+        error._scid_diagnostic_emitted=True
         raise
     finally:
-        transport.close()
-        process.stdin.close()
-        if process.poll() is None: process.terminate()
-        try: process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill(); process.wait(timeout=2)
-        process.stdout.close()
+        try:
+            transport.close()
+            try:process.stdin.close()
+            except BrokenPipeError:pass
+            if process.poll() is None: process.terminate()
+            try: process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill(); process.wait(timeout=2)
+            process.stdout.close()
+        except Exception as error:
+            error._scid_transport_stage='native_cleanup'
+            transport.diagnostic('native_cleanup',diagnostic_code(error))
+            error._scid_diagnostic_emitted=True
+            raise
+
+
+def diagnostic_code(error):
+    codes={'Native terminal status unavailable':'terminal_status_unavailable',
+        'Native final assistant message unavailable':'final_unavailable',
+        'Native assistant text unavailable':'assistant_text_unavailable',
+        'Native notification turn changed':'turn_identity_changed',
+        'Native turn changed':'turn_identity_changed',
+        'Native notification thread changed':'thread_identity_changed',
+        'Native thread launch did not match declaration':'launch_binding_mismatch',
+        'Native RPC submission response unavailable':'rpc_response_unavailable',
+        'Native metadata scalar invalid':'metadata_scalar_invalid'}
+    return codes.get(str(error),'native_io_error' if isinstance(error,OSError) else 'native_projection_invalid')
 
 
 def main(argv=None):
@@ -689,16 +738,13 @@ def main(argv=None):
         stage=getattr(error,'_scid_transport_stage','launch_or_declaration')
         if stage not in {'initialization_submit','event_projection','initialization_response','thread_response',
                 'turn_response','rpc_response','turn_completion','turn_start_notice','assistant_or_compaction',
-                'context_report','native_notification'}:stage='launch_or_declaration'
-        codes={'Native terminal status unavailable':'terminal_status_unavailable',
-            'Native final assistant message unavailable':'final_unavailable',
-            'Native assistant text unavailable':'assistant_text_unavailable',
-            'Native notification turn changed':'turn_identity_changed',
-            'Native notification thread changed':'thread_identity_changed',
-            'Native thread launch did not match declaration':'launch_binding_mismatch',
-            'Native RPC submission response unavailable':'rpc_response_unavailable',
-            'Native metadata scalar invalid':'metadata_scalar_invalid'}
-        code=codes.get(str(error),'native_io_error' if isinstance(error,OSError) else 'native_projection_invalid')
+                'context_report','native_notification','native_cleanup'}:stage='launch_or_declaration'
+        code=diagnostic_code(error)
+        if not getattr(error,'_scid_diagnostic_emitted',False):
+            print(json.dumps(dict(type='transport.diagnostic',diagnostic=dict(
+                phase='launch_or_declaration',code=code,
+                original_call_state='not_submitted' if getattr(error,'_scid_never_submitted',False) else 'unknown',
+                thread_bound=False,turn_bound=False)),separators=(',',':')),flush=True)
         print('Native app-server transport diagnostic: '+json.dumps(dict(error_stage=stage,error_code=code)),file=sys.stderr)
         return 1
 

@@ -18,6 +18,44 @@ DISCOVERY_ENTRIES = 256
 DISCOVERY_DIRECTORIES = 4096
 MAX_SAFE_INTEGER = 2 ** 53 - 1
 
+# The owner publishes only these compact transport facts. Consumers never
+# recover a diagnosis from private stderr, session text or exception messages.
+TRANSPORT_PHASES = frozenset({'launch_or_declaration', 'initialization_submit',
+    'event_projection', 'initialization_response', 'thread_response', 'turn_response',
+    'rpc_response', 'turn_completion', 'turn_start_notice', 'assistant_or_compaction',
+    'context_report', 'native_notification', 'event_stream', 'metadata_delivery', 'native_execution', 'native_cleanup'})
+TRANSPORT_CODES = frozenset({'terminal_status_unavailable', 'final_unavailable',
+    'assistant_text_unavailable', 'turn_identity_changed', 'thread_identity_changed',
+    'launch_binding_mismatch', 'rpc_response_unavailable', 'metadata_scalar_invalid',
+    'native_io_error', 'native_projection_invalid', 'native_terminal_unreported',
+    'native_metadata_unavailable', 'native_metadata_unsupported', 'native_execution_stopped'})
+
+
+def transport_diagnostic(value):
+    """Pure, fail-closed projection of an owner's small typed diagnosis."""
+    if (not isinstance(value, dict)
+            or any(not isinstance(value.get(key),str) for key in ('phase','code','original_call_state'))
+            or value.get('phase') not in TRANSPORT_PHASES
+            or value.get('code') not in TRANSPORT_CODES
+            or value.get('original_call_state') not in {'not_submitted', 'unknown', 'terminal'}
+            or any(type(value.get(key)) is not bool for key in ('thread_bound', 'turn_bound'))):
+        return None
+    result = {key: value[key] for key in ('phase', 'code', 'original_call_state', 'thread_bound', 'turn_bound')}
+    result['next_action'] = {'not_submitted': 'recheck_before_same_task_restart',
+        'unknown': 'reconcile_original_without_replay', 'terminal': 'inspect_terminal_original'}[result['original_call_state']]
+    return result
+
+
+def actionable_stop(outcome):
+    """Public facts only; consumed budgets and originals remain on the outcome."""
+    selected = transport_diagnostic(outcome.get('technical_diagnostic')) if isinstance(outcome, dict) else None
+    if selected is None:
+        return None
+    # This does not set terminal_observed: a real failed native terminal is
+    # terminal for reconciliation but cannot verify scientific completion.
+    return dict(selected, category='technical', budgets_preserved=True,
+        original_records=['native-intent.json', 'native-outcome.json'])
+
 
 class MetadataUnavailable(ValueError):
     """The declared native launcher cannot provide required compact facts."""

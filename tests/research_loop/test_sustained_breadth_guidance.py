@@ -24,7 +24,7 @@ def prepare(tmp_path, advice):
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, ['never-call-a-model'], model='fixture',
         reasoning_effort='high', max_tokens=100000, max_seconds=600, max_steps=8,
-        role_guidance=advice, search_policy=search.DEFAULT_POLICY)
+        role_guidance=advice, search_policy=search.DEFAULT_POLICY,research_strategy_version=None)
     return root
 
 
@@ -116,9 +116,9 @@ def test_normal_prepared_scientific_request_delivers_sustained_breadth_and_froze
         assert task['lineage']['indexes'] == job['history']['view']['indexes']
         assert '2-3 full procedures' not in transmitted
     else:
-        for concept in ('W owns sustained research direction/design/adaptation',
-                'H for hypotheses', 'A for a decision-changing judgment', 'observations and residuals',
-                'breadth for conflict/stall', 'runnable candidates/helpers',
+        for concept in ('W sustains direction/design/adaptation',
+                'H:hypotheses', 'A:decision-changing judgment', 'observations/residuals',
+                'Conflict/stall:revisit breadth', 'runnable candidates/helpers',
                 'negatives', 'exact originals'):
             assert concept in transmitted
         assert set(schema['properties']['stage_intent']['enum'])=={'continue','handoff','revise_h','review','decision'}

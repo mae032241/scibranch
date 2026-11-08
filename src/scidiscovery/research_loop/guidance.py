@@ -24,12 +24,36 @@ OPPORTUNITY = {
 }
 
 
+# Versions 1 and 2 share these frozen scientific role literals. Their distinct
+# readiness authority lives in purpose contracts; unmarked originals keep theirs.
+WORKER_LED = {
+    'H': 'Open distinct explanations, representations or problem decompositions rooted in the objective, evidence and gaps. Label speculation and distinguish it from observations. Keep original constraints fixed. Offer useful distinctions, not mandatory method-family coverage, recipes or downstream caps. W chooses the research direction and may revise it; answer consultation then return to W. Request E only for a bounded evidence gap.',
+    'W': 'Own research, objective/score/validation-object alignment and runnable incumbents. Interpret observations/residuals/negative results; adapt. Consult H/A freely. Plateau/time alone is not failure. Separate exploratory/adaptive evidence from independent final checks. No exhaustive search or invented observations. Honor --mechanism N; reconcile unknown calls, never replay. No auxiliary agents.',
+    'A': 'Independently check local lock-in, target drift, ignored evidence and repetitive or unreasonable search; distinguish productive deepening from stagnation. Give evidence and the key concern, or say no material issue and return to W. No method prescriptions, checklists or final-proof demands for exploratory work. Plateau/time alone is not scientific failure. Preserve missing evidence/limits and formal review independence.',
+    'E': DEFAULT['E'],
+}
+
+
+WORKER_LED_PLANNING = {
+    'H': 'Open useful explanations, representations or problem decompositions from the objective, evidence and gaps; label speculation. No mandatory method-family coverage, recipes or downstream caps. W owns direction and allocation.',
+}
+
+
+# New preparations choose v3 explicitly; older literal dictionaries stay frozen.
+WORKER_FIRST = {
+    'H': 'Answer W\'s concrete question from relevant originals, candidates and unresolved gaps. Offer alternative mechanisms, representations or decompositions and cheap observations that could distinguish them. Mark speculation. Say when no useful alternative is found; return to W. Preserve original constraints; no execution grant.',
+    'W': 'Start and own research/methods/candidates. For ordinary research, bind stable mechanisms and experiment_question via --research JSON before batches; discovery/diagnosis is valid. Keep research_memory exact candidates/evidence/limits/questions across advice/context changes. H offers alternatives; A checks omissions/inefficiency; W chooses methods. Separate adaptive evidence from final checks. Reconcile unknown calls; never replay. No auxiliary agents.',
+    'A': 'Use relevant originals and W\'s concrete question, candidate memory and unresolved gaps. Ordinary advice finds consequential omissions, misjudgment or inefficient validation; endorse continued work or say no new issue when appropriate. Extra work needs a concrete decision-changing gap, not a checklist. Final A independently checks delivery claims, reproducibility and limits; reject all or request one bounded correction when permitted. Preserve formal review independence and original qualification.',
+    'E': DEFAULT['E'],
+}
+
+
 # Current launcher advice is separate from the immutable scientific literal.
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
     'H': 'H explores revisable high-level scientific methods/directions; offer competing explanations and distinguishing experiments. W owns direction/design/implementation/adaptation and may add/revise mechanisms. Use exact observations/counterevidence; revisit breadth when contradictions or stalled progress justify it. Keep original task constraints/counts/commitments fixed, distinct from hypotheses. Consultation answers W then returns to a fresh W. Publish rationale in declared outputs; cite managed originals. No downstream budget/call/audit caps.',
     'A': 'Judge premature convergence, important alternatives and decision progress; W owns methods and allocation. Reuse exact originals/limits.',
-    'W': 'W owns sustained research direction/design/adaptation from observations and residuals. H for hypotheses; A for a decision-changing judgment. Revisit breadth for conflict/stall. Keep runnable candidates/helpers, negatives and exact originals.',
+    'W': 'W sustains direction/design/adaptation via observations/residuals;H:hypotheses;A:decision-changing judgment. Conflict/stall:revisit breadth. Keep runnable candidates/helpers,negatives,exact originals.',
 }
 
 
@@ -43,6 +67,9 @@ def purpose(job):
     if job.get('formal_review') or job.get('purpose')=='formal_review':return 'formal_review'
     if job.get('purpose')=='worker_consultation':return 'worker_consultation'
     if job.get('final_only') or job.get('final_report'):return 'protected_closeout'
+    from . import delivery_review
+    review_scope=delivery_review.scope(job)
+    if review_scope:return review_scope
     if job.get('purpose')=='closeout':return 'closeout'
     return 'assessment' if job['role']=='A' else 'research'
 
@@ -50,6 +77,37 @@ def purpose(job):
 def role_contract(job):
     """One model-facing purpose contract, frozen with each new task."""
     role,scope=job['role'],purpose(job)
+    if job.get('research_strategy_version') in {2,3}:
+        if scope=='delivery_review':
+            return ('Independently judge readiness before final lock. Availability is not scientific qualification; '
+                'reject all if needed. Exact deliver authorizes; best-effort needs original task policy. Follow action options.')
+        if scope=='delivery_correction':
+            if job.get('research_strategy_version')==3:
+                return 'Resolve only the exact requested gap within original remaining budgets and frozen --mechanism N; no new declarations, broader research or consultation. Return for one reassessment.'
+            return 'Resolve only the exact requested decision-changing gap within original remaining budgets; no broader research or consultation. Return for one reassessment.'
+        if role=='A' and scope=='protected_closeout':
+            return 'Judge retained evidence only; reject all if needed despite available candidates. Exact deliver authorizes; best-effort needs original task policy. No new work.'
+    if job.get('research_strategy_version') in {1,2,3}:
+        if role=='H':
+            if job.get('research_strategy_version')==3:
+                return ('Use W\'s question and linked originals; return alternatives or no useful addition to W. No compulsory initial H stage.'
+                    +(' Advice without a new plan: next_action=wait returns to W.' if scope=='worker_consultation' else ''))
+            return ('Answer W\'s hypothesis question, then return to W. ' if scope=='worker_consultation' else '')+WORKER_LED_PLANNING['H']
+        if role=='W':
+            # Stage routes carry W's purpose and authority once, alongside the
+            # actual authored output fields rather than a second role banner.
+            return ''
+        if role=='A' and scope in {'assessment','worker_consultation'}:
+            route=''
+            if scope=='worker_consultation':
+                route+='Answer W\'s concrete question with a meaningful judgment, then return to W; no global allocation, candidate choice, formal verdict or grant. '
+            else:
+                route+=('No material issue: continue_w with decision_request=null. '
+                    'Extra work requires concrete bounded decision-changing decision_request{decision:candidate|mechanism|compliance,question,change_criterion}; W chooses methods. '
+                    'deliver/finish requests mandatory final A assessment before delivery, not authorization. ')
+                if job.get('supervision_request') is not None:
+                    route+=('supervision_result: continue_existing=continue_w without decision_request; request_evidence=continue_w/revise_h/extract with decision_request; finalize=finish/deliver requests final assessment. ')
+            return route+ASSESSMENT_SCOPE
     if role=='A':
         if scope=='formal_review':
             route='Judge the exact independent subject with the requested verdict; do not edit it. '

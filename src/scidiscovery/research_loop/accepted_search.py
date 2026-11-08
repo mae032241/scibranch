@@ -215,6 +215,49 @@ def _screen_observations(job, payload, observation, delivery_facts):
     return list(unique.values())
 
 
+def _live_mechanisms(delta, job, observation, *, origin, initial_calls):
+    """Consume accepted call snapshots without reopening live declaration files.
+
+    Call publication already bound the immutable declaration. The existing
+    mechanism table gains stable identities; no second scientific ledger exists.
+    """
+    if job.get('research_strategy_version')!=3 or job['role']!='W':return
+    snapshots=[(call.get('mechanism_binding') or {}).get('research_binding')
+        for call in (observation or {}).get('managed_calls',[])]
+    research=(observation or {}).get('research_state') or {}
+    snapshots.extend(dict(version=1,**row) for row in research.get('mechanisms',{}).values())
+    for row in snapshots:
+        if row is None:continue
+        if (not isinstance(row,dict) or row.get('version')!=1
+                or not isinstance(row.get('mechanism_ref'),str) or not isinstance(row.get('source_ref'),dict)
+                or not isinstance(row.get('question'),str) or not row['question'].strip()
+                or type(row.get('revision')) is not int or row['revision']<0):
+            raise ValueError('Accepted live mechanism lost its exact declaration')
+        ref=row['mechanism_ref'];item=delta.get('mechanism',ref);summary=delta.summary
+        if item is None:
+            item=delta.put('mechanism',ref,dict(status='pending',original_step=row['source_step'],original_role=row['source_role'],
+                accepted_calls=0,participated_cycles=0,last_participated_cycle=summary['portfolio']['completed_cycle_count']))
+            summary['mechanism_count']+=1
+            item.update(ordinal=summary['mechanism_count'],origin_identity=copy.deepcopy(origin),
+                origin_ref=copy.deepcopy(row.get('origin_ref')) or dict(goal_id=origin['goal_id'],source_step=row['source_step'],source_role=row['source_role'],mechanism_ref=ref))
+            delta.put('ordinal',item['ordinal'],dict(ordinal=item['ordinal'],mechanism_ref=ref,origin_identity=copy.deepcopy(origin)))
+            summary['pending_count']+=1;summary['portfolio']['unexcluded_count']+=1
+            summary['owed_count']+=int(_owed(item,initial_calls));_due(delta,item)
+        # Revisions are local to an exact W owner. A new W's revision zero may
+        # seed an old identity, but must never erase its accepted provenance.
+        same_owner=item.get('source_step')==row['source_step']
+        if same_owner and item.get('research_revision',-1)>row['revision']:continue
+        if not same_owner and item.get('source_step',-1)>row['source_step']:continue
+        if row.get('status')=='retired':_status(delta,ref,item,'waived',initial_calls)
+        elif row['source_step']==job['step'] and item['status']=='waived':_status(delta,ref,item,'pending',initial_calls)
+        item.update(label=row.get('label',row['question']),minimal_test=row['question'],
+            source_step=row['source_step'],source_role=row['source_role'],source_ref=copy.deepcopy(row['source_ref']),
+            source_origin_identity=copy.deepcopy(origin if row['source_step']==job['step'] else item.get('source_origin_identity',origin)),research_revision=row['revision'],
+            research_original=copy.deepcopy(row.get('original_ref')),exploration=row.get('exploration',False),
+            predecessors=copy.deepcopy(row.get('predecessors',[])),research_binding=copy.deepcopy(row))
+        if item['status']!='waived':delta.queue(ref,item,row['source_step'])
+
+
 def prepare_node(root, job, payload, seal, *, summary, lookup, observation, delivery_facts=None, usage_lookup=None,
         budget_fraction=None, completion_fraction=None):
     """Independent entry: produce this node's policy and exact original owner."""
@@ -257,6 +300,7 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
         raise ValueError('Accepted portfolio policy cannot change without an explicit rebuild')
     current['portfolio']['review_after_cycles']=threshold
     initial_calls = limits.get('initial_calls', 1)
+    _live_mechanisms(delta,job,observation,origin=origin,initial_calls=initial_calls)
     control = seal.get('control_outcome', {})
     valid = all(control.get(field) == 'applied' for field in ('search_status', 'selection_status', 'decision_status'))
     ordinary = not (job.get('formal_review') or job.get('purpose') == 'formal_review' or job.get('engineering_repair'))
@@ -403,6 +447,18 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
     _supervision(delta,job,payload,seal,observation,origin=origin,
         bindings=round_bindings,valid=valid and ordinary and not consultation,policy=policy,
         budget_fraction=budget_fraction,completion_fraction=completion_fraction)
+    if role=='W' and job.get('research_strategy_version')==3:
+        from . import supervision
+        for row in ((observation or {}).get('research_state') or {}).get('mechanisms',{}).values():
+            current['supervision']=supervision.declare_investment(current['supervision'],dict(
+                mechanism_ref=row['mechanism_ref'],predecessors=copy.deepcopy(row.get('predecessors',[]))))
+        for call in (observation or {}).get('managed_calls',[]):
+            binding=call.get('mechanism_binding')
+            if binding is None:continue
+            call_identity=json.dumps(call['scope']['job_ref'],sort_keys=True,separators=(',',':'))+':'+call['call_id']
+            current['supervision']=supervision.add_investment(current['supervision'],dict(
+                original_call_id=call_identity,mechanism_ref=binding['mechanism_ref'],
+                predecessors=copy.deepcopy((binding.get('research_binding') or {}).get('predecessors',[]))))
     if role=='W' and job.get('candidate_nomination_mechanisms'):
         from . import candidate_nominations
         authored=c.scientific_field(job,payload,'candidate_nominations')
@@ -591,7 +647,7 @@ def _supervision(delta, job, payload, seal, observation, *, origin, bindings, va
     diagnostics=[]
     def diagnostic(index,reason):
         diagnostics.append(dict(source_step=job['step'],pointer=f'/exploration_rounds/{index}' if index is not None else '/exploration_rounds',reason=reason))
-    if job['role']=='W' and valid:
+    if job['role']=='W' and valid and job.get('research_strategy_version')!=3:
         declarations=c.scientific_field(job,payload,'exploration_rounds')
         if declarations is None:
             diagnostic(None,'no_declared_scientific_rounds')
@@ -758,6 +814,8 @@ def state(root, before_step, *, refs=(), work_refs=(), head=None):
         row=summary['current_facts'].get(name) or accepted_budget.search_row(root,name,head=head)
         return row['accepted_count'] if row else 0
     return dict(summary=summary, _catalog=dict(prefix=copy.deepcopy(head['prefix']),max_ordinal=summary['mechanism_count']),
+        worker_research_mechanisms=[copy.deepcopy(item['research_binding']) for item in mechanisms.values()
+            if isinstance(item.get('research_binding'),dict)],
         _point_get=point_get, _node_get=node_get, _repair_get=repair_get, mechanisms=mechanisms, current_h=summary['current_h'], scope=None, plan=None,
         authorized=set(mechanisms), focus=summary['focus'], extra_grant=summary['extra_grant'],
         opportunity_counts={ref:item['accepted_calls'] for ref,item in mechanisms.items()}, opportunity_grants={},

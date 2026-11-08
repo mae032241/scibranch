@@ -633,8 +633,15 @@ def _allocate_call(config, payload, ordinal, mechanism=None):
     subject, ref, alias = _selected_subject(root, job, payload)
     body = dict(scope=config['scope'], native_attempt=config['native_attempt'], interface=config['execution_interface'],
                 subject=subject, review=ref, payload_alias=alias, ordinal=ordinal)
-    mechanism_binding = breadth.admit(config.get('breadth'), mechanism, config['scope'],
-        [e.Records(config).accepted(path.name) for path in e.Records(config).calls()])
+    from . import worker_research
+    if worker_research.enabled(config):
+        # The real Records preflight already admitted this exact loaded fact
+        # before any provider preparation. Preserve its full revision through
+        # authorization; an ordinal/ref alone cannot recover that identity.
+        mechanism_binding=worker_research.check_binding(mechanism,config['scope'])
+    else:
+        mechanism_binding = breadth.admit(config.get('breadth'), mechanism, config['scope'],
+            [e.Records(config).accepted(path.name) for path in e.Records(config).calls()])
     body['mechanism_binding'] = mechanism_binding
     call = f'{ordinal:04d}-' + security.request_digest(body)[:32]
     path = root / 'execution-authority/calls' / call / 'allocation.json'
@@ -736,6 +743,8 @@ def _accepted_input_subject(root, job, accepted, secret, *, source=None):
             or allocation_ref != ref_at(root / 'execution-authority/calls' / call / 'allocation.json')
             or allocation['call_id'] != call or binding['scope'] != accepted['scope']
             or binding['native_attempt'] != attempt or binding['interface'] != accepted['interface']
+            or (config.get('research_strategy_version')==3
+                and binding.get('mechanism_binding')!=accepted.get('mechanism_binding'))
             or binding['subject'] != subject or binding['review'] != request_value['review']
             or binding['payload_alias'] != alias or request_value['call_id'] != call
             or authorization['scope'] != accepted['scope'] or authorization['native_attempt'] != attempt

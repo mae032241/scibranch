@@ -14,6 +14,13 @@ from test_execution_authority import prepare
 from test_history_handoff import finish
 
 
+def execution_scope(root,step=2):
+    # These saved-display fixtures intentionally have no protocol marker.
+    reference=dict(path=str(root/'jobs'/f'{step:03d}.json'))
+    return dict(step=step,role='W',handoff_protocol=None,job_ref=reference,
+        execution_key=reference,mechanism_ref=None)
+
+
 def test_current_context_is_independent_of_billing_and_loaded_once(tmp_path, monkeypatch):
     from scidiscovery.research_loop import ui_saved_status as saved
     record=tmp_path/'native-evidence/001'
@@ -55,7 +62,7 @@ def test_execution_owner_view_is_bounded_readonly_and_not_scientific_counts(tmp_
     job=dict(step=2,role='W',worker_view_version=1)
     records=tmp_path/'host-runtime/experiment-control/002/records'
     records.mkdir(parents=True)
-    config=dict(record_dir=str(records),scope=dict(step=2),native_attempt=dict(number=1))
+    config=dict(record_dir=str(records),scope=execution_scope(tmp_path),native_attempt=dict(number=1))
     owner=experiments.Records(config)
     owner.live_status('exact-original','submitted',accepted=dict(_display_first_call=True,native_attempt=dict(number=1)))
     monkeypatch.setattr(Path,'iterdir',lambda *args:pytest.fail('Display must not enumerate receipts'))
@@ -86,7 +93,7 @@ def test_only_bound_observed_process_identity_marks_running_and_terminal_wins(tm
     records=tmp_path/'host-runtime/experiment-control/002/records'
     directory=records/'calls/exact-call'
     directory.mkdir(parents=True)
-    scope=dict(step=2)
+    scope=execution_scope(tmp_path)
     experiments.write(directory/'accepted.json',dict(call_id='exact-call',scope=scope,
         native_attempt=dict(number=0)))
     monkeypatch.setattr(protocol,'require_scope',lambda value:None)
@@ -110,6 +117,140 @@ def test_only_bound_observed_process_identity_marks_running_and_terminal_wins(tm
     owner.live_status('exact-call','running')  # A stale observation cannot regress terminal.
     value=saved._live_executions(tmp_path,job)
     assert value['counts']['known_success']==1 and value['counts']['running']==0
+
+
+def test_execution_descriptions_and_validated_metrics_reach_collapsed_panel(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import experiments,protocol,ui_saved_status as saved
+    records=tmp_path/'host-runtime/experiment-control/002/records'
+    directory=records/'calls/random-original-id'
+    directory.mkdir(parents=True)
+    scope=execution_scope(tmp_path)
+    accepted=dict(call_id='random-original-id',scope=scope,native_attempt=dict(number=3),
+        code_version=dict(entry='experiments/check.py'),source_script='/private/host/check.py',
+        change_intent=r'compare <baseline> from /private/host/input 对比/home/private/input.csv \\server\share\file',
+        mechanism_binding=dict(mechanism_ref='h001.m1'))
+    experiments.write(directory/'accepted.json',accepted)
+    monkeypatch.setattr(protocol,'require_scope',lambda value:None)
+    owner=experiments.Records(dict(record_dir=str(records),scope=scope,
+        breadth=dict(mechanisms=[dict(mechanism_ref='h001.m1',label='response <model>')])))
+    publish=experiments.Records.publish.__wrapped__
+    publish(owner,'random-original-id','completed.json',dict(status='known_success',
+        result=dict(status='available',metrics=[dict(name='unvalidated metric',value=999)])))
+    original=(directory/'completed.json').read_bytes()
+    job=dict(step=2,role='W',worker_view_version=1)
+    pending=saved._live_executions(tmp_path,job)
+    pending_markup=InstanceUI._execution_activity(pending)
+    assert '声明结果尚未提供' in pending_markup and 'unvalidated metric' not in pending_markup
+    public_result=dict(result=dict(status='available',metrics=[dict(name='error <mean>',value=.25,unit='a.u.')]))
+    # Only the observation owner passes its already-validated public projection.
+    owner.live_status('random-original-id','known_success',accepted=accepted,public_result=public_result)
+    value=saved._live_executions(tmp_path,job)
+    markup=InstanceUI._execution_activity(value)
+    summary=markup.split('</summary>',1)[0]
+    assert 'W 实验执行状态 · 阶段 2' in summary and '执行成功 1' in summary
+    assert markup.startswith('<details class="execution-activity" data-details-key="w-executions-2">')
+    assert ' open' not in markup
+    assert 'experiments/check.py' in markup and 'compare &lt;baseline&gt;' in markup
+    assert '机制：response &lt;model&gt;' in markup and 'error &lt;mean&gt; = 0.25 a.u.' in markup
+    assert '/private/host' not in markup and '<baseline>' not in markup
+    assert '/home/private' not in markup and r'\\server\share\file' not in markup
+    details=markup.split('<summary>原调用详情</summary>',1)[1]
+    assert 'random-original-id' in details and 'attempt：3' in details
+    assert '不表示科学认可' in markup
+    assert (directory/'completed.json').read_bytes()==original
+    owner.live_status('random-original-id','running')
+    terminal=saved._live_executions(tmp_path,job)
+    assert terminal['counts']['known_success']==1 and terminal['calls'][0]['display']==value['calls'][0]['display']
+
+
+def test_saved_execution_observation_restores_metric_display_without_extra_reads(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import experiment_client,experiments,ui_saved_status as saved
+    records=tmp_path/'host-runtime/experiment-control/002/records'
+    (records/'calls/exact-call').mkdir(parents=True)
+    config=dict(record_dir=str(records),scope=execution_scope(tmp_path),max_seconds=65)
+    owner=experiments.Records(config)
+    owner.live_status('exact-call','known_success',accepted=dict(_display_first_call=True,
+        native_attempt=dict(number=0),code_version=dict(entry='check.py')))
+    observation=dict(status='known_success',
+        public_result=dict(result=dict(status='available',metrics=[dict(name='declared measurement',value=.5)])))
+    observations=[]
+    def original_projection(config,adapter,call_id,path,**options):
+        observations.append((call_id,path.name,options['verify_files']))
+        return observation
+    monkeypatch.setattr(experiments,'_saved_observation',original_projection)
+    monkeypatch.setattr(experiment_client,'root_for_configuration',lambda *args,**kwargs:None)
+    monkeypatch.setattr(experiments.Records,'accepted',lambda *args,**kwargs:pytest.fail('No accepted original reload'))
+    result=experiments.record_observation.__wrapped__(config,object(),'exact-call')
+    assert result is observation and observations==[('exact-call','execution-observation.json',True)]
+    value=saved._live_executions(tmp_path,dict(step=2,role='W',worker_view_version=1))
+    assert value['counts']['known_success']==1
+    assert value['calls'][0]['display']['entry']=='check.py'
+    assert 'declared measurement = 0.5' in InstanceUI._execution_activity(value)
+
+
+def test_execution_display_utf8_budget_and_malformed_optional_metadata(tmp_path):
+    import json
+    from scidiscovery.research_loop import experiments,ui_saved_status as saved
+    records=tmp_path/'host-runtime/experiment-control/002/records'
+    records.mkdir(parents=True)
+    owner=experiments.Records(dict(record_dir=str(records),scope=execution_scope(tmp_path),
+        breadth=dict(mechanisms=[dict(mechanism_ref='h001.m1',label='机理'*1000)])))
+    accepted=dict(_display_first_call=True,native_attempt=dict(number=0),
+        code_version=dict(entry='实验'*1000+'.py'),change_intent='目的'*1000,
+        mechanism_binding=dict(mechanism_ref='h001.m1'))
+    public=dict(result=dict(status='available',metrics=[dict(name='测量'*1000,value=i,unit='单位'*1000)
+        for i in range(4)]))
+    for number in range(128):
+        owner.live_status('call-'+str(number),'running',accepted=accepted,public_result=public)
+    owner.live_status('call-127','known_failed',accepted=dict(native_attempt=dict(number=0),
+        code_version=[],source_script='/private/original/fallback.py',change_intent=dict(bad='metadata'),
+        mechanism_binding=[]),public_result=dict(result=[]))
+    assert (records/'live-status.json').stat().st_size<=65536
+    value=saved._live_executions(tmp_path,dict(step=2,role='W',worker_view_version=1))
+    assert value['counts']['running']==127 and value['counts']['known_failed']==1
+    assert value['omitted_count']==108
+    latest=value['calls'][0]
+    assert latest['call_id']=='call-127' and latest['display']['entry']=='fallback.py'
+    assert latest['display']['result_status']=='unavailable'
+    markup=InstanceUI._execution_activity(value)
+    assert '目的：未提供' in markup and '声明结果不可用' in markup and '/private' not in markup
+    assert '仅显示部分指标' in markup and '...' in markup
+    invalid_text='\ud800'
+    malformed=dict(native_attempt=dict(number=0),code_version=dict(entry='fallback.py'),
+        change_intent=invalid_text)
+    owner.live_status('call-126','known_failed',accepted=malformed,public_result=dict(result=dict(
+        status='available',metrics=[dict(name=invalid_text,value=1),dict(name='measured',value=2,unit=invalid_text)])))
+    value=saved._live_executions(tmp_path,dict(step=2,role='W',worker_view_version=1))
+    assert value['counts']['running']==126 and value['counts']['known_failed']==2
+    display=value['calls'][0]['display']
+    assert display['metrics']==[dict(name='measured',value=2,unit=None)] and display['metrics_partial']
+    assert 'purpose' not in display and malformed['change_intent']==invalid_text
+    compact=json.loads((records/'live-status.json').read_bytes())
+    for identity,row in compact['calls'].items():
+        if identity!='call-126':row.pop('display',None)
+    compact['calls']['call-126']['display'].update(entry=invalid_text,purpose=invalid_text,mechanism=invalid_text,
+        metrics=[dict(name=invalid_text,value=1),dict(name='measured',value=2,unit=invalid_text)])
+    (records/'live-status.json').write_text(json.dumps(compact))
+    value=saved._live_executions(tmp_path,dict(step=2,role='W',worker_view_version=1))
+    assert value['counts']['running']==126 and value['counts']['known_failed']==2
+    display=value['calls'][0]['display']
+    assert display['metrics']==[dict(name='measured',value=2,unit=None)]
+    markup=InstanceUI._execution_activity(value)
+    assert '实验名称未提供' in markup and '目的：未提供' in markup
+    assert invalid_text not in markup
+
+
+def test_legacy_execution_rows_keep_explicit_missing_descriptions_and_results(tmp_path):
+    import json
+    from scidiscovery.research_loop import ui_saved_status as saved
+    records=tmp_path/'host-runtime/experiment-control/002/records'
+    records.mkdir(parents=True)
+    (records/'live-status.json').write_text(json.dumps(dict(version=1,scope=execution_scope(tmp_path),
+        source='execution_receipt_owner',partial=True,calls={'legacy-id':dict(state='running',attempt=0,updated_at=1.)})))
+    value=saved._live_executions(tmp_path,dict(step=2,role='W',worker_view_version=1))
+    markup=InstanceUI._execution_activity(value)
+    assert '实验名称未提供' in markup and '目的：未提供' in markup and '声明结果尚未提供' in markup
+    assert '部分覆盖，计数为下界' in markup and '已观察运行 1' in markup.split('</summary>',1)[0]
 
 
 def test_technical_pause_offers_only_exact_owner_reported_recovery(tmp_path):
@@ -420,9 +561,13 @@ def test_final_results_follow_exact_sealed_terminal_route(tmp_path):
     ui, cookie = session(root, key)
     assert '最终综合结论尚未返回' in ui.get('/final-results', host=ui.host, cookie=cookie)[1].decode()
     finish(root, 2, 'A', [1], action='finish')
-    assert ui._final_step() == 2
+    assert ui._final_step() is None  # Ordinary v3 A only requests Final A.
+    from scidiscovery.research_loop import contracts as c,delivery_review
+    c.build_job(root,3,'A',[2],evidence_return=delivery_review.make('delivery_review',2,0))
+    finish(root,3,'A',[2],action='finish')
+    assert ui._final_step() == 3
     page = ui.get('/final-results', host=ui.host, cookie=cookie)[1].decode()
-    assert '研究发现' in page and '/nodes/2/science' in page
+    assert '研究发现' in page and '/nodes/3/science' in page
     overview = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
     assert '已完成' in overview and 'href="/final-results" class="primary">查看结果</a>' in overview
     assert '第 1 轮 · A 决定结束探索' in overview
@@ -2198,13 +2343,22 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
     form_markup = ('<form method="post" action="/control/continue"><input name="nonce" value="form-original">'
         '<input name="csrf" value="csrf-original"><input name="ack_correction" value="same-trigger">'
         '<textarea name="authorization_note"></textarea><button type="submit">Submit</button></form>')
+    execution_markup = InstanceUI._execution_activity(dict(step=2,coverage='observed',counts=dict(running=1),
+        calls=[dict(call_id='fixture-original',attempt=0,state='running',updated_at=1.,
+            display=dict(entry='check.py'))]))
     driver = '''document.addEventListener('DOMContentLoaded', () => {
       const input = document.querySelector('textarea'); input.value = 'preserved browser draft';
       input.dispatchEvent(new Event('input', {bubbles:true}));
+      const execution = document.querySelector('[data-details-key="w-executions-2"]');
+      const identity = document.querySelector('[data-details-key="w-execution-2-fixture-original"]');
+      const initiallyCollapsed = !execution.open && !identity.open;
+      execution.open = true; identity.open = true;
       const observer = new MutationObserver(() => {
         if (!document.querySelector('[data-phase="2"]')) return;
         const current = document.querySelector('textarea');
-        const ok = current.value === 'preserved browser draft' && document.querySelector('[name="nonce"]').value === 'form-original';
+        const ok = current.value === 'preserved browser draft' && document.querySelector('[name="nonce"]').value === 'form-original'
+          && initiallyCollapsed && document.querySelector('[data-details-key="w-executions-2"]').open
+          && document.querySelector('[data-details-key="w-execution-2-fixture-original"]').open;
         const result = document.createElement('output'); result.id = 'browser-result';
         result.textContent = ok ? 'PASSED_STABLE_DRAFT' : 'FAILED_DRAFT';
         document.body.append(result); observer.disconnect();
@@ -2214,7 +2368,7 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
     });'''
     driver_csp = "'sha256-" + base64.b64encode(hashlib.sha256(driver.encode()).digest()).decode() + "'"
     page = render.page('Offline browser fixture', '<p data-live-url="/live"></p><div id="live-hero">' + form_markup
-        + '</div><script>' + driver + '</script>', live=True)
+        + execution_markup + '</div><script>' + driver + '</script>', live=True)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_GET(self):
@@ -2222,7 +2376,7 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
                 self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
                 if ready.wait(3):
                     for phase in (1, 2):
-                        value = dict(fragments={'live-hero': form_markup + f'<p data-phase="{phase}">Updated</p>'},
+                        value = dict(fragments={'live-hero': form_markup + execution_markup + f'<p data-phase="{phase}">Updated</p>'},
                             nonce='unrelated-tab-token', csrf={'continue': 'unrelated-csrf'}, current=None)
                         self.wfile.write(b'event: snapshot\ndata: ' + json.dumps(value).encode() + b'\n\n')
                     self.wfile.flush()
@@ -2287,6 +2441,9 @@ def test_completed_research_has_no_attention_for_optional_budget_extension(tmp_p
     root, key = prepare(tmp_path, enabled=False)
     finish(root, 1, 'H', [], action='analyze')
     finish(root, 2, 'A', [1], action='finish')
+    from scidiscovery.research_loop import contracts as c,delivery_review
+    c.build_job(root,3,'A',[2],evidence_return=delivery_review.make('delivery_review',2,0))
+    finish(root,3,'A',[2],action='finish')
     ui, cookie = session(root, key)
     snapshot = ui._snapshot()
     status = ui._status(snapshot, ui._receipt(snapshot))

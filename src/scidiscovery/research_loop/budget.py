@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import time
 
-from . import accepted_budget, budget_limits, contracts, history, originals
+from . import accepted_budget, budget_limits, contracts, history, originals, delivery_review
 
 
 def supervision_fraction(*,initial_tokens,initial_seconds,observed_tokens,active_seconds):
@@ -2502,7 +2502,8 @@ def accept_action(root, kind, operation_id, decision, binding, max_seconds):
     from .protocol import require_current
     require_current(root)
     from . import configuration_updates
-    settings = configuration_updates.for_step(root, decision['step'])
+    author = contracts.read(contracts.regular(Path(root) / 'jobs' / f'{decision["step"]:03d}.json'))
+    settings = configuration_updates.for_job(root, author)
     begin = closeout_state(root)['begin']
     if (settings.get('delivery_policy') is None or settings['delivery_policy']['adapter'] is None
             or begin is None or begin['mode'] not in {'model', 'final'}):
@@ -2513,6 +2514,15 @@ def accept_action(root, kind, operation_id, decision, binding, max_seconds):
     meter = native.usage(root)
     limits = snapshot(root)
     final_return = require_final_a_delivery_eligibility(root, decision, binding)
+    if final_return is None:
+        # Admission owns this exact author read. An ordinary strategy-v1 A
+        # requests FINAL; only the protected final or closeout A can authorize
+        # the first adapter effect. Missing markers retain historical scope.
+        if (author.get('research_strategy_version') in (1,2,3) and author.get('role') == 'A'
+                and delivery_review.scope(author) != 'delivery_review'
+                and not author.get('formal_review') and not author.get('final_only') and not author.get('final_report')
+                and author.get('purpose') not in {'closeout', 'formal_review', 'worker_consultation'}):
+            raise NodeBudgetUnavailable('final_author_required')
     direct = direct_delivery_scope(begin, decision, binding)
     if begin.get('authorization_step') is not None and not direct:
         raise ValueError('Direct delivery changed its accepted scientific choice')
@@ -2652,7 +2662,7 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
         boundary='final_a_return'
     remaining=budget_limits.remaining(limits['max_tokens'], shared.get('accounted_tokens', shared['observed_tokens']))
     shared_seconds=limits['seconds_remaining']
-    ordinary=not (author or final_return is not None or job.get('formal_review') or closeout
+    ordinary=not (delivery_review.scope(job) is not None or author or final_return is not None or job.get('formal_review') or closeout
         or job.get('final_report') or job.get('final_only') or intent.get('output_repair') or intent.get('work_repair'))
     followup_tokens={}
     if ordinary:
@@ -2714,11 +2724,17 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
             +', '.join(f'{role}={tokens}' for role,tokens in followup_tokens.items())
             +'; these are advice, not reserved tokens or authorization.')
     if ordinary and job['role']=='A':
-        hint['instruction'] += (' Node targets/shared risk advise finishing the current assessment: retain unmet goals '
-            'and choose normal next_action by evidence/shared balance (continue_w/revise_h/extract allowed); '
-            'node targets do not end research. If shared tokens remaining<=0 or shared time remaining<=0, '
-            'ordinary A must conclude now: summarize existing results and deliver an eligible existing candidate '
-            'or finish with gaps, with no new H/W/E or extra FINAL; permissions hold.')
+        if job.get('research_strategy_version') in (1,2,3):
+            hint['instruction'] += (' Finish the current assessment by evidence/shared balance; node targets do not end research. '
+                'Existing productive work may continue with continue_w and decision_request=null. '
+                'At exhausted shared budgets, summarize existing results and gaps and use finish/deliver to request the protected final A. '
+                'Ordinary A does not authorize adapter submission; no new H/W/E is authorized at exhaustion.')
+        else:
+            hint['instruction'] += (' Node targets/shared risk advise finishing the current assessment: retain unmet goals '
+                'and choose normal next_action by evidence/shared balance (continue_w/revise_h/extract allowed); '
+                'node targets do not end research. If shared tokens remaining<=0 or shared time remaining<=0, '
+                'ordinary A must conclude now: summarize existing results and deliver an eligible existing candidate '
+                'or finish with gaps, with no new H/W/E or extra FINAL; permissions hold.')
     if author:
         hint['instruction'] = ('The author token target is soft: finish this original scientific response at the target. '
             'The verified author permit finite time limit remains enforced. No new experiment is authorized; all actual usage is retained.')
@@ -2758,6 +2774,10 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
         hint['target_state']='reached'
         hint['instruction']=budget_notice.WORKER_DIRECTION_TEXT
         notices['review']=budget_notice.worker_direction_notice(direction_review)
+    if review.get('research_investment') is not None:
+        hint['research_investment']=review['research_investment']
+    if review.get('investment_notice'):
+        notices['investment']=budget_notice.worker_investment_notice()
     if notices:hint['closeout_notices']=notices
     data=(json.dumps(hint,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode()
     if len(data)>4096:raise ValueError('Budget advice exceeds byte bound')
@@ -2821,6 +2841,11 @@ def review_configuration(root,job):
     facts=dict(settings=settings,head=head,shared=shared,stamp=stamp,
         task=contracts.record_ref(Path(root)/'jobs'/f'{job["step"]:03d}.json'),scope=stage_scope(root,job),
         native_attempt=dict(number=len(execution.records(root,job['step']))-1,execution_key=execution.identity(root,job['step'])))
+    if job.get('research_strategy_version')==3 and job['role']=='W':
+        from . import experiment_client,worker_research
+        facts['research_investment']=worker_research.load_investment(dict(
+            record_dir=str(experiment_client._record_directory_from_facts(root,job['step'],job)),
+            scope=facts['scope']))
     limits=_snapshot(root,head.base,accepted_budget.AcceptedEvents(head),sample_stamp=stamp)
     publish_review(root,job,intent,limits,meter,facts=facts,observed=observed,
         context_observation=context_observation)
@@ -2851,12 +2876,33 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
         consumed=prior+meter['input_tokens']+meter['output_tokens'] if observed else prior
         reserve=delivery_reserve(settings) or dict(tokens=0,seconds=0,steps=0)
         basis=settings.get('supervision_budget_basis')
-        direction_review=supervision.worker_review(job,intent,summary=head['search'],
-            budget_fraction=(supervision_fraction(initial_tokens=basis['max_tokens'],
+        current_search=head['search']
+        if job.get('research_strategy_version')==3:
+            current_search=supervision.with_live_investment(current_search,
+                facts.get('research_investment'),scope=facts['scope'])
+        fraction=(supervision_fraction(initial_tokens=basis['max_tokens'],
                 initial_seconds=basis['max_seconds'],
                 observed_tokens=shared.get('accounted_tokens',shared['observed_tokens']),
-                active_seconds=limits['consumed_seconds']) if basis is not None else None),
+                active_seconds=limits['consumed_seconds']) if basis is not None else None)
+        direction_review=supervision.worker_review(job,intent,summary=current_search,
+            budget_fraction=fraction,
             selected_policy=settings.get('supervision_policy') if settings.get('search_policy') is not None else None)
+        investment=None;investment_notice=False
+        if job.get('research_strategy_version')==3:
+            chosen=supervision.policy(settings['supervision_policy']) if settings.get('supervision_policy') else None
+            if chosen is not None and chosen['version']==2:
+                status=supervision.due(current_search,budget_fraction=fraction,policy=chosen)
+                state=supervision.observe(current_search,fraction,selected_policy=chosen)
+                counts=state['investment']
+                live_observed=facts.get('research_investment') is not None
+                investment=dict(total_calls=counts['total_calls'],consecutive_calls=counts['consecutive_calls'],
+                    mechanism_ref=counts['mechanism_ref'],mode=chosen['mode'],
+                    coverage='live' if live_observed else 'accepted_lower_bound',
+                    due=status['due'] if live_observed or status['due'] or chosen['mode']=='off' else None)
+                investment_notice=(chosen['mode']=='notice' and status['due'] and not status['cooldown']
+                    and job.get('purpose') is None and not job.get('evidence_return')
+                    and not intent.get('output_repair') and not intent.get('work_repair')
+                    and not job.get('final_only') and not job.get('final_report'))
         # The original grant remains the ceiling for this accepted stage.
         grant=intent.get('budget_slice',{}).get('shared_limits',dict(max_tokens=settings['max_tokens'],max_seconds=settings['max_seconds']))
         available_tokens=budget_limits.remaining(budget_limits.minimum(limits['max_tokens'],grant['max_tokens']),
@@ -2893,5 +2939,6 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
             if old.get('stage_anchor')!=task or old.get('scope')!=value['scope']:
                 raise ValueError('Host review projection binding changed')
         contracts.write(path,value);path.chmod(0o400)
-        return dict(mode=mode,targets=targets,duration=duration,direction_review=direction_review)
+        return dict(mode=mode,targets=targets,duration=duration,direction_review=direction_review,
+            research_investment=investment,investment_notice=investment_notice)
     finally:os.close(fd)

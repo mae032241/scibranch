@@ -197,6 +197,10 @@ def _single(fields, key, default=''):
 
 def _typed(value, kind, label):
     try:
+        if kind == 'null':
+            if value != '':
+                raise ValueError()
+            return None
         if kind == 'boolean':
             if value not in ('true', 'false'):
                 raise ValueError()
@@ -378,6 +382,8 @@ def parse(fields, *, base, _fixed_skill_sets=None):
             if identity in used:
                 raise ValueError('结构字段存在循环')
             used.add(identity)
+            if node['kind'] == 'null' and any(child['parent'] == identity for child in nodes.values()):
+                raise ValueError('空值字段不能包含子项')
             item = (tree(identity, node['kind'], depth+1) if node['kind'] in ('table', 'array')
                     else typed(node['value'], node['kind'], node['key'] or '数组项'))
             if kind == 'table':
@@ -481,6 +487,7 @@ def parse_edit(fields, *, base, configuration):
 
 def _kind(value):
     if isinstance(value, _Invalid): return value.kind
+    if value is None: return 'null'
     if isinstance(value, dict): return 'table'
     if isinstance(value, list): return 'array'
     if type(value) is bool: return 'boolean'
@@ -509,13 +516,13 @@ def render(draft, *, edit=False):
         for key, item in items:
             counter[0] += 1
             identity = str(counter[0]); kind = _kind(item); prefix = 'node.'+identity+'.'
-            scalar = str(item).lower() if type(item) is bool else (item.isoformat() if isinstance(item, (date,time)) else str(item))
+            scalar = '' if item is None else (str(item).lower() if type(item) is bool else (item.isoformat() if isinstance(item, (date,time)) else str(item)))
             contents.append('<div class="config-node" data-node="'+identity+'" data-error-label="'+escape(str(key),quote=True)+'"'+(' data-invalid="true"' if isinstance(item, _Invalid) else '')+'>'
                 '<input type="hidden" name="'+prefix+'parent" value="'+escape(parent, quote=True)+'">'
                 '<label class="config-node-key">键名 <input name="'+prefix+'key" value="'+escape(str(key) if isinstance(value,dict) else '',quote=True)+'"></label>'
                 '<label class="config-node-type">类型 <select name="'+prefix+'kind" class="config-kind">'+''.join(
                     '<option value="'+k+'"'+(' selected' if k==kind else '')+'>'+label+'</option>'
-                    for k,label in [('string','文本'),('integer','整数'),('number','数字'),('boolean','布尔'),('table','对象'),('array','数组'),('datetime','日期时间'),('date','日期'),('time','时间')])+'</select></label>'
+                    for k,label in [('string','文本'),('integer','整数'),('number','数字'),('boolean','布尔'),('null','空值（null）'),('table','对象'),('array','数组'),('datetime','日期时间'),('date','日期'),('time','时间')])+'</select></label>'
                 '<label class="config-value">值 <input name="'+prefix+'value" value="'+escape(scalar if kind not in ('table','array') else '',quote=True)+'"></label>'
                 '<button type="button" class="config-remove">删除此项</button>'
                 '<div class="config-children" data-parent="'+identity+'">'+
@@ -934,7 +941,7 @@ let next = Math.max(0, ...Array.from(document.querySelectorAll('.config-node')).
 const update = node => {
   const kind = node.querySelector('.config-kind').value;
   const composite = kind === 'table' || kind === 'array';
-  node.querySelector('.config-value').hidden = composite;
+  node.querySelector('.config-value').hidden = composite || kind === 'null';
   node.querySelector('.config-children').hidden = !composite;
   node.querySelector('.config-add').hidden = !composite;
 };
@@ -966,6 +973,7 @@ document.addEventListener('click', e => { if (e.target.matches('.config-add,.con
 document.addEventListener('change', e => {
   if (!e.target.matches('.config-kind')) return;
   const node = e.target.closest('.config-node');
+  if (e.target.value === 'null') node.querySelector('.config-value input').value = '';
   node.querySelector('.config-children').replaceChildren(); update(node);
 });
 document.addEventListener('click', e => {
@@ -987,7 +995,7 @@ document.addEventListener('click', e => {
   const key = document.createElement('input'); key.name = prefix+'key'; key.placeholder = '对象键名（数组项留空）'; keyLabel.append(key); node.append(keyLabel);
   const kindLabel = document.createElement('label'); kindLabel.className='config-node-type'; kindLabel.textContent='类型 ';
   const kind = document.createElement('select'); kind.name = prefix+'kind'; kind.className = 'config-kind';
-  for (const [value,label] of [['string','文本'],['integer','整数'],['number','数字'],['boolean','布尔'],['table','对象'],['array','数组'],['datetime','日期时间'],['date','日期'],['time','时间']]) {
+  for (const [value,label] of [['string','文本'],['integer','整数'],['number','数字'],['boolean','布尔'],['null','空值（null）'],['table','对象'],['array','数组'],['datetime','日期时间'],['date','日期'],['time','时间']]) {
     const option = document.createElement('option'); option.value = value; option.textContent = label; kind.append(option);
   } kindLabel.append(kind); node.append(kindLabel);
   const label = document.createElement('label'); label.className='config-value'; label.textContent='值 ';
@@ -1045,6 +1053,7 @@ def export_toml(draft):
     def value(item):
         if isinstance(item, _Invalid): raise ValueError('参数仍有类型错误，请修改后重新保存')
         kind = _kind(item)
+        if kind == 'null': raise ValueError('TOML 不支持空值（null）；请保留当前表单，或明确修改空值后再导出')
         if kind == 'table':
             return '{' + ', '.join(json.dumps(k,ensure_ascii=False)+' = '+value(v) for k,v in item.items()) + '}'
         if kind == 'array': return '['+', '.join(value(v) for v in item)+']'

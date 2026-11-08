@@ -8,6 +8,7 @@ first-observation order and only author/control records mark A or delivery.
 from __future__ import annotations
 
 import copy
+import json
 import math
 from pathlib import Path
 import re
@@ -15,7 +16,7 @@ import threading
 import time
 
 from . import contracts as c, instance_display as display
-from . import native_usage, public_output
+from . import native_usage, public_output, ui_semantics
 
 ROLE_LABELS = {'H': 'H · 假设', 'W': 'W · 实验', 'A': 'A · 综合评估', 'E': 'E · 证据'}
 ROLE_VERBS = {'H': 'H 正在提出假设', 'W': 'W 正在实验', 'A': 'A 正在综合评估', 'E': 'E 正在整理证据'}
@@ -198,12 +199,13 @@ class Reader:
         self._nodes = {}
         self._observations = {}
         self._roles = {}
+        self._members = {}
+        self._candidate_facts = {}
         self.memo = memo if memo is not None else {}
 
     @staticmethod
     def _fingerprint(paths):
-        return tuple((str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            for path in paths for info in [path.stat()])
+        return tuple(display.file_identity(path) for path in paths)
 
     def node(self, step):
         with memo_lock(self.memo):
@@ -244,6 +246,13 @@ class Reader:
                 before = None
             node = display.node(self.root, step)
             observation = display.observation(self.root, step, node=node)
+            navigation=node.get('navigation_file')
+            if navigation is not None:
+                paths.append(navigation)
+                # This optional accepted view is acquired by display.node once.
+                # Its appearance/change invalidates the same shared cache.
+                observed=node.get('navigation_fingerprint')
+                before=(*before,observed) if before is not None and observed is not None else None
             try:
                 fingerprint = self._fingerprint(paths)
                 if fingerprint != before or node['seal'] != seal:
@@ -285,17 +294,17 @@ class Reader:
                 summaries.pop(key, None)
             node = self.node(step)
             observation = self.observation(step)
-            value = dict(role=node['job']['role'], observed=observation is not None,
+            value = dict(role=node['job']['role'], kind=ui_semantics.kind(node['job']), observed=observation is not None,
                 candidates=[dict(id=row['id'], label=row.get('label'))
                     for row in (observation or {}).get('candidates', [])
                     if isinstance(row, dict) and isinstance(row.get('id'), str)])
             payload = node['payload']
             dependencies = []
-            if (value['role'] == 'A' and not node['job'].get('formal_review')
-                    and payload.get('next_action') != 'audit'):
+            if (ui_semantics.assessment(node['job']) and payload.get('next_action') != 'audit'):
                 try:
-                    value['recommendation'] = resolve_candidate(self.root, node['job'],
-                        payload.get('candidate_recommendation'), reader=self, dependencies=dependencies)
+                    if node.get('candidate_reference_unresolved'):
+                        raise ValueError('Inherited candidate input identity is unavailable')
+                    value['recommendation'] = self.candidate(node['job'],payload.get('candidate_recommendation'),dependencies=dependencies)
                 except (OSError, ValueError, KeyError, TypeError):
                     # A later author choice with an unreadable source still
                     # supersedes earlier A advice; never revive the old choice.
@@ -311,6 +320,55 @@ class Reader:
         """Sealed observer snapshot bound to this node's exact output, if any."""
         self.node(step)
         return self._observations[step]
+
+    def member(self, prefix, step, *, dependencies=None):
+        """One exact saved membership from the subject's frozen cut, no acceptance."""
+        from . import accepted_prefix
+        key=(json.dumps(prefix,sort_keys=True),step)
+        if key not in self._members:
+            value=accepted_prefix.member(self.root,prefix,step)
+            paths=[self.root/'host-history/accepted-members'/accepted_prefix._view_key(prefix)/'logical'/f'{step:03d}.json',
+                accepted_prefix._member_path(self.root,prefix,value['origin_identity'],step)]
+            self._members[key]=dict(value=value,paths=paths,fingerprint=self._fingerprint(paths))
+        saved=self._members[key]
+        if dependencies is not None:
+            dependencies.append(dict(paths=saved['paths'],fingerprint=saved['fingerprint']))
+        return saved['value']
+
+    def candidate_facts(self,job,value,*,dependencies=None):
+        """Acquire one requested candidate's frozen facts, never a live prefix."""
+        from . import candidate_refs
+        if not isinstance(value,str):return dict(resolved=None)
+        key=(job.get('step'),value,json.dumps(dict(history=job.get('history'),
+            worker_view_version=job.get('worker_view_version'),fork_source=job.get('fork_source')),sort_keys=True))
+        if key not in self._candidate_facts:
+            used=[];facts=dict(resolved=value)
+            try:
+                resolved=candidate_refs.resolve_reference(self.root,job,value)
+                facts['resolved']=resolved
+                match=re.fullmatch(r'([HWAE])(\d{3,})-I(\d{3,})',resolved) if isinstance(resolved,str) else None
+                if match:
+                    step=int(match[2]);prefix=job.get('history',{}).get('prefix')
+                    member=self.member(prefix,step,dependencies=used) if isinstance(prefix,dict) else None
+                    if member is not None or step in {row['step'] for row in job.get('history',{}).get('nodes',[])}:
+                        node=self.node(step)
+                        if member is not None and node.get('origin_identity')!=member['origin_identity']:
+                            raise ValueError('Implementation source differs from its frozen branch member')
+                        saved=self.memo.get((str(self.root),step))
+                        used.append(dict(paths=saved['paths'],fingerprint=saved['fingerprint']) if saved else None)
+                        facts['implementation']=dict(node=node,observation=self.observation(step))
+            except (ValueError,FileNotFoundError) as error:
+                facts['error']=ValueError('Candidate is outside its frozen scientific input') if isinstance(error,FileNotFoundError) else error
+                used.append(None)
+            self._candidate_facts[key]=(facts,used)
+        facts,used=self._candidate_facts[key]
+        if dependencies is not None:dependencies.extend(used)
+        return facts
+
+    def candidate(self,job,value,references=None,*,strict=False,dependencies=None):
+        facts=self.candidate_facts(job,value,dependencies=dependencies)
+        if dependencies is not None and facts.get('error') is not None:raise facts['error']
+        return resolve_candidate(self.root,job,value,references,strict=strict,facts=facts)
 
     def role(self, step):
         if step not in self._roles:
@@ -337,45 +395,29 @@ def accepted_calls(observation):
     return sum(1 for call in observation.get('managed_calls', []) if isinstance(call, dict) and call.get('accepted'))
 
 
-def resolve_candidate(root, job, value, references=None, *, strict=False, reader=None, dependencies=None):
-    """Author reference -> canonical id via frozen task mapping; never inferred.
-
-    ``strict`` raises when the frozen mapping rejects the reference instead of
-    displaying the author's raw text as if it were an identity.
-    """
-    if not isinstance(value, str):
-        return None
-    from . import candidate_refs
-    try:
-        resolved = candidate_refs.resolve_reference(root, job, value)
-        if re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}', resolved):
-            match = re.fullmatch(r'([HWAE])(\d{3,})-I(\d{3,})', resolved)
-            step, index = int(match[2]), int(match[3])
-            if step in {row['step'] for row in job.get('history', {}).get('nodes', [])}:
-                reader = reader if reader is not None else Reader(root)
-                if dependencies is not None:
-                    dependencies.append(None)
-                node = reader.node(step)
-                if dependencies is not None:
-                    source = reader.memo.get((str(root), step))
-                    dependencies[-1] = (dict(paths=source['paths'], fingerprint=source['fingerprint'])
-                        if source is not None else None)
-                materials = sorted(node['seal']['materials'], key=lambda row: row['path'])
-                if node['job']['role'] == match[1] and 1 <= index <= len(materials):
-                    target = materials[index - 1]['path'].replace('inputs/parents/', 'history/nodes/', 1)
-                    matches = {row['id'] for row in (reader.observation(step) or {}).get('candidates', [])
-                               if row.get('implementation') == target}
-                    if len(matches) == 1:
-                        resolved = matches.pop()
-            if strict and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}', resolved):
-                raise ValueError('Implementation has no unique frozen candidate binding')
-    except ValueError:
-        if strict or dependencies is not None and None in dependencies:
-            raise
-        resolved = value
+def resolve_candidate(root, job, value, references=None, *, strict=False, facts):
+    """Pure candidate preview from the UI owner's already acquired frozen facts."""
+    if not isinstance(value,str):return None
+    if facts.get('error') is not None:
+        if strict:raise facts['error']
+        resolved=value
+    else:resolved=facts['resolved']
+    match=re.fullmatch(r'([HWAE])(\d{3,})-I(\d{3,})',resolved) if isinstance(resolved,str) else None
+    if match:
+        binding=facts.get('implementation')
+        if binding is not None:
+            node=binding['node'];index=int(match[3])
+            materials=sorted(node['seal']['materials'],key=lambda row:row['path'])
+            if node['job']['role']==match[1] and 1<=index<=len(materials):
+                target=materials[index-1]['path'].replace('inputs/parents/','history/nodes/',1)
+                matches={row['id'] for row in (binding.get('observation') or {}).get('candidates',[])
+                    if row.get('implementation')==target}
+                if len(matches)==1:resolved=matches.pop()
+        if strict and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}',resolved):
+            raise ValueError('Implementation has no unique frozen candidate binding')
     if references and resolved not in references:
-        inverse = {ref: identity for identity, ref in references.items()}
-        resolved = inverse.get(resolved, resolved)
+        inverse={ref:identity for identity,ref in references.items()}
+        resolved=inverse.get(resolved,resolved)
     return resolved
 
 
@@ -453,7 +495,8 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
     state = node.get('state')
     line = dict(step=step, role=role, role_label=ROLE_LABELS.get(role, role), state=state,
                 state_label=native_state_label(node), sealed=state in SEALED,
-                kind='ordinary', one_line=None, facts=[], links=_links(node, False), next_action=None)
+                kind=node.get('kind','ordinary'), one_line=None, facts=[], links=_links(node, False), next_action=None)
+    line['role_label']=node.get('role_label') or line['role_label']
     if not line['sealed']:
         line['facts'].extend(native_facts(node, clean))
         recovery = node.get('automatic_recovery')
@@ -465,12 +508,8 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
     job, payload, seal = sealed['job'], sealed['payload'], sealed['seal']
     line['links'] = _links(node, True, len(seal.get('materials') or []))
     line['materials'] = len(seal.get('materials') or [])
-    if job.get('formal_review'):
-        line['kind'] = 'formal_review'
-        line['role_label'] = 'A · 正式评审'
-    elif job.get('purpose') == 'closeout':
-        line['kind'] = 'closeout'
-        line['role_label'] = 'A · 最终评估'
+    line['kind'] = ui_semantics.kind(job)
+    line['role_label'] = ui_semantics.role_label(job) or line['role_label']
     summary = payload.get('summary')
     if isinstance(summary, str) and summary.strip():
         line['one_line'] = clean(summary.strip(), 600)
@@ -480,6 +519,7 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
     facts = line['facts']
     action = payload.get('next_action') if isinstance(payload.get('next_action'), str) else None
     line['next_action'] = action
+    line['action_label'] = ui_semantics.action(job, action, A_OUTCOMES)
     mechanisms = mechanisms or {}
     if role == 'H':
         plan = payload.get('search_plan') if isinstance(payload.get('search_plan'), dict) else None
@@ -493,7 +533,7 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
                                        existing_ref=item.get('existing_ref')) for item in commitments]
             facts.append(dict(label='机制', value=str(len(commitments)) + ' 个' + ('：' + '、'.join(names[:5]) if names else '')
                               + (f' 等（另 {len(names) - 5} 个）' if len(names) > 5 else '')))
-        facts.append(dict(label='行动', value=H_ACTIONS.get(action, action) if action else '未记录'))
+        facts.append(dict(label='行动', value=(line['action_label'] if line['kind']=='consultation' else H_ACTIONS.get(action,action)) if action else '未记录'))
     elif role == 'W':
         observation = reader.observation(step)
         calls = accepted_calls(observation)
@@ -513,11 +553,11 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
             verdict = payload.get('verdict')
             facts.append(dict(label='评审结论', value=clean(str(verdict), 200) if verdict is not None else '未记录'))
         else:
-            facts.append(dict(label='决定', value=A_OUTCOMES.get(action, action) if action else '未记录'))
+            facts.append(dict(label='咨询答复' if line['kind']=='consultation' else '决定', value=line['action_label'] if action else '未记录'))
         reason = first_sentence(payload.get('route_reason'))
         if reason:
             facts.append(dict(label='理由', value=clean(reason, 400)))
-        review = payload.get('search_review') if isinstance(payload.get('search_review'), dict) else None
+        review = payload.get('search_review') if ui_semantics.assessment(job) and isinstance(payload.get('search_review'), dict) else None
         if review is not None:
             counts = {}
             for item in review.get('dispositions') or []:
@@ -531,17 +571,17 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
                 ref = focus['mechanism_ref']
                 facts.append(dict(label='下一焦点', value=clean(mechanisms.get(ref, str(ref)), 200)
                                   + (' · ' + clean(str(focus['action']), 60) if focus.get('action') else '')))
-        if line['kind'] != 'formal_review' and 'candidate_recommendation' in payload:
+        if ui_semantics.assessment(job) and 'candidate_recommendation' in payload:
             value = payload.get('candidate_recommendation')
             if action == 'audit':
-                identity = resolve_candidate(reader.root, job, value, references)
+                identity = reader.candidate(job,value,references)
                 line['audit_target'] = identity
                 label = (labels or {}).get(identity)
                 facts.append(dict(label='审计对象', value=clean(label or str(value), 300) if value is not None else '未指定'))
             elif value is None:
                 facts.append(dict(label='候选推荐', value='未推荐'))
             else:
-                identity = resolve_candidate(reader.root, job, value, references)
+                identity = reader.candidate(job,value,references)
                 line['recommendation'] = identity
                 label = (labels or {}).get(identity)
                 facts.append(dict(label='候选推荐', value='★ ' + clean(label if label else str(value), 300)))
@@ -577,28 +617,31 @@ def rounds(reader, nodes, clean, *, completed=False, mechanisms=None, labels=Non
     from . import originals
     for source in originals.source_sequence(reader.root, first):
         try:
-            before += reader.role(source.step) == 'H'
+            summary=reader.summary(source.step) if hasattr(reader,'summary') else dict(role=reader.role(source.step))
+            before += summary['role']=='H' and summary.get('kind')!='consultation'
         except Exception:  # noqa: BLE001 - earlier numbering becomes unknown, not invented
             before = None
             break
     items, current = [], None
     for node in nodes:
-        if node['role'] == 'H' or current is None:
+        line = guarded(role_line, reader, node, clean, mechanisms=mechanisms, labels=labels, references=references, clean=clean)
+        if 'error' in line:
+            line = dict(step=node['step'], role=node['role'], role_label=ROLE_LABELS.get(node['role'], node['role']),
+                        state=node.get('state'), state_label=STATE_LABELS.get(node.get('state'), '状态待核对'),
+                        sealed=False, kind='ordinary', one_line=None, facts=[], links=_links(node, False), error=line['error'])
+        if (node['role'] == 'H' and line['kind'] != 'consultation') or current is None:
             index = None
-            if node['role'] == 'H':
+            if node['role'] == 'H' and line['kind']!='consultation':
                 index = (before + 1 + sum(1 for item in items if item['index'])) if before is not None else None
             elif before:
                 index = before  # Window starts inside an earlier round.
             current = dict(index=index, steps=[], h=None, w=[], a=[], others=[], outcome='进行中',
                            partial=node['role'] != 'H' and node['step'] != 1)
             items.append(current)
-        line = guarded(role_line, reader, node, clean, mechanisms=mechanisms, labels=labels, references=references, clean=clean)
-        if 'error' in line:
-            line = dict(step=node['step'], role=node['role'], role_label=ROLE_LABELS.get(node['role'], node['role']),
-                        state=node.get('state'), state_label=STATE_LABELS.get(node.get('state'), '状态待核对'),
-                        sealed=False, kind='ordinary', one_line=None, facts=[], links=_links(node, False), error=line['error'])
         current['steps'].append(node['step'])
-        if node['role'] == 'H' and current['h'] is None:
+        if line['kind'] == 'consultation':
+            current['others'].append(line)
+        elif node['role'] == 'H' and current['h'] is None:
             current['h'] = line
         elif node['role'] == 'W':
             current['w'].append(line)
@@ -607,10 +650,10 @@ def rounds(reader, nodes, clean, *, completed=False, mechanisms=None, labels=Non
         else:
             current['others'].append(line)
     for item in items:
-        decisive = [line for line in item['a'] if line.get('sealed') and line.get('kind') != 'formal_review']
+        decisive = [line for line in item['a'] if line.get('sealed') and line.get('kind') not in {'formal_review', 'consultation'}]
         if decisive:
             action = decisive[-1].get('next_action')
-            item['outcome'] = A_OUTCOMES.get(action, action) if action else '未记录'
+            item['outcome'] = decisive[-1].get('action_label', A_OUTCOMES.get(action, action)) if action else '未记录'
         elif completed and item is not items[-1]:
             item['outcome'] = '未记录'
         item['experiments'] = sum(line.get('experiments') or 0 for line in item['w'])
@@ -811,7 +854,7 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
         headline = '停在第 ' + str(current['step']) + ' 阶段（' + STATE_LABELS.get(current['state'], '状态待核对') + '）'
     stage = None
     if current:
-        stage = '第 ' + str(current['step']) + ' 阶段 · ' + ROLE_LABELS.get(current['role'], current['role']) + ' · ' \
+        stage = '第 ' + str(current['step']) + ' 阶段 · ' + (current.get('role_label') or ROLE_LABELS.get(current['role'], current['role'])) + ' · ' \
             + native_state_label(current)
     badge = ('接续停止待处理' if state == 'service_error'
         and ((current or {}).get('native_failure') or {}).get('category') != 'permanent' else STATES[state])
@@ -942,7 +985,7 @@ def usage_stats(view, *, used_steps=None, candidates=None):
 def final_coverage(job, payload, clean):
     """Display A's exact coverage declaration; observations supply no verdict."""
     rows = payload.get('final_coverage')
-    if not isinstance(rows, list) or job.get('formal_review'):
+    if not isinstance(rows, list) or not ui_semantics.assessment(job):
         return None
     labels = {row['mechanism_ref']: row.get('label') for row in job.get('final_coverage_mechanisms') or []
               if isinstance(row, dict) and isinstance(row.get('mechanism_ref'), str)}
@@ -1084,7 +1127,7 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
     latest_a = None
     for item in ([] if 'error' in trail else trail['rounds']):
         for line in reversed(item['a']):
-            if line.get('sealed') and line.get('kind') != 'formal_review' and line.get('next_action') != 'audit':
+            if line.get('sealed') and line.get('kind') not in {'formal_review', 'consultation'} and line.get('next_action') != 'audit':
                 latest_a = latest_a or line
         if latest_a:
             break
@@ -1104,7 +1147,10 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
     mechanism_trails = guarded(ui_mechanisms.project, reader,
         [node['step'] for node in nodes if node.get('state') in SEALED], clean,
         partial=bool(nodes) and nodes[0]['step'] > 1, clean=clean)
-    return dict(header=guarded(header, root, objective if objective is not None else view.get('objective')),
+    memory_node=next((getattr(reader,'_nodes',{}).get(node['step'],{}) for node in reversed(nodes)
+        if node.get('state') in SEALED),{})
+    return dict(candidate_memory=candidate_memory(memory_node,clean,loaded_nodes=getattr(reader,'_nodes',{}).values()),
+                header=guarded(header, root, objective if objective is not None else view.get('objective')),
                 trail=trail, mechanisms=mechanisms, mechanism_trails=mechanism_trails, labels=labels, references=references,
                 candidates=candidates, used_steps=used_steps, recommended=recommended, confirmed=confirmed,
                 latest_a=latest_a, materials=materials)
@@ -1129,21 +1175,29 @@ def _delivery_state(closeout, chosen, recommended_value, *, unresolved_reference
     return 'recommended', '已推荐未交付'
 
 
-def candidate_projection(root, before_step, *, job=None, reader=None, history_only=False):
-    """Display the subject's saved input prefix without rerunning admission."""
-    from . import candidate_nominations, candidate_refs, lineage
-    reader = reader or Reader(root)
-    job = job if job is not None else reader.node(before_step)['job']
+def candidate_steps(job,before_step):
+    """The exact saved source cut shared by acquisition and projection."""
     cutoff = (job.get('final_report') or {}).get('source_cutoff', job.get('source_cutoff'))
     extras = sorted(int(ref['path'].split('/')[2]) for ref in job.get('direct_refs', [])
                     if cutoff is not None and int(ref['path'].split('/')[2]) > cutoff)
     history = job.get('history') or {}
     steps = [row['step'] for row in history['nodes']] if 'nodes' in history else list(range(1, before_step))
     steps = [step for step in steps if 0 < step < before_step and (cutoff is None or step <= cutoff or step in extras)]
+    return steps
+
+
+def candidate_projection(root, before_step, *, job=None, reader=None, history_only=False):
+    """Display the subject's saved input prefix without rerunning admission."""
+    from . import candidate_nominations, candidate_refs, lineage, worker_research
+    reader = reader or Reader(root)
+    job = job if job is not None else reader.node(before_step)['job']
+    steps=candidate_steps(job,before_step)
     sources, records, mechanisms, candidates = [], [], {}, {}
     current_h = None
+    memory_node={}
     for step in steps:
         node = reader.node(step)
+        memory_node=node
         source, payload, seal = node['job'], node.get('result', node['payload']), node['seal']
         sources.append((source, payload, seal, None))
         if source['role'] == 'H':
@@ -1151,17 +1205,19 @@ def candidate_projection(root, before_step, *, job=None, reader=None, history_on
             for index, item in enumerate((payload.get('search_plan') or {}).get('commitments') or [], 1):
                 ref = item.get('existing_ref') or f'h{step:03d}.m{index}'
                 mechanisms[ref] = dict(item, status='pending')
-        for item in (payload.get('search_review') or {}).get('dispositions') or []:
+        for item in ((payload.get('search_review') or {}).get('dispositions') or []) if ui_semantics.assessment(source) else []:
             if item['mechanism_ref'] in mechanisms:
                 mechanisms[item['mechanism_ref']].update(status=item['status'], disposition=dict(item, source_a=step))
         observation = reader.observation(step)
         record = dict(step=step, role=source['role'], observation=observation,
-            recommendation=payload.get('candidate_recommendation') if source['role'] == 'A' and payload.get('next_action') != 'audit' else None,
+            recommendation=payload.get('candidate_recommendation') if ui_semantics.assessment(source) and payload.get('next_action') != 'audit' else None,
+            purpose=source.get('purpose'), formal_review=source.get('formal_review'),
+            assessment_author=ui_semantics.assessment(source),
             view=dict(h_scope=current_h, summary=payload.get('summary', ''),
                 conclusion_pages=[f'inputs/history/nodes/{step:03d}/0001.json']))
         if 'candidate_nominations' in payload:
             record['candidate_nominations'] = payload['candidate_nominations']
-        if payload.get('next_action') == 'audit':
+        if ui_semantics.assessment(source) and payload.get('next_action') == 'audit':
             record['audit_request'] = True
         records.append(record)
         for item in (observation or {}).get('candidates') or []:
@@ -1197,6 +1253,9 @@ def candidate_projection(root, before_step, *, job=None, reader=None, history_on
         projected.append(record)
     records = projected
     indexed = lineage.candidate_view(records)
+    from . import selection
+    indexed.update(selection.recommendations([record for record in records
+        if record['role']!='A' or record.get('assessment_author')]))
     graph = dict(mechanisms=mechanisms, candidates=candidates)
     latest_w = next((record for record in reversed(records) if record['role'] == 'W'), None)
     nominated = candidate_nominations.project([latest_w] if latest_w is not None else [], dict(mechanisms=mechanisms))
@@ -1206,11 +1265,56 @@ def candidate_projection(root, before_step, *, job=None, reader=None, history_on
     except ValueError:
         references = {}
     return dict(index=indexed['candidate_index'], graph=graph, references=references,
+                candidate_memory=candidate_memory(memory_node,
+                    lambda value,limit:worker_research.public_text(value,limit) or '',
+                    loaded_nodes=getattr(reader,'_nodes',{}).values()),
                 nominated_ids=nominated_ids,
                 nomination_diagnostics=nominated['diagnostics'],
                 records=records, sources=sources, subject=job,
                 recommended=(indexed.get('a_recommended') or {}).get('candidate_id'),
                 unresolved=unresolved)
+
+
+def candidate_memory(node, clean, *, loaded_nodes=()):
+    """Bounded W-selected navigation from one already loaded accepted view."""
+    memory=(node.get('research') or {}).get('candidate_memory')
+    if not isinstance(memory,dict):return dict(coverage='unknown',candidates=[])
+    source=memory.get('source') or {}
+    step=source.get('source_step')
+    if type(step) is not int or step<1 or source.get('source_role')!='W':
+        return dict(coverage='unknown',candidates=[])
+    materials={}
+    for loaded in loaded_nodes:
+        owner=loaded['job'].get('step')
+        for index,row in enumerate(loaded.get('seal',{}).get('materials') or [],1):
+            materials[row.get('path')]=f'/nodes/{owner}/materials/{index}'
+    def link(reference):
+        if not isinstance(reference,str):return None
+        if reference in materials:return materials[reference]
+        match=re.fullmatch(r'inputs/history/nodes/(?:[A-Za-z0-9._-]+/)?([0-9]{3,})/(?:science|scientific-original)\.json',reference)
+        if match:return '/nodes/'+str(int(match[1]))+'/science'
+        match=re.fullmatch(r'inputs/parents/([0-9]{3,})/(?:conclusion\.json|artifacts/.+)',reference)
+        if match:return '/nodes/'+str(int(match[1]))+('/science' if reference.endswith('/conclusion.json') else '/materials')
+        return None
+    rows=[]
+    originals=memory.get('candidates') if isinstance(memory.get('candidates'),list) else []
+    for row in originals[:16]:
+        if not isinstance(row,dict):continue
+        evidence=[]
+        items=row.get('evidence') if isinstance(row.get('evidence'),list) else []
+        for item in items[:8]:
+            if not isinstance(item,dict) or item.get('relation') not in {'supports','opposes','unknown'}:continue
+            evidence.append(dict(relation=item['relation'],note=clean(str(item.get('note') or ''),400),
+                href=link(item.get('ref'))))
+        rows.append(dict(candidate=clean(str(row.get('candidate') or '未声明'),300),
+            data=clean(str(row.get('data') or ''),400),evaluation=clean(str(row.get('evaluation') or ''),400),
+            failure_condition=clean(str(row.get('failure_condition') or ''),400),
+            open_question=clean(str(row.get('open_question') or ''),400),
+            limitations=[clean(str(value),240) for value in (row.get('limitations') or [])[:6]],
+            evidence=evidence,evidence_omitted=max(0,len(items)-8)))
+    return dict(coverage='accepted',source_step=step,question=clean(str(memory.get('question') or ''),1200),
+        candidates=rows,omitted=max(0,len(originals)-16),
+        diagnostic_count=len(memory.get('diagnostics') or [])+len(memory.get('update_diagnostics') or []))
 
 
 def candidate_rows(projection, *, recommended=None, delivered=None, audits=None, mechanisms=None, clean=None, all_candidates=False):
@@ -1287,7 +1391,7 @@ def audit_facts(root, projection, *, subject=None):
     if subject is not None:
         requests.append((job, subject))
     for source, payload in requests:
-        if source['role'] == 'A' and payload.get('next_action') == 'audit':
+        if ui_semantics.assessment(source) and payload.get('next_action') == 'audit':
             audit_steps.add(source['step'])
     from . import candidate_audit
     models=candidate_audit.candidate_artifacts(root,projection['records'])
@@ -1317,18 +1421,20 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
     sealed = reader.node(step)
     job, payload, seal = sealed['job'], sealed['payload'], sealed['seal']
     references = (projection or {}).get('references') or {}
-    value = payload.get('candidate_recommendation')
-    audit = payload.get('next_action') == 'audit'
+    value = payload.get('candidate_recommendation') if ui_semantics.assessment(job) else None
+    audit = ui_semantics.assessment(job) and payload.get('next_action') == 'audit'
     resolution_error = None
     try:
+        if sealed.get('candidate_reference_unresolved'):
+            raise ValueError('Inherited candidate input identity is unavailable')
         saved = sealed.get('result') or {}
-        chosen = (saved['candidate_recommendation'] if 'candidate_recommendation' in saved else
-            resolve_candidate(reader.root, job, value, references, strict=True) if value is not None else None)
+        chosen = (saved['candidate_recommendation'] if ui_semantics.assessment(job) and 'candidate_recommendation' in saved else
+            reader.candidate(job,value,references,strict=True) if value is not None else None)
         if isinstance(chosen, str) and re.fullmatch(r'[HWAE]\d{3,}-I\d{3,}', chosen):
             # Saved normalized output may retain an implementation reference.
             # Resolve it through the same exact frozen material/observation
             # binding as the authored reference before indexing the candidate.
-            chosen = resolve_candidate(reader.root, job, chosen, references, strict=True, reader=reader)
+            chosen = reader.candidate(job,chosen,references,strict=True)
     except ValueError as error:
         chosen, resolution_error = None, clean(str(error), 300)
     if closeout and (closeout.get('existing_A_recommendation') or {}).get('author_step') == step:
@@ -1345,6 +1451,9 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
                          direction=clean(str(item['direction']), 200) if item and item.get('direction') else None,
                          step=(item or {}).get('observation_step'), indexed=item is not None)
     delivery, delivery_label = _delivery_state(closeout, chosen, value, unresolved_reference=resolution_error is not None)
+    if ui_semantics.kind(job)=='consultation':
+        chosen, candidate = None, None
+        delivery, delivery_label = 'consultation', '研究咨询；不产生正式候选推荐'
     if audit:
         delivery, delivery_label = 'audit', '审计请求'
     explanation = payload.get('selection_explanation') if isinstance(payload.get('selection_explanation'), dict) else None
@@ -1359,9 +1468,8 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
                      if change.get(key)])
     limitations = [clean(str(item), 1200) for item in payload.get('limitations') or []]
     goal = goal_completion if goal_completion is not None else (closeout or {}).get('goal_completion')
-    return dict(step=step, role=job['role'], kind='closeout' if job.get('purpose') == 'closeout' or job.get('final_report') or job.get('final_only') else
-                'formal_review' if job.get('formal_review') else 'ordinary',
-                next_action=payload.get('next_action'), decision=A_OUTCOMES.get(payload.get('next_action'), payload.get('next_action')),
+    return dict(step=step, role=job['role'], kind=ui_semantics.kind(job),
+                next_action=payload.get('next_action'), decision=ui_semantics.action(job,payload.get('next_action'),A_OUTCOMES),
                 summary=clean(payload['summary'], 1200) if isinstance(payload.get('summary'), str) else '未记录摘要',
                 delivery_state=delivery, delivery_label=delivery_label, chosen=None if audit else candidate,
                 audit_target=candidate if audit else None,
@@ -1413,11 +1521,7 @@ def results_list_row(reader, step, clean):
     job, payload = sealed['job'], sealed['payload']
     summary = payload.get('summary') if isinstance(payload.get('summary'), str) and payload['summary'].strip() else \
         first_sentence(payload.get('scientific_result'), 600)
-    label = ROLE_LABELS.get(job['role'], job['role'])
-    if job.get('formal_review'):
-        label = 'A · 正式评审'
-    elif job.get('purpose') == 'closeout':
-        label = 'A · 最终评估'
+    label = ui_semantics.role_label(job) or ROLE_LABELS.get(job['role'],job['role'])
     return dict(step=step, role=job['role'], role_label=label, one_line=clean(summary, 600) if summary else '未记录摘要')
 
 

@@ -332,8 +332,11 @@ def _accepted(directory, value, config, ref, context=None, *, historical=False):
     elif (accepted.get('source_script')!=prepared['local_path']
             or accepted.get('script')!=dict(path=str(destination/'source.py'),size_bytes=prepared['size_bytes'])):
         _fail('Durable accepted original differs from its host snapshot binding')
-    from . import breadth
-    breadth.check_binding(config.get('breadth'), accepted.get('mechanism_binding'), value['scope'])
+    from . import breadth, worker_research
+    if worker_research.enabled(config):
+        worker_research.check_binding(accepted.get('mechanism_binding'),value['scope'])
+    else:
+        breadth.check_binding(config.get('breadth'), accepted.get('mechanism_binding'), value['scope'])
     parent = accepted.get('parent')
     if not isinstance(parent, dict) or 'candidate_id' not in parent:
         _fail('Durable accepted original has no exact parent')

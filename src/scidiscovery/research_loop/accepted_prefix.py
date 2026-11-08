@@ -131,6 +131,64 @@ def candidate_for_implementation(root,prefix,identity):
     return value['candidate_id'] if value['count']==1 else None
 
 
+def _research_memory_facts(root, prefix, job, payload, seal, observation, *, prior=None):
+    """Resolve only W-selected candidate identities using this publication's facts."""
+    from . import candidate_refs,generic_results,research_memory
+    current=candidate_refs.references([dict(step=job['step'],role=job['role'],observation=observation)])
+    candidates={}
+    def add(choice, public):candidates[research_memory._identity(choice)]=public
+    references={}
+    memory=(prior or {}).get('candidate_memory') or {}
+    for row in memory.get('candidates',[]):
+        choice=row.get('candidate')
+        if isinstance(choice,str):add(choice,choice)
+        for evidence in row.get('evidence',[]):
+            reference=evidence.get('ref')
+            if isinstance(reference,str):references[reference]=reference
+    for row in (observation or {}).get('candidates',[]):
+        public=current.get(row['id'],row['id']);add(row['id'],public);add(public,public)
+    for call in (observation or {}).get('managed_calls',[]):
+        for declaration in generic_results.declarations(call):
+            if not isinstance(declaration,dict) or not isinstance(declaration.get('artifact'),str):continue
+            identity=generic_results.identity(call,declaration)
+            if identity not in current:continue
+            add(dict(call_id=call['call_id'],artifact=declaration['artifact']),current[identity])
+    authored=payload.get('research_memory')
+    for row in authored.get('candidates',[]) if isinstance(authored,dict) and isinstance(authored.get('candidates'),list) else []:
+        choice=row.get('candidate') if isinstance(row,dict) else None
+        if not isinstance(choice,str) or research_memory._identity(choice) in candidates:continue
+        try:fact=candidate(root,prefix,choice)
+        except (ValueError,FileNotFoundError):continue
+        add(choice,fact.get('public_reference',choice))
+    for row in [*job.get('global_materials',[]),*job.get('direct_refs',[]),*job.get('direct_materials',[]),
+                *job.get('history',{}).get('files',[]),*seal.get('materials',[])]:
+        path=row.get('path')
+        if not isinstance(path,str) or not path.startswith('inputs/'):continue
+        references[path]=path
+        prefix_path=f'inputs/parents/{job["step"]:03d}/artifacts/'
+        if path.startswith(prefix_path):references[path[len(prefix_path):]]=path
+    # The constant-prefix production binding has no per-file history list.
+    # Resolve only the exact source nodes W cites, through accepted membership;
+    # a matching directory prefix alone never makes evidence available.
+    members={}
+    for row in authored.get('candidates',[]) if isinstance(authored,dict) and isinstance(authored.get('candidates'),list) else []:
+        for evidence in row.get('evidence',[]) if isinstance(row,dict) and isinstance(row.get('evidence'),list) else []:
+            reference=evidence.get('ref') if isinstance(evidence,dict) else None
+            if not isinstance(reference,str) or reference in references:continue
+            match=re.fullmatch(r'inputs/history/(nodes/[^/]+/([0-9]{3,})/)(science\.json|scientific-original\.json|index\.json|research\.json)',reference)
+            if match is None:continue
+            number=int(match[2])
+            if not 0<number<job['step'] or number>prefix['cutoff']:continue
+            if number not in members:
+                try:members[number]=member(root,prefix,number)
+                except (ValueError,FileNotFoundError):members[number]=None
+            accepted=members[number]
+            if accepted is None:continue
+            parent=Path(accepted['navigation']['path']).parent.as_posix()+'/'
+            if match[1]==parent:references[reference]=reference
+    return dict(candidates=candidates,references=references)
+
+
 def _material_binding(root, job, seal, observation, candidate_value):
     from . import contracts as c,generic_results,history
     step=job['step'];owner=job;owner_seal=seal
@@ -358,7 +416,10 @@ def prepare_node(root, job, payload, seal, *, inventory):
             label=Path(row['path']).name) for index,row in enumerate(sorted(seal['materials'],key=lambda row:row['path']),1)],
         scope='Accepted authored science and exact implementation locators; no inherited qualification.')
     node['research']=lineage.research_navigation(prior['research'] if prior else {},job,payload,node_path=base,
-        supervision_state=search_delta['summary'])
+        supervision_state=search_delta['summary'],
+        memory_facts=_research_memory_facts(root,prefix,job,payload,seal,observation,
+            prior=prior['research'] if prior else None)
+            if job.get('research_strategy_version')==3 and job['role']=='W' and payload.get('research_memory') is not None else None)
     node['entities']=[]
     for name,row in search_delta['rows'].items():
         parts=name.split('/',2)

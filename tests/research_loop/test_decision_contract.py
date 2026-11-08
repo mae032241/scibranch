@@ -18,6 +18,7 @@ def prepare(tmp_path, *, enabled=True):
     controller.prepare(root, objective, public, ['never-launched'], max_tokens=100_000,
         max_seconds=3600, max_steps=16, model='fixture', reasoning_effort='high',
         decision_contract_version=1 if enabled else None,
+        research_strategy_version=None,
         search_policy=None)
     finish(root, 1, 'H', [], action='experiment')
     finish(root, 2, 'W', [1], text='Negative controlled result; target uncertainty remains.')

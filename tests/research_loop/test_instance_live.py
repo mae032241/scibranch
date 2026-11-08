@@ -151,7 +151,9 @@ def test_current_worker_execution_receipt_changes_reach_get_and_readonly_sse(tmp
     job=c.read(root/'jobs/002.json')
     records=experiment_client._record_directory_from_facts(root,2,job)
     records.mkdir(parents=True,exist_ok=True)
-    owner=experiments.Records(dict(record_dir=str(records),scope=dict(step=2,private_binding='private-binding-marker')))
+    from scidiscovery.research_loop.protocol import stage_scope_for_job
+    owner=experiments.Records(dict(record_dir=str(records),scope=stage_scope_for_job(root,job,
+        task_ref=dict(path=str(root/'jobs/002.json')))))
     accepted=dict(_display_first_call=True,native_attempt=dict(number=0,execution_key='private-native-path'))
     owner.live_status('original-call-only','submitted',accepted=accepted)
     originals={path:path.read_bytes() for path in (root/'jobs/002.json',root/'native-evidence/001/result-identity.json')}
@@ -176,6 +178,60 @@ def test_current_worker_execution_receipt_changes_reach_get_and_readonly_sse(tmp
             assert not (root/'native-evidence/002/result-identity.json').exists()
             page=request(connection,'GET','/',cookie=cookie)[1]
             assert '已观察运行' in page.decode()
+        finally:
+            response.close();client.close()
+
+
+@pytest.mark.process_e2e
+def test_v3_same_worker_declaration_and_original_binding_reach_get_and_sse(tmp_path):
+    from scidiscovery.research_loop import contracts as c,experiments,experiment_client,protocol,worker_research
+    from scidiscovery.research_loop import controller
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'goal.md';objective.write_text('Retain exact observations and explicit limitations.')
+    root=tmp_path/'instance'
+    controller.prepare(root,objective,public,['never-launched'],native_backend='protocol',
+        model='ui-fixture',reasoning_effort='high',max_tokens=100000,max_seconds=120,max_steps=6,
+        research_strategy_version=3)
+    job=c.build_job(root,1,'W',[])
+    assert job['search']['breadth'] is None
+    key=tmp_path/'operator.key';key.write_bytes(b'ui-worker-first-fixture-key-32-bytes');key.chmod(0o600)
+    directory=experiment_client._record_directory_from_facts(root,1,job);directory.mkdir(parents=True,exist_ok=True)
+    config=dict(record_dir=str(directory),scope=protocol.stage_scope_for_job(root,job,
+        task_ref=dict(path=str(root/'jobs/001.json'))),research_strategy_version=3,
+        breadth=job['search']['breadth'],worker_research_goal_id=c.settings(root)['goal_id'])
+    owner=experiments.Records(config)
+    previous=worker_research.initial(config)
+    current=worker_research.evolve(previous,[dict(action='declare',mechanism_ref='w001.observation',
+        question='Which controlled observation distinguishes the alternatives?')],scope=config['scope'],
+        original_ref=dict(path=str(directory/'research/000001.json')))
+    worker_research.publish(config,previous,current)
+    owner.research_status(current)
+    originals={path:path.read_bytes() for path in (root/'jobs/001.json',directory/'research/000001.json')}
+    with host(root,key,workspace=False) as (connection,url,endpoint):
+        cookie=login(connection,urlsplit(endpoint['read_url']))
+        page=request(connection,'GET','/',cookie=cookie)[1].decode()
+        assert 'w001.observation' in page and '缺失视图不表示零投入' in page
+        client,response=stream(url,'/live',cookie)
+        try:
+            initial=snapshot(response)
+            assert 'w001.observation' in initial['fragments']['live-usage']
+            _,binding=worker_research.prepare(config,current,dict(mechanism_ref='w001.observation',
+                experiment_question=dict(question='Does this input preserve the observable?',
+                    change_criterion='Change the input if the observable disappears.')))
+            admitted=dict(scope=config['scope'],call_id='exact-original',mechanism_binding=binding,
+                native_attempt=dict(number=0),_display_first_call=True,code_version=dict(entry='observe.py'))
+            owner._research_prior_calls=[]
+            owner.live_status('exact-original','running',accepted=admitted)
+            changed=snapshot(response)
+            html=changed['fragments']['live-usage']
+            assert 'Does this input preserve the observable?' in html and 'revision 1' in html
+            assert '原调用总数：1' in html and '当前连续投入：1' in html
+            assert 'action="/control/' not in html and str(root) not in html
+            assert 'job_ref' not in json.dumps(changed) and 'execution_key' not in json.dumps(changed)
+            assert all(path.read_bytes()==data for path,data in originals.items())
+            assert not (root/'native-evidence/001/result-identity.json').exists()
+            page=request(connection,'GET','/',cookie=cookie)[1].decode()
+            assert 'Does this input preserve the observable?' in page and '原调用总数：1' in page
         finally:
             response.close();client.close()
 

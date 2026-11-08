@@ -113,22 +113,103 @@ writes; no compatibility reader, migration or settings-version edit is supported
 补填诊断指出准确角色、路径和预期形状，并区分剩余额度及既有消费，不授权重跑旧实验。
 包括 32 在内的旧协议在解释科学原件或写入前拒绝，不兼容读取、不迁移、不手改旧实例版本。
 
-Ordinary A assesses a concrete high-level question and cannot change W/H focus,
-mechanism dispositions or allocations through planning fields. Further-work routes
-require `decision_request` with a concrete question and change criterion; no full
-portfolio or final-coverage inventory is required. Mechanical checks remain outside
-A's routine work. A frozen macro-supervision request additionally permits
-`supervision_result=continue_existing` with `continue_w` and no new evidence request.
+New preparations freeze W-first `research_strategy_version=3`: W starts research and may
+begin discovery with no candidate or mature hypothesis. Before managed batches W declares
+a stable mechanism and `experiment_question={question,change_criterion}`. Same-session
+revisions, merges, retirement and resume retain exact declaration originals. Optional
+`research_memory` retains selected candidate/evidence references, data/evaluation basis,
+conditional negative findings, failure conditions, open questions and limitations across
+consultation and context changes. Control validates exact references and structure,
+without deciding scientific novelty or granting permissions. `--research JSON`
+preflight runs under the existing writer lease: current-attempt admission, pause,
+host-review and budget gates precede write-once declaration publication. It launches
+no external execution, adds no call investment and grants no execution permission;
+actual acceptance idempotently reuses the exact frozen binding. H expands useful
+explanations, ordinary A reflects on search limitations and may endorse productive
+depth, and W retains methods and allocation. Ordinary A can return to existing work
+with `continue_w` and `decision_request:null`; specific new evidence requests still
+need a concrete question and change criterion. Its `deliver`/`finish` requests
+Final A, which is required before submission. A trigger does not
+prove stagnation, and ordinary A need not invent a problem or prescribe a method.
+With original allowance remaining, v2/v3 W's voluntary `decision` or ordinary A's closeout request enters
+one pre-delivery Final A before irreversible lock: accept exact `deliver`, reject
+all with `finish` and no recommendation, or ask W for one concrete decision-changing
+correction using that remaining allowance. Correction admits no broader research
+or H/A/E consultation; it returns for at most one reassessment and no second correction.
+Acceptance does not add another Final A. Exhaustion keeps protected final-only
+reporting with no new W/E or experiments; an already accepted pre-delivery A
+concludes from originals under its own exact deliver/finish authority without
+another A. V2/v3 may reject all even with candidates;
+availability is not qualification. Best-effort submission requires explicit original
+task policy and is separate from scientific endorsement. Normal no-delivery is not
+itself a failure metric; engineering tests do not establish scientific benefit.
+Frozen v2 retains its original H-first startup and Final A contract. Frozen v1 retains voluntary `decision` directly entering irreversible protected FINAL.
+Unmarked retained instances keep their original request and terminal contracts
+on configuration updates, exact rebuild or fork. Inspect/export does not modify an
+instance; preparing a new instance from editable TOML uses current defaults rather
+than reproducing every internal frozen setting. Mechanical checks and formal
+independent review keep their separate authority. A frozen macro-supervision request
+permits `supervision_result=continue_existing` without a new evidence request.
 Explicit W `exploration_rounds`, exact-original counting and A coverage are maintained
 by the common ledger/controller, independently of the agent backend. The architecture
 owns the reporting fields, trigger defaults and purpose-specific contract.
+V3 defaults to automatic A off. Optional original-call investment notices and
+enforced reviews are separate settings; exact original calls count once across
+continuation and recovery, without becoming scientific rounds or stagnation verdicts.
+Frozen earlier supervision policies retain their cadence. Automatic supervision is an
+experimental scheduling heuristic, not evidence of stagnation or scientific gain. Direct API `supervision_policy=None` disables it;
+no new scientific classifier, search tree or knowledge database is required.
 
-普通 A 只评估具体的高层问题，不通过规划字段改变 W/H focus、机制处置或分配。
-继续研究须给出具体 decision_request 及改变判断的条件，不要求全盘组合或最终覆盖清单；
-常规机械核对不属于 A 的工作。带冻结宏观监督请求的 A 可用
+新准备实例冻结 W 先行策略 `research_strategy_version=3`，从 W 开始，初探可无候选或成熟假设。
+受管批次前声明稳定机制身份及 `experiment_question={question,change_criterion}`，同 session 可修订、
+合并、退役和恢复，保留准确声明原件。可选 `research_memory` 以现有研究导航保存所选候选/证据引用、
+数据及评价口径、条件性负结果、失败条件、未解问题和限制，咨询返回和换上下文后仍可回读。
+控制只核结构与准确原件，不判断科学新颖度或授予权限。`--research JSON` 预检在既有 writer lease 内，
+先核对当前 attempt，并通过暂停、宿主评估及预算门槛，再一次性发布不可变声明；不启动外部执行，
+不新增调用投入，也不授执行权限，后续实际接受幂等复用准确冻结绑定。H 打开解释，普通 A 反思搜索局限，
+可支持有效深挖，方法与分配仍由 W 拥有。普通 A 可用 `continue_w` 与 `decision_request:null`
+返回已有工作，确需新证据时仍给出具体问题及改变判断的条件；`deliver/finish` 只请求
+Final A，提交前必须经过最终评估。触发不证明停滞，普通 A 不强行找错或指定方法。
+v2/v3 的 W 自愿 `decision` 或普通 A 请求收口，在原额度可用时先进入一次提交前 Final A，不先不可逆锁死研究：
+同一次 A 可显式 `deliver` 接受准确候选、用 `finish` 且无推荐全部拒绝，或要求 W 在原剩余额度内
+补正一个具体、能改变判断的缺口。补正不扩大研究、不咨询 H/A/E，之后至多一次再评估，不能再补正；
+接受不另加一次 Final A。耗尽后仍只作 protected final-only 报告，不新开 W/E 或实验。
+已接受的提交前 A 运行中才耗尽时，同一次 A 按原件及其准确 `deliver/finish` 权限收口，不另加 A。
+v2/v3 即使有候选也可全部拒绝，可用性不等于资格；best-effort 提交须原任务显式政策，不能冒充科学认可。
+正常未交付本身不是失败指标，工程检查不证明科学收益。已冻结 v2 保留原 H 开始及 Final A 合同；
+已冻结 v1 保留自愿 `decision` 直接进入
+不可逆 protected FINAL 的旧义。
+无该字段的已有实例在配置更新、准确重建和 fork 时保留原请求及终态合同，不自动升级。
+检查或导出不修改实例；从可编辑 TOML 新准备实例使用当前默认值，不等于重建全部内部冻结设置。常规机械检查与
+正式独审保留单列权限。带冻结宏观监督请求的 A 可用
 `supervision_result=continue_existing` 与 `continue_w` 放行原工作，不编造新缺口。
-W 的 `exploration_rounds`、准确原件计数和 A 覆盖边界由公共账本/控制层维护，与 Agent
+旧冻结策略的 `exploration_rounds`、准确原件计数和 A 覆盖边界由公共账本/控制层维护，与 Agent
 后端无关；报告字段、默认触发策略和按目的区分的统一合同由上述架构维护。
+v3 默认关闭自动 A；可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
+不把投入当科学轮次或停滞判决。旧冻结监督策略保留原节奏。
+自动监督是尚未证明收益的实验性调度启发式，不是停滞判断；直接 API 的
+`supervision_policy=None` 可关闭，不新增科学分类器、搜索树或知识库。
+
+For a new preparation, the direct API's `supervision_policy` accepts the following
+version 2 policy. `mode="off"` retains passive investment facts; `"notice"` sends
+a bounded notice without blocking work; `"review"` requests ordinary A and pauses
+new experiments when due. Review mode also requires a positive
+`max_automatic_reviews`. These are scheduling settings, not scientific verdicts.
+
+新准备时，直接 API 的 `supervision_policy` 可使用下例。`off` 仅保留投入事实，
+`notice` 只提醒，`review` 到期后暂停新实验并转普通 A；强制评估还须配置正数的
+`max_automatic_reviews`。原调用的 query/collect 仍可用，已有冻结实例不升级。
+
+```json
+{
+  "version": 2,
+  "mode": "notice",
+  "consecutive_calls": 4,
+  "min_budget_fraction": 0.1,
+  "budget_checkpoints": [],
+  "max_automatic_reviews": 0
+}
+```
 
 ## Declaration fields / 声明字段
 
@@ -206,8 +287,10 @@ compactions. Fresh current-window occupancy can advise preparing a checkpoint at
 exceeds the allowed count, the next supported observable boundary seals the partial
 result and starts a new W. It does not automatically
 request A. An explicit `handoff` also starts a new W; `revise_h` and `review` request
-serial H and A consultation respectively, returning to a new W. `decision` requests
-an ordinary A assessment. Ordinary consultation grants no assessment cycle,
+serial H and A consultation respectively, returning to a new W. Strategy v2 W uses
+`decision` for pre-delivery Final A; frozen v1 uses
+`decision` when ready to close research and directly request protected Final A;
+an unmarked legacy W requests ordinary A assessment. Ordinary consultation grants no assessment cycle,
 main-line change, recommendation or qualification. Formal independent review
 retains its exact-subject contract and neutral inputs.
 
@@ -232,7 +315,8 @@ rejects them without migration or settings edits.
 冻结为 `worker_fragment_policy.max_context_windows`。同 session fragment 保留同一 W
 任务和额度；窗口门禁只计一个初始窗口加已完成压缩次数。当前窗口新鲜占比可在最后允许窗口的 85% 提前提示准备 checkpoint，缺失或过期占比不新增停止条件。完成压缩后超出
 允许次数，在下一受支持的可观察边界封存部分结果并交新 W，不自动交 A。显式 `handoff` 同样交新 W；`revise_h`
-和 `review` 分别请求串行 H/A 咨询，结束后交新 W；`decision` 请求普通 A 正式阶段评估。
+和 `review` 分别请求串行 H/A 咨询，结束后交新 W；策略 v2 用 `decision` 请求提交前 Final A；已冻结 v1
+直接请求 protected Final A，无策略字段的旧 W 仍请求普通 A 评估。
 咨询不消费正式 A 周期，不改变主线、推荐或资格；正式独审保持精确 subject 和中性输入。
 
 `policies.worker_context` 仍选择 `same_session` 或 `new_context`。同 session 续接保留
@@ -249,11 +333,12 @@ W may declare new mechanisms through its existing search_plan when sealing a
 result. The current W executes only the frozen catalog; a new W must freeze the
 new catalog before executing those mechanisms under the original admission rules.
 H/A consultation is optional and is not a prerequisite for W mechanism registration.
-`decision` and final judgment retain the ordinary independent A boundaries.
+Strategy v2 `decision` requests pre-delivery Final A; frozen v1 enters protected
+Final A directly. Final judgment remains independent.
 
 W 可在封存时用既有 search_plan 声明新机制；当前 W 只执行其冻结目录，新机制须由新 W
-冻结新目录后按原准入执行。H/A 咨询可选，不是 W 登记机制的前置条件；`decision` 正式
-阶段评估及最终裁决仍保留独立 A 边界。
+冻结新目录后按原准入执行。H/A 咨询可选，不是 W 登记机制的前置条件；策略 v2 的
+`decision` 请求提交前 Final A，已冻结 v1 直接进入 protected Final A，最终裁决保留独立 A 边界。
 
 Shared research navigation reuses sealed scientific originals and the accepted
 prefix. `indexes.research` links current authored understanding, competing H
@@ -476,7 +561,9 @@ outcome and evidence bindings, and shares `max_continues` with early-stop recove
 Required-format and conditional breadth omissions use output repair; that permission alone
 does not authorize scientific work. A repaired valid response can independently
 qualify for work continuation. Valid partial findings and explicit blocks keep
-their declared stage intent; `decision` requests ordinary A assessment. Complete or inapplicable delivery adds no
+their declared stage intent; strategy v2 `decision` requests pre-delivery Final A,
+while frozen v1 requests protected Final A directly,
+while unmarked legacy W requests ordinary A assessment. Complete or inapplicable delivery adds no
 recovery action. An enforced host review keeps its existing priority. Exhausting the
 automatic continue cap or the original budget records a verified partial exit rather
 than inventing completed findings or refunding consumption.
@@ -500,7 +587,8 @@ Codex home 用精确 ID 执行 `exec resume`，仍沿用原 thread 并再次到�
 可依靠独立自动许可续接原 W 完整任务；沿用原 session，绑定原返回、outcome 和证据快照，
 与提前停止共用 `max_continues`。必需格式和条件广度声明缺失走输出补填，该许可本身不授权科学续工；
 补成合法返回后可另行符合独立续工条件。有效 partial 和明确障碍保留作者的 stage_intent；
-`decision` 交普通 A 正式阶段评估，其他交接或咨询沿其明确路线。完整或不适用的交付判定
+策略 v2 的 `decision` 请求提交前 Final A，已冻结 v1 直接请求 protected Final A；无策略字段的旧 W 仍交普通 A 评估，
+其他交接或咨询沿其明确路线。完整或不适用的交付判定
 不追加恢复动作。宿主强制边界仍优先于科学续工，不把上下文续接变成自动 A。continue 次数或原预算耗尽记录可核验的 partial 出口，
 不虚构已完成 finding，不退还已用预算。
 
@@ -842,7 +930,8 @@ from evidence and shared balance, including `continue_w`, `revise_h` or `extract
 when justified. A node target does not end research. Only when shared tokens or
 shared time are actually exhausted (remaining <= 0) must ordinary A immediately
 summarize existing results and `deliver` an eligible existing candidate or `finish`
-with gaps, without new H/W/E or another FINAL. These are advisory thresholds, not new
+with gaps, without new H/W/E. Strategies v1 and v2 request protected Final A through that
+choice; unmarked legacy A retains its original terminal authority. These are advisory thresholds, not new
 quotas, reservations, authorization or defaults. Missing billing coverage alone
 does not block advancement; reported lower bounds and unknown gaps remain, without
 refund, zero replacement or replay. Unknown execution still requires original-call
@@ -862,7 +951,8 @@ their completion policy; see [architecture](ARCHITECTURE.md).
 全局余额选择正常 `next_action`，有依据时仍可 `continue_w`、`revise_h` 或 `extract`；
 节点目标本身不终止研究。仅当共享 token 或共享时间实际耗尽（剩余量 <= 0）时，普通 A
 才须立即总结已有结果，用已有合格候选 `deliver`，无合适候选则 `finish` 并保留缺口，
-不新开 H/W/E 或额外 FINAL。阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
+不新开 H/W/E；策略 v1/v2 由此请求 protected Final A，无策略字段的旧 A 保留原终态权限。
+阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
 不阻断推进，已报下界与未知缺口保留，不补零、不退款、不授重放；真实执行未知仍须按原调用
 核对。共享准入、单次有限执行及 protected FINAL 原策略继续有效。
 

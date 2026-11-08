@@ -16,11 +16,12 @@ from execution_fixtures import execution_registry
 from scidiscovery.research_loop.protocol import CURRENT
 
 
-def prepare(tmp_path, advice=guidance.DEFAULT):
+def prepare(tmp_path, advice=guidance.DEFAULT, *, research_strategy_version=None):
     public=tmp_path/'public';public.mkdir();objective=public/'objective';objective.write_text('Adapt experiments to observed results within the scientific objective.')
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,['fake'],max_tokens=100000,max_seconds=3600,max_steps=8,
-        model='fake',reasoning_effort='high',search_policy=None,role_guidance=advice)
+        model='fake',reasoning_effort='high',search_policy=None,role_guidance=advice,
+        research_strategy_version=research_strategy_version)
     return root
 
 

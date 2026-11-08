@@ -559,6 +559,15 @@ def _observed_original_refs(accepted, observed):
     return originals
 
 
+def _check_call_binding(job, binding, scope):
+    """Choose the task's frozen identity contract, consuming saved facts only."""
+    from . import worker_research
+    if worker_research.applicable(job):
+        return worker_research.check_binding(binding,scope)
+    from . import breadth
+    return breadth.check_binding((job.get('search') or {}).get('breadth'),binding,scope)
+
+
 @_job_storage
 def _observe_managed_calls(root, job, *, context=None, call_ids=None):
     from .protocol import stage_scope
@@ -588,7 +597,7 @@ def _observe_managed_calls_from_facts(root,job,*,chain,scope,context=None,call_i
         accepted=c.read(c.regular(accepted_path))
         if accepted.get('scope')!=scope or accepted.get('call_id')!=directory.name:
             raise ObserverIntegrityError('Managed original escaped its stage owner')
-        binding=breadth.check_binding((job.get('search') or {}).get('breadth'),accepted.get('mechanism_binding'),scope)
+        binding=_check_call_binding(job,accepted.get('mechanism_binding'),scope)
         completion=directory/'completed.json';terminal_path=directory/'terminal.json';state='unknown';terminal=None;value={}
         if completion.exists():
             value=c.read(c.regular(completion))
@@ -611,7 +620,10 @@ def _observe_managed_calls_from_facts(root,job,*,chain,scope,context=None,call_i
             terminal=_managed_proof(root,terminal_path,observed['native_terminal'],context=context)
         retired_path=directory/'submission-retirement.json'
         if retired_path.exists() or retired_path.is_symlink():
-            value=experiments.retirement(dict(record_dir=str(records.root),scope=scope,execution_interface=interface,breadth=(job.get('search') or {}).get('breadth')),directory.name)
+            retirement_config=dict(record_dir=str(records.root),scope=scope,execution_interface=interface,breadth=(job.get('search') or {}).get('breadth'))
+            from . import worker_research
+            if worker_research.applicable(job):retirement_config['research_strategy_version']=3
+            value=experiments.retirement(retirement_config,directory.name)
             originals=experiments.retirement_originals(value,accepted)
             row=dict(call_id=directory.name,scope=scope,mechanism_binding=binding,status='not_submitted',
                 result_protocol=generic_results.protocol(interface),accepted=_proof(root,accepted_path.relative_to(root).as_posix(),context=context,source_kind='managed_frozen'),
@@ -679,7 +691,7 @@ def _validate_managed_from_facts(root,job,rows,*,chain,scope,context=None,verify
             raise ObserverIntegrityError('Managed receipt differs from accepted original')
         if 'result_protocol' in row and row['result_protocol']!=generic_results.protocol(_execution_interface_from_chain(root,accepted,chain)):
             raise ObserverIntegrityError('Managed result protocol differs from frozen host interface')
-        breadth.check_binding((job.get('search') or {}).get('breadth'),row['mechanism_binding'],scope)
+        _check_call_binding(job,row['mechanism_binding'],scope)
         observed=c.read(root/row['observation']['snapshot']) if row.get('observation') is not None else None
         from . import experiments
         direct=('code_version' in accepted and observed is not None
@@ -780,7 +792,7 @@ def validate_managed_original(source,job,rows,*,controls_only=False):
         if (accepted.get('scope') != scope or accepted.get('call_id') != row['call_id']
                 or accepted.get('mechanism_binding') != row['mechanism_binding']):
             raise ObserverIntegrityError('Inherited managed call changed its accepted identity')
-        breadth.check_binding((job.get('search') or {}).get('breadth'), row['mechanism_binding'], scope)
+        _check_call_binding(job,row['mechanism_binding'],scope)
         interface = _original_interface(source, accepted)
         if 'result_protocol' in row and row['result_protocol'] != generic_results.protocol(interface):
             raise ObserverIntegrityError('Inherited managed result protocol changed')
@@ -1025,6 +1037,7 @@ def _capture(root, job, payload, materials, *, inventory):
             diagnostics=[]
             snapshot=dict(binding=binding,candidates=generic_results.candidates(rows,diagnostics=diagnostics),current_candidate=None,actual_submission=None,contexts=[],managed_calls=rows,
                 coverage=dict(status='partial',note='Registered call originals and explicitly declared candidates only; scientific qualification is unobserved.'))
+            if inventory.research_state is not None:snapshot['research_state']=inventory.research_state
             if diagnostics:snapshot['candidate_diagnostics']=diagnostics
             c.write(path,snapshot)
         inventory.observation_document,inventory.observation_inputs=snapshot,None
@@ -1259,6 +1272,7 @@ def _capture(root, job, payload, materials, *, inventory):
         if diagnostics:snapshot.setdefault('candidate_diagnostics',[]).extend(diagnostics)
     if snapshot.get('candidate_diagnostics'):
         snapshot['coverage']=dict(status='partial',note='Some observer items have no verified binding; retained valid facts remain available.')
+    if inventory.research_state is not None:snapshot['research_state']=inventory.research_state
     c.write(path, snapshot)
     inventory.observation_document,inventory.observation_inputs=snapshot,inputs
     return dict(path=path.relative_to(root).as_posix())
@@ -1295,6 +1309,7 @@ def capture(root, job, payload, materials, *, inventory):
             diagnostics=[]
             value['candidates']=generic_results.candidates(value['managed_calls'],diagnostics=diagnostics)
             if diagnostics:value['candidate_diagnostics']=diagnostics
+        if inventory.research_state is not None:value['research_state']=inventory.research_state
         c.write(path, value)
         inventory.observation_document,inventory.observation_inputs=value,None
         return dict(path=path.relative_to(root).as_posix())

@@ -15,7 +15,10 @@ import uuid
 
 from . import budget, contracts, history, native, runtime, search, correction, semantic, execution, continuation, guidance, checkpoint, role_share, shortlist, engineering, worker_delivery
 from .output_repair import OutputRepairRequired
-from . import managed_wait, configuration_updates, handoff_state, budget_limits, supervision
+from . import managed_wait, configuration_updates, handoff_state, budget_limits, supervision, delivery_review
+
+_DEFAULT_ROLE_GUIDANCE = object()
+_DEFAULT_SUPERVISION_POLICY = object()
 
 
 def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str], *,
@@ -27,13 +30,14 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             user_updates: list[Path] | None = None,
             history_observer: dict | None = None,
             search_policy: dict | None = search.DEFAULT_POLICY,
-            supervision_policy: dict | None = supervision.DEFAULT_POLICY,
+            supervision_policy: dict | None = _DEFAULT_SUPERVISION_POLICY,
             correction_policy: dict | None = None,
             node_budget_policy: dict | None = None,
             delivery_policy: dict | None = None,
             resume_policy: dict | None = None,
             lineage_projection_version: int | None = 1,
-            role_guidance: dict | None = guidance.DEFAULT,
+            role_guidance: dict | None = _DEFAULT_ROLE_GUIDANCE,
+            research_strategy_version: int | None = 3,
             selection_protocol: int | None = 1,
             node_budget_mode: str = 'soft', candidate_audit_policy: dict | None = None,
             handoff_authority_version: int | None = 1, decision_contract_version: int | None = None,
@@ -57,6 +61,12 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     """Freeze an explicit goal, global ceilings and finite node budgets."""
     from . import candidate_nominations
     from . import storage_policy as storage
+    if _existing_settings is not None:
+        research_strategy_version = _existing_settings.get('research_strategy_version')
+    if supervision_policy is _DEFAULT_SUPERVISION_POLICY:
+        supervision_policy=(supervision.WORKER_FIRST_POLICY if research_strategy_version==3 else supervision.DEFAULT_POLICY)
+    if research_strategy_version is not None and (type(research_strategy_version) is not int or research_strategy_version not in (1, 2, 3)):
+        raise ValueError('Unsupported research strategy version')
     storage_limits = storage.configuration(storage_policy)
     nomination_limits=candidate_nominations.configuration(candidate_extra_slots)
     portfolio_limits = search.portfolio_policy(portfolio_policy) if portfolio_policy is not None else None
@@ -201,8 +211,15 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     if resource_policy is not None and (authority_policy is None or frozen_execution is None):
         raise ValueError('Execution resources require explicit authority and registered host execution')
     observer = history.observer_config(history_observer) if history_observer is not None else None
-    literal_guidance = (guidance.OPPORTUNITY if portfolio_limits is not None and portfolio_limits.get('version', 1) == 2
-                        and role_guidance is guidance.DEFAULT else role_guidance)
+    if role_guidance is _DEFAULT_ROLE_GUIDANCE:
+        if _existing_settings is not None:
+            role_guidance = _existing_settings.get('role_guidance')
+        else:
+            role_guidance = (guidance.WORKER_FIRST if research_strategy_version == 3 else
+                guidance.WORKER_LED if research_strategy_version in (1, 2) else
+                guidance.OPPORTUNITY if portfolio_limits is not None and portfolio_limits.get('version', 1) == 2
+                else guidance.DEFAULT)
+    literal_guidance = role_guidance
     advice = guidance.policy(literal_guidance) if literal_guidance is not None else None
     search_limits = search.policy(search_policy) if search_policy is not None else None
     correction_limits = correction.policy(correction_policy) if correction_policy is not None else None
@@ -269,6 +286,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     settings['experiment_interface_version'] = 1
     settings['managed_admission_version'] = 1
     settings['worker_view_version'] = 1
+    if research_strategy_version is not None or (_existing_settings is not None and 'research_strategy_version' in _existing_settings):
+        settings['research_strategy_version'] = research_strategy_version
     settings['experiment_mode'] = experiment_mode
     if frozen_execution is not None:
         settings['execution_config']=frozen_execution
@@ -396,6 +415,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             from . import accepted_search
             search_seed=accepted_search.empty() if _fork_search_seed is None else _fork_search_seed
             if _fork_search_seed is None:
+                if research_strategy_version==3 and settings.get('supervision_policy') is not None:
+                    search_seed['supervision']=supervision.empty(settings['supervision_policy'])
                 prefix_seed,search_rows=None,None
             else:
                 prefix_seed,search_rows,search_seed=accepted_prefix.fork_seed(
@@ -757,14 +778,24 @@ def _finish(root, settings, status, completed, last, *, reason=None, next_role=N
 
 
 def _technical_pause_result(root, settings, completed, last, *, job, record, outcome):
-    """Keep a prelaunch control failure actionable without inventing science."""
+    """Project an original transport stop without granting replay permission."""
+    from .native_usage import actionable_stop
+    diagnostic=actionable_stop(outcome)
     stopped=continuation.technical_stop(root,job,record,outcome)
+    if diagnostic is not None:
+        stopped=dict(reason=diagnostic['code'],stage=diagnostic['phase'],
+            repair_scope='original_native_call',supported_actions=[],
+            technical_diagnostic=diagnostic,
+            prerequisite=('Reconcile the exact original native call before any new turn; preserve consumed budgets.'
+                if diagnostic['original_call_state']=='unknown' else
+                'Inspect the exact retained native outcome before selecting an existing supported recovery action.'))
     if stopped is None:return None
     result=_finish(root,settings,'technical_pause',completed,last,
         reason=stopped['reason'],next_role=job['role'])
     result.update(technical_stop=stopped,stage=stopped['stage'],
         pending_step=job['step'],pending_role=job['role'],repair_scope=stopped['repair_scope'],
         supported_actions=stopped['supported_actions'])
+    if diagnostic is not None:result['technical_diagnostic']=diagnostic
     return result
 
 
@@ -817,6 +848,51 @@ def _route(root, step, role, result, job, current_h, current_w):
             + ('Original W question: '+requester['route_reason']+' ' if requester.get('route_reason') else '')+
             'Retain unfinished questions, candidates, mechanisms, materials and consumed opportunities; assess advice against evidence. Consultation grants no qualification or execution permission.',None)
         return (*route,current_h,target['step'])
+    bound = delivery_review.binding(job)
+    if bound is not None:
+        parents = _parents(current_h, current_w, step)
+        if bound['kind'] == 'delivery_review':
+            if result['next_action'] == 'continue_w':
+                if bound['corrections_used'] != 0:
+                    raise ValueError('Delivery correction allowance is consumed')
+                if job.get('research_strategy_version')==3:
+                    parents=_parents(*parents,bound['step'],
+                        *[int(Path(ref['path']).parts[2]) for ref in job.get('direct_refs',[])])
+                request=result['decision_request']
+                instruction=(f'Resolve only the decision-changing gap from A in inputs/parents/{step:03d}/conclusion.json. '
+                    'Question: '+request['question']+' Change criterion: '+request['change_criterion']+'. '
+                    'Choose your methods within the original remaining authorization. '+instruction)
+                return ('W', parents, instruction, delivery_review.make('delivery_correction', step, 1), current_h, current_w)
+            return (None, [], '', None, current_h, current_w)
+        current_w = step
+        instruction=job.get('instruction','')+(' Latest W handoff: '+instruction if instruction else '')
+        context_handoff = False
+        if result['stage_intent']=='continue':
+            record=execution.record(root,step)
+            ended=checkpoint.stage_end(root,job,record) if (record/'stage-end.json').exists() else None
+            context_handoff=ended is not None and ended['reason'] in {
+                'worker_context_review_due','worker_context_observation_unknown','worker_progress_review_due'}
+        if result['stage_intent'] == 'handoff' or context_handoff:
+            return ('W', _parents(current_h, step), instruction,
+                delivery_review.make('delivery_correction', step, 1), current_h, current_w)
+        return ('A', _parents(current_h, step),
+            'Reassess the single corrected delivery gap from exact retained originals. No further correction is authorized. '+instruction,
+            delivery_review.make('delivery_review', step, 1), current_h, current_w)
+    if (role == 'A' and job.get('research_strategy_version') in (2, 3)
+            and _worker_led_final_required(job) and result.get('next_action') in {'finish','deliver'}):
+        subjects=([int(Path(ref['path']).parts[2]) for ref in job.get('direct_refs',[])]
+            if job.get('research_strategy_version')==3 else [])
+        return ('A', _parents(current_h, current_w, step,*subjects),
+            'Independent pre-delivery assessment of the ordinary assessment request. Accept an exact candidate with deliver, '
+            'decline with finish, or request one bounded decision-changing correction with continue_w and decision_request. '+instruction,
+            delivery_review.make('delivery_review', step, 0), current_h, current_w)
+    if (role == 'W' and job.get('research_strategy_version') in (2, 3)
+            and result.get('stage_intent') == 'decision'):
+        return ('A', _parents(current_h, step),
+            'Independent pre-delivery assessment: accept an exact existing candidate with deliver, decline with finish, '
+            'or request one bounded decision-changing correction with continue_w and a concrete decision_request. '
+            'No new authorization or budget is granted. '+instruction,
+            delivery_review.make('delivery_review', step, 0), current_h, step)
     if role=='A' and (job.get('formal_review') or result.get('next_action')=='formal_review'):
         from . import formal_review
         parents=_parents(current_h,current_w,step)
@@ -867,9 +943,13 @@ def _route(root, step, role, result, job, current_h, current_w):
                 'Preserve original directions, unfinished questions, candidates, materials, mechanisms and consumed opportunities. '
                 'Partial sealing is neither independent A review nor mechanism completion; permissions and global budgets persist.',None)
         elif intent in {'revise_h','review'}:
+            consultation=result.get('consultation_question') if job.get('research_strategy_version')==3 else None
+            if job.get('research_strategy_version')==3 and (not isinstance(consultation,str) or not consultation.strip()):
+                raise ValueError('W consultation requires its explicit decision-changing information question')
             route=('H' if intent=='revise_h' else 'A',_parents(current_h,step),
                 f'Answer the requesting W consultation in {source}.{request} '
-                'Use its exact question, retained evidence and limitations. '
+                + ('Requested information: '+consultation+' ' if consultation else '')
+                + 'Use its exact question, retained evidence and limitations. '
                 + ('Assess only core scientific direction, decision-changing evidence and delivery/completion at a high level. ' if intent=='review' else '')
                 + 'Return advice for a new W; no formal verdict, global decision or execution grant.',dict(role='W',step=step))
         elif intent in {'decision','continue'}:
@@ -880,6 +960,11 @@ def _route(root, step, role, result, job, current_h, current_w):
         action = result["next_action"]
         parents = _parents(current_h, current_w, step)
         if action == "continue_w":
+            if job.get('research_strategy_version') in (1, 2, 3) and result.get('decision_request') is None:
+                instruction = (f'Continue the existing W work in inputs/parents/{current_w:03d}/conclusion.json. '
+                    if current_w is not None else 'Continue the retained W work. ') + (
+                    'Preserve its original question, focus and unfinished work. The assessment endorses continuing this work; '
+                    'it does not require a new evidence task or direction change. ' + instruction)
             route = ("W", parents, instruction, None)
         elif action == "revise_h":
             route = ("H", parents, instruction, None)
@@ -981,7 +1066,7 @@ def _wait_continuation_target(root):
 def _continue_wait(root, step, job, result, next_role, target):
     """Retain a single explicit boundary; ordinary reconstruction never adds one."""
     if (next_role is not None or job['role'] != 'A' or result.get('next_action') != 'wait'
-            or job.get('purpose') or job.get('formal_review')):
+            or job.get('purpose') or job.get('formal_review') or delivery_review.scope(job) is not None):
         return False
     path = root / 'host-control' / 'wait-continuations' / f'{step:03d}.json'
     expected = dict(source_step=step,
@@ -1048,7 +1133,8 @@ def _supervision_facts(root, settings):
 
 def _supervision_route(step, result, route, *, facts, source_job):
     """Replace only a prospective route, preserving its exact scientific inputs."""
-    if facts is None or route[0] is None:
+    if (facts is None or route[0] is None or delivery_review.scope(source_job) is not None
+            or (route[3] or {}).get('kind') in delivery_review.KINDS):
         return route, None
     summary, fraction, selected = facts['summary'], facts['budget_fraction'], facts['policy']
     status = supervision.due(summary, budget_fraction=fraction, policy=selected)
@@ -1074,15 +1160,40 @@ def _supervision_route(step, result, route, *, facts, source_job):
         + 'Assess the retained main direction, decision-changing evidence and finalization scope at a high level. '
         'Choose continue_existing without inventing an evidence gap, request_evidence with a bounded concrete question, '
         'or finalize from existing evidence. This assessment grants no scientific qualification or execution permission.')
+    if source_job.get('research_strategy_version') in (1,2,3):
+        instruction += (' Review lock-in, goal drift, repeated or ignored evidence, and whether the current depth remains productive. '
+            'Counted work and budget checkpoints trigger reflection; they do not establish stagnation. '
+            'Retain the original W question and pending work. Do not force a direction change or prescribe an execution recipe.')
     return ('A', _parents(current_h, current_w, *direct_parents, *parents, step), instruction, None,
         current_h, current_w, None, None), request
 
 
-def _terminal_route(root, settings, step, result, role):
+def _worker_led_final_required(job):
+    """The frozen ordinary A can request finalization, never authorize delivery."""
+    return (job.get('research_strategy_version') in (1, 2, 3) and job.get('role') == 'A'
+        and delivery_review.scope(job) != 'delivery_review'
+        and not job.get('formal_review') and not job.get('final_only') and not job.get('final_report')
+        and job.get('purpose') not in {'closeout', 'formal_review', 'worker_consultation'})
+
+
+def _worker_led_requests_final(job, result):
+    """A W's explicit final-decision request closes its ordinary work phase."""
+    return (job.get('research_strategy_version') == 1 and job.get('role') == 'W'
+        and result.get('stage_intent') == 'decision' and not job.get('formal_review')
+        and not job.get('engineering_repair') and not job.get('final_only') and not job.get('final_report')
+        and job.get('purpose') not in {'closeout', 'formal_review', 'engineering_repair', 'worker_consultation'})
+
+
+def _terminal_route(root, settings, step, result, role, *, source_job=None):
     if result.get('next_action') in {'finish', 'deliver'} and role != 'A':
         raise ValueError('Only an independent A scientific assessment can finish or deliver research')
     if role == 'H' and result.get('next_action') == 'wait' and not budget.execution_blocked(root):
         return _start_budget_closeout(root, step, step + 1, 'H', 'scientific_wait')
+    if (result.get('next_action') in {'finish', 'deliver'}
+            and _worker_led_final_required(source_job if source_job is not None else dict(settings, role=role))):
+        return _start_budget_closeout(root, step, step + 1, 'A', 'scientific_' + result['next_action'])
+    if delivery_review.scope(source_job or {}) == 'delivery_review' and result.get('next_action')=='finish':
+        return _finish(root,settings,'finish',step,result,reason='scientific_delivery_declined')
     if settings.get('delivery_policy') is not None and result.get('next_action') == 'deliver':
         return _start_closeout(root, step, step + 1, 'scientific_deliver', authorization_step=step)
     action = 'finish' if result.get('next_action') == 'deliver' else result['next_action']
@@ -1116,7 +1227,8 @@ def _run(root, *, continue_wait=None):
     final = budget.final_a_barrier(root)
     if final is not None:
         return _collect_final_a(root, final)
-    role, parents, instruction, evidence_return, correction_request = "H", [], "", None, None
+    role, parents, instruction, evidence_return, correction_request = (
+        "W" if settings.get('research_strategy_version') == 3 else "H"), [], "", None, None
     author_correction = None
     supervision_request = None
     current_h = current_w = last = None
@@ -1172,8 +1284,11 @@ def _run(root, *, continue_wait=None):
             cursor[key] for key in ('role','parents','instruction','evidence_return','correction_request','author_correction'))
         supervision_request=saved.get('supervision_request')
         first_step=completed+1
+        job=contracts.read(root/'jobs'/f'{completed:03d}.json')
+        if (_worker_led_requests_final(job,last)
+                and not (root/'jobs'/f'{first_step:03d}.json').exists()):
+            return _start_budget_closeout(root,completed,first_step,'A','worker_final_decision')
         if role is None:
-            job=contracts.read(root/'jobs'/f'{completed:03d}.json')
             if _continue_wait(root,completed,job,last,None,continue_wait):
                 role='A';parents=_parents(current_h,current_w,completed)
                 instruction='The operator explicitly requested continuation from the retained wait. Reassess the original goal, evidence and remaining limitations before choosing the next scientific route.'
@@ -1196,7 +1311,7 @@ def _run(root, *, continue_wait=None):
                 _save_route(root,completed,(role,parents,instruction,evidence_return,correction_request,author_correction),
                     current_h,current_w,resumed=resumed,supervision_request=supervision_request)
             else:
-                return _terminal_route(root,settings,completed,last,job['role'])
+                return _terminal_route(root,settings,completed,last,job['role'],source_job=job)
     def start_final(cutoff, step, blocked_role, reason, *, pending=None):
         route = pending if pending is not None else (role,parents,instruction,evidence_return,correction_request,author_correction)
         cursor = sources = None
@@ -1392,6 +1507,10 @@ def _run(root, *, continue_wait=None):
                     reason=f"Native work did not seal ({type(error).__name__}); original intent is retained",
                     next_role=role)
             if not identity.exists():
+                if (record/'native-outcome.json').exists():
+                    outcome=contracts.native_outcome(record)
+                    pause=_technical_pause_result(root,settings,completed,last,job=job,record=record,outcome=outcome)
+                    if pause is not None:return pause
                 return _finish(root, settings, "native_outcome_unsealed", completed, last,
                     reason="Native work returned without a complete seal", next_role=role)
         try:
@@ -1404,6 +1523,8 @@ def _run(root, *, continue_wait=None):
             final = _final_a_result(root, job, result)
             if final is not None:
                 return final
+            if _worker_led_requests_final(job,result):
+                return _start_budget_closeout(root,step,step+1,'A','worker_final_decision')
             if role == 'A' and job.get('purpose')!='worker_consultation' and result.get('next_action') == 'audit':
                 from . import candidate_audit
                 audit_status = candidate_audit.execute(root, job, result)
@@ -1421,11 +1542,19 @@ def _run(root, *, continue_wait=None):
                     try:engineering.admit(root,repair,step+1)
                     except engineering.RepairUnavailable as error:
                         return _finish(root,settings,str(error),step,result)
+            scoped_route = delivery_review.scope(job) is not None
+            original_route = _route(root,step,role,result,job,current_h,current_w)
+            scoped_route = scoped_route or (original_route[3] or {}).get('kind') in delivery_review.KINDS
             correction.publish(root, step)
             next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction = correction.effective_route(
-                root, step, result, job, _route(root, step, role, result, job, current_h, current_w))
+                root, step, result, job, original_route)
             next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction, next_author = semantic.effective_route(
                 root, step, result, job, (next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction))
+            if scoped_route:
+                expected = original_route
+                if ((next_role,next_parents,next_instruction,next_return) != expected[:4]
+                        or next_correction is not None or next_author is not None):
+                    raise semantic.ScientificAdmissionRefused('delivery_review_scope_unavailable',next_role=expected[0])
             wait_continued = _continue_wait(root, step, job, result, next_role, continue_wait)
             if wait_continued:
                 next_role, next_parents = 'A', _parents(current_h, current_w, step)
@@ -1450,6 +1579,9 @@ def _run(root, *, continue_wait=None):
             return _finish(root, settings, 'waiting_execution', completed, last,
                 reason='Original execution remains live or unknown; optional admission refused: ' + admission_refusal,
                 next_role='H')
+        if scoped_route and share_stop is not None:
+            return _finish(root,settings,'role_admission_refused',completed,last,
+                reason=share_stop,next_role=next_role)
         if share_stop is not None and (job.get('purpose')=='worker_consultation'
                 or role=='W' and result.get('stage_intent') in {'handoff','revise_h','review'}
                 or role=='W' and next_role=='W'):
@@ -1468,7 +1600,7 @@ def _run(root, *, continue_wait=None):
         _save_route(root,completed,(next_role,next_parents,next_instruction,next_return,next_correction,next_author),
             current_h,current_w,resumed=resumed,supervision_request=next_supervision)
         if next_role is None:
-            return _terminal_route(root,settings,completed,last,role)
+            return _terminal_route(root,settings,completed,last,role,source_job=job)
         role, parents, instruction, evidence_return, correction_request = next_role, next_parents, next_instruction, next_return, next_correction
         author_correction = next_author
         supervision_request = next_supervision
@@ -1674,6 +1806,10 @@ def _final_a_result(root, job, result):
     settings = contracts.settings(root, job)
     begin = budget.closeout_state(root)['begin']
     policy = settings.get('delivery_policy')
+    if job.get('research_strategy_version') in (2, 3) and result.get('next_action') == 'finish':
+        if begin is not None:
+            return _closeout_result(root,'final_a_completed',reason='scientific_delivery_declined',step=job['step'])
+        return _finish(root,settings,'final_a_completed',job['step'],result,reason='scientific_delivery_declined')
     if result.get('next_action') != 'deliver' or policy is None or policy['adapter'] is None:
         from . import originals
         frozen=contracts.read(originals.resolve_root_ref(root,job['history']['breadth_snapshot']))
@@ -1720,7 +1856,8 @@ def _resume_final(root, begin):
         if seal_ref != reference['seal_ref']:
             raise ValueError('Final resume source seal identity changed')
         if role_share.reason(root, source_step, source_job, source_result, cursor['role'],
-                cursor['correction_request'], allow_repeat=source_result.get('next_action') == 'wait') is not None:
+                cursor['correction_request'], allow_repeat=source_result.get('next_action') == 'wait',
+                evidence_return=cursor.get('evidence_return')) is not None:
             return False
     if not budget.task_step_available(root, first) or budget.node_admission(root,
             dict(step=first,role=cursor['role']),normal_resume_check=True) is not None:
@@ -1829,6 +1966,11 @@ def _run_final(root, begin, *, sources=None):
             'When existing candidate originals and delivery permission are available, use deliver and select an exact candidate; '
             'control performs the original host submission and supplies its actual confirmed, failed or unknown receipt. '
             'Never manufacture submission success. If originals or delivery permission are absent, return finish with the explicit unsubmitted reason.')
+        if settings.get('research_strategy_version') in (2, 3):
+            instruction = ('This is FINAL: judge only accepted existing evidence. Candidate availability never requires scientific acceptance. '
+                'Use finish to decline every candidate, with no recommendation and a truthful unsubmitted reason in scientific_result and limitations. '
+                'Use deliver only to explicitly select a justified exact existing candidate under the original declared delivery policy. '
+                'No new role, experiment, audit, wait or correction is authorized. Never manufacture submission success.')
         policy = settings.get('delivery_policy')
         sources = None
         if not has_worker:
@@ -1934,6 +2076,8 @@ def _start_closeout(root, cutoff, first_step, reason, *, export_only=False, auth
 
 def _run_delivery_actions(root, job, result):
     from . import delivery
+    if _worker_led_final_required(job):
+        return _start_budget_closeout(root, job['step'], job['step'] + 1, 'A', 'final_author_required')
     state = budget.closeout_state(root)
     policy = contracts.settings(root, job)['delivery_policy']
     if policy['adapter'] is None:
@@ -2014,6 +2158,8 @@ def _run_direct_delivery(root, begin):
     result=handoff_state.read_sealed(root, step)
     if job['role']!='A' or job.get('purpose') is not None or result['next_action']!='deliver' or step!=begin['source_cutoff']:
         raise ValueError('Original direct delivery authorization changed')
+    if _worker_led_final_required(job):
+        return _start_budget_closeout(root, step, begin['first_step'], 'A', 'final_author_required')
     try:
         delivery.prepare_binding(root,job,result)
     except delivery.PreparationUnavailable as error:

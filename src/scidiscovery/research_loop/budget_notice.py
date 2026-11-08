@@ -32,6 +32,8 @@ WORKER_CONTEXT_NEAR_TEXT = ('W final context window is at least 85% full. Prepar
     'Advice only; original permissions and count-based handoff still hold.')
 WORKER_DIRECTION_TEXT = ('W direction review due. Finish/reconcile bounded existing work; never replay unknown calls. '
     'Save a checkpoint and return for independent A. No new work or scientific verdict; permissions hold.')
+WORKER_INVESTMENT_TEXT = ('Repeated calls under this mechanism: inspect retained evidence and choose continuation or H/A. '
+    'Counts measure effort, not scientific stagnation. Original permissions and budgets hold.')
 HELPER = '.scid-budget-notice.py'
 EMPTY_CONFIG = '.scid-budget-notice-empty-config.toml'
 VISIBLE = 'scid-budget-hook-visible-v1'
@@ -76,13 +78,40 @@ def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, t
     elif job.get('purpose')=='worker_consultation':
         text=(risk+' Return bounded advice for the exact W request now; retain evidence gaps. '
             'No verdict/new work/grant; original permissions and shared budgets hold; unknown usage != 0.')
+    elif (job.get('research_strategy_version') in {2,3}
+            and (job.get('evidence_return') or {}).get('kind') in {'delivery_review','delivery_correction'}):
+        # This module is also a stdlib-only staged executable. The producer
+        # supplies the already-validated frozen task binding, never a new grant.
+        binding=job['evidence_return']
+        exhausted=shared_expired or shared_reached or shared_exhausted
+        if binding['kind']=='delivery_correction' and exhausted:
+            cause='shared'
+            text=(risk+' W: return retained correction/gaps for protected FINAL. '
+                'No new work/replay; original permissions/budgets hold; unknown usage != 0.')
+        elif binding['kind']=='delivery_correction':
+            text=(risk+' W: save the exact correction/gaps; return for final reassessment. '
+                'No scope expansion/replay; original permissions/budgets hold; unknown usage != 0.')
+        elif exhausted:
+            cause='shared'
+            text=(risk+' A: conclude from originals; exact deliver or reject all with finish. '
+                'No correction/new W/E/extra FINAL; permissions hold; unknown usage != 0.')
+        elif binding.get('corrections_used')==1:
+            text=(risk+' A: accept exact deliver or reject all with finish. No second correction/new work; '
+                'permissions hold; unknown usage != 0.')
+        else:
+            text=(risk+' A: deliver, reject all with finish, or request one concrete correction in remaining budgets. '
+                'No grant; permissions hold; unknown usage != 0.')
     elif job['role'] == 'A' and not (job.get('purpose') == 'closeout' or job.get('final_report') or job.get('final_only')):
         if shared_expired or shared_reached or shared_exhausted:
             cause = 'shared'
             timing = ('Shared time expired.' if shared_expired else
                 f'Shared {dimension} budget reached.' if shared_reached else risk+' Shared budget exhausted.')
-            text = (timing+' A: conclude now; deliver an eligible existing candidate or finish with gaps. '
-                'No H/W/E/extra FINAL; permissions hold; unknown usage != 0.')
+            if job.get('research_strategy_version') in {1,2,3}:
+                text=(timing+' A: conclude now; deliver/finish requests protected Final A. '
+                    'No new H/W/E; permissions hold; unknown usage != 0.')
+            else:
+                text = (timing+' A: conclude now; deliver an eligible existing candidate or finish with gaps. '
+                    'No H/W/E/extra FINAL; permissions hold; unknown usage != 0.')
         else:
             text = (risk+' A: end this assessment; retain unmet goals. '
                 'Choose normal next_action by evidence/shared balance. '
@@ -186,6 +215,11 @@ def worker_direction_notice(review):
     return dict(cause='node', text=WORKER_DIRECTION_TEXT) if review is not None else None
 
 
+def worker_investment_notice():
+    """A bounded advisory checkpoint; it neither stops work nor requests A."""
+    return dict(cause='node',text=WORKER_INVESTMENT_TEXT)
+
+
 def published_notices(value):
     """Accept the bounded current host projection from its sole producer."""
     if not isinstance(value, dict) or value.get('scope') != SCOPE:
@@ -193,7 +227,7 @@ def published_notices(value):
     if not _finite(value.get('updated_at_unix')) or value.get('inflight_usage_unknown') is not True:
         return None
     notices = value.get('closeout_notices')
-    if not isinstance(notices, dict) or not notices or not set(notices).issubset({'token', 'time', 'progress', 'review'}):
+    if not isinstance(notices, dict) or not notices or not set(notices).issubset({'token', 'time', 'progress', 'review','investment'}):
         return None
     # Shared risk also includes the producer's follow-up advice and time ratio.
     # The hook consumes that bounded projection; it does not reload settings or
@@ -205,7 +239,12 @@ def published_notices(value):
             return None
         if len(notice['text'].encode('utf-8')) > MAX_NOTICE_BYTES:
             return None
-        if notice['cause'] == 'node' and value.get('target_state') not in {'near', 'reached'}:
+        if notice['cause'] == 'node' and dimension!='investment' and value.get('target_state') not in {'near', 'reached'}:
+            return None
+        if dimension=='investment' and (notice!=worker_investment_notice()
+                or not isinstance(value.get('research_investment'),dict)
+                or value['research_investment'].get('mode')!='notice'
+                or value['research_investment'].get('due') is not True):
             return None
         if dimension == 'review' and (notice != dict(cause='node', text=WORKER_DIRECTION_TEXT)
                 or value.get('target_state') != 'reached'):
@@ -243,7 +282,7 @@ def hook_output(work, attempt):
     try:
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
-            for dimension in ('time', 'token', 'review', 'progress'):
+            for dimension in ('time', 'token', 'review', 'progress','investment'):
                 if dimension not in notices:
                     continue
                 try:

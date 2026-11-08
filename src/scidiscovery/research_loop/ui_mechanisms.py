@@ -68,25 +68,58 @@ def project(reader, steps, clean, *, partial=False):
                 item['events'].append(dict(step=step, role=role, kind='declaration', label=label, text=question))
         if role == 'W':
             search = job.get('search') or {}
-            declared = (search.get('breadth') or {}).get('mechanisms') or []
+            declared = list((search.get('breadth') or {}).get('mechanisms') or [])
+            calls = (observation or {}).get('managed_calls') or []
+            state=(observation or {}).get('research_state') or {}
+            live_rows=list((state.get('mechanisms') or {}).values()) if isinstance(state.get('mechanisms'),dict) else []
+            snapshots=[]
+            for call in calls:
+                binding=(call.get('mechanism_binding') or {}).get('research_binding')
+                if isinstance(binding,dict):snapshots.append(binding)
+            # These are already sealed owner facts, never the current live pointer.
+            # Call versions stay distinct from the declaration at W sealing.
+            versions=set();live_refs=set()
+            for row in [*snapshots,*live_rows] if job.get('research_strategy_version')==3 else []:
+                ref=row.get('mechanism_ref');revision=row.get('revision')
+                if (not isinstance(ref,str) or type(revision) is not int or revision<1
+                        or row.get('source_role')!='W'):continue
+                label=clean(row.get('label') or row.get('question') or ref,300)
+                question=clean(row.get('question') or '',2000)
+                key=(ref,revision)
+                if key not in versions:
+                    versions.add(key)
+                    item=mechanism(ref)
+                    item.update(label=label,authored_label=True,question=question,declared_in_window=True)
+                    item['events'].append(dict(step=step,role='W',kind='declaration',label=label,text=question,
+                        revision=revision,source_step=row.get('source_step'),source_role=row.get('source_role'),
+                        declaration_scope='封存时接受的 W 声明' if row in live_rows else '原调用准确绑定'))
+                if not any(item['mechanism_ref']==ref for item in declared):
+                    declared.append(dict(mechanism_ref=ref,label=label,minimal_test=question,
+                        source_step=row.get('source_step'),source_role=row.get('source_role'),research_binding=row))
+                live_refs.add(ref)
             for row in declared:
                 item = mechanism(row['mechanism_ref'])
                 if item['question'] is None:
                     item.update(label=clean(row['label'], 300), authored_label=True, question=clean(row.get('minimal_test') or '', 2000))
             findings = {}
             declared_findings = c.scientific_field(job, payload, 'mechanism_findings')
+            authored_findings=False
+            if (declared_findings is None and job.get('research_strategy_version')==3
+                    and isinstance(payload.get('mechanism_findings'),list)):
+                # Explicit authored notes are a UI preview, never a contract gate.
+                declared_findings=payload['mechanism_findings'];authored_findings=True
             if declared_findings is None and payload.get('mechanism_findings') is not None:
                 unresolved.append(dict(step=step, field='W 逐机制发现'))
             for row in declared_findings or []:
-                if not isinstance(row,dict) or any(not isinstance(row.get(key),str) for key in ('mechanism','basis','finding')):
+                if not isinstance(row,dict) or any(not isinstance(row.get(key),str) or not row[key].strip() for key in ('mechanism','basis','finding')):
                     if dict(step=step,field='W 逐机制发现') not in unresolved:unresolved.append(dict(step=step,field='W 逐机制发现'))
                     continue
-                matches = [item['mechanism_ref'] for item in declared
-                    if row['mechanism'] in (item['mechanism_ref'], item['label'])]
+                matches = list({item['mechanism_ref'] for item in declared
+                    if row['mechanism']==item['mechanism_ref'] or (not authored_findings and (not item.get('research_binding')
+                        or (item.get('research_binding') or {}).get('revision')==0) and row['mechanism']==item['label'])})
                 if len(matches) == 1:
                     findings.setdefault(matches[0], []).append(dict(basis=clean(row['basis'], 80),
-                        text=clean(row['finding'], 2400)))
-            calls = (observation or {}).get('managed_calls') or []
+                        text=clean(row['finding'], 2400),authored=authored_findings))
             contexts = (observation or {}).get('contexts') or []
             # Candidate identities are matched to their exact observed call, not
             # to labels, scientific nominations, dispatch focus, or metric values.
@@ -105,7 +138,7 @@ def project(reader, steps, clean, *, partial=False):
                 refs = bindings.get(row['id'], set())
                 if len(refs) == 1:
                     candidates.setdefault(next(iter(refs)), []).append(row)
-            refs = set(findings) | set(candidates) | {ref for row in calls if (ref := _ref(row))}
+            refs = live_refs | set(findings) | set(candidates) | {ref for row in calls if (ref := _ref(row))}
             # A local W's declared summary belongs only to its one exact focus.
             # All bound tasks may carry breadth metadata, including local W.
             # A screen dispatch alone supplies no completed mechanism evidence.
@@ -144,6 +177,10 @@ def _event(event):
     declaration=event.get('kind')=='declaration'
     if declaration:
         body += '<p><strong>' + ui.translatable(event['label']) + '</strong></p>'
+        if 'revision' in event:
+            body+='<p class="note">'+ui.esc(event['declaration_scope'])+' · revision '+str(event['revision'])+'</p>'
+            if type(event.get('source_step')) is int and event['source_step']>0:
+                body+='<p>'+ui.link('声明来源 '+str(event.get('source_role') or '')+' · 第 '+str(event['source_step'])+' 阶段','/results/'+str(event['source_step']))+'</p>'
     if role == 'A':
         body += ui.badge(ui_view.DISPOSITIONS.get(event['status'], event['status']))
     if event.get('text'):
@@ -153,6 +190,8 @@ def _event(event):
             body += '<p class="note">关联机制声明：' + '、'.join(ui.link(
                 (source['source_role']+' · ' if source['source_role'] else '')+'第 '+str(source['source_step'])+' 阶段',
                 '/results/'+str(source['source_step'])) for source in event['source_authors']) + '</p>'
+        if any(row.get('authored') for row in event['findings']):
+            body+='<p class="note">以下为 W 原文作者声明；按准确机制身份展示，不改变科学状态或资格。</p>'
         for row in event['findings']:
             body += '<p><strong>' + ui.esc({'observed': '观察发现', 'blocked': '受阻原因'}.get(row['basis'], row['basis'])) + '：</strong>' + ui.translatable(row['text']) + '</p>'
         counts = event['calls']
@@ -193,7 +232,7 @@ def render(value):
     body = '<section class="mechanism-trails"><h2>机制探索过程</h2>'
     if 'error' in value:
         return ui.Safe(body + ui.error_inline(value, what='机制探索过程') + '</section>')
-    body += '<p class="note">按 H/W 声明和 W 的明确机制关联串联；A 判断保留在阶段原文中。不同评估口径分别保留，候选顺序不代表科学排序。每个机制展开后可查看中间过程与原文。</p>'
+    body += '<p class="note">仅封存阶段：按 H/W 声明和 W 的明确机制关联串联；A 判断保留在阶段原文中。不同评估口径分别保留，候选顺序不代表科学排序。每个机制展开后可查看中间过程与原文。</p>'
     if value['omitted'] or value['partial']:
         body += '<p class="note">仅汇集当前窗口内至多 ' + str(ui_view.WINDOW) + ' 个已封存阶段；较早记录未汇入，机制记录可能不完整。' + ui.link('按阶段查看更早原文', '/results?after=0') + '</p>'
     if not value['mechanisms']:

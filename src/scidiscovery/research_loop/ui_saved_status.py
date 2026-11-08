@@ -197,7 +197,11 @@ def _node(root, step, job, memo=None):
     from . import continuation
     technical_stop=continuation.technical_stop_from_facts(job,outcome,attempt=len(records)-1,
         blocked_reason='technical_restart_recheck_required')
-    return dict(step=step, role=job['role'], state=state, continuations=len(records) - 1,
+    technical_diagnostic=native_usage.actionable_stop(outcome)
+    from . import ui_semantics
+    return dict(step=step, role=job['role'], kind=ui_semantics.kind(job),role_label=ui_semantics.role_label(job),
+        state=state, continuations=len(records) - 1,
+        **(dict(technical_diagnostic=technical_diagnostic) if technical_diagnostic is not None else {}),
         **(dict(technical_stop=technical_stop) if technical_stop is not None else {}),
         **(dict(automatic_recovery=shown) if shown is not None else {}),
         stop_reason=outcome.get('stop_reason'), returncode=outcome.get('returncode'),
@@ -322,6 +326,44 @@ def _budget(root, settings, events):
         **(dict(unmeasured_shutdown_tail=True) if unmeasured_tail else {}))
 
 
+def _public_research(value):
+    """Pure schema check for the receipt owner's compact authored facts."""
+    from .worker_research import public_mechanism
+    if (not isinstance(value,dict) or value.get('version')!=1
+            or type(value.get('revision')) is not int or value['revision']<0
+            or type(value.get('omitted_count')) is not int or value['omitted_count']<0
+            or not isinstance(value.get('mechanisms'),list) or len(value['mechanisms'])>16):return None
+    rows=[]
+    for row in value['mechanisms']:
+        public=public_mechanism(row)
+        if (public is None or public!=row or row['status'] not in {'active','retired'}
+                or row['revision']>value['revision']):return None
+        rows.append(public)
+    return dict(version=1,revision=value['revision'],mechanisms=rows,omitted_count=value['omitted_count'])
+
+
+def _public_investment(value,scope):
+    """Validate exact admitted originals, then discard private scope/identifiers."""
+    from .worker_research import public_text
+    if (not isinstance(value,dict) or value.get('version')!=1 or value.get('scope')!=scope
+            or type(value.get('total_calls')) is not int or value['total_calls']<0
+            or type(value.get('consecutive_calls')) is not int
+            or not 0<=value['consecutive_calls']<=value['total_calls']
+            or not isinstance(value.get('by_mechanism'),dict)
+            or any(not isinstance(ref,str) or type(count) is not int or not 0<=count<=value['total_calls']
+                for ref,count in value['by_mechanism'].items())):return None
+    direction=value.get('direction')
+    if (direction is not None and direction not in value['by_mechanism']
+            or bool(value['total_calls'])!=bool(direction)
+            or value['total_calls'] and value['consecutive_calls']==0):return None
+    rows=[dict(mechanism_ref=ref,calls=count) for ref,count in value['by_mechanism'].items()
+        if public_text(ref,128)==ref]
+    shown=rows[-16:]
+    return dict(total_calls=value['total_calls'],consecutive_calls=value['consecutive_calls'],
+        direction=direction if public_text(direction,128)==direction else None,
+        by_mechanism=shown,omitted_count=len(value['by_mechanism'])-len(shown))
+
+
 def _live_executions(root, job):
     """Read one current W owner's bounded display view, without querying work."""
     if job is None or job.get('role')!='W':return None
@@ -336,13 +378,22 @@ def _live_executions(root, job):
             raw=stream.read(65537)
         if len(raw)>65536:return unavailable
         value=json.loads(raw)
+        expected_scope=dict(step=job['step'],role=job['role'],handoff_protocol=job.get('handoff_protocol'),
+            job_ref=dict(path=str(root/'jobs'/f'{job["step"]:03d}.json')),
+            execution_key=dict(path=str(root/'jobs'/f'{job["step"]:03d}.json')),
+            mechanism_ref=None if (job.get('search') or {}).get('breadth') is not None else
+                ((job.get('search') or {}).get('focus') or {}).get('mechanism_ref'))
         if (not isinstance(value,dict) or value.get('version')!=1
-                or (value.get('scope') or {}).get('step')!=job['step']
+                or value.get('scope')!=expected_scope
                 or value.get('source')!='execution_receipt_owner'
                 or type(value.get('partial')) is not bool
                 or not isinstance(value.get('calls'),dict) or len(value['calls'])>128):return unavailable
         states={'accepted','submitted','queued','running','cancelling','known_success',
             'known_failed','not_submitted','unknown'}
+        def bounded_text(value,limit):
+            if not isinstance(value,str):return None
+            try:return value if len(value.encode('utf-8'))<=limit else None
+            except UnicodeEncodeError:return None
         rows=[];counts=dict.fromkeys(sorted(states),0)
         for identity,row in value['calls'].items():
             if (not isinstance(identity,str) or re.fullmatch(r'[A-Za-z0-9._-]{1,128}',identity) is None
@@ -351,9 +402,38 @@ def _live_executions(root, job):
                     or type(row.get('updated_at')) not in (int,float)
                     or not 0<=row['updated_at']<=2**53-1):return unavailable
             counts[row['state']]+=1
-            rows.append(dict(call_id=identity,state=row['state'],attempt=row['attempt'],updated_at=row['updated_at']))
+            projected=dict(call_id=identity,state=row['state'],attempt=row['attempt'],updated_at=row['updated_at'])
+            display=row.get('display')
+            if isinstance(display,dict):
+                compact={}
+                for key,limit in (('entry',160),('purpose',240),('mechanism',160),('change_criterion',240)):
+                    text=bounded_text(display.get(key),limit)
+                    if text is not None:compact[key]=text
+                binding=display.get('research_binding')
+                if isinstance(binding,dict):
+                    checked=_public_research(dict(version=1,revision=binding.get('revision'),mechanisms=[binding],omitted_count=0))
+                    if checked is not None:compact['research_binding']=checked['mechanisms'][0]
+                if isinstance(display.get('result_status'),str) and display.get('result_status') in {'available','missing','invalid','unavailable'}:
+                    compact['result_status']=display['result_status']
+                metrics=display.get('metrics')
+                if isinstance(metrics,list) and len(metrics)<=3:
+                    compact['metrics']=[]
+                    for metric in metrics:
+                        if not isinstance(metric,dict):continue
+                        name=bounded_text(metric.get('name'),80);number=metric.get('value')
+                        if (name is None
+                                or type(number) not in (int,float)
+                                or not -float('inf')<number<float('inf') or len(str(number))>32):continue
+                        compact['metrics'].append(dict(name=name,value=number,
+                            unit=bounded_text(metric.get('unit'),40)))
+                    compact['metrics_partial']=display.get('metrics_partial') is True or len(compact['metrics'])<len(metrics)
+                if compact:projected['display']=compact
+            rows.append(projected)
         rows.sort(key=lambda row:row['updated_at'],reverse=True)
-        return dict(step=job['step'],coverage='partial' if value['partial'] else 'observed',
+        research=_public_research(value.get('research'))
+        investment=_public_investment(value.get('research_investment'),expected_scope)
+        return dict(step=job['step'],research=research,research_investment=investment,
+            coverage='partial' if value['partial'] else 'observed',
             counts=counts,calls=rows[:20],omitted_count=max(0,len(rows)-20),
             limitation='执行状态来自本地调用收据与已有生命周期观察；不表示科学认可。'
                 +(' 覆盖不完整，计数为已观察下界。' if value['partial'] else ''))

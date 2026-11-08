@@ -14,7 +14,8 @@ class OpportunityRequired(ValueError):
 def validate(value):
     if value is None:
         return None
-    if (not isinstance(value, dict) or set(value) != {'version','initial_calls','mechanisms','baseline','grant','prior_unknown','outside_initial_owed','catalog'}
+    if (not isinstance(value, dict) or set(value)-{'restricted_combination'} != {'version','initial_calls','mechanisms','baseline','grant','prior_unknown','outside_initial_owed','catalog'}
+            or 'restricted_combination' in value and value['restricted_combination'] is not True
             or value['version'] != 3 or type(value['initial_calls']) is not int or value['initial_calls'] < 1
             or type(value['prior_unknown']) is not bool):
         raise ValueError('Exact frozen scientific opportunity configuration required')
@@ -24,14 +25,15 @@ def validate(value):
     if (not isinstance(catalog,dict) or set(catalog)!={'prefix','max_ordinal'}
             or not isinstance(catalog['prefix'],dict) or catalog['prefix'].get('version')!=1
             or type(catalog['prefix'].get('cutoff')) is not int or catalog['prefix']['cutoff']<1
-            or type(catalog['max_ordinal']) is not int or catalog['max_ordinal']<1):
+            or type(catalog['max_ordinal']) is not int
+            or catalog['max_ordinal']<(0 if value.get('restricted_combination') else 1)):
         raise ValueError('Exact frozen mechanism catalog required')
     rows = value['mechanisms']
-    if not isinstance(rows,list) or not rows:
+    if not isinstance(rows,list) or not rows and not value.get('restricted_combination'):
         raise ValueError('Scientific opportunity combination requires mechanisms')
     refs = set();ordinals=set()
     for row in rows:
-        if (not isinstance(row,dict) or set(row) != {'mechanism_ref','label','source_step','source_ref','source_role','minimal_test','status','ordinal','origin_ref','source_goal_id'}
+        if (not isinstance(row,dict) or set(row)-{'research_binding'} != {'mechanism_ref','label','source_step','source_ref','source_role','minimal_test','status','ordinal','origin_ref','source_goal_id'}
                 or row['mechanism_ref'] in refs or any(not isinstance(row[key],str) or not row[key] for key in ('mechanism_ref','label','minimal_test'))
                 or row['source_role'] not in {'H','W'} or type(row['source_step']) is not int or row['source_step'] < 1
                 or not isinstance(row['source_ref'], dict) or set(row['source_ref']) != {'path'} or not isinstance(row['source_ref']['path'],str)
@@ -63,6 +65,8 @@ def check_binding(value, binding, scope, *, _validated=False, _rows=None):
     if not isinstance(binding,dict) or set(binding) != {'mechanism_ref','source_step','source_ref','source_role','job_ref','grant','catalog_binding'}:
         raise ValueError('Accepted scientific call binding missing')
     row = _rows.get(binding['mechanism_ref']) if _rows is not None else next((row for row in value['mechanisms'] if row['mechanism_ref'] == binding['mechanism_ref']),None)
+    if value.get('restricted_combination') and row is None:
+        raise ValueError('Accepted scientific call escaped its bounded correction combination')
     proof=_catalog_binding(binding['catalog_binding'],binding['mechanism_ref'],value['catalog'])
     if (binding['job_ref'] != scope['job_ref'] or binding['source_role'] not in {'H','W'} or type(binding['source_step']) is not int
             or not 0<binding['source_step']<=value['catalog']['prefix']['cutoff']
@@ -121,7 +125,7 @@ def resolve_choice(value,choice,scope,*,head=None,_root=None,_focus=None,_valida
     try:
         root,focus=_catalog_root(value,scope) if _root is None else (_root,_focus)
         ref,item,head,member=accepted_search.catalog_item(root,value['catalog'],choice,head=head)
-        if focus and focus['action']!='screen' and ref not in {row['mechanism_ref'] for row in value['mechanisms']}:
+        if (value.get('restricted_combination') or focus and focus['action']!='screen') and ref not in {row['mechanism_ref'] for row in value['mechanisms']}:
             raise ValueError('This scientific task permits only its frozen assigned mechanisms')
     except (ValueError,FileNotFoundError) as error:
         raise OpportunityRequired(str(error)) from error
@@ -131,6 +135,7 @@ def resolve_choice(value,choice,scope,*,head=None,_root=None,_focus=None,_valida
 
 
 _REFUSALS={
+    'retained_originals_only': 'This bounded correction uses retained originals only; no new execution is authorized',
     'original_execution_unknown': 'Preserve the original unknown execution; resolve its identity before a new submission',
     'mechanism_waived': 'This mechanism was scientifically waived by A',
     'focused_mechanism_required': 'This scientific task permits only its frozen assigned mechanisms',
@@ -150,7 +155,7 @@ def _availability(value,scope,accepted,*,head,focus):
                 or binding['catalog_binding']!=dict(ordinal=item['ordinal'],origin_ref=item['origin_ref'],
                     source_goal_id=item['source_origin_identity']['goal_id'])):
             raise ValueError('Accepted scientific call changed its frozen catalog member')
-    focused=focus and focus['action']!='screen'
+    focused=value.get('restricted_combination') or focus and focus['action']!='screen'
     decisions={};available=[]
     for ref,item in items.items():
         extra=None
@@ -172,6 +177,9 @@ def admit(value, choice, scope, accepted):
     if value is None:
         if choice is not None:raise OpportunityRequired('No mechanism combination is authorized for this stage')
         return None
+    if value.get('restricted_combination') and not value['mechanisms']:
+        raise OpportunityRequired('This bounded correction uses retained originals only; no new execution is authorized',
+            reason='retained_originals_only',available_mechanisms=[])
     root,focus=_catalog_root(value,scope)
     head=accepted_budget.read(root)
     # Validate the exact prefix once before using its already loaded table.

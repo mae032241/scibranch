@@ -159,6 +159,77 @@ def test_exact_resume_has_no_history_and_cannot_change_native_identity(tmp_path)
     assert events[0]['rpc_method']=='thread/resume'
 
 
+@pytest.mark.parametrize('first_binding',['response','notification'])
+def test_resume_usage_before_current_turn_binding_stays_unqualified(tmp_path,first_binding):
+    d=declaration(tmp_path,resumed='thread-one');events=[];sent=[]
+    transport=rpc.Transport(d,emit=events.append,send=sent.append)
+    transport.initialize()
+    transport.receive(dict(id=1,result={}), 'Private prompt')
+    transport.receive(started(d),'Private prompt')
+
+    def receive_wire(message):
+        wire=(json.dumps(message)+'\n').encode()
+        for selected in rpc.native_lines(io.BytesIO(wire)):
+            transport.receive(selected,'Private prompt')
+
+    def usage(turn,used):
+        return dict(method='thread/tokenUsage/updated',params=dict(threadId='thread-one',turnId=turn,
+            tokenUsage=dict(last=dict(totalTokens=used),modelContextWindow=100)))
+
+    # A resumed thread can report its previous usage while turn/start is
+    # awaiting its response and turn/started notification. Neither that sample
+    # nor an early sample naming the eventual new turn may bind the new turn.
+    receive_wire(usage('previous-turn',90))
+    receive_wire(usage('turn-one',80))
+    assert transport.turn is None
+    assert [event['type'] for event in events]==['thread.started']
+    assert not transport.finished and not d['pending'].exists()
+
+    response=dict(id=3,result=dict(turn=dict(id='turn-one',items=[],status='inProgress')))
+    notification=dict(method='turn/started',params=dict(threadId='thread-one',
+        turn=dict(id='turn-one',items=[],status='inProgress')))
+    first,second=(response,notification) if first_binding=='response' else (notification,response)
+    receive_wire(first)
+    assert transport.turn=='turn-one'
+    assert [event['type'] for event in events]==['thread.started','turn.started']
+    receive_wire(usage('turn-one',42))
+    assert events[-1]['context']['total_tokens']==42
+    assert events[-1]['context']['turn_id']=='turn-one'
+    assert events[-1]['context']['current_window'] is True
+    receive_wire(second)
+    assert sum(event['type']=='turn.started' for event in events)==1
+    assert not any(event['type']=='turn.completed' for event in events)
+    assert not d['pending'].exists()
+
+    receive_wire(dict(method='item/completed',params=dict(threadId='thread-one',turnId='turn-one',
+        item=dict(type='agentMessage',text='{"summary":"Fixture"}',phase='final_answer'))))
+    receive_wire(dict(method='turn/completed',params=dict(threadId='thread-one',
+        turn=dict(id='turn-one',items=[],status='completed'))))
+    assert transport.finished and transport.completed
+    assert json.loads(d['pending'].read_text())==dict(summary='Fixture')
+    assert [item['method'] for item in sent].count('thread/resume')==1
+    assert [item['method'] for item in sent].count('turn/start')==1
+
+
+@pytest.mark.parametrize('bound,thread,turn,error',[
+    (False,'foreign-thread','previous-turn','thread changed'),
+    (True,'foreign-thread','turn-one','thread changed'),
+    (True,'thread-one','foreign-turn','turn changed')])
+def test_resume_context_identity_mismatch_still_stops(tmp_path,bound,thread,turn,error):
+    d=declaration(tmp_path,resumed='thread-one');events=[];sent=[]
+    transport=rpc.Transport(d,emit=events.append,send=sent.append)
+    transport.receive(dict(id=1,result={}), 'Private prompt')
+    transport.receive(started(d),'Private prompt')
+    if bound:
+        transport.receive(dict(id=3,result=dict(turn=dict(id='turn-one'))),'Private prompt')
+    with pytest.raises(ValueError,match=error):
+        transport.receive(dict(method='thread/tokenUsage/updated',params=dict(threadId=thread,turnId=turn,
+            tokenUsage=dict(last=dict(totalTokens=42),modelContextWindow=100))),'Private prompt')
+    assert not any(event['type'] in {'context.reported','turn.completed'} for event in events)
+    assert not transport.finished and not d['pending'].exists()
+    assert [item['method'] for item in sent].count('turn/start')==1
+
+
 def test_new_transport_proof_binds_frozen_profile_and_keeps_same_thread_identity(tmp_path):
     transport,d,events,sent=ready(tmp_path)
     event=events[0]
@@ -531,9 +602,9 @@ def test_canonical_observer_skips_huge_tools_but_keeps_full_result_usage_and_lat
     assert events[2]['result']==result
     assert adapter.event(events[1])['live_usage']==meter
     assert adapter.event(events[3])==dict(completed=True,usage=meter)
-    # The actual core completion guard consumes this same activity fact, so
-    # discarding an opaque tool body cannot hide activity after completion.
-    assert adapter.event(events[-1])==dict(activity=True)
+    # The completion guard keeps activity after completion visible; the
+    # separate tool fact survives without decoding the opaque body.
+    assert adapter.event(events[-1])==dict(activity=True,tool_action=True)
     observation=adapter.meter(tmp_path,tmp_path)
     adapter.observe(observation,adapter.event(events[1]))
     assert adapter.snapshot_observation(observation)['tokens']==meter
@@ -573,7 +644,8 @@ def test_canonical_type_last_uses_exact_published_source_without_buffering_opaqu
     assert events[1]['result']==science
     assert adapter.event(events[2])['live_usage']==meter
     assert adapter.event(events[3])['usage']==meter
-    assert all(adapter.event(event)==dict(activity=True) for event in events[4:])
+    assert adapter.event(events[4])==dict(activity=True,tool_action=True)
+    assert all(adapter.event(event)==dict(activity=True) for event in events[5:])
 
 
 def test_type_last_tool_never_reopens_its_body_from_published_source(tmp_path,monkeypatch):

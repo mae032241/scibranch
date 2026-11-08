@@ -22,8 +22,8 @@ import time
 from . import budget_limits, configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends, native_recovery
 from .output_repair import OutputRepairRequired
-from .native_usage import terminal_attempt_tokens, metadata_stop
-from .guidance import STAGE_PLANNING, role_contract
+from .native_usage import terminal_attempt_tokens, metadata_stop, transport_diagnostic
+from .guidance import STAGE_PLANNING, role_contract, purpose
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
                         seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output,
                         native_outcome)
@@ -76,14 +76,20 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             prompt+=' Targets soft; limits/permissions bind.'
             if (job['role'] in {'A','H','W'} and not author
                     and not intent.get('output_repair') and not intent.get('work_repair')
-                    and job.get('purpose') not in {'closeout','worker_consultation'} and not job.get('final_report') and not job.get('final_only')):
+                    and purpose(job) not in {'closeout','worker_consultation','delivery_review','delivery_correction'} and not job.get('final_report') and not job.get('final_only')):
                 prompt+=' Goals remain.'
-                if job['role'] in {'H','W'}:prompt+=' '+STAGE_PLANNING[job['role']]
+                if job['role'] in {'H','W'}:
+                    if job.get('research_strategy_version') not in {1,2,3}:
+                        prompt+=' '+STAGE_PLANNING[job['role']]
                 if job['role'] in {'H','W'}:
                     prompt+=' Follow-up targets advise; no grant/required handoff.'
                 else:
-                    prompt+=(' Complete the requested judgment; bounded further work needs decision_request. Soft targets do not end research. Shared tokens<=0 or time<=0: '
-                        'deliver eligible candidate or finish with gaps from originals; no new H/W/E/extra FINAL; permissions hold.')
+                    if job.get('research_strategy_version') in {1,2,3}:
+                        prompt+=(' Complete the requested judgment; follow role_contract. Soft targets do not end research. '
+                            'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.')
+                    else:
+                        prompt+=(' Complete the requested judgment; bounded further work needs decision_request. Soft targets do not end research. Shared tokens<=0 or time<=0: '
+                            'deliver eligible candidate or finish with gaps from originals; no new H/W/E/extra FINAL; permissions hold.')
                 if job['role']=='W':prompt+=' Wait 10-30s on pending originals within deadlines.'
     if budget_status:
         if any(key in budget_status and budget_status[key] is None for key in (
@@ -94,8 +100,11 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         prompt+='\nExecution: '+json.dumps(dict(command=managed_command,
             lifecycle=execution_interface['capabilities'],result_protocol=execution_interface['result_protocol']),
             ensure_ascii=False,separators=(',',':'))
-        prompt+=(' Read capabilities/describe; exact IDs; no unknown-call replay. '
-            'Freeze code/ on capture; outputs/logs elsewhere.')
+        if job.get('research_strategy_version') in {1,2,3}:
+            prompt+=' Read capabilities/describe; exact IDs; capture freezes code/; other outputs/logs.'
+        else:
+            prompt+=(' Capabilities/describe:exact IDs;no unknown-call replay;'
+                'capture freezes code/;outputs/logs elsewhere.')
     if job['role']=='W' and ('managed_execution_wait' in job or execution_interface is not None or intent.get('execution_wake')):
         prompt+=' handoff.action: finalize_response=JSON; return_control=wait.'
     if job['role']=='W' and not author:
@@ -106,7 +115,9 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             prompt+='\n'+RESUME_INSTRUCTION
     if intent.get('output_repair') or intent.get('work_repair'):
         request=intent.get('work_repair') or intent['output_repair']
-        prompt+='\n'+(WORK_REPAIR_INSTRUCTION if intent.get('work_repair') else OUTPUT_REPAIR_INSTRUCTION)
+        work_repair=('Complete missing assigned work under original authorization; reuse results, no unknown-call replay; report obstacles/limits. Diagnosis: '
+            if job.get('research_strategy_version') in {1,2,3} else WORK_REPAIR_INSTRUCTION)
+        prompt+='\n'+(work_repair if intent.get('work_repair') else OUTPUT_REPAIR_INSTRUCTION)
         prompt+=json.dumps({key:request[key] for key in ('code','diagnostic')},ensure_ascii=False,separators=(',',':'))
     if intent.get('execution_wake'):
         prompt+=' Read work/execution-results.json; continue original W work; never replay accepted calls.'
@@ -512,8 +523,14 @@ def run_native(root: Path, step: int, attempt=0):
         shared=accepted_budget.usage_from_facts(head,
             job_rows=accepted_budget.load_usage_rows(head),current_native=live)
         cut=control_budget._snapshot(root,head.base,accepted_budget.AcceptedEvents(head),sample_stamp=stamp)
+        research_investment=None
+        if job['role']=='W' and job.get('research_strategy_version')==3 and experiment_config is not None:
+            from . import experiment_client, worker_research
+            research_investment=worker_research.load_investment(dict(
+                record_dir=str(experiment_client._record_directory_from_facts(root,step,job)),scope=hint_scope))
         return cut,dict(settings=settings,head=head,shared=shared,stamp=stamp,
             task=intent['task_ref'],scope=hint_scope,native_attempt=hint_attempt,
+            research_investment=research_investment,
             final_return=final_return,closeout_preparation_seconds=closeout_preparation_seconds)
     cleanup = None
     thread_id = (intent.get('session') or {}).get('thread_id') if attempt and not startup_retry else None
@@ -521,6 +538,7 @@ def run_native(root: Path, step: int, attempt=0):
     native_activity_observed = False
     native_thread_event = None
     terminal_final_binding=None
+    technical_diagnostic=None
     format_candidate, format_rejected = True, False
     from . import public_output
     public_clean = public_output.cleaner(root, settings)
@@ -661,6 +679,8 @@ def run_native(root: Path, step: int, attempt=0):
                                     public_log.write(json.dumps(published,ensure_ascii=False)+'\n')
                                     public_log.flush()
                             event = backend.event(event)
+                            if event.get('transport_diagnostic') is not None:
+                                technical_diagnostic=event['transport_diagnostic']
                             if event.get('thread_event') is not None:
                                 native_thread_event=event['thread_event']
                             if event.get('failure') is not None:
@@ -859,6 +879,18 @@ def run_native(root: Path, step: int, attempt=0):
         except ValueError:
             stop = outcome['stop_reason'] = 'w_slice_meter_unknown'
             outcome['search_slice'] = dict(status='unknown')
+    if technical_diagnostic is None and stop in {'native_metadata_unavailable','native_metadata_unsupported'}:
+        # Required delivery faults are observed by this invocation's metadata
+        # owner. Untyped provider failures keep their existing recovery facts;
+        # lack of an adapter diagnosis must not invent new acceptance evidence.
+        technical_diagnostic=transport_diagnostic(dict(
+            phase='metadata_delivery',code=stop,
+            # Native process startup alone does not prove request rejection.
+            original_call_state='not_submitted' if process is None else
+                'terminal' if terminal_observed else 'unknown',
+            thread_bound=thread_id is not None,turn_bound=live_meter.turn is not None))
+    if technical_diagnostic is not None:
+        outcome['technical_diagnostic']=technical_diagnostic
     if error is not None:
         write(record / 'native-outcome.json', outcome)
         raise error

@@ -209,7 +209,7 @@ def from_document(document, *, base):
         result['delivery_policy'] = delivery
     policies = _table(document.get('policies', {}),
         {'formal_review', 'execution_authority', 'candidate_audit', 'decision_contract',
-         'selection', 'worker_context', 'worker_context_windows', 'resume', 'history_observer'}, 'policies')
+         'selection', 'worker_context', 'worker_context_windows', 'resume', 'history_observer', 'supervision'}, 'policies')
     for source, target in (('formal_review', 'formal_review_policy'),
                            ('execution_authority', 'execution_authority_policy'),
                            ('candidate_audit', 'candidate_audit_policy')):
@@ -222,7 +222,7 @@ def from_document(document, *, base):
             raise ValueError('policies.decision_contract must be boolean')
         result['decision_contract_version'] = 1 if policies['decision_contract'] else None
     for source, target in (('selection', 'selection_policy'), ('resume', 'resume_policy'),
-                           ('history_observer', 'history_observer')):
+                           ('history_observer', 'history_observer'),('supervision','supervision_policy')):
         if source in policies:
             result[target] = policies[source]
     if 'worker_context' in policies:
@@ -422,7 +422,7 @@ def to_document(root, settings=None):
     policies = {target: value.get(source) is not None for source, target in
                 (('formal_review_policy', 'formal_review'), ('execution_authority_policy', 'execution_authority'),
                  ('candidate_audit_policy', 'candidate_audit'), ('decision_contract_version', 'decision_contract'))}
-    for source, target in (('selection_policy', 'selection'), ('resume_policy', 'resume'), ('history_observer', 'history_observer')):
+    for source, target in (('selection_policy', 'selection'), ('resume_policy', 'resume'), ('history_observer', 'history_observer'),('supervision_policy','supervision')):
         if value.get(source) is not None:
             policies[target] = copy.deepcopy(value[source])
     if isinstance(policies.get('resume'), dict):
@@ -499,7 +499,8 @@ def validate_update(root, document, *, base=None):
     # Preserve historical options which have no public declaration field.
     for key in ('role_guidance', 'node_budget_mode', 'handoff_authority_version',
                 'lineage_projection_version', 'selection_protocol', 'live_feedback_version',
-                'experiment_interface_version', 'managed_admission_version', 'worker_view_version'):
+                'experiment_interface_version', 'managed_admission_version', 'worker_view_version',
+                'research_strategy_version'):
         if key in previous:
             settings[key] = copy.deepcopy(previous[key])
         else:

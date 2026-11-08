@@ -1,9 +1,19 @@
 """Sealed ordinary A choices keep their bounded host delivery without a new A."""
 
+from unittest.mock import patch
+
 import pytest
 
 from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, delivery, handoff_state, native
 from test_history_handoff import selection_explanation
+
+
+def legacy_scene(tmp_path):
+    from test_closeout_protocol import scene
+    original = controller.prepare
+    with patch.object(controller, 'prepare', lambda *args, **kwargs:
+            original(*args, **kwargs, research_strategy_version=None)):
+        return scene(tmp_path, [])
 
 
 def publish(root, job, *, action='finish', tokens=10, recommendation=None):
@@ -45,8 +55,7 @@ def publish(root, job, *, action='finish', tokens=10, recommendation=None):
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('boundary', ['tokens', 'wall'])
 def test_sealed_overbudget_a_delivers_its_exact_choice_without_final(tmp_path, monkeypatch, boundary):
-    from test_closeout_protocol import scene
-    root = scene(tmp_path, [])
+    root = legacy_scene(tmp_path)
     c.write(root/'host-started.json', budget.clock_stamp())
     budget.transition(root, 'advance', 'Original ordinary A transport fixture')
     job = c.build_job(root, 3, 'A', [1, 2])
@@ -99,8 +108,7 @@ def test_sealed_overbudget_a_delivers_its_exact_choice_without_final(tmp_path, m
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('recommendation', [None, 'run-1'])
 def test_expired_sealed_a_can_finish_with_gaps_without_delivery_or_final(tmp_path, monkeypatch, recommendation):
-    from test_closeout_protocol import scene
-    root = scene(tmp_path, [])
+    root = legacy_scene(tmp_path)
     c.write(root/'host-started.json', budget.clock_stamp())
     budget.transition(root, 'advance', 'Original ordinary A finish fixture')
     record = publish(root, c.build_job(root, 3, 'A', [1, 2]),
@@ -126,8 +134,7 @@ def test_expired_sealed_a_can_finish_with_gaps_without_delivery_or_final(tmp_pat
 
 @pytest.mark.process_e2e
 def test_unknown_overbudget_a_delivery_reconciles_the_same_original(tmp_path, monkeypatch):
-    from test_closeout_protocol import scene
-    root = scene(tmp_path, [])
+    root = legacy_scene(tmp_path)
     c.write(root/'host-started.json', budget.clock_stamp())
     record = publish(root, c.build_job(root, 3, 'A', [1, 2]),
         action='deliver', tokens=120000, recommendation='run-1')
@@ -170,7 +177,7 @@ def test_unknown_overbudget_a_delivery_reconciles_the_same_original(tmp_path, mo
 @pytest.mark.process_e2e
 def test_unknown_direct_confirmation_exhausts_the_original_host_allowance(tmp_path, monkeypatch):
     from test_closeout_protocol import scene
-    root = scene(tmp_path, [])
+    root = legacy_scene(tmp_path)
     c.write(root/'host-started.json', budget.clock_stamp())
     record = publish(root, c.build_job(root, 3, 'A', [1, 2]),
         action='deliver', tokens=120000, recommendation='run-1')
@@ -218,7 +225,7 @@ def test_unknown_direct_confirmation_exhausts_the_original_host_allowance(tmp_pa
 @pytest.mark.process_e2e
 def test_overbudget_a_without_exact_choice_never_invents_delivery_or_final(tmp_path, monkeypatch):
     from test_closeout_protocol import scene
-    root = scene(tmp_path, [])
+    root = legacy_scene(tmp_path)
     c.write(root/'host-started.json', budget.clock_stamp())
     record = publish(root, c.build_job(root, 3, 'A', [1, 2]), action='deliver', tokens=120000)
     original = (record/'science-output.json').read_bytes()

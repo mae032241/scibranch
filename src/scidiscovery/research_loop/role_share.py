@@ -37,7 +37,11 @@ def usage(root, through_step):
     return accepted_budget.role_usage(root, through_step)
 
 
-def _required(root, step, job, result, role, correction_request):
+def _required(root, step, job, result, role, correction_request, evidence_return=None):
+    from . import delivery_review
+    if delivery_review.scope(dict(step=step+1,role=role,evidence_return=evidence_return,
+            research_strategy_version=job.get('research_strategy_version'))) == 'delivery_review':
+        return True
     if correction_request is not None or job['role'] == 'W' and role == 'A' and result.get('stage_intent')=='decision':
         return True
     if job['role'] == 'A' and role == 'A' and result.get('next_action') == 'audit' and c.settings(root, job).get('candidate_audit_policy'):
@@ -46,12 +50,12 @@ def _required(root, step, job, result, role, correction_request):
     return False
 
 
-def reason(root, step, job, result, role, correction_request=None, *, allow_repeat=False):
+def reason(root, step, job, result, role, correction_request=None, *, allow_repeat=False, evidence_return=None):
     """Why control refuses the proposed optional H/A node, or None."""
     limits = configured(root, job)
     if limits is None or role not in THINKING or job.get('purpose') == 'closeout':
         return None
-    if _required(root, step, job, result, role, correction_request):
+    if _required(root, step, job, result, role, correction_request, evidence_return):
         return None
     if not allow_repeat and job['role'] == role and not (job.get('formal_review') or result.get('next_action')=='formal_review'):
         return 'role_repeat_without_evidence'
@@ -93,7 +97,7 @@ def effective_route(root, step, result, job, route, *, allow_repeat=False):
             # Replay the original accepted route; controller._check_job still
             # verifies it exactly. Today's shares gate only new admission.
             return (*route, None)
-    code = reason(root, step, job, result, role, correction_request, allow_repeat=allow_repeat)
+    code = reason(root, step, job, result, role, correction_request, allow_repeat=allow_repeat,evidence_return=evidence_return)
     if code is None:
         return (*route, None)
     # Insufficient allocation never authorizes another scientific task.

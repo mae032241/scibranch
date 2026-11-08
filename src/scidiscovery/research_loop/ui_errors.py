@@ -48,6 +48,22 @@ class ControlFailure(RuntimeError):
     """A durable receipt reports failure, even if its transport was accepted."""
 
 
+def native_stop_problem(value, *, href='/progress'):
+    """Render the backend owner's allowlisted facts, without reading originals."""
+    from .native_usage import transport_diagnostic
+    selected=transport_diagnostic(value)
+    if selected is None:return None
+    state=selected['original_call_state']
+    descriptions={'not_submitted':'原调用尚未提交', 'unknown':'原调用状态未知',
+        'terminal':'已观察到原调用的真实终态'}
+    hints={'not_submitted':'修复本次启动或观测条件，再通过同一原任务的续接入口重新核验权限与余额。',
+        'unknown':'打开同一原任务，核对留存原调用与执行记录；核实前不要重新提交或重放调用。',
+        'terminal':'打开同一原任务，核对原终态、计量与输出，再按原条件收集或修复。'}
+    return Problem(409,'原生传输技术停止',
+        '阶段：'+selected['phase']+'；错误码：'+selected['code']+'；'+descriptions[state]+'。',
+        hints[state]+' 原任务身份、原件和已用预算保留；缺失用量仍为未知。',href=href,code=selected['code'])
+
+
 class InputError(ValueError):
     """A host-authored field failure; never pass submitted text as its message."""
 

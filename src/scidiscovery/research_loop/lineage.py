@@ -101,7 +101,10 @@ def contexts(root, job, items, archive, previous=()):
             binding=item.get('mechanism_binding')
             if accepted.get('scope')!=scope or accepted.get('call_id')!=item['call_id'] or accepted.get('mechanism_binding')!=binding:
                 raise history.ObserverIntegrityError('Context mechanism differs from original accepted call')
-            breadth.check_binding(job['search']['breadth'],binding,scope)
+            from . import worker_research
+            if worker_research.applicable(job):
+                worker_research.check_binding(binding,scope)
+            else:breadth.check_binding(job['search']['breadth'],binding,scope)
         # Provider-owned artifact labels are opaque; every descriptor receives
         # the same original-byte validation, regardless of its scientific name.
         validated={**item,'proofs':proofs}
@@ -260,7 +263,7 @@ def authored_excerpt(payload):
 
 
 
-def research_navigation(prior, job, payload, *, node_path, supervision_state=None):
+def research_navigation(prior, job, payload, *, node_path, supervision_state=None, memory_facts=None):
     """Project authored research locators at the existing single-node writer.
 
     The producer supplies the preceding accepted navigation and current original.
@@ -294,6 +297,12 @@ def research_navigation(prior, job, payload, *, node_path, supervision_state=Non
                 row['original']=original
             elif row['round_id'] in previous and 'original' in previous[row['round_id']]:
                 row['original']=previous[row['round_id']]['original']
+    if job.get('research_strategy_version')==3 or prior.get('candidate_memory') is not None:
+        from . import research_memory
+        memory=research_memory.retain(prior,job,payload,
+            source=dict(source_step=job['step'],source_role=role,science=science,original=original),facts=memory_facts)
+        if memory is not None:result['candidate_memory']=memory
+        result['unresolved_questions']='Read candidate_memory.question, each open_question, conditional counterevidence and limitations, then the linked complete scientific originals.'
     return result
 
 

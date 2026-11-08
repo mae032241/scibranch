@@ -810,18 +810,19 @@ def _current_combination(root,state):
     state['combination_refs']=refs
 
 
-def _breadth(root,state,limits,focus):
+def _breadth(root,state,limits,focus,*,restricted=False):
     from . import accepted_search, breadth
     if state.get('summary') is None:raise ValueError('Current accepted scientific point state required')
     # Keep declaration order across revisions; never discard authorized pending items.
     refs=list(state.get('combination_refs',[]))
-    if not refs:return None
+    if not refs and not restricted:return None
     mechanisms=[]
     for ref in refs:
         item=state['mechanisms'][ref];step=item['source_step']
         mechanisms.append(dict(mechanism_ref=ref,label=item['label'],source_step=step,
             source_ref=item['source_ref'],source_role=item['source_role'],
-            minimal_test=item['minimal_test'],status=item['status'],ordinal=item['ordinal'],origin_ref=item['origin_ref'],source_goal_id=item['source_origin_identity']['goal_id']))
+            minimal_test=item['minimal_test'],status=item['status'],ordinal=item['ordinal'],origin_ref=item['origin_ref'],source_goal_id=item['source_origin_identity']['goal_id'],
+            **(dict(research_binding=copy.deepcopy(item['research_binding'])) if item.get('research_binding') is not None else {})))
     declared=state.get('extra_grant');grant=None
     if declared and declared['mechanism_ref'] in refs:
         step=declared['source_a'];sha=declared['source_a_ref']
@@ -830,6 +831,7 @@ def _breadth(root,state,limits,focus):
     value=dict(version=3,initial_calls=limits.get('initial_calls',1),mechanisms=mechanisms,
         baseline=[dict(mechanism_ref=ref,accepted_count=state['opportunity_counts'].get(ref,0)) for ref in refs],
         grant=grant,prior_unknown=state['opportunity_unknown'])
+    if restricted:value['restricted_combination']=True
     in_scope=sum(accepted_search._owed(dict(state['mechanisms'][ref],
         accepted_calls=state['opportunity_counts'].get(ref,0)),limits.get('initial_calls',1)) for ref in refs)
     value['outside_initial_owed']=max(0,state['summary']['owed_count']-in_scope)
@@ -837,13 +839,64 @@ def _breadth(root,state,limits,focus):
     return breadth.validate(value)
 
 
-def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True):
-    limits=configuration_updates.for_new_job(root,step).get('search_policy')
+def _correction_combination(job,parent_jobs,state):
+    """Freeze only identities available to the exact requesting W subject."""
+    from . import delivery_review
+    if (job.get('research_strategy_version')!=3 or job.get('role')!='W'
+            or delivery_review.scope(job)!='delivery_correction'):
+        return None
+    if parent_jobs is None:raise ValueError('Bounded correction requires its owner-loaded parent jobs')
+    requester=parent_jobs.get(job['evidence_return']['step'])
+    if requester is None:raise ValueError('Bounded correction requester is missing')
+    if requester['role']=='W':
+        inherited=(requester.get('search') or {}).get('bounded_correction')
+        if not isinstance(inherited,dict):raise ValueError('Bounded correction handoff lost its original combination')
+        source_step=inherited['source_step'];source_steps=inherited.get('source_steps',[source_step])
+        declared=inherited['mechanism_refs']
+    else:
+        request=delivery_review.binding(requester)
+        if requester['role']!='A' or request is None or request['kind']!='delivery_review':
+            raise ValueError('Bounded correction requires its exact pre-delivery assessment')
+        source_step=request['step'];source=parent_jobs.get(source_step)
+        if source is None:raise ValueError('Bounded correction original subject is missing')
+        if source['role']=='W':
+            source_steps=[source_step]
+        elif (source['role']=='A' and delivery_review.binding(source) is None
+                and source.get('purpose') in {None,'assessment'} and not source.get('formal_review')
+                and not source.get('final_only') and not source.get('final_report')):
+            subjects=[int(Path(ref['path']).parts[2]) for ref in source.get('direct_refs',[])]
+            if any(number not in parent_jobs for number in subjects):
+                raise ValueError('Bounded correction assessment subject has unloaded direct source facts')
+            source_steps=[number for number in subjects if parent_jobs[number]['role']=='W']
+            if not source_steps:raise ValueError('Bounded correction assessment has no exact loaded W subject')
+        else:raise ValueError('Bounded correction requires its exact W or ordinary assessment subject')
+        declared=[]
+        for number in source_steps:
+            source_search=parent_jobs[number].get('search') or {}
+            declared += [row['mechanism_ref'] for row in (source_search.get('breadth') or {}).get('mechanisms',[])
+                if row.get('research_binding') is None or row['research_binding']['status']=='active']
+            declared += [row['mechanism_ref'] for row in source_search.get('worker_research',{}).get('seed',[])
+                if row['status']=='active']
+        declared += [ref for ref,item in state['mechanisms'].items() if item['source_step'] in source_steps
+            and (item.get('research_binding') is None or item['research_binding']['status']=='active')]
+    allowed=set(declared)
+    refs=[ref for ref,item in state['mechanisms'].items() if ref in allowed and item['status']!='waived'
+        and (item.get('research_binding') is None or item['research_binding']['status']=='active')]
+    state['combination_refs']=refs
+    return dict(version=1,source_step=source_step,source_steps=source_steps,mechanism_refs=refs)
+
+
+def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True,job=None,parent_jobs=None):
+    settings=configuration_updates.for_new_job(root,step)
+    limits=settings.get('search_policy')
     if limits is None:return None
     state=current_state(root,dict(step=step,role=role)) if state is None else state
     if state.get('summary') is None:raise ValueError('Current accepted scientific point state required')
     if role=='W' and state.get('summary') is not None:_current_combination(root,state)
+    bounded=_correction_combination(job,parent_jobs,state) if job is not None else None
     focus=state['focus'] if role=='W' else None
+    if bounded is not None and focus and focus['mechanism_ref'] not in bounded['mechanism_refs']:
+        focus=None
     repair_root=repair_binding=repair_source=repair_authorization=None
     if focus is not None and focus['action']=='repair':
         chooser,_,chooser_seal,_=history._source(root,state['summary']['last_science']['step'])
@@ -858,14 +911,18 @@ def bind(root,step,role,protocol=None,*,write_pages=True,state=None,unified=True
     if role=='W' and focus and focus['action']=='screen':
         obligation=[dict(mechanism_ref=ref,source_step=item['source_step'],source_ref=item['source_ref'],source_role=item['source_role'])
             for ref,item in state['mechanisms'].items() if ref in state.get('combination_refs',state['authorized']) and item['status']=='pending']
-    bound_breadth=_breadth(root,state,limits,focus) if role=='W' else None
+    bound_breadth=_breadth(root,state,limits,focus,restricted=bounded is not None) if role=='W' else None
     advice=None
     if bound_breadth is not None:
         from . import breadth
         decisions,available=breadth._availability(bound_breadth,{},[],head=dict(search=state['summary']),focus=focus)
         advice=dict(available_mechanisms=available[:4],omitted_count=max(0,len(available)-4),
             focus_reason=decisions[focus['mechanism_ref']]['reason'] if focus else None)
-    return dict(coverage_obligation=obligation,focus=focus,allocation=copy.deepcopy(state['order']['allocation']),unfinished_plan=copy.deepcopy(state['order']['remaining']),
+    return dict(**(dict(bounded_correction=bounded) if bounded is not None else {}),
+        **(dict(worker_research=dict(version=1, exploration=focus is None,
+        seed=copy.deepcopy(state.get('worker_research_mechanisms',[]))))
+        if role=='W' and settings.get('research_strategy_version')==3 else {}),
+        coverage_obligation=obligation,focus=focus,allocation=copy.deepcopy(state['order']['allocation']),unfinished_plan=copy.deepcopy(state['order']['remaining']),
         breadth=bound_breadth,admission_advice=advice,intent_diagnostics=state['order']['diagnostics'],repair_root=repair_root,repair_binding=repair_binding,repair_source=repair_source,repair_authorization=repair_authorization,limits=policy(limits),files=[])
 
 
@@ -876,7 +933,26 @@ def launch_reason(root,job):
     if c.settings(root, job).get('search_policy') is None:return None
     bound=job['search'];focus=bound['focus'];state=current_state(root,job)
     if bound['intent_diagnostics']:return bound['intent_diagnostics'][0]['code']
-    if focus is None:return 'science_plan_empty'
+    if focus is None:
+        from . import delivery_review
+        if job.get('research_strategy_version')==3 and delivery_review.scope(job)=='delivery_correction':
+            bounded=bound.get('bounded_correction');combination=bound.get('breadth')
+            if (isinstance(bounded,dict) and bounded.get('version')==1
+                    and combination is not None and combination.get('restricted_combination') is True
+                    and bounded.get('mechanism_refs')==[row['mechanism_ref'] for row in combination['mechanisms']]):
+                return None
+            return 'science_plan_empty'
+        bootstrap=bound.get('worker_research')
+        if (c.settings(root,job).get('research_strategy_version')==3
+                and isinstance(bootstrap,dict) and bootstrap.get('version')==1 and bootstrap.get('exploration') is True
+                and set(bootstrap) in ({'version','exploration'},{'version','exploration','seed'})
+                and not job.get('formal_review') and not job.get('engineering_repair')
+                and not job.get('delivery_review') and not job.get('final_only') and not job.get('final_report')
+                and job.get('purpose') not in {'closeout','formal_review','engineering_repair','worker_consultation'}):
+            from . import delivery_review
+            if delivery_review.scope(job) is not None:return 'science_plan_empty'
+            return None
+        return 'science_plan_empty'
     if focus['mechanism_ref'] not in state['authorized']:return 'search_focus_outside_h_scope'
     if focus['action']=='repair' and bound['repair_binding']!='available':return 'search_repair_source_'+bound['repair_binding']
     if focus['action']=='repair':

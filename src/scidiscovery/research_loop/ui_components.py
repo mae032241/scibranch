@@ -347,6 +347,36 @@ def _number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def candidate_memory(value):
+    """Author-selected evidence notes, separate from nominations and A advice."""
+    body='<section id="candidate-memory"><h2>W 选择的候选证据记忆</h2>'
+    body+='<p class="note">这是 W 选择的科学主张与证据导航；与提名、A 推荐、候选资格分别记录，不排名，也不判定科学真伪。</p>'
+    if value.get('coverage')!='accepted':
+        return Safe(body+empty('未提供已接受的候选证据记忆；缺失不表示没有候选或证据。')+'</section>')
+    step=value['source_step']
+    body+='<p>'+link('W 第 '+str(step)+' 阶段准确原文','/nodes/'+str(step)+'/science')+' · '+link('该阶段现有材料','/nodes/'+str(step)+'/materials')+'</p>'
+    if value.get('question'):body+='<p>'+translatable(value['question'])+'</p>'
+    if not value['candidates']:body+=empty('W 本次未选择可展示的候选记忆条目。')
+    for row in value['candidates']:
+        article='<article><h3>'+esc(row['candidate'])+'</h3><dl>'
+        for key,label in (('data','数据'),('evaluation','评价口径'),('failure_condition','失败条件'),('open_question','开放问题')):
+            article+='<dt>'+label+'</dt><dd>'+translatable(row[key] or '未声明')+'</dd>'
+        article+='</dl><h4>证据关系</h4><ul>'
+        for evidence in row['evidence']:
+            article+='<li><strong>'+{'supports':'支持','opposes':'反对','unknown':'未知'}[evidence['relation']]+'</strong>：'+translatable(evidence['note'])
+            article+=' · '+link('准确证据原件 / 已有材料',evidence['href']) if evidence.get('href') else ' · '+link('原文中的准确证据引用','/nodes/'+str(step)+'/science')
+            article+='</li>'
+        article+='</ul><h4>限制</h4><ul>'+''.join('<li>'+translatable(text)+'</li>' for text in row['limitations'])+'</ul>'
+        if row.get('evidence_omitted'):article+='<p class="note">另有 '+str(row['evidence_omitted'])+' 条证据关系，见准确原文。</p>'
+        article+='</article>'
+        if len((body+article).encode('utf-8'))>60*1024:
+            body+='<p class="note">其余记忆超出显示预算，请查看上述准确原文。</p>';break
+        body+=article
+    if value.get('omitted'):body+='<p class="note">另有 '+str(value['omitted'])+' 个记忆条目未展开。</p>'
+    if value.get('diagnostic_count'):body+='<p class="note">部分可选记忆条目无法形成准确导航；请核对 W 原文中的声明与限制。</p>'
+    return Safe(body+'</section>')
+
+
 def candidate_table(value, *, open_=True, ident='candidates'):
     """Observation order, grouped by evaluation_key; client sort is in-group only."""
     if 'error' in value:
@@ -402,8 +432,8 @@ def candidate_table(value, *, open_=True, ident='candidates'):
 def result_card(card, *, files=None, full_href=None):
     if 'error' in card:
         return Safe('<section class="result-card">' + error_inline(card, what='结论卡片') + '</section>')
-    tone = {'confirmed': 'ok', 'recommended': 'active', 'none': 'neutral', 'unknown': 'warn', 'audit': 'neutral'}[card['delivery_state']]
-    kind = {'closeout': '最终评估', 'formal_review': '正式评审', 'ordinary': '综合评估'}.get(card['kind'], '综合评估')
+    tone = {'confirmed': 'ok', 'recommended': 'active', 'none': 'neutral', 'unknown': 'warn', 'audit': 'neutral', 'consultation':'neutral'}[card['delivery_state']]
+    kind = {'closeout': '最终评估', 'formal_review': '正式评审', 'ordinary': '综合评估','consultation':'W 研究咨询','delivery_review':'提交前最终评估'}.get(card['kind'], '综合评估')
     body = ('<section class="result-card hero"><p class="eyebrow">第 ' + esc(card['step']) + ' 阶段 · A · ' + esc(kind)
             + ' · 决定：' + esc(card['decision'] or '未记录') + '</p>'
             '<p class="head-status">' + badge(card['delivery_label'], tone) + '</p>')
@@ -418,7 +448,7 @@ def result_card(card, *, files=None, full_href=None):
                  + ('<div><dt>作者引用</dt><dd><code>' + esc(chosen['reference']) + '</code></dd></div>' if chosen.get('reference') else '')
                  + '</dl>')
     else:
-        body += '<h2 class="chosen">' + ('审计对象未能对应已观察候选' if audit else '本阶段未推荐候选方案' if card['delivery_state'] == 'none' else '候选推荐未能对应已观察候选') + '</h2>'
+        body += '<h2 class="chosen">' + ('审计对象未能对应已观察候选' if audit else '本阶段未推荐候选方案' if card['delivery_state'] == 'none' else '咨询不产生正式候选推荐' if card['delivery_state']=='consultation' else '候选推荐未能对应已观察候选') + '</h2>'
         if card.get('recommendation_raw'):
             body += '<p>作者引用：<code>' + esc(card['recommendation_raw']) + '</code></p>'
         if card.get('resolution_error'):

@@ -230,6 +230,72 @@ def test_invalid_edit_retains_all_controls_for_correction(tmp_path):
     assert not (tmp_path/'instance').exists()
 
 
+def test_configuration_edit_preserves_and_edits_explicit_null_plugin_limits(tmp_path):
+    draft = complete(tmp_path)
+    limits = dict.fromkeys(('max_file_bytes', 'max_log_bytes', 'max_result_bytes', 'max_total_bytes'))
+    draft['document']['executor'] = dict(config=dict(configuration=limits))
+    fields = Controls(form.render(draft, edit=True)).fields
+    parsed = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+    assert parsed['document'] == draft['document']
+    prefix = next(name[:-4] for name, value in fields.items()
+        if name.endswith('.key') and value == 'max_file_bytes')
+    assert fields[prefix+'.kind'] == 'null' and fields[prefix+'.value'] == ''
+
+    fields[prefix+'.kind'] = 'integer'
+    fields[prefix+'.value'] = '1024'
+    parsed = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+    assert parsed['document']['executor']['config']['configuration'] == dict(limits, max_file_bytes=1024)
+    fields = Controls(form.render(parsed, edit=True)).fields
+    prefix = next(name[:-4] for name, value in fields.items()
+        if name.endswith('.key') and value == 'max_file_bytes')
+    fields[prefix+'.kind'] = 'null'
+    fields[prefix+'.value'] = ''
+    restored = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+    assert restored['document'] == draft['document']
+
+
+@pytest.mark.parametrize('invalid', ['payload', 'child'])
+def test_configuration_null_nodes_reject_payload_and_children(tmp_path, invalid):
+    draft = complete(tmp_path)
+    draft['document']['executor'] = dict(config=dict(configuration=dict(max_file_bytes=None)))
+    fields = Controls(form.render(draft, edit=True)).fields
+    prefix = next(name[:-4] for name, value in fields.items()
+        if name.endswith('.key') and value == 'max_file_bytes')
+    if invalid == 'payload':
+        fields[prefix+'.value'] = '1024'
+        with pytest.raises(form.FormError) as caught:
+            form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+        retained = Controls(form.render(caught.value.draft, edit=True)).fields
+        assert retained[prefix+'.kind'] == 'null' and retained[prefix+'.value'] == '1024'
+    else:
+        fields.update({'node.2001.parent': prefix.split('.')[1], 'node.2001.key': 'hidden',
+            'node.2001.kind': 'integer', 'node.2001.value': '1024'})
+        with pytest.raises(ValueError, match='空值字段不能包含子项'):
+            form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+
+
+@pytest.mark.parametrize('plugin_value', [None, dict(nested=None), [1, None]])
+def test_toml_export_rejects_null_without_changing_draft(tmp_path, plugin_value):
+    draft = complete(tmp_path)
+    draft['document']['executor'] = dict(config=dict(configuration=dict(limit=plugin_value)))
+    before = form.declaration(draft)
+    with pytest.raises(ValueError, match='TOML 不支持空值'):
+        form.export_toml(draft)
+    assert form.declaration(draft) == before
+    fields = Controls(form.render(draft, edit=True)).fields
+    assert form.parse_edit(fields, base=tmp_path, configuration=before)['document'] == before
+
+
+def test_toml_export_without_null_keeps_typed_plugin_values(tmp_path):
+    draft = complete(tmp_path)
+    configuration = dict(limit=1024, disabled=False, empty='', labels=['None', 0])
+    draft['document']['executor'] = dict(config=dict(configuration=configuration))
+    exported = research_config.tomllib.loads(form.export_toml(draft))
+    assert exported['executor']['config']['configuration'] == configuration
+    imported = form.imported(exported, base=tmp_path)
+    assert research_config.tomllib.loads(form.export_toml(imported)) == exported
+
+
 def test_policy_forms_edit_real_schemas_and_preserve_extra_fields(tmp_path):
     draft = complete(tmp_path)
     draft['document']['budget']['role_shares'] = dict(version=1, min_w_share=.65,

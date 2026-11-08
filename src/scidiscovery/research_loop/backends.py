@@ -20,7 +20,7 @@ import stat
 import subprocess
 import sys
 
-from .native_usage import BasicObservation, SessionUsage, tokens
+from .native_usage import BasicObservation, SessionUsage, tokens, transport_diagnostic
 
 DEFAULT_BACKEND = 'codex'
 
@@ -351,7 +351,7 @@ class CodexEvents:
                         else:
                             self.selected = self.kind in {'thread.started', 'thread.observed', 'turn.completed',
                             'turn.failed', 'turn.incomplete', 'turn.interrupted', 'turn.started',
-                            'context.reported', 'context.compacted', 'error'}
+                            'context.reported', 'context.compacted', 'transport.diagnostic', 'error'}
                     elif len(self.pending) > self.HEADER_BYTES or complete:
                         self.selected = False
                     # The same chunk may contain a selected message/control.
@@ -463,7 +463,7 @@ class CanonicalEvents:
     VIEW_BYTES=65536
     _string=re.compile(rb'"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"')
     _scalar=re.compile(rb'(?:-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)')
-    _metadata={'session','usage','context','native_call','compaction','turn.started','completed','failed','error','message'}
+    _metadata={'session','usage','context','native_call','compaction','turn.started','completed','failed','error','message','transport.diagnostic'}
 
     def __init__(self,source):
         self.source=Path(source);self.source_identity=None
@@ -484,6 +484,7 @@ class CanonicalEvents:
     def _project(cls,line):
         meter={key:True for key in ('input_tokens','cached_input_tokens','output_tokens')}
         shape=dict(type=True,session_id=True,turn_id=True,usage=meter,call_id=True,status=True,text=True,
+            diagnostic={key:True for key in ('phase','code','original_call_state','thread_bound','turn_bound')},
             context={key:True for key in ('status','total_tokens','model_context_window','reported_at','observed_at',
                 'thread_id','turn_id','current_window')})
         position=0
@@ -798,6 +799,9 @@ class Codex(Backend):
 
     def event(self, value):
         kind = value.get('type')
+        if kind=='transport.diagnostic':
+            selected=transport_diagnostic(value.get('diagnostic'))
+            return dict(transport_diagnostic=selected) if selected is not None else {}
         item=value.get('item')
         if kind=='tool' or isinstance(item,dict) and item.get('type') in {'command_execution','mcp_tool_call','web_search','file_change'}:
             return dict(activity=True,tool_action=True)
@@ -1316,6 +1320,9 @@ class Protocol(Backend):
     def observation_fault(self,meter): return meter.fault
     def event(self, value):
         kind=value.get('type')
+        if kind=='transport.diagnostic':
+            selected=transport_diagnostic(value.get('diagnostic'))
+            return dict(transport_diagnostic=selected) if selected is not None else {}
         if kind=='opaque.activity':return dict(activity=True)
         if kind=='tool':return dict(activity=True,tool_action=True)
         if kind=='session':return dict(session=value.get('session_id'))

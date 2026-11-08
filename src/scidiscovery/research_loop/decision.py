@@ -1,7 +1,7 @@
 """Scientific A requests and exact completed-request replay; no value classifier."""
 from pathlib import Path
 
-from . import accepted_budget,accepted_prefix,accepted_search,contracts as c,correction,history
+from . import delivery_review,accepted_budget,accepted_prefix,accepted_search,contracts as c,correction,history
 
 ACTIONS = {'continue_w': 'W', 'revise_h': 'H', 'extract': 'E'}
 
@@ -45,8 +45,24 @@ def validate_supervision(job,payload):
 
 def require_request(job,payload):
     """Require explicit further-work intent without judging scientific prose."""
+    if delivery_review.scope(job)=='delivery_review':
+        science=payload.get('scientific_result')
+        if not isinstance(science,str) or not science.strip() or (payload.get('next_action')=='continue_w' and _request(job,payload) is None):
+            from .output_repair import OutputRepairRequired
+            raise OutputRepairRequired('a_delivery_review_incomplete',
+                'Supply nonblank scientific_result. continue_w requires one concrete decision_request with question and change_criterion; no additional authorization is granted.')
+        return _request(job,payload) if payload.get('next_action')=='continue_w' else None
     supervision=validate_supervision(job,payload)
+    ordinary=(job['role']=='A' and not job.get('formal_review') and c.guidance.purpose(job)=='assessment')
+    if ordinary and job.get('research_strategy_version') in (1,2,3):
+        science=payload.get('scientific_result')
+        if not isinstance(science,str) or not science.strip():
+            from .output_repair import OutputRepairRequired
+            raise OutputRepairRequired('a_scientific_result_incomplete',
+                'Correct this same A output with nonblank scientific_result explaining the decision and remaining limitations. '
+                'This repair authorizes no new research.')
     if supervision in {'continue_existing','finalize'}:return None
+    if _continue_existing(job,payload):return None
     if (job['role']!='A' or job.get('formal_review')
             or c.guidance.purpose(job)!='assessment'
             or payload.get('next_action') not in ACTIONS):return None
@@ -58,6 +74,13 @@ def require_request(job,payload):
             'a nonblank concrete evidence gap/question, and a nonblank change_criterion stating what result would change '
             'the assessment. Preserve the original science and limitations; no new research is authorized by this repair.')
     return request
+
+
+def _continue_existing(job,payload):
+    return (job.get('research_strategy_version') in (1,2,3) and job['role']=='A'
+        and not job.get('formal_review') and c.guidance.purpose(job)=='assessment'
+        and payload.get('next_action')=='continue_w' and 'decision_request' in payload
+        and payload['decision_request'] is None)
 
 
 def _key(job,payload,focus):
@@ -126,8 +149,9 @@ def _completed(job, payload, sources):
 
 def assess(root, job, payload, *, focus=None):
     policy=c.settings(root,job)
-    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'}:
+    if (policy.get('decision_contract_version')!=1 and job.get('research_strategy_version') not in (1,2,3)) or job['role']!='A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'}:
         return []
+    if delivery_review.scope(job) is not None:return []
     if payload['next_action'] not in ACTIONS:return []
     return _assess_from_facts(root,job,payload,policy=policy,
         interpretation=dict(focus=focus),head=accepted_budget.read(root))
@@ -137,9 +161,11 @@ def _assess_from_facts(root, job, payload, *, policy, interpretation, head):
     """Consume this attempt's interpretation and accepted comparison head."""
     if policy is None or interpretation is None or head is None:
         raise ValueError('Decision assessment requires its produced policy, interpretation and accepted head')
-    if policy.get('decision_contract_version')!=1 or job['role']!='A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'}:
+    if (policy.get('decision_contract_version')!=1 and job.get('research_strategy_version') not in (1,2,3)) or job['role']!='A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'}:
         return []
     if job.get('supervision_request') is not None and c.scientific_field(job,payload,'supervision_result')=='continue_existing':return []
+    if _continue_existing(job,payload):return []
+    if delivery_review.scope(job) is not None:return []
     if payload['next_action'] not in ACTIONS:return []
     key,basis=_key(job,payload,interpretation['focus']),_basis(root,job)
     prefix=accepted_prefix.for_job(job)

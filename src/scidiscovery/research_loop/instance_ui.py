@@ -863,8 +863,8 @@ class InstanceUI:
 
     @staticmethod
     def _ordinary_assessment(job):
-        return (job['role'] == 'A' and job.get('purpose') != 'closeout'
-            and not any(job.get(key) for key in ('formal_review', 'final_report', 'final_only')))
+        from . import ui_semantics
+        return ui_semantics.terminal_finish(job)
 
     @staticmethod
     def _selected_result(saved, latest, conclusion, *, terminal=False):
@@ -969,6 +969,9 @@ class InstanceUI:
                 for key in ('step', 'role', 'state', 'stop_reason', 'returncode', 'continuations') if key in node}
         if isinstance(node.get('stop_reason'), str):
             value['stop_reason_omitted_characters'] = max(0, len(node['stop_reason']) - 300)
+        from .native_usage import transport_diagnostic
+        diagnostic=transport_diagnostic(node.get('technical_diagnostic'))
+        if diagnostic is not None:value['technical_diagnostic']=diagnostic
         return value
 
     def _clear_display_caches(self):
@@ -1059,7 +1062,7 @@ class InstanceUI:
         state = current['state'] if current else 'ready'
         conclusion = snapshot['conclusion']
         waiting = bool(current and conclusion and conclusion['step'] == current['step']
-                       and conclusion['payload'].get('next_action') == 'wait')
+                       and conclusion['payload'].get('next_action') == 'wait' and current.get('kind')!='consultation')
         completed = snapshot['final'] is not None or (view.get('closeout') or {}).get('status') in {'final_a_completed', 'delivery_confirmed', 'exported_unsubmitted'}
         # A durable sealed/terminal node outranks a transient accepted receipt.
         active = state in {'running', 'automatic_recovery_waiting'} or (state in {'ready', 'prepared'} and receipt.get('status') in {'accepted', 'running'})
@@ -1143,7 +1146,7 @@ class InstanceUI:
                 if not value.get('has_more'):
                     break
             self.activity = {key: entry}
-        return dict(step=step, role_label=ui_view.ROLE_LABELS.get(current['role'], current['role']),
+        return dict(step=step, role_label=current.get('role_label') or ui_view.ROLE_LABELS.get(current['role'], current['role']),
                     elapsed=ui_view.elapsed_text(entry['prepared_at']), label=entry['label'], messages=list(entry['messages']),
                     href='/nodes/' + str(step) + '/progress?attempt=' + str(attempt))
 
@@ -1163,6 +1166,14 @@ class InstanceUI:
         view = snapshot['view']
         display = status['display']
         items = []
+        current=display.get('current')
+        diagnostic=(ui_errors.native_stop_problem(current.get('technical_diagnostic'),
+            href='/nodes/'+str(current['step']))
+            if current and current.get('state') not in ui_view.SEALED else None)
+        if diagnostic is not None:
+            items.append(dict(text=diagnostic.cause,href=diagnostic.href,action='核对同一原调用',
+                form=ui.Safe('<details open><summary>技术停止原因与下一步</summary><p>'+
+                    ui.esc(diagnostic.hint)+'</p></details>')))
         technical=self._technical_stop(snapshot)
         if technical is not None:
             items.append(dict(text='当前为启动前技术暂停，未产生科学评审结论。先修复本机原生后端或必需控制观测配置；原任务身份、此前成果和已用预算保留。',
@@ -1322,7 +1333,9 @@ class InstanceUI:
                         notice += ' 原任务步骤：' + str(result['attempt_step']) + '。'
             notices.append(notice)
         if current and not sealed and current.get('stop_reason'):
-            notices.append('工作停止说明：' + ui_view.cleaner(self.root)(current['stop_reason'], 600))
+            diagnostic=ui_errors.native_stop_problem(current.get('technical_diagnostic'))
+            notices.append('技术停止说明：'+diagnostic.cause if diagnostic is not None else
+                '工作停止说明：' + ui_view.cleaner(self.root)(current['stop_reason'], 600))
         return notices
 
     def _snapshot_or_error(self, *, force=False):
@@ -1376,19 +1389,64 @@ class InstanceUI:
             'running':'已观察运行','cancelling':'正在取消','known_success':'执行成功',
             'known_failed':'执行失败','not_submitted':'确认未提交','unknown':'状态未知'}
         coverage={'observed':'本地观察','partial':'部分覆盖，计数为下界','unknown':'观察不可用'}
-        body='<section class="execution-activity"><h3>当前 W 执行观察 · 阶段 '+ui.esc(str(value.get('step')))+'</h3>'
-        body+='<p>'+ui.esc(coverage.get(value.get('coverage'),'观察不可用'))+'；'+ui.esc(value.get('limitation',''))+'</p>'
         counts=value.get('counts') or {}
-        if counts:body+='<p>'+' · '.join(ui.esc(labels[key])+' '+str(counts[key]) for key in labels if counts.get(key))+'</p>'
+        totals=' · '.join(labels[key]+' '+str(counts[key]) for key in labels if counts.get(key))
+        step=str(value.get('step'))
+        body='<details class="execution-activity" data-details-key="'+ui.esc('w-executions-'+step)+'"><summary>W 实验执行状态 · 阶段 '+ui.esc(step)
+        body+=' · '+ui.esc(coverage.get(value.get('coverage'),'观察不可用'))
+        if totals:body+=' · '+ui.esc(totals)
+        body+='</summary>'
+        body+='<p>'+ui.esc(coverage.get(value.get('coverage'),'观察不可用'))+'；'+ui.esc(value.get('limitation',''))+'</p>'
+        investment=value.get('research_investment')
+        body+='<section><h3>原调用研究投入</h3><p class="note">仅当前 W 阶段的 owner 观察；逐机制计数含继承，可能重叠，不可相加作为总数。投入不等于科学轮次、研究深度或科学认可。</p>'
+        if isinstance(investment,dict):
+            body+='<p>已接受原调用总数：'+ui.esc(investment['total_calls'])+'；当前连续投入：'+ui.esc(investment['consecutive_calls'])+' 次；方向：'+ui.esc(investment.get('direction') or '未提供')+'</p>'
+            body+='<ul>'+''.join('<li>'+ui.esc(row['mechanism_ref'])+'：'+ui.esc(row['calls'])+' 次</li>' for row in investment['by_mechanism'])+'</ul>'
+            if investment.get('omitted_count'):body+='<p>另有 '+str(investment['omitted_count'])+' 个机制计数未展开。</p>'
+        else:body+='<p>研究投入未观测；缺失视图不表示零投入。</p>'
+        research=value.get('research')
+        if isinstance(research,dict):
+            body+='<h3>当前 W 已声明机制</h3><p class="note">声明版本 '+str(research['revision'])+'；以下是当前声明，历史调用各自保留准确绑定版本。声明不表示已有执行或科学发现。</p><ul>'
+            for index,row in enumerate(research['mechanisms']):
+                declaration='<li><strong>'+ui.esc(row.get('label') or row['mechanism_ref'])+'</strong> · '+ui.esc(row['mechanism_ref'])+' · revision '+str(row['revision'])+' · '+ui.esc({'active':'活跃','retired':'已退役'}[row['status']])+'<br>'+ui.esc(row.get('question') or '问题未提供')+'</li>'
+                if len((body+declaration).encode('utf-8'))>32*1024:
+                    body+='<li>另有 '+str(len(research['mechanisms'])-index)+' 个声明因显示长度限制未展开；'+ui.link('封存后查看准确阶段原文','/results')+'</li>';break
+                body+=declaration
+            body+='</ul>'
+            if research.get('omitted_count'):body+='<p>另有 '+str(research['omitted_count'])+' 个声明未展开。</p>'
+        else:body+='<p class="note">当前机制声明观察未提供；封存后的声明见机制过程。</p>'
+        body+='</section>'
         rows=value.get('calls') or []
         if rows:
-            body+='<table><thead><tr><th>原调用</th><th>attempt</th><th>执行观察</th><th>最近记录</th></tr></thead><tbody>'
-            for row in rows:
+            body+='<table><thead><tr><th>实验与目的</th><th>执行状态</th><th>声明结果指标</th><th>最近记录 / 调用详情</th></tr></thead><tbody>'
+            omitted_for_size=0
+            for index,row in enumerate(rows):
                 age=ui_view.elapsed_text(row['updated_at'])
-                body+='<tr><td>'+ui.esc(row['call_id'])+'</td><td>'+('未知' if row['attempt'] is None else str(row['attempt']))+'</td><td>'+ui.esc(labels[row['state']])+'</td><td>'+ui.esc(age+'前' if age else '时间未知')+'</td></tr>'
+                display=row.get('display') or {}
+                description=ui.esc(display.get('entry') or '实验名称未提供')
+                description+='<br>'+ui.esc('目的：'+(display.get('purpose') or '未提供'))
+                if display.get('mechanism'):description+='<br>'+ui.esc('机制：'+display['mechanism'])
+                binding=display.get('research_binding') or {}
+                if binding:
+                    description+='<br>'+ui.esc(binding['mechanism_ref']+' · revision '+str(binding['revision']))
+                    description+='<br>'+ui.esc('机制问题：'+(binding.get('question') or '未提供'))
+                if display.get('change_criterion'):description+='<br>'+ui.esc('改变判断的条件：'+display['change_criterion'])
+                metrics=display.get('metrics') or []
+                result_status=display.get('result_status')
+                result='；'.join(item['name']+' = '+str(item['value'])+(' '+item['unit'] if item.get('unit') else '') for item in metrics)
+                if not result:result=({'available':'无可展示的声明指标','missing':'未提供声明结果',
+                    'invalid':'声明结果不可用','unavailable':'声明结果不可用'}.get(result_status,'声明结果尚未提供'))
+                if display.get('metrics_partial'):result+='（仅显示部分指标）'
+                details_key='w-execution-'+step+'-'+row['call_id']
+                details='<details data-details-key="'+ui.esc(details_key)+'"><summary>原调用详情</summary><p>调用 ID：'+ui.esc(row['call_id'])+'<br>attempt：'+ui.esc('未知' if row['attempt'] is None else str(row['attempt']))+'</p></details>'
+                markup='<tr><td>'+description+'</td><td>'+ui.esc(labels[row['state']])+'</td><td>'+ui.esc(result)+'</td><td>'+ui.esc(age+'前' if age else '时间未知')+details+'</td></tr>'
+                if len((body+markup).encode('utf-8'))>63*1024:
+                    omitted_for_size=len(rows)-index;break
+                body+=markup
             body+='</tbody></table>'
+            if omitted_for_size:body+='<p>另有 '+str(omitted_for_size)+' 个调用因显示长度限制未展开；原件与后续封存记录保留。</p>'
         if value.get('omitted_count'):body+='<p>另有 '+str(value['omitted_count'])+' 个调用未在此表展开。</p>'
-        return body+'</section>'
+        return body+'</details>'
 
     def _live_snapshot(self, token, mount, *, force=False):
         self.browser.verify(token, instance_id=self.instance)
@@ -1405,6 +1463,7 @@ class InstanceUI:
             mechanism_trails = (projected.get('mechanism_trails') if 'error' not in projected else projected)
             fragments['live-mechanisms'] = self._fragment(ui_mechanisms.render, mechanism_trails or
                 dict(error=dict(kind='Unavailable', message='机制记录暂不可读')))
+            fragments['live-mechanisms'] += self._fragment(ui.candidate_memory, projected.get('candidate_memory') or {})
             if 'error' not in snapshot:
                 current = snapshot['view']['nodes'][-1] if snapshot['view']['nodes'] else None
                 if manager:
@@ -1636,7 +1695,9 @@ class InstanceUI:
         # stages and never calls the mutating control/status recovery path.
         mechanism_steps = found if not explicit else self._sealed_steps()
         mechanisms = self._guarded(ui_mechanisms.project, reader, mechanism_steps, clean, clean=clean)
-        body += '<div id="live-mechanisms">' + ui_mechanisms.render(mechanisms) + '</div><h2>阶段原文记录</h2>'
+        memory_node=reader._nodes.get(max(mechanism_steps),{}) if mechanism_steps else {}
+        memory=ui_view.candidate_memory(memory_node,clean,loaded_nodes=reader._nodes.values())
+        body += '<div id="live-mechanisms">' + ui_mechanisms.render(mechanisms) + ui.candidate_memory(memory) + '</div><h2>阶段原文记录</h2>'
         if not shown:
             body += '<p>还没有阶段结论。开始研究后，可先到“实时进度”查看工作情况。</p>'
         else:
@@ -1677,8 +1738,15 @@ class InstanceUI:
             job = job if job is not None else reader.node(step)['job']
             # The exact immutable input job and every referenced saved observation
             # identify this display projection; changing any source invalidates it.
-            steps = [row['step'] for row in (job.get('history') or {}).get('nodes', [])]
-            sources = [(number, reader.node(number), reader.observation(number)) for number in steps]
+            steps=ui_view.candidate_steps(job,step)
+            sources=[]
+            for number in steps:
+                node=reader.node(number)
+                # Internal path objects are acquisition handles, not JSON cache
+                # identity. Include the owner's observed metadata and exact facts.
+                identity={key:node.get(key) for key in ('job','payload','seal','result','research',
+                    'origin_identity','candidate_reference_unresolved','navigation_fingerprint')}
+                sources.append((number,identity,reader.observation(number)))
             key = json.dumps([str(self.root), job, sources, history_only], sort_keys=True)
             value = self.candidate_cache.get(key)
             if value is None:
@@ -1728,6 +1796,7 @@ class InstanceUI:
             for gap in projection.get('unresolved', []):
                 label = '推荐' if gap['field'] == 'recommendation' else '提名'
                 body += '<p class="gap">第 ' + str(gap['step']) + ' 阶段有 ' + str(gap['count']) + ' 条' + label + '的候选来源不可读，未计为可用关联；' + ui.link('查看该阶段原文', '/results/' + str(gap['step'])) + '。</p>'
+            body += ui.candidate_memory(projection.get('candidate_memory') or {})
             body += ui.candidate_table(dict(rows, all_candidates=True))
             if after + 20 < total:
                 body += '<p><a href="/candidates?through=' + str(through) + '&amp;prefix=' + identity + '&amp;after=' + str(after + 20) + '">下一页候选</a></p>'
@@ -1768,7 +1837,9 @@ class InstanceUI:
         full = ('<details class="full-text"><summary>查看完整原文（第 ' + str(step) + ' 阶段）</summary>'
                 + render.result_body(step, job, payload, seal, clean=clean) + '</details>')
         role = job['role']
-        label = ui_view.ROLE_LABELS.get(role, role)
+        from . import ui_semantics
+        label = ui_semantics.role_label(job) or ui_view.ROLE_LABELS.get(role, role)
+        memory=ui.candidate_memory(ui_view.candidate_memory(node,clean,loaded_nodes=reader._nodes.values()))
         if role != 'A':
             mechanisms = self._guarded(ui_view.mechanism_labels, reader, range(1, step + 1))
             node = dict(step=step, role=role, state='seal_present_unverified')
@@ -1776,7 +1847,7 @@ class InstanceUI:
                 mechanisms={} if 'error' in mechanisms else mechanisms), clean=clean)
             if 'error' in line:
                 line = dict(node, role_label=label, state_label='已有阶段结论', sealed=False, facts=[], links=[], error=line['error'])
-            body = self._navigation('/results') + ui.role_line(line, expanded=True) + full
+            body = self._navigation('/results') + ui.role_line(line, expanded=True) + memory + full
             body += ui.understanding(self._RESULT_NOTES[:1] + (
                 'W 的“本阶段实验”是封存观察中已接受的受管调用数，不等于独立实验设计数或科学覆盖。',
                 '本阶段候选按首次观察顺序列出；“最高/最低”只在同一口径内按作者声明方向取值，不代表科学排序。'))
@@ -1807,7 +1878,7 @@ class InstanceUI:
             if 'error' not in card else None, delivered=delivered,
             audits=ui_view.audit_facts(self.root, projection, subject=payload), mechanisms=mechanisms, clean=clean), clean=clean) \
             if 'error' not in projection else projection
-        table = ui.candidate_table(rows, ident='candidates')
+        table = memory + ui.candidate_table(rows, ident='candidates')
         if not final:
             table = ui.Safe('<details class="candidates-fold"><summary>候选比较（本阶段 W 提名及 A 选中）</summary>' + table + '</details>')
         materials = self._guarded(self._materials_overview, step, reader, clean=clean)

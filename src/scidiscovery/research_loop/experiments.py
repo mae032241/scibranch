@@ -159,6 +159,13 @@ def _require_new_execution(config):
     # cannot lend its earlier full-task grant to the latest narrow repair.
     if intent.get('output_repair') is not None or intents[-1][1].get('output_repair') is not None:
         raise UnsupportedExecution('Output repair permits original results only; no new scientific execution or compilation')
+    if config.get('research_strategy_version')==3:
+        if (number!=len(intents)-1 or (record/'native-outcome.json').exists()
+                or (record/'stage-end.json').exists()
+                or (c.host_record(c.workspace(root,step))/'result-identity.json').exists()):
+            raise UnsupportedExecution('Live W declarations require the exact active original attempt; ended work uses original-call recovery')
+        if (root/'pause.request').exists():
+            raise ReviewRequired('User pause prevents new W declarations and scientific execution')
 
 
 def _review_observation(value, stamp):
@@ -258,7 +265,7 @@ def registration(executor):
 HOST_CONFIGURATION_FIELDS = frozenset({'scope','record_dir','native_attempt','admission','breadth',
     'engineering_repair','execution_interface','registered_implementation', 'host_execution_authority',
     'execution_host_services', 'frozen_execution_interface', 'worker_view_version', 'host_launch_implementation',
-    'storage_policy'})
+    'storage_policy','research_strategy_version','worker_research_seed','worker_research_goal_id'})
 
 
 def operator_configuration(value, base=None):
@@ -900,7 +907,13 @@ def configure(root,step,executor,config,output):
         scope=stage_scope(root,job),breadth=(job.get('search') or {}).get('breadth'),
         **(dict(engineering_repair=dict(candidate_id=candidate_refs.resolve_reference(root,job,
             job['engineering_repair']['candidate_id']))) if job.get('engineering_repair') else {}))
-    value['storage_policy'] = c.settings(root, job).get('storage_policy')
+    task_settings=c.settings(root,job)
+    value['storage_policy'] = task_settings.get('storage_policy')
+    from . import worker_research
+    if worker_research.applicable(job):
+        value['research_strategy_version'] = 3
+        value['worker_research_goal_id']=task_settings['goal_id']
+        value['worker_research_seed']=list((job.get('search') or {}).get('worker_research',{}).get('seed',[]))
     client = None
     if job.get('worker_view_version') == 1:
         from . import experiment_client
@@ -1047,6 +1060,8 @@ class Records:
         self.config = config
         self.root = Path(config['record_dir'])
         self._preparation_node_held = False
+        self._research_prior_calls = None
+        self._research_state = None
         if self.root.resolve() != self.root:
             raise IntegrityError('Execution record namespace changed')
 
@@ -1054,12 +1069,18 @@ class Records:
         from . import experiment_client
         return experiment_client.root_for_configuration(self.config,allow_standalone=True) or self.root
 
-    def live_status(self, call_id, state, *, accepted=None):
+    def live_status(self, call_id, state, *, accepted=None, public_result=None):
         # Optional presentation must never change a durable call's outcome.
-        try:self._live_status(call_id,state,accepted=accepted)
+        try:self._live_status(call_id,state,accepted=accepted,public_result=public_result)
         except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError,RecursionError):pass
 
-    def _live_status(self, call_id, state, *, accepted=None):
+    def research_status(self, state):
+        # The declaration writer already loaded this exact state under admission.
+        self._research_state=state
+        try:self._live_status(None,None)
+        except (OSError,ValueError,TypeError,KeyError,AttributeError,OverflowError,RecursionError):pass
+
+    def _live_status(self, call_id, state, *, accepted=None, public_result=None):
         """Publish bounded display facts inside the receipt owner's transaction.
 
         This replaceable projection is never admission or scientific evidence.
@@ -1067,9 +1088,9 @@ class Records:
         """
         states={'accepted','submitted','queued','running','cancelling','known_success',
             'known_failed','not_submitted','unknown'}
-        if not isinstance(call_id,str) or not ID.fullmatch(call_id):
+        if call_id is not None and (not isinstance(call_id,str) or not ID.fullmatch(call_id)):
             raise IntegrityError('Execution display identity is invalid')
-        state=state if state in states else execution_status(state)
+        state='unknown' if call_id is None else state if state in states else execution_status(state)
         if state not in states:state='unknown'
         path=self.root/'live-status.json'
         try:
@@ -1083,18 +1104,79 @@ class Records:
         # The first writer knows whether it is publishing the first accepted
         # call only from its admission's existing inventory, never a new scan.
         if accepted is not None and accepted.get('_display_first_call') is True:partial=False
-        if call_id in calls or len(calls)<128:
+        if call_id is None:pass
+        elif call_id in calls or len(calls)<128:
             prior=calls.get(call_id) or {}
             attempt=((accepted or {}).get('native_attempt') or {}).get('number',prior.get('attempt'))
             if type(attempt) is not int or attempt<0:attempt=None;partial=True
+            def mapping(value):return value if isinstance(value,dict) else {}
+            display=dict(mapping(prior.get('display')))
+            from .worker_research import public_text as text
+            if accepted is not None:
+                entry=mapping(accepted.get('code_version')).get('entry')
+                if (not isinstance(entry,str) or not entry or entry.startswith(('/','\\'))
+                        or '\\' in entry or '..' in entry.split('/')
+                        or re.match(r'^[A-Za-z]:',entry)):
+                    source=accepted.get('source_script')
+                    entry=source.replace('\\','/').rsplit('/',1)[-1] if isinstance(source,str) else None
+                display['entry']=text(entry,160)
+                binding=mapping(accepted.get('mechanism_binding'))
+                research=mapping(binding.get('research_binding'))
+                purpose=mapping(research.get('experiment_question'))
+                display['purpose']=text(purpose.get('question') if research else accepted.get('change_intent'),240)
+                if research:
+                    from .worker_research import public_mechanism
+                    snapshot=public_mechanism(research)
+                    if snapshot is not None:
+                        display['research_binding']=snapshot
+                        display['mechanism']=snapshot['label']
+                    display['change_criterion']=text(purpose.get('change_criterion'),240)
+                else:
+                    mechanism=binding.get('mechanism_ref')
+                    declarations=mapping(self.config.get('breadth')).get('mechanisms') or []
+                    if not isinstance(declarations,list):declarations=[]
+                    declaration=next((row for row in declarations if isinstance(row,dict)
+                        and row.get('mechanism_ref')==mechanism),{}) if mechanism is not None else {}
+                    display['mechanism']=text(declaration.get('label'),160)
+            if public_result is not None:
+                result=mapping(mapping(public_result).get('result'))
+                display['result_status']=result.get('status') if isinstance(result.get('status'),str) and result.get('status') in {
+                    'available','missing','invalid','unavailable'} else 'unavailable'
+                metrics=[];declared=result.get('metrics') or []
+                if not isinstance(declared,list):declared=[]
+                for metric in declared[:3]:
+                    if not isinstance(metric,dict):continue
+                    name=text(metric.get('name'),80);number=metric.get('value')
+                    if (name is None or type(number) not in (int,float)
+                            or not -float('inf')<number<float('inf') or len(str(number))>32):continue
+                    metrics.append(dict(name=name,value=number,unit=text(metric.get('unit'),40)))
+                display['metrics']=metrics
+                display['metrics_partial']=len(metrics)<len(declared) or bool(result.get('metrics_omitted_count'))
             calls[call_id]=dict(state=state,attempt=attempt,updated_at=time.time())
+            if display:calls[call_id]['display']=display
             if (prior.get('state') in {'known_success','known_failed','not_submitted'}
                     and state not in {'known_success','known_failed','not_submitted'}):
                 calls[call_id]=prior
         else:partial=True
         value=dict(version=1,scope=self.config['scope'],calls=calls,partial=bool(partial),
             updated_at=time.time(),source='execution_receipt_owner')
+        from . import worker_research
+        if worker_research.enabled(self.config):
+            if self._research_state is not None:
+                value['research']=worker_research.project(self._research_state)
+            elif isinstance(previous.get('research'),dict):value['research']=previous['research']
+            if accepted is not None and self._research_prior_calls is not None:
+                value['research_investment']=worker_research.investment(self.config['scope'],
+                    [*self._research_prior_calls,accepted],research_state=self._research_state)
+            elif previous.get('research_investment') is not None:
+                value['research_investment']=previous['research_investment']
         data=encoded(value)
+        # Preserve execution counts when optional descriptions exceed the slot.
+        # Only this compact display is bounded; originals remain unchanged.
+        for row in sorted(calls.values(),key=lambda row:row.get('updated_at',0)):
+            if len(data)<=65536:break
+            row.pop('display',None)
+            data=encoded(value)
         if len(data)>65536:raise ValueError('Execution display exceeds its fixed bound')
         if path.resolve()!=path or path.is_symlink() or path.exists() and not path.is_file():
             raise IntegrityError('Execution display is not an ordinary mutable slot')
@@ -1162,7 +1244,7 @@ class Records:
                 raise ConcurrentExecution('Another admission still owns its lease; no new call was accepted') from error
             yield
 
-    def admission_binding(self, mechanism, *, expected_calls=None, recovery_admission=None):
+    def admission_binding(self, mechanism, *, expected_calls=None, recovery_admission=None, recovery_binding=None, preflight_binding=None, _research_publish=False):
         calls=self.calls()
         if expected_calls is not None and [path.name for path in calls]!=expected_calls:
             raise ConcurrentExecution('Another original execution was accepted; query its identity')
@@ -1175,6 +1257,36 @@ class Records:
                 raise ReviewRequired(reason)
         else:
             recovery_admission()
+        from . import worker_research
+        if worker_research.enabled(self.config):
+            # The admission owner observes each exact original once; native
+            # polling consumes only its compact derived view.
+            self._research_prior_calls=[json.loads(read(path/'accepted.json')) for path in calls]
+            for accepted in self._research_prior_calls:worker_research.call_fact(accepted,self.config['scope'])
+            if recovery_admission is not None:
+                # Explicit host recovery owns its original allocation proof;
+                # current declarations cannot redefine that original call.
+                if preflight_binding is not None:raise ValueError('Recovery cannot replace its original allocation binding')
+                return worker_research.check_binding(recovery_binding,self.config['scope'])
+            if preflight_binding is not None:
+                # The dispatch still owns node.lock and the same Records
+                # instance as preflight. Consume its published snapshot once;
+                # replaying dependent merge/revise actions can create a new
+                # revision after external preparation has already happened.
+                if not self._preparation_node_held or self._research_state is None:
+                    raise ValueError('Worker declaration requires its original dispatch preflight')
+                binding=worker_research.check_binding(preflight_binding,self.config['scope'])
+                state=worker_research.validate_state(self._research_state,self.config['scope'])
+                row={key:value for key,value in binding['research_binding'].items()
+                    if key not in {'version','experiment_question'}}
+                if state['mechanisms'].get(binding['mechanism_ref'])!=row:
+                    raise ValueError('Prepared execution changed its accepted worker declaration')
+                return binding
+            state=worker_research.load(self.config)
+            updated,binding=worker_research.prepare(self.config,state,mechanism)
+            self._research_state=updated
+            if _research_publish:worker_research.publish(self.config,state,updated)
+            return binding
         from . import breadth
         opportunities=breadth.validate(self.config.get('breadth'))
         rows={row['mechanism_ref']:row for row in opportunities['mechanisms']} if opportunities else {}
@@ -1184,19 +1296,25 @@ class Records:
     @_configuration_effect
     def preflight(self, *, expected_calls, mechanism=None):
         from . import storage_policy as storage
+        from . import worker_research
+        if worker_research.enabled(self.config):_require_new_execution(self.config)
         with self.admission_lease(context=storage.Deadline(self.config['max_seconds'])):
-            return self.admission_binding(mechanism,expected_calls=expected_calls)
+            # The real owner retains declaration originals before any adapter
+            # preparation or allocation can acquire an external effect. Pure
+            # request/state validators remain free of filesystem operations.
+            return self.admission_binding(mechanism,expected_calls=expected_calls,_research_publish=True)
 
-    def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None, _local_preparation=False):
+    def accept(self, descriptor, metadata, interface, *, expected_calls=None, mechanism=None, recovery_admission=None, recovery_binding=None, operation_context=None, _local_preparation=False):
         from . import experiment_client
         return self._accept(descriptor,metadata,interface,expected_calls=expected_calls,mechanism=mechanism,
-            recovery_admission=recovery_admission,operation_context=operation_context,
+            recovery_admission=recovery_admission,recovery_binding=recovery_binding,operation_context=operation_context,
             _local_preparation=_local_preparation,client_facts=experiment_client.load_client_facts(self.config))
 
     @_configuration_effect
-    def _accept(self, descriptor, metadata, interface, *, client_facts, expected_calls=None, mechanism=None, recovery_admission=None, operation_context=None, _local_preparation=False):
+    def _accept(self, descriptor, metadata, interface, *, client_facts, expected_calls=None, mechanism=None, recovery_admission=None, recovery_binding=None, preflight_binding=None, operation_context=None, _local_preparation=False):
         """Snapshot inputs before the short accept.lock publication section."""
-        _require_new_execution(self.config)
+        if not (self.config.get('research_strategy_version')==3 and recovery_admission is not None):
+            _require_new_execution(self.config)
         from .protocol import require_scope
         require_scope(self.config['scope'])
         from . import contracts as c, storage_policy as storage
@@ -1279,7 +1397,13 @@ class Records:
                     bind_input(original, target)
             with self.admission_lease(context=operation_context):
                 binding=self.admission_binding(mechanism,expected_calls=expected_calls,
-                    recovery_admission=recovery_admission)
+                    recovery_admission=recovery_admission,recovery_binding=recovery_binding,
+                    preflight_binding=preflight_binding,_research_publish=True)
+                from . import worker_research
+                if worker_research.enabled(self.config) and self.config.get('host_execution_authority') is not None:
+                    allocation=c.read(c.regular(instance/'execution-authority/calls'/descriptor.name/'allocation.json'))
+                    if allocation.get('binding',{}).get('mechanism_binding')!=binding:
+                        raise ConcurrentExecution('Original execution allocation changed its exact worker declaration')
                 if binding is not None:accepted['mechanism_binding']=binding
                 if direct_input:
                     verify_scientific_inputs(accepted,config=self.config,context=operation_context)
@@ -1348,8 +1472,11 @@ class Records:
                 or value['scope']!=self.config['scope']):
             raise IntegrityError('Accepted execution binding changed')
         from . import breadth
-        try:breadth.check_binding(self.config.get('breadth'),value.get('mechanism_binding'),self.config['scope'],
-            _validated=_validated_breadth,_rows=_breadth_rows)
+        from . import worker_research
+        try:
+            if worker_research.enabled(self.config):worker_research.check_binding(value.get('mechanism_binding'),self.config['scope'])
+            else:breadth.check_binding(self.config.get('breadth'),value.get('mechanism_binding'),self.config['scope'],
+                _validated=_validated_breadth,_rows=_breadth_rows)
         except ValueError as error:raise IntegrityError('Accepted scientific mechanism binding changed') from error
         parent=value.get('parent')
         if not isinstance(parent,dict) or 'candidate_id' not in parent:
@@ -1414,8 +1541,15 @@ def dispatch(config, script, *, parent=None, new=False, change=None, mechanism=N
     """Convenience input path; neutral callers may provide a descriptor directly."""
     from . import experiment_client
     with instance_owner.lease_for_configuration(config):
+        return _dispatch_script(config,script,parent=parent,new=new,change=change,mechanism=mechanism,
+            command_options=command_options,client_facts=experiment_client.load_client_facts(config))
+
+
+def _dispatch_script(config,script,*,client_facts,parent=None,new=False,change=None,mechanism=None,command_options=None):
+    """Consume the dispatch owner's already acquired scientific input facts."""
+    from . import experiment_client
+    with instance_owner.lease_for_configuration(config):
         if '\0' in os.fspath(script):raise CallerError('Script or payload path cannot contain NUL bytes.')
-        client_facts=experiment_client.load_client_facts(config)
         logical=(experiment_client._observe_code_path(script,facts=client_facts)
             if client_facts['root'] is not None and config.get('scope',{}).get('role')=='W' else Path(script).absolute())
         reference=experiment_client._observe_input_reference(config,logical,facts=client_facts)
@@ -1757,7 +1891,7 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
     saved=_saved_observation(config,adapter,call_id,path,
         operation_context=operation_context,verify_files=True)
     if saved is not None:
-        records.live_status(call_id,saved.get('status','unknown'))
+        records.live_status(call_id,saved.get('status','unknown'),public_result=saved.get('public_result'))
         return saved
     accepted=records.accepted(call_id)
     if accepted['interface']!=config['execution_interface']:
@@ -1841,6 +1975,7 @@ def record_observation(config, adapter, call_id, *, collected=None, operation_co
         if path.exists():
             if json.loads(read(path))!=value:raise IntegrityError('Frozen execution observation changed')
         else:write(path,value,root=storage_root,policy=config.get('storage_policy'),context=operation_context)
+    records.live_status(call_id,status,accepted=accepted,public_result=value['public_result'])
     from . import execution_authority
     execution_authority.reconcile_resources(config,adapter,call_id,observation=value,operation_context=operation_context)
     _cleanup_terminal_code_export(config,call_id,value)
@@ -2005,11 +2140,13 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, cl
     try:binding=records.preflight(expected_calls=expected_calls,mechanism=mechanism)
     except (ReviewRequired,breadth.OpportunityRequired) as error:_raise_admission_refusal(error)
     except ConcurrentExecution:return None
-    if binding is not None:mechanism=binding['mechanism_ref']
+    if binding is not None and not config.get('research_strategy_version')==3:mechanism=binding['mechanism_ref']
     call_id = f'{len(expected_calls)+1:04d}-{uuid.uuid4().hex}'
     if config.get('host_execution_authority') is not None:
         from . import execution_authority
-        try:call_id=execution_authority.host_services(config).call_identity(payload,len(expected_calls)+1,mechanism)
+        try:call_id=execution_authority.host_services(config).call_identity(payload,len(expected_calls)+1,
+            binding if config.get('research_strategy_version')==3 else
+            binding['mechanism_ref'] if binding is not None else mechanism)
         except breadth.OpportunityRequired as error:_raise_admission_refusal(error)
     descriptor = payload.model_copy(update={'name':call_id})
     options = dict(command_options=command_options) if command_options is not None else {}
@@ -2101,6 +2238,7 @@ def _prepare_descriptor(config, payload, adapter, records, expected_calls, *, cl
         try:
             accepted = records._accept(prepared, metadata, config['execution_interface'],client_facts=client_facts,
                 expected_calls=expected_calls,mechanism=mechanism,operation_context=operation_context,
+                preflight_binding=binding if config.get('research_strategy_version')==3 else None,
                 _local_preparation=local_preparation)
         except (ReviewRequired,breadth.OpportunityRequired,ConcurrentExecution) as error:
             if local_preparation:
@@ -2329,9 +2467,14 @@ def _cli_parser(*,configuration=True):
     payload.add_argument('--script',type=Path,help='Script path relative to the task workspace, independently of --experiment-dir');payload.add_argument('--payload',type=Path)
     run.add_argument('--experiment-dir',type=Path,help='Current-W Local: independent experiments/<name> runtime directory, created if absent; script remains relative to the task workspace. Other executors use their declared invocation; directory code inputs do not enable this runtime option')
     choice=run.add_mutually_exclusive_group();choice.add_argument('--parent-plan');choice.add_argument('--new-plan',action='store_true')
-    run.add_argument('--change-intent');run.add_argument('--mechanism')
+    run.add_argument('--change-intent')
+    research_choice=run.add_mutually_exclusive_group()
+    research_choice.add_argument('--mechanism')
+    research_choice.add_argument('--research',type=Path,help='W-first JSON declarations, exact mechanism_ref and experiment_question {question,change_criterion}')
     run.add_argument('arguments',nargs=argparse.REMAINDER,help='When declared by the selected executor, script arguments after --; passed as argv, never shell text')
     sub.add_parser('lineage-status')
+    declarations=sub.add_parser('research-declare',help='Register exact W mechanism identities without submitting an experiment')
+    declarations.add_argument('--research',type=Path,required=True)
     compile_command = sub.add_parser('compile', help='Optional local compilation of scientific slots; grants no execution')
     compile_command.add_argument('--implementation', type=Path, required=True)
     compile_command.add_argument('--scientific-files', type=Path, required=True, help='JSON slot-name to listed scientific input alias map; {} for self-contained sources')
@@ -2382,7 +2525,7 @@ def main(argv=None):
         if args.command=='lineage-status' and (type(scope.get('handoff_protocol')) is not int or scope['handoff_protocol']!=protocol.CURRENT):
             print(json.dumps(preserved_progress(config),allow_nan=False));return 0
         owner_lease.enter_context(instance_owner.lease_for_configuration(config))
-        if args.command in {'run','compile','lookup','collect','cancel','reconcile','retire'}:
+        if args.command in {'run','compile','research-declare','lookup','collect','cancel','reconcile','retire'}:
             from .protocol import require_scope
             require_scope(config.get('scope'))
         if args.command in {'query','lookup','collect','cancel','reconcile','retire'}:
@@ -2391,6 +2534,24 @@ def main(argv=None):
             Records(config).accepted(args.call_id)
             accepted_call_id=args.call_id
             original_operation_started=False
+        if args.command=='research-declare':
+            from . import worker_research, experiment_client, storage_policy as storage
+            if not worker_research.enabled(config):raise CallerError('Live declarations require the frozen W-first strategy')
+            _require_new_execution(config)
+            facts=experiment_client.load_client_facts(config)
+            reference=experiment_client._observe_input_reference(config,args.research,facts=facts)
+            declared=worker_research.request(json.loads(read(reference['path'],MAX_BYTES)),batch=False)
+            records=Records(config)
+            with records.admission_lease(context=storage.Deadline(config['max_seconds'])):
+                review=review_status(config)
+                if review['requested'] and review['enforced']:raise ReviewRequired(review['reason'])
+                previous=worker_research.load(config)
+                original=dict(path=str(records.root/'research'/f'{previous["revision"]+1:06d}.json'))
+                current=worker_research.evolve(previous,declared.get('declarations',[]),scope=config['scope'],original_ref=original)
+                worker_research.publish(config,previous,current)
+                records.research_status(current)
+            print(json.dumps(dict(status='research_declared',accepted=False,research=worker_research.project(current)),allow_nan=False))
+            return 0
         adapter=load(config,path=args.config)
         if args.command in {'capabilities','describe'}:
             frozen_declared=_public_capabilities(adapter)
@@ -2439,6 +2600,15 @@ def main(argv=None):
             result={key:result[key] for key in ('status','path','qualification') if key in result}
             code=0
         elif args.command=='run':
+            from . import experiment_client
+            client_facts=experiment_client.load_client_facts(config)
+            mechanism=args.mechanism
+            if args.research is not None:
+                from . import worker_research, experiment_client
+                if not worker_research.enabled(config):raise CallerError('Live experiment declarations require the frozen W-first strategy')
+                reference=experiment_client._observe_input_reference(config,args.research,facts=client_facts)
+                try:mechanism=worker_research.request(json.loads(read(reference['path'],MAX_BYTES)))
+                except (ValueError,TypeError,KeyError) as error:raise CallerError(str(error)) from error
             arguments=args.arguments[1:] if args.arguments[:1]==['--'] else args.arguments
             options=dict(arguments=arguments,experiment_directory=str(args.experiment_dir.absolute()) if args.experiment_dir else None)
             parent=args.parent_plan
@@ -2453,8 +2623,8 @@ def main(argv=None):
                 except ValueError as error:
                     if isinstance(error,(IntegrityError,common.IntegrityError)):raise
                     raise CallerError('The --parent-plan reference does not select a listed candidate; choose its exact candidate reference.') from error
-            result=dispatch(config,args.script or args.payload,parent=parent,new=args.new_plan,change=args.change_intent,mechanism=args.mechanism,
-                command_options=options if arguments or args.experiment_dir else None)
+            result=_dispatch_script(config,args.script or args.payload,parent=parent,new=args.new_plan,change=args.change_intent,mechanism=mechanism,
+                command_options=options if arguments or args.experiment_dir else None,client_facts=client_facts)
             observation=None
             if isinstance(result.get('call_id'),str):
                 call_id=result['call_id'];records=Records(config)

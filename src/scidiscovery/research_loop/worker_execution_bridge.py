@@ -27,9 +27,9 @@ SUBMISSION_DIRECTORY = 'work/experiment'
 SUBMISSION_REF = re.compile(r'S[0-9]{3,6}\Z')
 WAIT_SECONDS = 3600
 COMMANDS = frozenset({'capabilities','describe','compile','run','lineage-status',
-    'query','lookup','collect','cancel','reconcile','retire'})
+    'query','lookup','collect','cancel','reconcile','retire','research-declare'})
 PATH_OPTIONS = frozenset({'--script','--payload','--experiment-dir','--implementation',
-    '--scientific-files','--output'})
+    '--scientific-files','--output','--research'})
 VALUE_OPTIONS = PATH_OPTIONS | {'--start','--key','--parent-plan','--change-intent','--mechanism','--call-id'}
 FLAG_OPTIONS = frozenset({'--metadata','--new-plan'})
 _LOCAL_LAUNCH = ContextVar('scientific_local_launch', default=None)
