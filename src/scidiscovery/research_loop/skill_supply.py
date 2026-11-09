@@ -1,7 +1,8 @@
 """Installation-owned Skill bundles and exact, rebuildable native projections.
 
-This selects only framework-managed Skills. Native user/system/plugin sources
-remain inherited; readonly modes are a soft boundary for trusted same-user code.
+This selects only framework-managed Skills. Other native sources follow the
+backend's resource policy (Pi disables their loading, not its inherited auth).
+Readonly modes are a soft boundary for trusted same-user code.
 """
 from __future__ import annotations
 
@@ -59,8 +60,8 @@ def configuration(value=None):
     return dict(sets=result)
 
 
-def _metadata(directory):
-    """Read only the selected directory's native manual, never its resource tree."""
+def _manual_path(directory):
+    """Observe one selected ordinary bundle/manual; do not parse native YAML."""
     item = _name(directory.name)
     diagnostic = (f'Selected Skill {item!r} requires an ordinary directory and SKILL.md at {directory}; '
         f'install or restore that bundle in the CLI installation skills directory {directory.parent}')
@@ -70,9 +71,15 @@ def _metadata(directory):
     if manual_path.is_symlink() or manual_path.resolve() != manual_path:
         raise ValueError(diagnostic)
     try:
-        manual = c.regular(manual_path, limit=256_000).read_text(encoding='utf-8')
+        return c.regular(manual_path, limit=256_000)
     except (OSError, ValueError) as error:
         raise ValueError(diagnostic) from error
+
+
+def _metadata(directory):
+    """Existing non-Pi/catalog metadata contract; native Pi parses its own YAML."""
+    item = _name(directory.name)
+    manual = _manual_path(directory).read_text(encoding='utf-8')
     lines = manual.splitlines()
     if not lines or lines[0] != '---' or '---' not in lines[1:]:
         raise ValueError(f'Selected Skill {item!r} at {directory} requires SKILL.md name and description frontmatter')
@@ -91,6 +98,15 @@ def _metadata(directory):
     if _name(metadata['name']) != item:
         raise ValueError(f'Selected Skill directory and native name must match at {directory}')
     return metadata
+
+
+def _selected_metadata(directory, backend):
+    if backend == 'pi':
+        # V3 freezes the bundle, not its live native name or description. The
+        # installed SDK's get_commands is authoritative for YAML admission;
+        # the RPC boundary binds its result by this exact manual source.
+        return dict(path=str(_manual_path(directory)))
+    return _metadata(directory)
 
 
 def catalog():
@@ -269,7 +285,7 @@ def prepare(value, *, backend, launcher, existing=None,
     if items:
         result['launcher'] = _launcher_contract(backend, launcher)
     for item in items:
-        _metadata(source / item)
+        _selected_metadata(source / item, backend)
     return result
 
 
@@ -286,7 +302,7 @@ def validate(root, settings):
         # existing backend/launcher contract established for native discovery.
         _launcher_contract(settings.get('native_backend', _default_backend()), settings['native_launcher_argv'])
     for item in items:
-        _metadata(Path(declared['root']) / item)
+        _selected_metadata(Path(declared['root']) / item, settings.get('native_backend', _default_backend()))
     return declared
 
 
@@ -321,9 +337,46 @@ def _targets(root, settings, job):
     return {item: source / item for item in (declared['sets'][name]['items'] if name is not None else [])}
 
 
+def selected_paths(settings, job):
+    """Pure frozen V3 selection; no catalog, asset or control acquisition."""
+    bound = for_job(settings, job)
+    if bound is None:
+        return None
+    text = bound['root']
+    source = Path(text)
+    if (not source.is_absolute() or str(source) != text or '..' in source.parts
+            or text.startswith('//') or '\0' in text):
+        raise ValueError('Skill source requires an exact normalized absolute path')
+    return {item: source / _name(item) for item in bound['items']}
+
+
+def load_selected_resources(root, settings, job, *, rebuild=False):
+    """Launch owner: observe this job's exact manuals, then its projection.
+
+    Bundle directory identities/root/role/revision stay frozen. Only Pi manual
+    paths cross the bridge; native get_commands owns live YAML/name/description
+    admission. No Python YAML prediction, snapshot, registry or catalog scan.
+    """
+    targets = selected_paths(settings, job)
+    if targets:
+        _launcher_contract(settings.get('native_backend', _default_backend()),
+            settings['native_launcher_argv'], settings['skills'].get('launcher'))
+    resources = tuple(dict(_selected_metadata(path, settings.get('native_backend', _default_backend())),
+        path=str(path / 'SKILL.md')) for path in (targets or {}).values())
+    project_from_targets(root, job, targets, rebuild=rebuild)
+    projection = c.workspace(Path(root), job['step']) / '.agents/skills'
+    mounts = tuple((path, path) for path in dict.fromkeys(
+        [projection, *targets.values()] if targets is not None else []))
+    return dict(resources=resources, mounts=mounts)
+
+
 def project(root, settings, job, *, rebuild=True):
     """Only missing derived entries may be rebuilt; unexpected entries fail closed."""
-    targets = _targets(root, settings, job)
+    return project_from_targets(root, job, _targets(root, settings, job), rebuild=rebuild)
+
+
+def project_from_targets(root, job, targets, *, rebuild):
+    """Projection writer consumes already selected sources, never reloads policy."""
     if targets is None:
         return
     from scidiscovery import archive_io as files

@@ -241,10 +241,12 @@ class AcceptedEvents:
 
 
 def initialize(root, settings, *, search_seed, search_ref, identity_root=None,
-        prefix_seed=None, search_rows=None):
+        prefix_seed=None, search_rows=None, is_fork=False):
     from . import accepted_prefix
     root = Path(root)
     identity_root = Path(identity_root or root)
+    if type(is_fork) is not bool or is_fork != (prefix_seed is not None):
+        raise ValueError('Fork accounting requires its produced birth prefix')
     value = dict(version=2, logical_root=str(identity_root),
         instance_id=settings['goal_id'], settings_ref=dict(path=str(identity_root/'settings.json')),
         seq=0, head_ref=None, last_stamp=None, latest={},
@@ -259,7 +261,7 @@ def initialize(root, settings, *, search_seed, search_ref, identity_root=None,
         dispatch_count=0, resource=None, closeout=None, resume=None, final_return=None,
         unresolved_actions=0, first_unresolved_operation=None, explicit_amendment=None,
         action_first=None, action_last=None, final_action_count=0, final_confirmed=False,
-        configuration=None, applied_configuration=0, is_fork=False,
+        configuration=None, applied_configuration=0, is_fork=is_fork,
         prefix=(accepted_prefix.empty(identity_root, settings)
             if prefix_seed is None else copy.deepcopy(prefix_seed)),
         search=copy.deepcopy(search_seed), search_ref=copy.deepcopy(search_ref),
@@ -275,6 +277,66 @@ def initialize(root, settings, *, search_seed, search_ref, identity_root=None,
     return AcceptedState(root, value, base=settings)
 
 
+def _validate_budget_transition(state, event):
+    """Validate the one pending amendment from supplied facts, without reads.
+
+    Redo head/index updates are effects of the declaration, not an independent
+    authority to change ceilings, historical grants, or retained consumption.
+    """
+    owned = {'ceilings', 'historical_max_steps', 'explicit_amendment'}
+    updates = event['head_updates']
+    if event['kind'] != 'budget_amend':
+        if owned.intersection(updates):
+            raise ValueError('Budget ceiling updates require a budget amendment')
+        return
+    for limits, expected_keys in (
+            (event.get('before'), {'max_tokens', 'max_seconds'}),
+            (event.get('after'), {'max_tokens', 'max_seconds'}),
+            (updates.get('ceilings'), {'max_tokens', 'max_seconds', 'max_steps'})):
+        if (not isinstance(limits, dict) or set(limits) != expected_keys
+                or limits['max_tokens'] is not None and (
+                    type(limits['max_tokens']) is not int or limits['max_tokens'] <= 0)
+                or limits['max_seconds'] is not None and (
+                    type(limits['max_seconds']) not in (int, float)
+                    or not 0 < limits['max_seconds'] < float('inf'))):
+            raise ValueError('Invalid audited budget ceilings')
+    if event['before'] != {key: state['ceilings'][key] for key in ('max_tokens', 'max_seconds')}:
+        raise ValueError('Budget amendment predecessor changed')
+    if not isinstance(event.get('authorization_note'), str) or not event['authorization_note'].strip():
+        raise ValueError('Budget amendment has no operator decision')
+    if 'authorization_statement' in event and (not isinstance(event['authorization_statement'], str)
+            or not event['authorization_statement'].strip()):
+        raise ValueError('Budget amendment has no original operator statement')
+    steps = state['ceilings']['max_steps']
+    if {'before_max_steps', 'after_max_steps', 'max_steps_delta'}.intersection(event):
+        if any(type(event.get(key)) is not int or event[key] <= 0
+                for key in ('before_max_steps', 'after_max_steps')):
+            raise ValueError('Invalid audited step ceilings')
+        if event['before_max_steps'] != steps:
+            raise ValueError('Budget step amendment predecessor changed')
+        if (type(event.get('max_steps_delta')) is not int
+                or event['max_steps_delta'] != event['after_max_steps'] - steps):
+            raise ValueError('Audited step amendment delta changed')
+        steps = event['after_max_steps']
+    reference = dict(path=str(Path(state['logical_root'])/'control-ledger'/f'{event["seq"]:06d}.json'))
+    expected = dict(ceilings=dict(event['after'], max_steps=steps),
+        historical_max_steps=max(state['historical_max_steps'], steps))
+    operation = event.get('operation_id')
+    if 'operation_id' in event and (not isinstance(operation, str) or not operation.strip()):
+        raise ValueError('Budget amendment operation identity changed')
+    if operation is None or not operation.startswith('configuration-'):
+        expected['explicit_amendment'] = reference
+    if (updates != expected or type(updates.get('historical_max_steps')) is not int
+            or type(updates['ceilings'].get('max_steps')) is not int):
+        raise ValueError('Budget amendment head updates changed')
+    expected_rows = ({} if operation is None else {'operation/'+operation:
+        dict(previous_seq=state['seq'], previous=None, current=dict(ref=reference))})
+    if (event['index_updates'] != expected_rows
+            or any(type(row.get('previous_seq')) is not int for row in event['index_updates'].values())
+            or event.get('control_files', {})):
+        raise ValueError('Budget amendment redo updates changed')
+
+
 def _apply(state, event):
     from .budget import _duration
     if (type(event.get('seq')) is not int or event['seq'] != state['seq']+1
@@ -284,6 +346,7 @@ def _apply(state, event):
             or not isinstance(event.get('boot_id'), str) or not event['boot_id']
             or event.get('kind') not in EVENT_KINDS or not isinstance(event.get('head_updates'), dict)
             or not isinstance(event.get('index_updates'), dict)
+            or not isinstance(event.get('control_files', {}), dict)
             or set(event['head_updates'])-set(state)
             or set(event['head_updates']).intersection(('seq','head_ref','settings_ref','instance_id','logical_root','clock'))):
         raise ValueError('New control event lost its accepted predecessor')
@@ -293,6 +356,13 @@ def _apply(state, event):
             or type(event['observed_advance_seconds']) not in (int, float)
             or not math.isfinite(event['observed_advance_seconds']) or event['observed_advance_seconds'] < 0):
         raise ValueError('Invalid new advancement observation')
+    # Legacy active events may have no marker, or literal True without the
+    # later optional observed counter. A declared marker is never truthy-only
+    # and elapsed accounting must not silently adopt active uptime semantics.
+    if 'uptime_accounting' in event and (event['uptime_accounting'] is not True
+            or state['clock']['basis'] != 'active'):
+        raise ValueError('Invalid uptime accounting marker')
+    _validate_budget_transition(state, event)
     if 'reanchor' in event:
         from . import budget
         budget._verify_reanchor(state.root, state.base, event, AcceptedEvents(state))
@@ -405,7 +475,7 @@ def _append_prepared(root, state, *, kind, stamp, index_updates,
     return event, next_state
 
 
-def append_budget_event(root, events, **fields):
+def append_budget_event(root, events, *, resource_origin=None, **fields):
     """Accept one already gated domain event and its exact accounting delta."""
     state = events.state
     kind = fields.pop('kind')
@@ -467,7 +537,7 @@ def append_budget_event(root, events, **fields):
                 and final is not None and row['final_return'] == dict(seq=final['seq'],record=final['ref'])):
             updates['final_confirmed'] = True
     elif kind.startswith('resource_'):
-        updates, rows = resource_delta(state, ref, kind, fields)
+        updates, rows = resource_delta(state, ref, kind, fields, origin=resource_origin)
     if fields.get('operation_id') is not None:
         rows['operation/'+fields['operation_id']] = dict(ref=ref)
     event, _ = append(root, state, kind=kind, fields=fields, updates=updates, rows=rows)
@@ -544,7 +614,7 @@ def _resource_call_key(binding):
     return 'resource-call/'+part+'/'+binding['call_id']
 
 
-def resource_delta(state, reference, kind, fields):
+def resource_delta(state, reference, kind, fields, *, origin):
     from .budget import _resource_dimensions, _resource_owner
     from scidiscovery import execution_security
     reference = dict(path=f'control-ledger/{state["seq"]+1:06d}.json')
@@ -554,10 +624,13 @@ def resource_delta(state, reference, kind, fields):
         if not isinstance(fields.get('authorization_note'), str) or not fields['authorization_note'].strip():
             raise ValueError('Execution grant requires its explicit operator decision')
         if resource is None:
-            settings_ref = (state['configuration'] or {}).get('ref', dict(path='settings.json'))
-            selected = c.read(state.root/settings_ref['path'])
-            settings = selected.get('settings', selected)
-            if (fields.get('previous_grant') is not None or fields['owner'] != _resource_owner(settings)
+            settings_ref = (dict(path='settings.json') if state.base.get('execution_resource_policy') is not None
+                else (state['configuration'] or {}).get('ref', dict(path='settings.json')))
+            if origin is None or origin['ref'] != settings_ref:
+                raise ValueError('Initial resource grant requires its produced frozen origin')
+            settings = origin['settings']
+            if (state.base.get('execution_resource_policy') is not None and settings != state.base
+                    or fields.get('previous_grant') is not None or fields['owner'] != _resource_owner(settings)
                     or allowance != settings['execution_resource_policy']['allowance']):
                 raise ValueError('Initial resource grant differs from its frozen owner or allowance')
         elif fields['owner'] != resource['owner']:
@@ -567,8 +640,7 @@ def resource_delta(state, reference, kind, fields):
         resource = dict(owner=fields['owner'], allowance=allowance, grant_ref=reference,
             held=dict(wall_time_seconds=0, max_storage_bytes=0) if resource is None else resource['held'],
             reservation_count=0 if resource is None else resource['reservation_count'],
-            settings_ref=((state['configuration'] or {}).get('ref', dict(path='settings.json'))
-                if resource is None else resource['settings_ref']))
+            settings_ref=settings_ref if resource is None else resource['settings_ref'])
         return dict(resource=resource), {}
     if resource is None or fields['owner'] != resource['owner']:
         raise ValueError('Execution reservation has no exact accepted resource owner')
@@ -653,8 +725,7 @@ def job_acceptance_facts(root, step, *, base):
     prior = state.row(f'job/{step:03d}')
     return dict(state=state, prior=prior,
         reference=c.record_ref(root/'jobs'/f'{step:03d}.json'),
-        stamp=budget.clock_stamp() if prior is None else None,
-        is_fork=(root/'host-runtime/fork/manifest.json').exists())
+        stamp=budget.clock_stamp() if prior is None else None)
 
 
 def accept_job_from_facts(root, step, job, *, facts, guidance_current):
@@ -680,7 +751,7 @@ def accept_job_from_facts(root, step, job, *, facts, guidance_current):
     _, state = _append_prepared(root, state, kind='job_accept', stamp=facts['stamp'],
         fields=dict(step=step, job_ref=reference),
         updates=dict(current_job=row, prepared_count=state['prepared_count']+1,
-            max_local_step=max(state['max_local_step'], step), is_fork=facts['is_fork']),
+            max_local_step=max(state['max_local_step'], step)),
         index_updates={f'job/{step:03d}': dict(previous_seq=state['seq'], previous=prior, current=row)})
     return state
 

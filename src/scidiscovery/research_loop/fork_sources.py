@@ -400,7 +400,7 @@ class _Closure:
         # remain scientific locators and are never read as control JSON.
         for name in ('job', 'job_ref', 'task_ref', 'configuration', 'native_intent',
                 'root_intent_ref', 'source_provenance', 'observations', 'native_authorship',
-                'formal_review', 'pending_executions',
+                'formal_review', 'pending_executions', 'native_process',
                 'contract', 'accepted', 'completed', 'submission', 'native_terminal',
                 'observation', 'retirement', 'parent_ref', 'previous_ref', 'execution_authority',
                 'request', 'intent', 'outcome', 'header', 'decision', 'admission',
@@ -455,8 +455,11 @@ class _Closure:
             if path.endswith('/pending-execution-set.json'):
                 for proof in attempt.values():follow(proof)
             else:
-                for name in ('intent','outcome','header'):
+                for name in ('intent','outcome','header','metadata','interruption'):
                     follow(attempt.get(name))
+        if path.endswith('/interruption.json'):
+            for name in ('runner-process.json', 'native-process.json'):
+                follow((value.get('processes') or {}).get(name))
         if path.endswith('/pending-execution-set.json'):
             for proof in value.get('host_preparations',[]):follow(proof)
             for allocation in value.get('allocations',[]):
@@ -486,8 +489,13 @@ class _Closure:
                 raise ValueError('Fork accepted control changed its exact original call')
             if 'code_version' in value:
                 self.code(source, step, value['call_id'], value['code_version'])
-            else:
+            elif not isinstance(value.get('tcad'), dict):
                 self.science_ref(source,value['script'])
+            if isinstance(value.get('tcad'), dict):
+                # TCAD declares the generated dispatch envelope as control,
+                # independently of its scientific source/code version. Its
+                # embedded paths are not another control-record schema.
+                self.control_proof(source,value['script'])
             attempt = (value.get('native_attempt') or {}).get('number', 0)
             record = f'native-evidence/{step:03d}' + (f'/continuations/{attempt:03d}' if attempt else '')
             self.control(source, dict(path=record + '/experiment-config.json'))
@@ -506,13 +514,16 @@ class _Closure:
         if path.endswith('/execution-observation.json'):
             from . import experiments
             accepted=follow(value['accepted']);completed=follow(value['completed'])
-            _,controls=experiments._observation_file_roles(value,accepted,completed)
+            science,controls=experiments._observation_file_roles(value,accepted,completed)
             for proof in value.get('proofs',[]):
                 original=proof.get('source') if isinstance(proof.get('source'),dict) else proof
                 if (str(Path(source.original_root)/proof['path']) in controls
-                        or str(Path(source.original_root)/original['path']) in controls):
-                    follow(proof)
-                    if original is not proof:follow(original)
+                        or str(Path(source.original_root)/original['path']) in controls
+                        or original not in science):
+                    # The verified completion declares this required proof. Its
+                    # opaque bytes are custody, not another control-record schema.
+                    self.control_proof(source,proof)
+                    if original is not proof:self.control_proof(source,original)
                 else:
                     self.science_ref(source,proof)
         self.control_active.remove(key)
@@ -554,13 +565,41 @@ class _Closure:
         if self.entry(source.origin_identity,path,required=False) is None:
             self.reference(source,path,proof=proof)
 
+    def control_proof(self, source, proof):
+        """Retain one declared opaque proof without interpreting its contents."""
+        source=o.source_for_ref(source,proof)
+        raw=Path(proof.get('snapshot',proof['path']))
+        if raw.is_absolute():
+            if not raw.is_relative_to(source.original_root):
+                source,_=o.material_owner(source,dict(source=str(raw)))
+            raw=raw.relative_to(source.original_root)
+        return self.add(source,o.relative(raw.as_posix()),proof=proof)
+
     def call(self, source, row):
         """Keep the exact accepted/terminal controls named by one frozen call row."""
+        values={}
         for name in ('accepted', 'completed', 'terminal', 'observation', 'retirement'):
             proof = row.get(name)
             if proof is not None:
-                self.control(source, proof)
-        for proof in [*row.get('originals', []), *row.get('outputs', [])]:
+                values[name]=self.control(source, proof)
+        required=[]
+        if 'accepted' in values and 'completed' in values:
+            from . import experiments
+            observed=values.get('observation')
+            science,controls=experiments._observation_file_roles(observed,
+                values['accepted'],values['completed'],
+                directory=(Path(source.original_root)/row['accepted']['path']).parent)
+            required=[proof for proof in values['completed'].get('proofs',[])
+                if proof['path'] in controls or proof not in science]
+        for proof in row.get('originals', []):
+            # Archived row spellings retain their original source path and
+            # snapshot. Only exact completion declarations confer a proof role.
+            if any(Path(source.original_root)/proof['path']==Path(source.original_root)/item['path']
+                    and proof['size_bytes']==item['size_bytes'] for item in required):
+                self.control_proof(source,proof)
+            else:
+                self.science_ref(source,proof)
+        for proof in row.get('outputs', []):
             self.science_ref(source,proof)
 
     def settings(self, source):
@@ -572,7 +611,7 @@ class _Closure:
             for number in range(1, revision['revision'] + 1):
                 self.add(source, f'host-control/configuration/revisions/{number:06d}.json')
                 self.add(source, f'host-control/configuration/identities/{number:06d}.json')
-            self.add(source, f'host-control/configuration/bindings/{source.step:03d}.json')
+            self.add(source, f'host-control/configuration/bindings/{source.step:06d}.json')
         settings = o.source_settings(source)
         if settings.get('source_provenance') is not None:
             self.control(source, settings['source_provenance'])
@@ -857,10 +896,19 @@ def inspect_source(parent_root, selected_job_ref):
     visible_sources = {}
     science_nodes = []
     frozen_prefix=job.get('history',{}).get('prefix')
+    prefix_source=source
+    if job.get('formal_review') is not None:
+        # The request saved the requester-inclusive accepted cut. Retain its
+        # canonical host navigation, not legacy linear history or a later head;
+        # the reviewer's neutral scientific inputs remain unchanged.
+        prefix_source=o.source_for_ref(source,job['formal_review'])
+        request=_json(o.resolve_ref(prefix_source,job['formal_review']))
+        if frozen_prefix!=request['prefix']:
+            raise ValueError('Fork review history differs from its immutable requested prefix')
     if frozen_prefix is not None:
         from . import accepted_prefix
         namespace=accepted_prefix._view_key(frozen_prefix)
-        owner=o.source_for_ref(source,dict(origin_identity=frozen_prefix['branch'],path='settings.json'))
+        owner=o.source_for_ref(prefix_source,dict(origin_identity=frozen_prefix['branch'],path='settings.json'))
         for ordinal in range(1,frozen_prefix['count']+1):
             ordinal_ref=closure.add(owner,f'{accepted_prefix.MEMBERS}/{namespace}/ordinals/{ordinal:09d}.json')
             binding=_json(o.resolve_ref(owner,ordinal_ref))
@@ -880,16 +928,6 @@ def inspect_source(parent_root, selected_job_ref):
                 scientific_event=event_ref))
     else:
         raise ValueError('Fork task lacks its exact accepted input prefix')
-    if job.get('formal_review') is not None:
-        # A reviewer sees its neutral subject binding. Host routing and science
-        # investment retain the requester's exact accepted prefix separately.
-        request_source = o.source_for_ref(source, job['formal_review'])
-        request = _json(o.resolve_ref(request_source, job['formal_review']))
-        requester = o.dependency(request_source, request['requester']['step'],
-            seal_ref=request['requester']['seal'])
-        requester_job = o.source_job(requester)
-        science_nodes = [*requester_job.get('history', {}).get('nodes', []),
-            dict(step=requester.step, seal_ref=request['requester']['seal'])]
     for row in science_nodes:
         if type(row.get('step')) is not int or row['step'] >= step:
             raise ValueError('Selected task history crosses its input boundary')

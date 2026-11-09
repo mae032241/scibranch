@@ -5,10 +5,12 @@ identity, cleanup and collection remain with the existing execution owner.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tomllib
 
@@ -161,10 +163,10 @@ def _public_root(public, root, work, home, runtime_roots):
         raise UnsupportedExecution('Declared public root overlaps private control or a scientific namespace mount')
 
 
-def _experiment_python(root, job, control_python):
-    """Capture the exact node's alternate Python once, in host-only state."""
-    from . import configuration_updates, python_environment
-    selected=configuration_updates.for_job(root,job).get('execution_config')
+def _experiment_python(settings, control_python):
+    """Capture mutable interpreter installation facts, not configuration again."""
+    from . import python_environment
+    selected=settings.get('execution_config')
     if selected is None or selected['executor']!='local_execution:command':return None
     argv=selected['configuration'].get('run_argv')
     if (not isinstance(argv,list) or not argv or argv[0]==control_python
@@ -172,37 +174,142 @@ def _experiment_python(root, job, control_python):
     return dict(run_argv=list(argv),runtime_roots=python_environment.runtime_roots(argv[0]))
 
 
+def load_native_facts(record, *, task_ref):
+    """Acquire the intent body and its proof from one exact original byte read."""
+    from . import contracts as c, experiments as e
+    path=Path(c.record_path(Path(record)/'native-intent.json'))
+    descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    with os.fdopen(descriptor,'rb') as stream:
+        before=os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise e.IntegrityError('Native intent is not an original regular file')
+        data=stream.read()
+        after=os.fstat(stream.fileno())
+    if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)
+            != (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+            or len(data)!=after.st_size):
+        raise e.IntegrityError('Native intent changed during capture')
+    intent=json.loads(data)
+    if not isinstance(intent,dict) or intent.get('task_ref')!=task_ref:
+        raise e.IntegrityError('Native execution task changed')
+    proof=dict(path=str(path),size_bytes=len(data),
+        file_stat=[after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns],
+        sha256=hashlib.sha256(data).hexdigest())
+    return dict(record=Path(record),intent=intent,task_ref=task_ref,intent_proof=proof)
+
+
 def prepare(root, step, record, work, home, args, *, standard, resume_position=None, native_options=None,
-            job=None, intent=None, settings=None):
-    """Freeze one host-only attempt; unsupported launchers still support reads."""
-    from . import contracts as c, execution, experiments as e
-    snapshot=record/'native-execution-permissions.json'
-    if job is None:job=c.read(c.regular(root/'jobs'/f'{step:03d}.json'))
+            job=None, intent=None, settings=None, intent_proof=None):
+    """Independent legacy preparation owner; native runners use explicit facts."""
+    from . import contracts as c, shared_input_views, configuration_updates
+    producers={}
+    if job is None:job=c.read_job(root/'jobs'/f'{step:03d}.json',sources=producers)
+    if settings is None:settings=configuration_updates.for_job(root,job)
     if intent is None:
-        from . import shared_input_views
-        native=shared_input_views._load_native_facts(root,job)
-        if native['record']!=record:raise e.IntegrityError('Native preparation belongs to another attempt')
+        if intent_proof is not None:raise ValueError('Intent proof requires its owner-loaded body')
+        native=load_native_facts(record,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'))
         intent=native['intent']
+    else:
+        if intent_proof is None:raise ValueError('Owner-loaded intent requires its original proof')
+        native=dict(record=record,intent=intent,task_ref=intent['task_ref'],intent_proof=intent_proof)
+    sources=shared_input_views.load_source_facts(root,job,work,
+        native=native,policy=settings,material_sources=producers)
+    selected=shared_input_views.materialize_selected_code(root,shared_input_views.selected_code_from_facts(sources))
+    return prepare_from_facts(root,step,record,work,home,args,resume_position=resume_position,
+        job=job,intent=intent,settings=settings,source_facts=sources,selected_code=selected,
+        material_sources=producers,projection=codex_projection(standard,native_options))
+
+
+def prepare_from_facts(root, step, record, work, home, args, *, resume_position, job, intent,
+                       settings, source_facts, selected_code, material_sources, projection):
+    """Existing bridge closure, with an explicit provider projection, not an executor.
+
+    The runner owns immutable inputs once. Only the mount producer observes
+    changing filesystem state at each accepted Local effect boundary.
+    """
+    from . import execution, experiments as e
+    validate_source_facts(root,step,record,work,job,intent,settings,source_facts)
+    snapshot=record/'native-execution-permissions.json'
     attempt=intent.get('attempt',0)
+    if type(attempt) is not int or attempt<0:
+        raise e.IntegrityError('Native preparation requires an exact attempt number')
     expected=execution.origin(root,step)
     if attempt:expected=expected/'continuations'/f'{attempt:03d}'
-    if record!=expected or intent.get('task_ref')!=c.record_ref(root/'jobs'/f'{step:03d}.json'):
+    native=source_facts['native']
+    try:task_ref=native['task_ref'];intent_proof=native['intent_proof']
+    except KeyError:
+        raise e.IntegrityError('Native preparation requires its owner-loaded task reference and intent proof') from None
+    if (not root.is_absolute() or '..' in root.parts
+            or record!=expected
+            or task_ref!=dict(path=str(root/'jobs'/f'{step:03d}.json'))
+            or intent.get('task_ref')!=task_ref
+            or intent_proof.get('path')!=str(record/'native-intent.json')):
         raise e.IntegrityError('Native preparation belongs to another task or attempt')
-    value=dict(version=1,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
-        native_attempt=dict(number=attempt,execution_key=c.record_ref(record/'native-intent.json') if attempt
-            else c.record_ref(root/'jobs'/f'{step:03d}.json')),
-        intent=e.proof(record/'native-intent.json'),
+    value=dict(version=1,task_ref=task_ref,
+        native_attempt=dict(number=attempt,execution_key=dict(path=intent_proof['path']) if attempt
+            else task_ref),
+        intent=intent_proof,
         native_argv=list(args),home=str(home),workspace=str(work))
     project=job.get('project')
     if project is not None:
-        frozen=c.settings(root,job) if settings is None else settings
-        if frozen.get('project')!=project or frozen.get('native_options')!=native_options:
+        if settings.get('project')!=project:
             raise e.IntegrityError('Project native policy differs from its frozen job')
-        project_policy(frozen)
         value['project']=project
     public=Path(job['public_root'])
     native_args=list(args)
     try:
+        projection['prepare'](value,native_args,root=root,record=record,work=work,home=home,
+            job=job,settings=settings,resume_position=resume_position)
+        from scidiscovery.plugin_configuration import PluginConfigurationError
+        try:experiment_python=_experiment_python(settings,value['python'])
+        except PluginConfigurationError:
+            raise e.UnsupportedExecution('The selected experiment Python runtime could not be captured for this native attempt') from None
+        if experiment_python is not None:value['experiment_python']=experiment_python
+        _public_root(public,root,work,home,[Path(path) for path in
+            ('/usr','/bin','/lib','/lib64','/etc/resolv.conf','/etc/hosts','/etc/ssl/certs',
+             *value['runtime_roots'],*(experiment_python or {}).get('runtime_roots',[]),
+             *value['runtime_programs'],*value['private_roots'],value['python'])])
+        projection['validate_runtime'](value,[public,work,*value['runtime_roots'],
+            *(experiment_python or {}).get('runtime_roots',[])])
+    except e.UnsupportedExecution as error:
+        if project is not None:raise
+        value['unsupported']=str(error)
+    with snapshot.open('x') as stream:
+        json.dump(value,stream,ensure_ascii=False,allow_nan=False);stream.flush();os.fsync(stream.fileno())
+    snapshot.chmod(0o400)
+
+    def check_available():
+        if 'unsupported' in value:raise e.UnsupportedExecution(value['unsupported'])
+
+    def launch(config,accepted,command,cwd):
+        if (accepted.get('native_attempt')!=value['native_attempt']
+                or accepted.get('scope')!=config['scope']
+                or config['scope']['job_ref']!=value['task_ref']):
+            raise e.IntegrityError('Scientific launch differs from its original native attempt')
+        check_available()
+        return _launch_from_facts(value,config,accepted,command,cwd,public=public,root=root,
+            source_facts=source_facts,selected_code=selected_code,material_sources=material_sources,
+            projection=projection)
+    launch.check_available=check_available
+    return native_args,launch
+
+
+def validate_source_facts(root,step,record,work,job,intent,settings,facts):
+    """Pure scope validation; never reload the runner's originals."""
+    from .experiments import IntegrityError
+    if (facts['root']!=root or facts['work']!=work or facts['target']!=work
+            or facts['job']!=job or facts['policy']!=settings
+            or facts['native']['record']!=record or facts['native']['intent']!=intent
+            or job.get('step')!=step):
+        raise IntegrityError('Scientific input facts belong to another native attempt')
+
+
+def codex_projection(standard,native_options):
+    """Codex keeps its actual native sandbox, never a name-selected framework branch."""
+    def prepare_projection(value,native_args,*,root,record,work,home,job,settings,resume_position):
+        from . import experiments as e, shared_input_views
+        project=job.get('project')
+        if project is not None:project_policy(settings)
         if not standard:
             raise e.UnsupportedExecution('This custom native launcher has no declared scientific subprocess sandbox; managed local launch is unsupported')
         if native_options is None:
@@ -218,21 +325,13 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
             if policy['writable_roots']:
                 raise e.UnsupportedExecution('Additional native writable roots have no declared scientific namespace mapping')
             originals=[]
-        helper=_native_program(args[:1])
+        helper=_native_program(native_args[:1])
         bwrap=shutil.which('bwrap')
         if bwrap is None:raise e.UnsupportedExecution('The native scientific namespace wrapper is unavailable')
         value.update(policy=policy,permission_sources=originals,native=dict(path=str(helper)),bwrap=dict(path=str(Path(bwrap).resolve())),
             python=str(Path(sys.executable).absolute()),runtime_roots=list(dict.fromkeys((sys.base_prefix,sys.prefix))))
-        from scidiscovery.plugin_configuration import PluginConfigurationError
-        try:
-            experiment_python=_experiment_python(root,job,value['python'])
-        except PluginConfigurationError:
-            raise e.UnsupportedExecution('The selected experiment Python runtime could not be captured for this native attempt') from None
-        if experiment_python is not None:value['experiment_python']=experiment_python
-        _public_root(public,root,work,home,[Path(path) for path in
-            ('/usr','/bin','/lib','/lib64','/etc/resolv.conf','/etc/hosts','/etc/ssl/certs',
-             *value['runtime_roots'],*(experiment_python or {}).get('runtime_roots',[]),
-             value['native']['path'],value['python'])])
+        value.update(runtime_programs=[str(helper)],private_roots=[],workspace_readonly=False,
+            metadata=['.git','.agents','.codex','.aws'])
         backend=record/'scientific-native-home';backend.mkdir(mode=0o700)
         tmpdir=os.environ.get('TMPDIR')
         from . import shared_input_views
@@ -262,43 +361,63 @@ def prepare(root, step, record, work, home, args, *, standard, resume_position=N
             value['project_writable_targets']=[str(path) for path in project_writes]
         native_args[position:position]=['-c','sandbox_workspace_write='+_toml(worker_policy)]
         value['applied_native_argv']=list(native_args)
-    except e.UnsupportedExecution as error:
-        if project is not None:raise
-        value['unsupported']=str(error)
-    with snapshot.open('x') as stream:
-        json.dump(value,stream,ensure_ascii=False,allow_nan=False);stream.flush();os.fsync(stream.fileno())
-    snapshot.chmod(0o400)
-    original=e.proof(snapshot)
+        value['configuration_mounts']=[['--ro-bind',value['backend_configuration']['path'],'/task-native/config.toml']]
+        value['environment']=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME='/task-native',
+            TMPDIR='/task-tmp',XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1')
+    return dict(prepare=prepare_projection,validate_runtime=lambda value,paths:None,
+        mounts=_codex_mount_facts,project=_codex_scientific_arguments)
 
-    def check_available():
-        if 'unsupported' in value:raise e.UnsupportedExecution(value['unsupported'])
 
-    def launch(config,accepted,command,cwd):
-        if e.proof(snapshot)!=original or c.read(c.regular(snapshot))!=value:
-            raise e.IntegrityError('Original native permissions changed')
-        if (e.proof(record/'native-intent.json')!=value['intent']
-                or c.record_ref(root/'jobs'/f'{step:03d}.json')!=value['task_ref']
-                or accepted.get('native_attempt')!=value['native_attempt']
-                or accepted.get('scope')!=config['scope']
-                or config['scope']['job_ref']!=value['task_ref']):
-            raise e.IntegrityError('Scientific launch differs from its original native attempt')
-        if 'unsupported' in value:raise e.UnsupportedExecution(value['unsupported'])
-        for key in ('backend_configuration',):
-            if e.proof(value[key]['path'])!=value[key]:
-                raise e.IntegrityError('Original native sandbox implementation changed')
-        return _launch(value,config,accepted,command,cwd,public=public,root=root)
-    launch.check_available=check_available
-    return native_args,launch
+def _codex_mount_facts(root,job,work,*,context,source_facts,selected_code,mounts,value,**layout):
+    from . import shared_input_views, experiments as e
+    # The actual mount producer observes the installed configuration inode at
+    # the effect boundary; it never reloads the runner's permission snapshot.
+    original=value['backend_configuration']
+    if e.proof(original['path'])!=original:
+        raise e.IntegrityError('Original native sandbox implementation changed')
+    return shared_input_views.load_mount_facts(root,job,work,include_skills=False,
+        context=context,source_facts=source_facts,selected_code=selected_code,mounts=mounts)
+
+
+def _codex_scientific_arguments(value,command,*,policy_cwd,project,cwd):
+    from . import experiments as e, shared_input_views
+    if _profile(value['policy'],policy_cwd,'/task-tmp',virtual=True,
+            project_writes=shared_input_views.project_targets(project,writable=False))!=value['backend_permission_profile']['configuration']:
+        raise e.IntegrityError('Accepted scientific cwd differs from its native permission projection')
+    if project is not None:
+        command=['/bin/sh','-c','cd "$1" && shift && exec "$@"','scid-project-cwd',cwd,*command]
+    return [value['native']['path'],'sandbox','-P',PERMISSION_PROFILE,'-C',str(policy_cwd),'--',*command]
 
 
 def _launch(value,config,accepted,command,cwd,*,public,root):
+    """Independent legacy argv inspection owner (not used by the native bridge)."""
+    from . import contracts as c, shared_input_views
+    producers={};job=c.read_job(root/'jobs'/f'{config["scope"]["step"]:03d}.json',sources=producers)
+    sources=shared_input_views.load_source_facts(root,job,Path(value['workspace']),material_sources=producers)
+    selected=shared_input_views.materialize_selected_code(root,shared_input_views.selected_code_from_facts(sources))
+    value=dict(value,runtime_programs=[value['native']['path']],private_roots=[],workspace_readonly=False,
+        metadata=['.git','.agents','.codex','.aws'],
+        configuration_mounts=[['--ro-bind',value['backend_configuration']['path'],'/task-native/config.toml']],
+        environment=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME='/task-native',TMPDIR='/task-tmp',
+            XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1'))
+    return _launch_from_facts(value,config,accepted,command,cwd,public=public,root=root,
+        source_facts=sources,selected_code=selected,material_sources=producers,projection=codex_projection(True,None))
+
+
+def _launch_from_facts(value,config,accepted,command,cwd,*,public,root,source_facts,selected_code,
+                       material_sources,projection):
     from . import experiments as e, shared_input_views, storage_policy
     from . import contracts as c
-    from . import worker_execution_bridge, experiment_client
+    from . import worker_execution_bridge, experiment_client, local_experiments
     context=storage_policy.Deadline(config['max_seconds'],upstream=worker_execution_bridge.operation_context())
     shared_input_views.ensure_capability(context=context)
-    producer_sources={}
-    job=c.read_job(root/'jobs'/f'{config["scope"]["step"]:03d}.json',sources=producer_sources)
+    job=source_facts['job']
+    if (source_facts['root']!=root or source_facts['work']!=Path(value['workspace'])
+            or source_facts['target']!=Path(value['workspace'])
+            or job.get('step')!=config['scope']['step']
+            or Path(config['record_dir'])!=experiment_client._record_directory_from_facts(root,job['step'],job)
+            or list(command)!=accepted['command'] or cwd!=accepted.get('cwd')):
+        raise e.IntegrityError('Scientific launch differs from its owner-loaded bindings')
     project=job.get('project')
     if value.get('project')!=project:
         raise e.IntegrityError('Scientific project differs from its frozen native attempt')
@@ -306,17 +425,22 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         raise e.UnsupportedExecution('Selected executor has no default scientific subprocess namespace')
     directory=e.Records(config).directory(accepted['call_id'])
     work=Path(value['workspace']);source=Path(accepted['source_script'])
-    input_sources=shared_input_views.load_source_facts(root,job,work,material_sources=producer_sources)
+    input_sources=source_facts
     if input_sources['native']['intent'].get('attempt',0)!=value['native_attempt']['number']:
         raise e.IntegrityError('Scientific input facts belong to another native attempt')
     client_facts=experiment_client.client_bindings_from_facts(root,work,job,
-        material_paths=input_sources['material_paths'],material_sources=producer_sources)
-    command=list(command);bindings=[];code_root=None;final_mounts=[]
+        material_paths=input_sources['material_paths'],material_sources=material_sources)
+    command=list(command);bindings=[];code_root=None;final_mounts=[];output=None
     if 'code_version' in accepted:
-        from . import code_versions
-        if e._code_version_binding(config,accepted)!=root:
-            raise e.IntegrityError('Scientific code belongs to another exact instance')
-        version=accepted['code_version'];code_root=work/version['logical_root']
+        from . import code_versions, project_layout
+        try:version=project_layout.validate_code(project,accepted['code_version'],purpose='run')
+        except (ValueError,KeyError,TypeError) as error:
+            raise e.IntegrityError('Scientific code differs from its frozen project') from error
+        if (source!=work/version['logical_root']/version['entry']
+                or accepted.get('base_identity')!=(project['base_identity'] if project is not None else None)
+                or any(key in accepted for key in ('entry','source_reference','source_input'))):
+            raise e.IntegrityError('Scientific code differs from its owner-loaded logical source')
+        code_root=work/version['logical_root']
         cwd=cwd or str(Path(project['base_root']) if project is not None else work)
         if (code_root.resolve()!=code_root or not code_root.is_dir()
                 or Path(cwd).is_relative_to(code_root)):
@@ -335,8 +459,9 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
             artifacts=target/'artifacts'
             if artifacts.resolve()!=artifacts or artifacts.exists() and not artifacts.is_dir():
                 raise e.UnsupportedExecution('Scientific artifacts require an ordinary output directory')
-            from . import local_experiments
-            bindings.append(('--bind',local_experiments.artifact_directory(config,accepted['call_id']),artifacts))
+            output=local_experiments.artifact_directory_from_facts(config,accepted['call_id'],
+                root=root,work=work,job=job)
+            bindings.append(('--bind',output,artifacts))
         elif accepted.get('snapshot_files'):
             raise e.IntegrityError('Scientific code snapshots require their accepted experiment directory')
         command[accepted['script_index']]=str(Path(project['base_root'])/version['entry'] if project is not None else source)
@@ -365,18 +490,8 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
             or project is not None and Path(cwd)==Path(project['base_root']))):
         raise e.UnsupportedExecution('Scientific working directory is outside its assigned workspace')
     policy_cwd=work if project is not None else Path(cwd)
-    project_writes=shared_input_views.project_targets(project,writable=False)
-    if _profile(value['policy'],policy_cwd,'/task-tmp',virtual=True,project_writes=project_writes)!=value['backend_permission_profile']['configuration']:
-        raise e.IntegrityError('Accepted scientific cwd differs from its native permission projection')
-    input_mounts=None
+    scientific=projection['project'](value,command,policy_cwd=policy_cwd,project=project,cwd=cwd)
     if code_root is not None:
-        input_facts=shared_input_views.load_mount_facts(root,job,work,include_skills=False,
-            context=context,source_facts=input_sources)
-        input_mounts=shared_input_views.mount_arguments_from_facts(input_facts)
-        targets=[Path(input_mounts[index+2]) for index,argument in enumerate(input_mounts)
-            if argument in ('--bind','--ro-bind')]
-        if any(target.is_relative_to(code_root) or code_root.is_relative_to(target) for target in targets):
-            raise e.UnsupportedExecution('Scientific input mount overlaps the selected code directory')
         try:
             export=code_versions.materialize(root,step=config['scope']['step'],call_id=accepted['call_id'],
                 code_version=version,context=context)
@@ -385,7 +500,9 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
         bindings.insert(0,('--ro-bind',export,code_root))
         if accepted.get('experiment_directory') is not None:
             (Path(cwd)/'artifacts').mkdir(exist_ok=True)
-    backend=Path('/task-native')
+    if project is not None and output is None:
+        output=local_experiments.artifact_directory_from_facts(config,accepted['call_id'],
+            root=root,work=work,job=job)
     wrapped=[value['bwrap']['path'],'--unshare-user','--unshare-pid','--unshare-ipc','--unshare-uts',
         '--die-with-parent','--new-session','--clearenv','--proc','/proc','--dev','/dev','--tmpfs','/tmp']
     runtime_roots=[Path(path) for path in ('/usr','/bin','/lib','/lib64')]
@@ -411,42 +528,46 @@ def _launch(value,config,accepted,command,cwd,*,public,root):
                 runtime_roots.append(Path(path))
     # Runtime binaries outside the system trees are exact read-only files;
     # neither their user's home nor the control source tree is mounted.
-    for path in dict.fromkeys((value['native']['path'],str(Path(command[0]).absolute()))):
+    projection['validate_runtime'](value,[*runtime_roots,Path(command[0]).absolute(),public,work])
+    for path in dict.fromkeys((*value['runtime_programs'],str(Path(command[0]).absolute()))):
         if not any(Path(path).is_relative_to(base) for base in runtime_roots):
             wrapped.extend(['--ro-bind',path,path])
     _public_root(public,root,work,Path(value['home']),[*runtime_roots,
         *[Path(path) for path in ('/etc/resolv.conf','/etc/hosts','/etc/ssl/certs',
-            value['native']['path'],str(Path(command[0]).absolute()))]])
+            *value['runtime_programs'],*value['private_roots'],str(Path(command[0]).absolute()))]])
     wrapped.extend(['--ro-bind',str(public),str(public)])
-    wrapped.extend(shared_input_views.workspace_arguments(root,work))
-    wrapped.extend(['--ro-bind',value['backend_configuration']['path'],str(backend/'config.toml'),
-        '--tmpfs',str(work/'work/experiment'),'--tmpfs','/task-tmp','--chdir',cwd])
+    wrapped.extend(shared_input_views.workspace_arguments(root,work,readonly=value['workspace_readonly']))
+    for mount in value['configuration_mounts']:wrapped.extend(mount)
+    wrapped.extend(['--tmpfs',str(work/'work/experiment'),'--tmpfs','/task-tmp','--chdir',cwd])
     # Codex protects these metadata directories even when they were absent at
     # preparation. Supply them in the host workspace before inner sandboxing.
     metadata_root=directory/'inputs' if code_root is None and 'entry' in accepted else policy_cwd
-    for name in ('.git','.agents','.codex','.aws'):
+    for name in value['metadata']:
         path=metadata_root/name
         if not path.exists():path.mkdir(mode=0o700)
+    input_facts=projection['mounts'](root,job,work,context=context,source_facts=input_sources,
+        selected_code=selected_code,mounts=[*final_mounts,
+            *[(source,target) for mode,source,target in bindings if mode=='--ro-bind']],
+        code_root=code_root,cwd=Path(cwd),metadata_root=metadata_root,output=output,
+        output_mounts=[(source,target) for mode,source,target in bindings if mode=='--bind'],
+        value=value)
+    input_mounts=shared_input_views.mount_arguments_from_facts(input_facts)
+    if code_root is not None:
+        # The exact captured export itself is expected; unrelated originals may
+        # never be hidden under it or replaced by the code overlay.
+        targets=[Path(target) for target,source_path in input_facts['mappings'].items()
+            if (Path(source_path),Path(target))!=(export,code_root)]
+        if any(target.is_relative_to(code_root) or code_root.is_relative_to(target) for target in targets):
+            raise e.UnsupportedExecution('Scientific input mount overlaps the selected code directory')
+    wrapped.extend(input_facts.get('workspace_writes',()))
     for mode,source_path,target in bindings:wrapped.extend([mode,str(source_path),str(target)])
     if project is not None:
         if code_root is None:
             raise e.UnsupportedExecution('Project local execution requires an exact project code version')
-        from . import local_experiments
         wrapped.extend(shared_input_views.project_arguments(project,work,code_tree=export,
-            artifacts=local_experiments.artifact_directory(config,accepted['call_id']),writable=False,context=context))
-        shared_input_views.project_overlap(project,[(Path(input_mounts[index+1]),Path(input_mounts[index+2]))
-            for index,argument in enumerate(input_mounts) if argument in ('--bind','--ro-bind')])
-    if input_mounts is None:
-        input_facts=shared_input_views.load_mount_facts(root,job,work,mounts=final_mounts,
-            include_skills=False,context=context,source_facts=input_sources)
-        input_mounts=shared_input_views.mount_arguments_from_facts(input_facts)
+            artifacts=output,writable=False,context=context,base_facts=input_facts.get('base_facts')))
     wrapped.extend(input_mounts)
-    environment=dict(PATH='/usr/bin:/bin',HOME='/task-tmp',CODEX_HOME=str(backend),
-        TMPDIR='/task-tmp',XDG_RUNTIME_DIR='/task-tmp',LANG='C.UTF-8',PYTHONDONTWRITEBYTECODE='1')
-    for key,content in environment.items():wrapped.extend(['--setenv',key,content])
+    for key,content in value['environment'].items():wrapped.extend(['--setenv',key,content])
     bootstrap='umask 077; chmod 700 /task-tmp; exec "$@"'
-    if project is not None:
-        command=['/bin/sh','-c','cd "$1" && shift && exec "$@"','scid-project-cwd',cwd,*command]
-    scientific=['/bin/sh','-c',bootstrap,'scid-scientific-sandbox',value['native']['path'],
-        'sandbox','-P',PERMISSION_PROFILE,'-C',str(policy_cwd),'--',*command]
+    scientific=['/bin/sh','-c',bootstrap,'scid-scientific-sandbox',*scientific]
     return shared_input_views._BwrapCommand(wrapped+scientific,command_index=len(wrapped)),None,None

@@ -64,7 +64,8 @@ def contract(root, job=None):
 def capture_participants(root, job):
     """Retain actual native identity, never inferred from role or subject inputs."""
     root = Path(root).resolve()
-    from . import continuation
+    from . import backends, continuation
+    adapter = backends.selected(configuration_updates.for_job(root, job)).for_job(job)
     rows, participants, complete = [], set(), True
     for number, record in enumerate(execution.records(root, job['step'])):
         if not (record / 'native-outcome.json').exists():
@@ -79,12 +80,11 @@ def capture_participants(root, job):
                    outcome=q._ref(root, record / 'native-outcome.json'))
         binding = outcome.get('native_identity') or {}
         try:
-            from . import backends
             provider=backends.participant_provider(binding)
-            if not binding.get('path',):
+            if not adapter.complete_authorship or provider.name != adapter.name or not binding.get('path',):
                 raise ValueError('native_participant_identity_unsupported')
-            original = continuation.session(root, job['step'], record, home=binding['home'],
-                session_path=binding['path'], identity_proof=True)
+            intent = q._read(root, row['intent'])
+            original = adapter.acquire_participant_session(outcome, intent, c.workspace(root, job['step']))
             path = c.host_record(c.workspace(root, job['step'])) / 'authorship' / f'{number:03d}.json'
             path.parent.mkdir(parents=True, exist_ok=True)
             kind=provider.authorship_proof_kind(binding)
@@ -93,7 +93,7 @@ def capture_participants(root, job):
                 native_process=q._ref(root, record / 'native-process.json'))
             retained = q._save(root, path, metadata)
             identity = provider.validate_participant_event(outcome.get('native_thread_event'),outcome,
-                q._read(root,row['intent']),c.workspace(root,job['step']))
+                intent,c.workspace(root,job['step']))
             participants.add(identity)
             row.update(status='known', participant=list(identity), session=original,
                 proof_kind=kind, metadata=retained)
@@ -109,9 +109,11 @@ def capture_participants(root, job):
 
 
 def _metadata_participant(row, metadata, outcome, intent, process, workspace, intent_reference):
-    """Validate frozen hook facts; historical native homes need not still exist."""
-    session = (outcome.get('native_identity') or {}).get('session')
-    thread_event = outcome.get('native_thread_event')
+    """Validate common bindings, then pure provider-owned retained semantics.
+
+    All originals are supplied by the caller. In particular this path must not
+    run a live EOF/resume validator against a later (or deleted) native home.
+    """
     from . import backends
     try:
         provider=backends.participant_provider(outcome.get('native_identity') or {})
@@ -120,19 +122,13 @@ def _metadata_participant(row, metadata, outcome, intent, process, workspace, in
         raise q.IntegrityError('Authorship provider proof unsupported') from error
     if (metadata.get('version') != 1 or metadata.get('kind') != kind or row.get('proof_kind')!=kind
             or metadata.get('intent') != row['intent'] or metadata.get('outcome') != row['outcome']
-            or not isinstance(session, dict) or session.get('source') != 'native_metadata_hooks'
-            or session.get('workspace') != str(workspace) or session.get('thread_id') != outcome.get('thread_id')
-            or not isinstance(thread_event, dict) or thread_event.get('type') != 'thread.started'
-            or thread_event.get('thread_id') != session['thread_id']
-            or metadata.get('session') != dict(session, thread_event=thread_event)
-            or row.get('session') != metadata['session']
-            or (outcome.get('budget_notification') or {}).get('status') != 'available'
             or process.get('task_ref') != (intent['task_ref'] if row['attempt'] == 0 else intent_reference)):
         raise q.IntegrityError('Authorship compact native identity changed')
     try:
-        return provider.validate_participant_event(thread_event,outcome,intent,workspace)
-    except ValueError as error:
-        raise q.IntegrityError('Authorship native provider proof changed') from error
+        provider.validate_participant_process(outcome, process)
+        return provider.validate_participant_proof(row,metadata,outcome,intent,workspace)
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise q.IntegrityError('Authorship compact native identity changed: provider proof') from error
 
 
 def participants(root, job, seal, *, source=None):
@@ -167,7 +163,7 @@ def participants(root, job, seal, *, source=None):
             continue
         outcome = q._read(root, row['outcome'])
         from . import backends
-        try: backends.participant_provider(outcome.get('native_identity') or {})
+        try: provider = backends.participant_provider(outcome.get('native_identity') or {})
         except ValueError:
             raise q.IntegrityError('Authorship has no complete native participant scope')
         if row.get('metadata') is not None:
@@ -178,10 +174,9 @@ def participants(root, job, seal, *, source=None):
                 q._read(root, metadata['native_process']), c.workspace(root, job['step']),
                 c.record_ref(record / 'native-intent.json'))
         else:
-            identity = ('codex_exec', outcome['thread_id'])
             header = root / row['header']['path']
             q._check({**row['header'], 'path': str(header)})
-            continuation.validate_session_header(header.read_bytes(), identity[1], c.workspace(root, job['step']))
+            identity = provider.validate_participant_header(header.read_bytes(), outcome, c.workspace(root, job['step']))
         if row['participant'] != list(identity) or row['session']['thread_id'] != identity[1]:
             raise q.IntegrityError('Authorship participant identity changed')
         found.add(identity)
@@ -192,13 +187,53 @@ def participants(root, job, seal, *, source=None):
                 reason=None if proof['complete'] else 'native_identity_unavailable')
 
 
+def _inherited_attempt_inventory(source, proof, seal):
+    """Check the entire supplied closure and sealed chain, not only listed rows.
+
+    Pure: original membership, logical names and the seal are already acquired.
+    The terminal output anchors the tail even if both a row and its manifest
+    intent were omitted. No historical native session is reopened.
+    """
+    base = f'native-evidence/{source.step:03d}'
+    rows = proof['attempts']
+    expected = [base + (f'/continuations/{number:03d}' if number else '')
+        for number in range(len(rows))]
+    inventory = {entry['path'] for entry in source.entries
+        if entry['origin_identity'] == source.origin_identity
+        and entry['path'].endswith('/native-intent.json')
+        and (entry['path'] == base + '/native-intent.json'
+            or entry['path'].startswith(base + '/continuations/'))}
+    if not rows or inventory != {path + '/native-intent.json' for path in expected}:
+        raise q.IntegrityError('Inherited authorship omits a native attempt or context')
+    execution_ref = seal.get('execution_ref')
+    chain = execution_ref.get('chain') if isinstance(execution_ref, dict) else None
+    if (execution_ref is not None and (not isinstance(chain, list) or len(chain) != len(rows)
+            or execution_ref.get('attempt') != len(rows) - 1)
+            or execution_ref is None and len(rows) != 1):
+        raise q.IntegrityError('Inherited authorship differs from its sealed attempt inventory')
+    root = Path(source.original_root)
+    for number, (row, record) in enumerate(zip(rows, expected)):
+        for field, name in (('intent', 'native-intent.json'), ('outcome', 'native-outcome.json'),
+                ('interruption', 'interruption.json')):
+            reference = row.get(field)
+            if reference is None:
+                continue
+            if (reference.get('origin_identity', source.origin_identity) != source.origin_identity
+                    or q.control_reference(root, reference) != dict(path=str(root / record / name))
+                    or chain is not None and chain[number].get(name) != q.control_reference(root, reference)):
+                raise q.IntegrityError('Inherited authorship differs from its exact attempt originals')
+    if q.control_reference(root, seal['raw_ref'])['path'] != str(root / expected[-1] / 'science-output.json'):
+        raise q.IntegrityError('Inherited authorship omitted its terminal attempt')
+
+
 def _inherited_participants(source, job, seal):
     """Verify retained headers in the original workspace identity, without a home."""
-    from . import originals, continuation
+    from . import originals
     ref = seal.get('native_authorship')
     if ref is None:
         return dict(complete=False, participants=[], reason='native_identity_unavailable')
     proof = c.read(originals.resolve_ref(source, ref))
+    _inherited_attempt_inventory(source, proof, seal)
     found, complete = set(), True
     first_digest = previous = previous_interruption = None
     for number, row in enumerate(proof['attempts']):
@@ -227,18 +262,22 @@ def _inherited_participants(source, job, seal):
             complete = False
             continue
         from . import backends
-        try: backends.participant_provider(outcome.get('native_identity') or {})
+        try: provider = backends.participant_provider(outcome.get('native_identity') or {})
         except ValueError:
             raise q.IntegrityError('Inherited native participant scope is incomplete')
         if row.get('metadata') is not None:
             metadata = c.read(originals.resolve_ref(source, row['metadata']))
-            process = c.read(originals.resolve_ref(source, metadata['native_process']))
+            process_ref = metadata['native_process']
+            if (process_ref.get('origin_identity', source.origin_identity) != source.origin_identity
+                    or q.control_reference(source.original_root, process_ref) != dict(path=str(
+                        Path(source.original_root) / Path(row['intent']['path']).parent / 'native-process.json'))):
+                raise q.IntegrityError('Inherited authorship native process changed')
+            process = c.read(originals.resolve_ref(source, process_ref))
             identity = _metadata_participant(row, metadata, outcome, intent, process,
                 source.logical_workspace, q.control_reference(source.original_root, row['intent']))
         else:
-            identity = ('codex_exec', outcome['thread_id'])
             header = originals.resolve_ref(source, row['header'])
-            continuation.validate_session_header(header.read_bytes(), identity[1], source.logical_workspace)
+            identity = provider.validate_participant_header(header.read_bytes(), outcome, source.logical_workspace)
         if row['participant'] != list(identity) or row['session']['thread_id'] != identity[1]:
             raise q.IntegrityError('Inherited native participant changed')
         found.add(identity)
@@ -404,14 +443,16 @@ def _subject(root, selected):
     return dict(producer_step=step, producer_seal=ref, material=item['material'])
 
 
-def _request_original(root, reference):
-    """Carry the request's origin while reading its unchanged nested references."""
+def _request_original(root, reference, *, owner=None):
+    """Carry a supplied owner's context through the unchanged request binding."""
     from . import originals
     parts = Path(reference['path']).parts
     if len(parts) < 3 or parts[0] != 'native-evidence' or not parts[1].isdigit():
         raise q.IntegrityError('Formal review request has no exact original requester')
     step = int(parts[1])
-    if reference.get('origin_identity') is not None:
+    if owner is not None:
+        source = originals.at_step(originals.source_for_ref(owner, reference), step)
+    elif reference.get('origin_identity') is not None:
         manifest = originals._manifest(root)
         if manifest is None:
             raise q.IntegrityError('Formal review request lost its original instance')
@@ -448,7 +489,7 @@ def _request_value(root, selected, job):
     subject = _subject(root, selected)
     identity = authors(root, subject['producer_step']) if subject else dict(complete=False, participants=[])
     from . import backends
-    backend = backends.selected(configuration_updates.for_job(root, job))
+    backend = backends.selected(configuration_updates.for_job(root, job)).for_job(job)
     reason = ('formal_review_subject_missing_or_ambiguous' if subject is None else
               'subject_authorship_unsupported' if not identity['complete'] else
               'reviewer_identity_unsupported' if not backend.complete_authorship else None)
@@ -522,11 +563,11 @@ def selected_compiler(root, reference, *, controls_only=False):
     return row['compiler'], compiler
 
 
-def input_binding(root, reference, *, sources=None):
-    """Exact material and producer metadata, without mounting authored conclusions."""
+def input_binding(root, reference, *, sources=None, owner=None):
+    """Exact material and producer metadata, retaining any supplied original owner."""
     from . import originals, history, material_references
     sources = {} if sources is None else sources
-    context, request = _request_original(root, reference)
+    context, request = _request_original(root, reference, owner=owner)
     requester = originals.source_job(context)
     subject = request['subject']
     producer, seal = _seal_original(root, subject['producer_step'], subject['producer_seal'], context,
@@ -602,7 +643,7 @@ def unavailable_attempts(root, step, *, before_step=None):
 def choice_constraints(root, job, references=None):
     """Freeze existing failures, not a retry allowance or a second history store."""
     from . import backends
-    backend=backends.selected(configuration_updates.for_job(root, job))
+    backend=backends.selected(configuration_updates.for_job(root, job)).for_job(job)
     if references is None:
         paths=sorted((Path(root)/'native-evidence').glob('*/formal-review-unavailable.json'),key=lambda path:int(path.parent.name))
         references=[q._ref(root,path) for path in paths if int(path.parent.name)<job['step']]

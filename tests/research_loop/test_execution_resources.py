@@ -11,7 +11,7 @@ import pytest
 from scidiscovery.operations.execution import AdapterCapability, ExecutionInterfaceRegistration
 from scidiscovery.operations.runtime_plugins import (RuntimePluginFactory, RuntimePluginContribution,
     HOST_EXECUTION_GATE_KEY, HOST_EXECUTION_GATE_SCHEMA, HOST_EXECUTION_GATE_CONTRACT)
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, experiments as e
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, experiments as e
 from scidiscovery.research_loop import execution_authority as authority, qualification as q
 from execution_fixtures import execution_registry, DifferentExternalIdentity
 from test_formal_review import LAUNCHER
@@ -134,7 +134,9 @@ def test_configure_rejects_old_factory_that_ignores_host_services(tmp_path, exec
     root = prepare(tmp_path, executor='local_execution:command', options=dict(run_argv=[sys.executable]))
     finish(root, 1, 'H', [], action='experiment')
     job = c.build_job(root, 2, 'W', [1]); record = execution.record(root, 2)
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
+    intent = dict(task_ref=c.record_ref(root / 'jobs/002.json'))
+    accepted_budget.accept_native(root, 2, record, intent)
+    assert c.read(record / 'native-intent.json') == intent
     with pytest.raises(e.UnsupportedExecution, match='does not declare'):
         e.configure(root, 2, 'local_execution:command', dict(run_argv=[sys.executable]),
             c.workspace(root, 2) / 'work/experiment-config.json')
@@ -148,19 +150,46 @@ def test_public_run_rejects_sealed_w_config_before_provider_or_reservation(tmp_p
     monkeypatch.delenv('REVIEW_REUSE_AUTHOR', raising=False); monkeypatch.delenv('REVIEW_MISSING_AUTHOR', raising=False)
     root = prepare(tmp_path, launcher=[str(launcher)])
     assert controller.run(root)['status'] == 'finish'
-    job = c.build_job(root, 6, 'W', [2, 5]); record = execution.record(root, 6)
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/006.json')))
-    path = c.workspace(root, 6) / 'work/experiment-config.json'
-    config = e.configure(root, 6, 'resource_fixture:fixture', {}, path)
-    finish(root, 6, 'W', [2, 5])
-    assert job['execution_qualifications']  # Genuine thin sealed review, synthetic native identities.
-    subject = q._read(root, job['execution_qualifications'][0])['subject']
-    original = c.workspace(root, 6) / subject['material']['path']; identity = e.proof(original)
+    # The current strategy starts W001; no hypothetical H/W/A/review step 5
+    # exists. Reuse the configuration made while that actual W was active.
+    job = c.read_job(root / 'jobs/001.json'); record = execution.origin(root, 1)
+    config = c.read(record / 'experiment-config.json')
+    assert job['role'] == 'W' and job['research_strategy_version'] == 3
+    assert config['scope']['job_ref'] == c.record_ref(root / 'jobs/001.json')
+    assert config['native_attempt'] == dict(number=0, execution_key=execution.identity(root, 1, 0))
+    assert (record / 'result-identity.json').is_file()
+    assert not job['execution_qualifications']  # No review or authority is invented.
+    original = c.workspace(root, 1) / 'artifacts/model.txt'; identity = e.proof(original)
     from scidiscovery.operations.execution import LocalFileDescriptor
     payload = LocalFileDescriptor(name='ignored', local_path=str(original), size_bytes=identity['size_bytes'], media_type='application/octet-stream')
-    with pytest.raises(ValueError, match='attempt has ended'):
+    before = budget.execution_accounting(root)
+    assert not e.Records(config).calls() and not before['reservations']
+    head = accepted_budget.read(root)
+    assert accepted_budget.authority_calls(head, 1) == {}
+    checked = []
+    require_active = e._require_new_execution
+    def ended(config_):
+        checked.append(config_)
+        return require_active(config_)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Sealed W reached factory/provider, authority allocation or resource reservation')
+    monkeypatch.setattr(e, '_require_new_execution', ended)
+    monkeypatch.setattr(e, 'load', forbidden)
+    monkeypatch.setattr(e, '_adapter', forbidden)
+    monkeypatch.setattr(GateContractFixture, 'prepare', forbidden)
+    monkeypatch.setattr(GateContractFixture, 'submit', forbidden)
+    monkeypatch.setattr(GateContractFixture, 'policy', forbidden)
+    monkeypatch.setattr(authority, '_allocate_call', forbidden)
+    monkeypatch.setattr(authority, 'record_policy_decision', forbidden)
+    monkeypatch.setattr(budget, 'execution_grant', forbidden)
+    monkeypatch.setattr(budget, 'reserve_execution', forbidden)
+    monkeypatch.setattr(budget, 'bind_execution', forbidden)
+    with pytest.raises(e.UnsupportedExecution, match='ended work uses original-call recovery'):
         e.dispatch_descriptor(config, payload)
-    assert not list(root.glob('**/accepted.json')) and not budget.execution_accounting(root)['reservations']
+    assert checked == [config]
+    assert not e.Records(config).calls()
+    assert budget.execution_accounting(root) == before
+    assert accepted_budget.authority_calls(accepted_budget.read(root), 1) == {}
 
 
 @pytest.mark.parametrize('phase',['prepare','submit'])

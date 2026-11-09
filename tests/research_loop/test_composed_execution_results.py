@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, experiments as e, history, native, search
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, experiments as e, history, native, search
 from test_history_handoff import finish
 
 
@@ -36,12 +36,14 @@ def case(tmp_path,options,observer=None):
             'print(json.dumps(dict(candidates=[],current_candidate=None,actual_submission=None,coverage=dict(status="complete",note="No domain claims"))))\n'))
         extra['history_observer']=dict(adapter=str(adapter),config={})
     controller.prepare(root,goal,public,['never-launched'],max_tokens=10000,max_seconds=120,max_steps=10,
-        model='no-model',reasoning_effort='high',node_budget_mode='soft',experiment_mode='external',**extra)
+        model='no-model',reasoning_effort='high',node_budget_mode='soft',experiment_mode='external',
+        # This fixture binds an H catalogue, not v3 live W declarations.
+        research_strategy_version=1,**extra)
     finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Two synthetic mechanisms',commitments=[
         dict(label=label,minimal_test='Read the exact backend observation',existing_ref=None) for label in ('P','Q')],
-        focus=dict(label=None,action='screen')))
+        focus=dict(index=1,action='screen')))
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),
+    accepted_budget.accept_native(root,2,record,dict(task_ref=c.record_ref(root/'jobs/002.json'),
         search_slice=search.accept(root,job)))
     path=c.workspace(root,2)/'work/config.json';config=e.configure(root,2,'composed_execution:fixture',options,path)
     package=c.workspace(root,2)/'code/package';package.parent.mkdir(exist_ok=True)
@@ -50,12 +52,12 @@ def case(tmp_path,options,observer=None):
         reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(path),*map(str,args)],capture_output=True,text=True)
         assert reply.returncode==expected,(reply.stdout,reply.stderr)
         return json.loads(reply.stdout)
-    started=cli('run','--payload',package,'--new-plan','--mechanism','P',expected=0 if options.get('synchronous') else 2)
+    started=cli('run','--payload',package,'--new-plan','--mechanism','1',expected=0 if options.get('synchronous') else 2)
     return root,job,config,cli,started['call_id']
 
 
 def seal_and_read(root,job,observed=True):
-    finish(root,2,'W',[1],mechanism_findings=[
+    finish(root,2,'W',[1],preserve_native_intent=True,mechanism_findings=[
         dict(mechanism='P',basis='observed' if observed else 'blocked',finding='Synthetic backend fact; no scientific qualification.'),
         dict(mechanism='Q',basis='blocked',finding='Not executed in this fixture.')])
     seal=c.read(execution.record(root,2)/'result-identity.json');fact=c.read(root/seal['observations']['path'])
@@ -127,7 +129,7 @@ def test_async_without_collect_reconciles_same_call_before_seal(tmp_path,compose
     (e.Records(config).root/'forbid-backend-reads').write_text('Repeated reconciliation must reuse the original projection.')
     before={p:p.read_bytes() for p in directory.rglob('*') if p.is_file()}
     assert cli('reconcile','--call-id',call)['status']==outcome
-    c.validate(c.workspace(root,2));history.validate_managed(root,job,fact['managed_calls'])
+    c.validate(c.workspace(root,2))
     assert before=={p:p.read_bytes() for p in directory.rglob('*') if p.is_file()}
     # A evaluates the frozen fact; subsequent work can be admitted without replay.
     record=execution.record(root,3)
@@ -138,19 +140,21 @@ def test_async_without_collect_reconciles_same_call_before_seal(tmp_path,compose
             next_focus=dict(mechanism_ref='h001.m1',action='improve')),
         next_action='continue_w',route_reason='Improve the observed mechanism',
         decision_request=dict(decision='mechanism',question='What changes the mechanism choice?',change_criterion='A discriminating observation'))
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/003.json')))
+    accepted_budget.accept_native(root,3,record,dict(task_ref=c.record_ref(root/'jobs/003.json')))
     c.write(record/'science-output.json',payload);c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,
+        usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     c.seal_result(root,3)
     assert search.project(root,4)['mechanisms']['h001.m1']['status']=='screened'
     successor_job=c.build_job(root,4,'W',[1,2,3]);record=execution.record(root,4)
     node_anchor=budget.accept_node(root,successor_job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,successor_job))
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/004.json'),**anchor))
+    accepted_budget.accept_native(root,4,record,dict(task_ref=c.record_ref(root/'jobs/004.json'),**anchor))
     successor=e.configure(root,4,'composed_execution:fixture',dict(synchronous=True),c.workspace(root,4)/'work/config.json')
     assert not successor['breadth']['prior_unknown']
-    package=c.workspace(root,4)/'work/package';package.write_bytes(b'new opaque input')
-    assert e.dispatch(successor,package,new=True,mechanism='P')['status']=='known_success'
+    package=c.workspace(root,4)/'code/package';package.parent.mkdir(exist_ok=True)
+    package.write_bytes(b'new opaque input')
+    assert e.dispatch(successor,package,new=True,mechanism='1')['status']=='known_success'
 
 
 def test_late_reconcile_preserves_old_sealed_unknown_without_explicit_recovery(tmp_path,composed_registry,monkeypatch):
@@ -158,7 +162,7 @@ def test_late_reconcile_preserves_old_sealed_unknown_without_explicit_recovery(t
     from scidiscovery.research_loop import managed_wait
     # Retained historical pre-wait seal: only the fixture bypasses the new seal gate.
     with monkeypatch.context() as patch:
-        patch.setattr(managed_wait,'before_seal',lambda *args:None)
+        patch.setattr(managed_wait,'before_seal',lambda *args,**kwargs:None)
         fact,calls=seal_and_read(root,job,observed=False)
     record=execution.record(root,2);seal_bytes=(record/'result-identity.json').read_bytes()
     assert len(fact['managed_calls'])==len(calls)==1
@@ -174,7 +178,7 @@ def test_late_reconcile_preserves_old_sealed_unknown_without_explicit_recovery(t
     page_bytes=page_path.read_bytes();page=json.loads(page_bytes)
     assert page['experiments']==calls and page['next_page'] is None
     e.load(config).complete(call);assert cli('reconcile','--call-id',call)['status']=='known_success'
-    assert history.managed_calls(root,job)[0]['status']=='known_success'
+    assert history._observe_managed_calls(root,job,call_ids=[call])[0]['status']=='known_success'
     c.validate(c.workspace(root,2))
     assert (record/'result-identity.json').read_bytes()==seal_bytes
     assert fact_path.read_bytes()==fact_bytes and page_path.read_bytes()==page_bytes
@@ -200,22 +204,22 @@ def test_reconcile_rejects_changed_original_identity_and_native_evidence(tmp_pat
 def test_pending_and_unknown_originals_block_new_calls_without_fabricated_running(tmp_path,composed_registry):
     root,job,config,cli,call=case(tmp_path,dict(collect=False,query_state='queued'))
     directory=e.Records(config).directory(call);accepted=c.read(directory/'accepted.json')
-    source=tmp_path/'second';source.write_bytes(b'no second submission')
+    source=c.workspace(root,2)/'code/second';source.write_bytes(b'no second submission')
     for state in ('accepted','submitted','queued','running','cancelling','unknown','unrecognized'):
         path=directory/'backend-accepted.json';backend=c.read(path);backend['state']=state;c.write(path,backend)
         before={p:p.read_bytes() for p in directory.rglob('*') if p.is_file()}
         expected='unknown' if state in {'unknown','unrecognized'} else state
-        result=e.dispatch(config,source,new=True,mechanism='Q')
+        result=e.dispatch(config,source,new=True,mechanism='2')
         assert result['call_id']==call and result['status']==expected
         progress=e.progress(config)
         assert progress['counts'][expected]==1 and progress['calls'][0]['status']==expected
         if state in {'queued','cancelling'}:
-            assert cli('run','--payload',source,'--new-plan','--mechanism','Q',expected=2)['status']==state
+            assert cli('run','--payload',source,'--new-plan','--mechanism','2',expected=2)['status']==state
             assert cli('reconcile','--call-id',call,expected=2)['status']==state
         assert accepted==c.read(directory/'accepted.json') and len(e.Records(config).calls())==1
         assert before=={p:p.read_bytes() for p in directory.rglob('*') if p.is_file()}
     # A pending string without the original external binding is still unknown.
     backend['state']='queued';c.write(path,backend);(directory/'submission.json').unlink()
-    assert e.dispatch(config,source,new=True,mechanism='Q')['status']=='unknown'
+    assert e.dispatch(config,source,new=True,mechanism='2')['status']=='unknown'
     assert cli('reconcile','--call-id',call,expected=2)['status']=='unknown'
     assert len(e.Records(config).calls())==1

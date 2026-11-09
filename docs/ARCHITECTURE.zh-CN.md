@@ -21,9 +21,87 @@ Linux 只读挂载保护科学命名空间中的
 新实例由 `scid-research` 管理，实验工具为 `scid-experiment`。没有 LLM Root、MCP 调度服务或后台 Root daemon。
 核心提供薄 CLI 与实例 UI；旧 CLI/MCP/UI、Root 宿主、平台配置生成与 legacy systemd 部署已退役。
 
-`research_config.py` 是 TOML、CLI 与宿主入口共同的准备、默认值和校验路径。新实例冻结实际生效设置；修改新建声明不更新已有实例。`backends.py` 将 Codex 与显式 protocol 输运隔开，不接管科学判断、预算或执行授权。protocol 权限为 launcher 提示，不证明隔离；不支持原生续接和完整作者证明，不能取得正式独审。开启子 Agent 也不证明作者或用量完整。具体字段与限制见[配置与后端参考](RESEARCH_CONFIGURATION.md)。
+`research_config.py` 是 TOML、CLI 与宿主入口共同的准备、默认值和校验路径。新实例冻结实际生效设置；修改新建声明不更新已有实例。`backends.py` 将 Codex、显式 protocol 输运与实验性 Pi 隔开，不接管科学判断、预算或执行授权。protocol 权限为 launcher 提示，不证明隔离；不支持原生续接和完整作者证明，不能取得正式独审。开启子 Agent 也不证明作者或用量完整。具体字段与限制见[配置与后端参考](RESEARCH_CONFIGURATION.md)。
 
 每个原生后端实现完整的 `Backend` 抽象类，拥有配置准备、profile 与权限投影、启动／续接、观测、终态证据、恢复能力、作者证明和公开配置投影。控制层和 UI 消费统一事实，可选遥测缺失保持 unknown。标准 Codex 适配器持有一个 app-server 输运，通过准确 thread／turn 通知采集，不读取私有 rollout；投影跳过工具和输入正文，完整助手最终回答独立流式保留，公开预览保持紧凑。宿主时钟、科学判断和受管实验执行器沿用既有 owner。
+
+**实验性 Pi：公共研究路径。** 默认后端仍为 Codex，Pi 须显式选择。Pi 实现同一 `Backend` 边界，不继承 Codex/protocol，
+也不建立另一套工作流。普通 H/W/A/E、当前回答 Schema、明确实例根下的 Local 执行、
+声明工程、所选 Skills 与历史任务分支均复用既有公共 owner。profile 须提供准确的
+`provider/model-id` 和显式受支持 thinking（`reasoning_effort`）；launcher 仅一个配置的
+可执行程序（默认 `pi`），不带参数、不替换模型或截档。不支持 `service_tier`、Codex
+原生选项或 native response-schema flag。科学 JSON 由模型编写，当前 Schema 随 prompt
+发送，不保证 provider JSON-mode。
+
+新 Pi 准备默认 Local，并冻结有限的 `pi_rpc_v1`、turn 计量续接策略：
+`max_attempts=2`、`output_repair=true`、`output_only=true`、`execution_wake=true`。
+这不是 Codex 默认的自动科学接续策略。公共准备节奏仍冻结同 session W fragment、
+`max_context_windows=1`；未给节点目标时，各角色使用原有限全局上限作为有限参考目标。
+显式策略仍走各自公共门槛，Pi 不再一概否决公共科学策略；接受声明不等于正式资格或
+执行授权。
+
+新受支持 Pi 准备冻结受控单原生 session 作者证明能力。参与者须由实际留存的启动／资源、
+observer 来源／启动证明、已接受 prompt、持久化 session 贡献、终态交付及已停止 writer 的
+进程／前缀证据共同确认，单有 session 标签不够。SDK session 是稳定作者，补填／续接或
+新 attempt 不会把同一 actor 变成独立审查者。既有正式 A 工作流须有显式冻结审查策略，
+仅在准确 subject 的作者与审查者证据均完整、参与者集合不相交且封存 verdict 为 `pass` 时
+赋予该 subject 审查资格。正式 A 使用普通原生生命周期、声明权限与准确 subject 的只读
+输入，不走无工具辅助只读服务。留存作者／审查校验
+不重新打开 live native session；私有 home 删除后及框架历史任务 fork（含嵌套 fork）中仍
+可使用。冻结为 false 的旧能力及旧 unsupported 回执保留原义。证明只覆盖实际受控原生
+参与者，不覆盖任意 shell 活动；同用户访问仍是可信软边界。这不自动产生 verdict、执行
+许可或科学研究资格。普通 W/A/Final A 不以完整作者或严格独立性证明为硬门槛；这些门槛仅属于显式选择的正式资格合同。当前受支持历史任务 fork 不承诺旧暂停或尚未首派工 fork 的迁移续跑。更强的 NoNetwork 与无工具辅助只读调用仍不支持，普通只读科学
+任务则是另一种受支持 profile。本接入不宣称科学完整资格或与其他后端完全等价。
+
+四项权限均须显式声明：`workspace=read-only` 或 `workspace-write`、`network=true`、
+`web=disabled`、`subagents=false`。默认／隐含 Local 及声明工程在准备副作用前要求
+`workspace-write`；只读须显式 external。必须使用 Linux 挂载，无无沙箱回退。框架拥有的
+workspace 顶层保持只读，包括尚不存在的发布名称；workspace-write 只开放 `work/`、
+`artifacts/`、`experiments/`、当前 W 代码草稿及声明工程槽，不开放任意 workspace 或宿主
+输出路径。准确原件、元数据、live Skill 来源及已知别名以最后的只读覆盖保护。`work/`
+内已发布控制文件只读，但挂载不能保留该可写槽内尚不存在的名字。继承的 `HOME`、
+`PI_CODING_AGENT_DIR` 与认证仅供 Native 沿用；窄 auth/runtime 和私有 session 可写例外
+不开放整个 home。既有 Local 子进程只有空的科学 HOME、有限运行时，没有原生认证、
+session 或控制存储；Pi Local 投影不要求 Codex 二进制。同用户进程仍可信，不构成保密
+或防恶意 Worker 的边界。
+
+Skill schema v3 冻结选择和安装来源绑定，不复制资产或创建 hash registry。每次调用的
+唯一 prompt 前，准确 live `SKILL.md` 须以有效原生 frontmatter 和原来源证明出现在
+native `get_commands`；Python 元数据解析本身不证明原生已加载。所选资产及 workspace
+inode 别名保持只读；准确来源原件在可写授权之后只读覆盖，包括原生 auth 目录可写例外。自动上下文／资源发现
+受过滤；任意用户扩展在此 profile 不支持，是因为 hook 可改变工具、权限或模型调用，
+不是 Native 无法加载扩展。唯一已知只读内部 observer 通过准确 command 来源证明及
+私有启动帧准入，不新增工具、模型调用、第二 prompt 或 continuation。
+
+此处 `<agent-dir>` 是继承的 `PI_CODING_AGENT_DIR`，未设时为 `$HOME/.pi/agent`；
+`<workspace>` 是准确科学任务工作区。原生启动前，两处准确 `settings.json`（agent 根及
+workspace `.pi/`）均要求 `packages` 缺失／为空且没有自定义 `npmCommand`。四个 prompt 候选必须不存在：
+`<agent-dir>/SYSTEM.md`、`<agent-dir>/APPEND_SYSTEM.md`、
+`<workspace>/.pi/SYSTEM.md`、`<workspace>/.pi/APPEND_SYSTEM.md`。
+`--no-context-files` 不抑制这些隐藏 prompt，offline 也不禁用 package resolution。
+不修改或复制用户配置／认证。`PI_OFFLINE` 只管理自动资源获取／目录活动；显式 provider
+请求和 bash 仍可联网，禁用 web 插件不等于禁网。
+
+合格元数据绑定真实持久化的 native user-entry ID、准确 session、当前窗口及新鲜度。
+完成压缩按保存 cursor 后唯一新追加项识别，不按相同摘要文字命中旧记录；同 session
+续接保留窗口数并去重已接受事件。当前占用仍是 SDK 估计，不是准确 token 占用或累计
+计费；压缩后 native null 在新用量出现前保持不可用。完整 `native_calls` 仍不支持：SDK
+辅助摘要、重试和 warming 的回执不完整，持久化 response receipt 仅为下界，可选调用者
+策略不能把它们当成完整计数。native ID、私有路径及 nonce 不进入公开数值遥测或科学证据。
+
+必需元数据在 acknowledgement 前，同步完成父控制 callback 的既有预算／复核／准入
+发布；丢失、迟到、伪造或超时会停止依赖该策略的工作，后续成功不能抹去故障。建议独立
+交付：既有提醒在自然发生的顶层 tool result 追加最多 200 UTF-8 字节，按提醒种类每逻辑
+节点一次，跨 resume 保留，原结果、错误、details 和用量不变，不新增 LLM turn。只读
+marker 写入失败时如实报告建议不可用，不借此证明或否定元数据资格。
+
+每个 RPC invocation 在唯一 prompt 前核对准确模型与 thinking；完成须有空闲终态、RPC
+排空、正常退出及进程组清理。最终 UTF-8 原始字节（含空白、围栏、畸形 JSON）完整保留，
+必需输出沿公共有限补填路径处理。退出后无条件核对账单，独立于元数据成功与否，保留
+辅助用量、下界与未知覆盖，不以占用估计或零替代。同 session 补填／唤醒／恢复保留全部
+既有消费与窗口；原件损坏、迁移或未记账追加在新效果前拒绝，PID 已死不证明可重放。
+包括 `caller.unknown` 在内的未知外部效果须按同一原调用核对，不重新提交。配置与示例见
+[Pi 配置参考](RESEARCH_CONFIGURATION.md#experimental-pi--common-research-path--实验性-pi公共研究路径)。
 
 普通科学回答只必填 summary、scientific_result、limitations，H/A 另填 next_action、
 route_reason，W 另填 stage_intent。标准 Codex 以简短提示要求 JSON，本地核必填字段和
@@ -88,9 +166,9 @@ v3 有限补正只冻结准确 W subjects 已保留的 active 机制，沿用冻
 
 `guidance.py` 按既有任务目的给出一份职责条款，在新任务中冻结，由科学任务视图和原生渲染共同消费。W 咨询只提供意见并返回 W；普通请求评估必须回答请求；正式独审使用中性精确 subject 和独立审查者；收尾仅允许既有最终动作。各目的不继承其他目的的权限。自定义科学原文保持冻结，不授执行权限。E 回答有界证据请求。控制层拥有不可变绑定、预算、资格、权限和机械发布，不制造科学判断，也不让模型重复制作哈希清单；Worker 留存普通科学文件，准确身份与声明大小仍由宿主既有合同私有绑定。
 
-新标准单命令 Codex 默认冻结同 session 的普通 W fragment，`worker_fragment_policy.max_context_windows=1`；TOML 的 `policies.worker_context_windows` 仅接受 1 或 2。`stage_intent=continue` 续接同一 W 任务；`handoff` 封存当前结果并转新 W，`revise_h` 请求 H 咨询，`review` 请求普通 A 反思。有职责标记的 W 还可用 `extract` 请求 E 的有界证据帮助；H/A/E 咨询均须具体 `consultation_question`，绑定准确请求 W、证据和材料，H/E 答复直接返回 W，由 W 判断后续研究。策略 v2/v3 的 W 用 `decision` 请求提交前 Final A；已冻结 v1 仍直接请求 protected Final A，无策略字段的旧 W 仍请求普通 A 阶段评估。咨询仍是单 writer 下串行 job，使用 `purpose=worker_consultation` 和精确 W 返回绑定；咨询结束后，以原 W 与咨询原件为输入新建逻辑 W 任务。新监督 policy 3 的任务冻结 `worker_continuity_version=1`，通过统一 `Backend` 能力与会话校验，在支持时续接原生 W 会话；原 workspace/home 与新调用分别验证。这是串行续接，不是同 thread 嵌套调用。不支持、profile/backend 改变、继承来源、共享 home/session 不可用或上下文需轮换时明确使用新上下文；失败或未确认的续接不自动重放。只有验证后的 outcome 可报告 `same_session`，请求状态不当成功。普通 A 咨询不计正式评估周期，不更新主线、候选推荐或资格。
+新标准单命令 Codex 及受支持 Pi 准备默认冻结同 session 的普通 W fragment，`worker_fragment_policy.max_context_windows=1`；TOML 的 `policies.worker_context_windows` 仅接受 1 或 2。`stage_intent=continue` 续接同一 W 任务；`handoff` 封存当前结果并转新 W，`revise_h` 请求 H 咨询，`review` 请求普通 A 反思。有职责标记的 W 还可用 `extract` 请求 E 的有界证据帮助；H/A/E 咨询均须具体 `consultation_question`，绑定准确请求 W、证据和材料，H/E 答复直接返回 W，由 W 判断后续研究。策略 v2/v3 的 W 用 `decision` 请求提交前 Final A；已冻结 v1 仍直接请求 protected Final A，无策略字段的旧 W 仍请求普通 A 阶段评估。咨询仍是单 writer 下串行 job，使用 `purpose=worker_consultation` 和精确 W 返回绑定；咨询结束后，以原 W 与咨询原件为输入新建逻辑 W 任务。新监督 policy 3 的任务冻结 `worker_continuity_version=1`，通过统一 `Backend` 能力与会话校验，在支持时续接原生 W 会话；原 workspace/home 与新调用分别验证。这是串行续接，不是同 thread 嵌套调用。不支持、profile/backend 改变、继承来源、共享 home/session 不可用或上下文需轮换时明确使用新上下文；失败或未确认的续接不自动重放。只有验证后的 outcome 可报告 `same_session`，请求状态不当成功。Pi 当前不支持 `consultation_resume`，H/A/E 咨询返回明确使用 `new_context`；同一逻辑任务的 fragment、补填及受管执行唤醒仍可按各自门槛追加到准确原 Pi session。普通 A 咨询不计正式评估周期，不更新主线、候选推荐或资格。
 
-新准备在配置了 `max_context_windows` 时另冻结 `worker_fragment_policy.context_handoff_version=2`（公开声明为 `policies.worker_context_handoff_version=2`），独立于 A 职责标记。已启动窗口数为一个初始窗口加已接受的完成压缩次数；同 session 续接保留计数并去重压缩事件。最后一个允许完整使用的窗口占用达到 90% 时只提示准备安全 checkpoint。压缩后继续在新窗口工作，只有已启动窗口数超过 `max_context_windows` 且当前有效窗口占用严格大于 70% 时才要求交新 W。因此 max=1 可用一个完整窗口及压缩后窗口的 70% 空间，max=2 可用两个完整窗口及下个压缩窗口的 70%；压缩事件或计数本身不直接触发交接。缺失或过期占比保持未知，不新增停止条件。实际交接在下一受支持可观察边界封存 W 部分结果，不自动 A；新调用暂停，原调用仍可查询、收集和核对。无此版本的旧冻结策略保留 85% 提醒及压缩超窗后按次数交接的语义。公开版本 1 表示旧语义，2 表示新规则，新准备默认 2；私有旧值缺失导出为公开 1，避免导出再准备时静默升级，fork 保留原私有标记或缺失。既有原生 helper 通过必需的 `PostCompact`、`PostModelRequest` hooks 接收小型控制事实，native stdout 只提供这些事实与有界助手文字，不观察工具、输入或输出正文，也不扫描私有 rollout。缺少必需 hooks 时在启动前明确 unsupported，不能在未知覆盖下反复新建 W；这是受支持启动路径的能力，不保证任意后端均具备。时间和原调用状态沿用既有 owner。新 W 不重置共享 token、活动时间、步骤、执行消费、权限或 unknown 原调用。W 时间和累计 token 目标仍为建议，真实共享和单实验限制继续有效。直接 API 显式 `worker_fragment_policy=None` 可禁用普通 fragment。协议 29、30、31、32 实例保留匹配旧 runtime；协议 33 在科学解释前拒绝旧原件，不迁移或修改旧设置。旧 A 规划权限和咨询输入选择不能按当前 W 主导合同重新解释，历史试验保持不变。
+新准备在配置了 `max_context_windows` 时另冻结 `worker_fragment_policy.context_handoff_version=2`（公开声明为 `policies.worker_context_handoff_version=2`），独立于 A 职责标记。已启动窗口数为一个初始窗口加已接受的完成压缩次数；同 session 续接保留计数并去重压缩事件。最后一个允许完整使用的窗口占用达到 90% 时只提示准备安全 checkpoint。压缩后继续在新窗口工作，只有已启动窗口数超过 `max_context_windows` 且当前有效窗口占用严格大于 70% 时才要求交新 W。因此 max=1 可用一个完整窗口及压缩后窗口的 70% 空间，max=2 可用两个完整窗口及下个压缩窗口的 70%；压缩事件或计数本身不直接触发交接。缺失或过期占比保持未知，不新增停止条件。实际交接在下一受支持可观察边界封存 W 部分结果，不自动 A；新调用暂停，原调用仍可查询、收集和核对。无此版本的旧冻结策略保留 85% 提醒及压缩超窗后按次数交接的语义。公开版本 1 表示旧语义，2 表示新规则，新准备默认 2；私有旧值缺失导出为公开 1，避免导出再准备时静默升级，fork 保留原私有标记或缺失。标准 Codex 的既有原生 helper 通过必需的 `PostCompact`、`PostModelRequest` hooks 接收小型控制事实，native stdout 只提供这些事实与有界助手文字，不观察工具、输入或输出正文，也不扫描私有 rollout。Pi 由前述受控 observer 提供持久化边界元数据。缺少必需 hooks 时在启动前明确 unsupported，不能在未知覆盖下反复新建 W；这是受支持启动路径的能力，不保证任意后端均具备。时间和原调用状态沿用既有 owner。新 W 不重置共享 token、活动时间、步骤、执行消费、权限或 unknown 原调用。W 时间和累计 token 目标仍为建议，真实共享和单实验限制继续有效。直接 API 显式 `worker_fragment_policy=None` 可禁用普通 fragment。协议 29、30、31、32 实例保留匹配旧 runtime；协议 33 在科学解释前拒绝旧原件，不迁移或修改旧设置。旧 A 规划权限和咨询输入选择不能按当前 W 主导合同重新解释，历史试验保持不变。
 
 共享研究导航复用既有封存原件、accepted prefix、history/lineage 和候选目录。H/W 各自追加作者原文，既有单节点 publisher 在 `indexes.research` 给出最近 W 理解、H 竞争解释、普通 A 正式评估与独立列出的 A 咨询原件入口，引用 summary、scientific_result 和 limitations。未决问题保留作者原文；已存候选、提名及判别工作沿用既有索引。摘录显式标记截断，完整原件始终可读。控制层不代写科学总结、排名或推断置信度，不新增可改 ledger 数据库或通用必填科学字段。候选可用不等于有资格。预算、私有绑定、cursor、token 不进入科学页；正式独立审查保留中性的精确 subject 输入。
 
@@ -171,7 +249,7 @@ commitments 的 1 起始编号。没有已保留、获授权且未豁免的 focu
 
 机制状态标签及历史解释不是新的 A 控制面。科学支持、未决解释和可能排除的依据保留在作者的准确证据和主张中；暂时落后或缺证据不等于科学否定。H/W 选择相关竞争解释和判别工作，控制层不分类科学价值。
 
-A 针对原目标和具体候选或主张回答请求，可返回会改变判断的有界缺口，由 W 选择解决方法。H 咨询可重审解释，无须先证明旧路线不可能。W 可在既有 `search_plan` 中声明新机制，由后继 W 冻结目录后执行，不强制经过 H/A；局部算法和表示调整仍由 W 完成。评估任务保留 W 的准确问题和真实 missing/blocked 原因；仅选择 `stage_intent=decision` 不把已完成观测标为未完成，也不授科学资格。
+A 针对原目标和具体候选或主张回答请求，可返回会改变判断的有界缺口，由 W 选择解决方法。H 咨询可重审解释，无须先证明旧路线不可能。旧目录路线中，W 可在既有 `search_plan` 中声明新机制，由后继 W 冻结目录后执行，不强制经过 H/A；v3 普通研究则通过 `--research JSON` 在同一 session 声明或修订，不要求换 W。局部算法和表示调整仍由 W 完成。评估任务保留 W 的准确问题和真实 missing/blocked 原因；仅选择 `stage_intent=decision` 不把已完成观测标为未完成，也不授科学资格。
 
 自定义和已准备的科学原文保持冻结。按任务目的区分的职责规则通过选定的 Codex developer 或 protocol prompt 传输一次；当前规划提示不能在 protected FINAL 或输出补填期间授权新工作。
 
@@ -209,11 +287,11 @@ H/W 只声明需要变更的 commitment；遗漏保留原承诺，A 意见保留
 
 H 提供可修订的机制问题、不同预测和比较建议，不把暂定方法变成禁止 W 修订的额外科学边界；W 在原用户/任务约束、冻结 dispatch/catalog、明确 focus/证据缺口及执行权限内自主决定方法、参数和批次。A 的 `continue_w` 说明科学决策或证据缺口；带冻结监督请求的 `continue_existing` 则明确保留当前工作。W 围绕该问题按“观察→设计下一小批→运行→比较→调整”持续探索，完成仍有价值的实现、参数比较、对照和必要检查后交 A 独立判断，不因单次实验结束或弱分数自动交接。沿已有报告和索引，以精确入口交接局部观察、反证、未决组合及问题，并保留可复用 driver/helpers 和残余缺口；下一 A/H 回看上次决定实际如何影响工作、所得证据支持什么，不增加报告 schema。
 
-下一批须对应明确未决判断，能说明如何区分以及不同结果会怎样改变下一步。W 可继续探索、封存交新 W，或按需要请求 H/A 咨询；改变机制或范围不强制先经 A。问题已足够回答或须有限收口时，v2/v3 的 `decision` 请求提交前 Final A；无策略字段的旧 W 仍交普通 A 正式阶段判断，明确局限；最终裁决仍由独立 A 承担。现有 token/time 余额和下游 A 建议用量指导规划，不新增配额或预留；token/time 目标指导当前批次收口，上下文窗口策略在可观察边界暂停新调用、封存部分结果并交新 W，不因此结束整个研究。缺少该字段的旧冻结策略保留原时间复核节奏。实际执行限制和已消费预算保持有效。
+下一批须对应明确未决判断，能说明如何区分以及不同结果会怎样改变下一步。W 可继续探索、封存交新 W，或按需要请求 H/A/E 咨询；改变机制或范围不强制先经 A。问题已足够回答或须有限收口时，以 `decision` 明确局限：v2/v3 请求提交前 Final A，v1 直接请求 protected Final A，无策略字段的旧 W 才交普通 A 阶段评估；最终裁决仍由独立 A 承担。现有 token/time 余额和下游 A 建议用量指导规划，不新增配额或预留；token/time 目标指导当前批次收口，上下文窗口策略在可观察边界暂停新调用、封存部分结果并交新 W，不因此结束整个研究。缺少该字段的旧冻结策略保留原时间复核节奏。实际执行限制和已消费预算保持有效。
 
 初始 `screen` 以有信息量的浅筛公平比较可信机制；未决备选保持明确，W 在冻结 focus 和原任务约束内选择判别后续，不要求先解决所有备选再深入。普通 `improve` 聚焦一个科学机制，而非算法标签，不因完成一组建议对照就结束。`validate` 在指定缺口解决或受阻时结束，`repair` 仍绑定精确失败观测，两者都不扩成新一轮搜索。上述工作单元不另设实验次数或报告字段；用户/任务自身的次数、停止条件和按任务目的区分的返回合同保持有效。
 
-任务导航只在冻结来源 seal 与历史来源匹配时，将父结论作为主阅读入口；可选 `history_alias` 保留历史文本页入口。两种表达来自同一科学来源，不保证字节相同。完整历史页和索引继续可读。Agent 自己检查 JSON 结构和所需字段，用本地代码分析数值数组，并按需补读缺失或冲突证据。`decision` 的正式阶段评估及最终裁决保留独立 A，控制层不代写科学摘要，也不限制原件只能读一次。
+任务导航只在冻结来源 seal 与历史来源匹配时，将父结论作为主阅读入口；可选 `history_alias` 保留历史文本页入口。两种表达来自同一科学来源，不保证字节相同。完整历史页和索引继续可读。Agent 自己检查 JSON 结构和所需字段，用本地代码分析数值数组，并按需补读缺失或冲突证据。`decision` 按冻结策略请求的普通评估或 Final A 保留独立 A，控制层不代写科学摘要，也不限制原件只能读一次。
 
 新建普通 A 任务可带 `assessment_handoff`，指出准确的本轮 W/H，以及沿其冻结决策路线绑定的上次 A，或明确的提取、审计请求者。上次评估只提供上下文，H 范围修订后也不继承旧资格。A 独立核查本轮证据和能改变决策的缺口；历史覆盖不足、结果矛盾、范围或评价口径变化时，应重新检查相关历史证据。本地工具按字段、差异和统计值读取，避免不必要地输出整张数值网格和重复代码；所需完整原件仍可读取。有复用价值的 A 复核脚本和小报告须声明在 `artifacts/` 下才能留存。准确上次 A 声明的材料沿既有原件绑定进入新 A 的只读输入，不复制整个工作目录；若这组可选材料超过既有合并输入上限，则整组省略并说明不可用原因，评估原件仍保留。已冻结任务保持原输入，作者收尾、补正、正式审查和 FINAL 保持原范围。
 
@@ -297,10 +375,11 @@ bridge、backend 或 replay 效果未知时仍须核对原调用。若捕获/导
 Codex/命名空间、replay/model、solver 或 SSH 路径已完成全部真实验收；这些路径仍须有各自
 精确的独立 CLI 证据。源码改动不授科学资格，也不构成真实 sandbox 保证。
 
-默认本地命令后端解析所选 Codex 安装的原生二进制，使用其 sandbox 和受限的科学子进程
-文件视图。已接受的 Git 代码导出只读映回逻辑科学代码目录；旧调用沿用原目录/脚本快照
+默认本地命令后端通过既有 native execution bridge 消费所选 provider 的权限投影。Pi
+使用前述 Linux 挂载投影，不依赖 Codex 配置、二进制或认证。标准 Codex 路径解析该安装
+的原生二进制，使用其 sandbox 和受限科学子进程文件视图。已接受的 Git 代码导出只读映回逻辑科学代码目录；旧调用沿用原目录/脚本快照
 语义。后端只获得运行时文件、科学工作区及 task-native 权限配置，
-不获得原生认证、provider 配置、控制原件或提交槽。原生 Worker 与后端遵守同一受支持的
+不获得原生认证、provider 配置、控制原件或提交槽。Codex 原生 Worker 与后端遵守同一受支持的
 legacy `workspace-write` 声明，包括网络权限和临时目录排除，并按各自工作目录、`TMPDIR`
 和命名空间等义解释。原生 Worker 保留 `--sandbox workspace-write` 及捕获的 legacy
 配置覆盖；只有后端 sandbox 使用表达同一声明的内部权限 profile。需要 Linux、
@@ -337,8 +416,8 @@ W 与 run 的 dirty 检查排除 editable/scratch/outputs，只读角色排除 s
 宿主创建空目录及必要父目录；宿主基础目录不可写时，这些目录须预先存在。
 
 run cwd 可为准确 base 根；后端内部权限策略仍以 task-work cwd 为基准，只增加声明的
-scratch/output 可写目标。原生 Worker 保留冻结的 Codex `workspace-write` 策略，并投影准确
-工程目标。不支持的原生权限或 launcher 配置在启动前拒绝，不替换原策略。网络、web、
+scratch/output 可写目标。原生 Worker 保留冻结的 provider 策略，并投影准确工程目标：Codex `workspace-write`
+或 Pi 受支持的 workspace-write 挂载投影。不支持的原生权限或 launcher 配置在启动前拒绝，不替换原策略。网络、web、
 子 Agent、Skill 与认证合同保持不变。TCAD 继续使用自包含 implementation JSON 的编译/
 审查/打包路径，DeckFiles 与 typed inputs 仍由科学作者明确依赖闭包；不自动把宿主绝对工程
 路径或整个基础工程发送到远端执行。
@@ -453,7 +532,7 @@ Final A 及无职责标记的普通 A 任务要求逐项对照原目标和授权
 条件变化会限制比较；流程级证据不能静默转给另一个保存的产物。普通研究收口前，A 可请求一次
 小规模、可负担的完整流程比较，使用共同条件及有价值的重复测量。这些建议不新增配额、按分数
 默认选择或完整性门槛。旧普通 A 与非受保护的 closeout 可拒绝全部候选，或保留缺失比较并有限收口。
-受保护 FINAL 只使用既有证据并遵循冻结的响应选项：v2/v3 可拒绝全部候选；v1 及无策略字段的旧合同中，留存交付来源列表非空时须 `deliver` 并给出精确候选引用，否则为 `finish`。这些选项不豁免原件、资格或执行权限检查，也不证明科学目标完成。
+受保护 FINAL 只使用既有证据并遵循冻结的响应选项：v2/v3 可用 `finish` 且无推荐拒绝全部候选，即使留存列表非空；v1 及无策略字段的旧合同中，留存交付来源列表非空时须 `deliver` 并给出精确候选引用，否则为 `finish`。这些选项不豁免原件、资格或执行权限检查，也不证明科学目标完成。
 
 H 基于 A 的证据、限制和准确引用决定机制变化与下一项最小判别，只针对具体矛盾核查，
 避免默认重做 A 的全池评估。A 先对照 prior A 未决问题审查最新 W 差量，复用报告、结果数组、
@@ -466,7 +545,7 @@ H 基于 A 的证据、限制和准确引用决定机制变化与下一项最小
 不默认另开完整 W 轮次。A 面向未满足的原目标，合并实质性的测试、诊断、新候选开发、调参
 和重测工作交 W。W 在 `improve` 内完成有用且连贯的一批实现、实验和检查后续，再交 A
 独立评价策略与结论；每个小发现不必触发新的 A/W 往返。方向变化、停滞、范围变化、阻塞或
-实际限制仍应交 A。两者均无需填充无用工作、耗尽预算或满足实验数量配额。`validate` 仍仅解决
+实际限制可促使按具体问题咨询 H/A，不自动要求 A。两者均无需填充无用工作、耗尽预算或满足实验数量配额。`validate` 仍仅解决
 指派的决策缺口，`repair` 仍仅恢复准确失败观测；普通迭代研究不扩大这两类单元的权限。
 复用成果及 helper 依赖使用当前任务声明的输入路径，旧作者工作区的绝对路径
 别名不是当前定位符。作者通过现有声明输出发布可复用诊断，以及实际执行
@@ -509,7 +588,7 @@ native home，保留配置、认证及权限来源；冻结绝对 launcher 调�
 普通受管执行唤醒通过独立的 `execution_wake: true` 完整 W 任务许可推进：
 W 在原受管调用 pending/running 时正常交回科学 JSON，宿主保留未封存等待 checkpoint，
 不启动新的 native turn 来轮询。只有这些精确原调用的已核验终态可唤醒同一 W session，
-W 消费原结果后可在原 H 范围、权限和预算内按正常准入提交新的有用调用；达到其冻结上下文边界则先封存并交新 W，不开新批次。
+W 消费原结果后可在原任务范围、权限和预算内按正常准入提交新的有用调用；达到其冻结上下文边界则先封存并交新 W，不开新批次。
 普通执行唤醒和 fragment 各沿其冻结的完整任务许可，不消耗输出补填次数；累计共享预算、既有步数限制、权限及原 home/session/context 绑定仍逐项检查。
 当前 turn 若为输出补填，仍禁止新实验；author closeout、FINAL 及其他受限任务保持原范围，普通唤醒不授权失败任务重试或科学工作修复。同用户原生 shell 仍是软边界。
 旧冻结 output-only 策略缺该标志不追认；旧显式完整 resume 策略保留已有唤醒行为，除非明确关闭。
@@ -545,7 +624,7 @@ loopback 响应实证的 429 retry-limit/quota 完整文本及有界锚定 503 H
 判定为 `incomplete` 才能依靠独立自动许可续接同一 W 的原完整任务。它沿用原 session、
 任务和保留观察，绑定原返回、outcome 与证据快照，并消耗 `max_continues`。必需格式或
 条件广度声明缺失走窄输出补填；补成合法返回后，科学不足可另经独立自动许可续工。有效 partial、
-没有准确未接受机械拒绝的科学障碍保留作者的 stage_intent；策略 v1 的 `decision` 请求
+没有准确未接受机械拒绝的科学障碍保留作者的 stage_intent；策略 v2/v3 的 `decision` 请求提交前 Final A，策略 v1 的 `decision` 请求
 protected Final A，无策略字段的旧 W 仍交普通 A 评估，其他交接或咨询沿其明确路线。该机械拒绝可在原有限接续额度内优先修正，覆盖 screen、
 improve 及无 search 普通任务。完整或不适用的交付判定
 不追加恢复动作。
@@ -579,7 +658,7 @@ FINAL 与 closeout 禁用自动科学续工，原有限输出补填另守原策�
 
 H 选择 `wait` 且没有 pending 或未知外部执行时，进入既有持久 FINAL；存在原未决调用则保留等待机制。此入口要求已冻结的最终 A 完成能力，缺少时如实返回 `final_unavailable`，不补造完成授权。普通 A 明确 `finish` 即结束本轮且零提交；未配置交付策略时，`deliver` 与 `finish` 使用相同停止行为，原封存科学选择保持不变；已配置时，`deliver` 只消费原封存 A 的精确候选授权，不强制新 FINAL A。启用选择策略时，普通 A 原任务先冻结并展示完整比较目录，交付仍核对同一目录、原件及资格；失败或缺资格保留未决结果，不自动改选或新起科学作者。共享预算阻断保留原路线。新 W 交接或咨询返回后的准入拒绝以 `role_admission_refused` 保留实际原因，不套 H 重规划；普通 H/A 作者的选择在依赖 W 前未解决时，既有 author-correction 仍返回该 H/A 作者。原有可选 H/A 角色准入路径若确有有界 H author-correction，继续保留其准确封存选择、首个根、实际原因及已消费的两次补正额度，跨重试/预算修订不重置。下一选择仍核当前角色份额、无证据重复、共享预算和执行门槛；控制不虚构实验或新证据，原调用活跃或未知时不启动新澄清。局部 W 只提名本次冻结范围内机制；按机制的最近声明及各自来源供 A/FINAL 读取，其他机制既有代表和缺口保持，新机制显示 pending，screen 仍可全局。
 
-策略 v1 的普通 A `deliver/finish` 必须先进入 protected Final A 才能提交；v2 在预算可用时请求提交前 Final A，耗尽时请求 protected Final A。共享预算已耗尽也不绕过最终边界；最终调用沿既有完成策略执行，不新增探索周期。缺原件或权限如实保留未交付。上段普通 A 直接收口语义仅适用于无策略字段的旧任务；共享预算达线不会把旧任务已有效封存的 `deliver/finish` 重开为新的科学 FINAL。
+策略 v1 的普通 A `deliver/finish` 必须先进入 protected Final A 才能提交；v2/v3 在预算可用时请求提交前 Final A，耗尽时请求 protected Final A。共享预算已耗尽也不绕过最终边界；最终调用沿既有完成策略执行，不新增探索周期。缺原件或权限如实保留未交付。上段普通 A 直接收口语义仅适用于无策略字段的旧任务；共享预算达线不会把旧任务已有效封存的 `deliver/finish` 重开为新的科学 FINAL。
 外部交付仍仅限原身份的有限 `submit` 和同操作 `confirm`；未知效果按同一原调用核对。
 
 普通控制收口分别保留以下边界：
@@ -836,8 +915,8 @@ bind。新实例不创建 Skill 对象、字节 manifest、副本或硬链接，
 Skill 绑定仅接受 schema v3 安装来源。旧 manifest/对象绑定在读取资产前拒绝，不提供
 兼容读取、实例内冻结空钩子或迁移。当前 fork 保留安装来源与准确选择，不复制 Skill 字节。
 
-此选择不屏蔽原生用户/系统/插件 Skill 来源，不改变已声明的原生权限；科学后端子进程不接收
-Skill 挂载。标准 Codex 保留其冻结的原生 home 与认证；Cov 适配器不再提供专用原生启动器
+Codex 的此选择不屏蔽原生用户/系统/插件 Skill 来源；Pi 则按前述资源 profile 只接受准确
+显式所选手册及受控 observer。两者都不改变声明的原生权限；科学后端子进程不接收 Skill 挂载。标准 Codex 保留其冻结的原生 home 与认证；Cov 适配器不再提供专用原生启动器
 或认证复制路径。
 只读挂载仍属同用户软边界；具体配置见[配置参考](RESEARCH_CONFIGURATION.md)。
 

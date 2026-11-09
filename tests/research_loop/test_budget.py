@@ -4,19 +4,33 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts, controller, native, runtime
+from scidiscovery.research_loop import accepted_budget, budget, contracts, controller, native, runtime
 from scidiscovery.research_loop.cli import main, status
 
 
 @pytest.fixture
-def clocked(tmp_path, monkeypatch):
+def clocked(tmp_path, monkeypatch, request):
     public = tmp_path / 'public'
     public.mkdir()
     objective = public / 'objective.md'
     objective.write_text('Resolve a bounded mechanism.')
     root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['fixture-never-launch'], max_tokens=100,
-        max_seconds=20, max_steps=3, model='fixture', reasoning_effort='high')
+    options = dict(max_tokens=100, max_seconds=20, max_steps=3,
+        model='fixture', reasoning_effort='high')
+    options.update(getattr(request, 'param', {}))
+    basis = options.pop('time_budget_basis', 'active')
+    if basis != 'active':
+        initialize = accepted_budget.initialize
+        def legacy_birth(selected, settings, **facts):
+            # Freeze the historical basis before the first accepted head exists.
+            # Never rewrite/reinitialize an already accepted clock.
+            assert not (selected / accepted_budget.HEAD).exists()
+            assert basis == 'elapsed'
+            settings.pop('time_budget_basis')
+            contracts.write(selected / 'settings.json', settings)
+            return initialize(selected, settings, **facts)
+        monkeypatch.setattr(accepted_budget, 'initialize', legacy_birth)
+    controller.prepare(root, objective, public, ['fixture-never-launch'], **options)
     now = [100.]
     monkeypatch.setattr(budget.time, 'time', lambda: now[0])
     monkeypatch.setattr(budget.time, 'clock_gettime', lambda _: now[0])
@@ -30,10 +44,14 @@ def transition(root, phase):
 
 
 def original_intent(root):
-    contracts.build_job(root, 1, 'H', [])
+    job = contracts.build_job(root, 1, 'H', [])
     record = contracts.host_record(contracts.workspace(root, 1))
-    contracts.write(record / 'native-intent.json', dict(step=1,
-        task_ref=contracts.record_ref(root / 'jobs/001.json')))
+    anchor = budget.accept_node(root, job)
+    intent = dict(step=1, task_ref=contracts.record_ref(root / 'jobs/001.json'),
+        **native.profiles.binding(contracts.settings(root, job), job))
+    if anchor is not None:
+        intent['budget_slice'] = anchor
+    accepted_budget.accept_native(root, 1, record, intent)
     return record
 
 
@@ -90,17 +108,13 @@ def test_unstarted_status_does_not_sample_current_clock(clocked, monkeypatch):
     assert value['consumed_seconds'] == 0 and value['seconds_remaining'] == 20
 
 
+@pytest.mark.parametrize('clocked', [dict(
+    delivery_policy=dict(closeout_a=dict(max_observed_tokens=10, max_seconds=2),
+        inflight_tokens=0, cleanup_seconds=0, submit_seconds=0, confirm_seconds=0, adapter=None),
+    node_budget_policy={role: dict(max_observed_tokens=10, max_seconds=2) for role in 'HWAE'})], indirect=True)
 @pytest.mark.parametrize('query, final_only', [('pending_status', False), ('pending_status', True), ('repair_funds', False)])
 def test_closed_closeout_queries_use_recorded_limits_and_funds_survive_reboot(clocked, monkeypatch, query, final_only):
-    from scidiscovery.research_loop import delivery
     root, now = clocked
-    settings = contracts.settings(root)
-    settings['delivery_policy'] = delivery.policy(dict(closeout_a=dict(max_observed_tokens=10, max_seconds=2),
-        inflight_tokens=0, cleanup_seconds=0, submit_seconds=0, confirm_seconds=0, adapter=None))
-    settings['node_budget_policy'] = budget.node_policy({
-        role: dict(max_observed_tokens=10, max_seconds=2) for role in 'HWAE'})
-    contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     transition(root, 'advance')
     budget.begin_closeout(root, 0, 1, 'A retained pending closeout', final_only=final_only)
     now[0] = 105.
@@ -125,13 +139,11 @@ def test_closed_closeout_queries_use_recorded_limits_and_funds_survive_reboot(cl
     assert all(path.read_bytes() == original for path, original in originals.items())
 
 
-@pytest.mark.parametrize('basis, phase', [('active', 'advance'), ('active', 'waiting'), ('elapsed', 'paused')])
-def test_status_excludes_downtime_from_active_and_retains_legacy_elapsed(clocked, monkeypatch, basis, phase):
+@pytest.mark.parametrize('clocked, phase', [({}, 'advance'), ({}, 'waiting'),
+    ({'time_budget_basis': 'elapsed'}, 'paused')], indirect=['clocked'])
+def test_status_excludes_downtime_from_active_and_retains_legacy_elapsed(clocked, monkeypatch, phase):
     root, now = clocked
-    settings = contracts.settings(root)
-    settings['time_budget_basis'] = basis
-    contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
+    basis = contracts.settings(root).get('time_budget_basis', 'elapsed')
     transition(root, phase)
     now[0] = 110.
     stamp = budget.clock_stamp(); stamp.update(boot_id='next-boot', at_boottime=1.)
@@ -234,13 +246,15 @@ def test_budget_amend_is_audited_and_preserves_consumption_and_settings(clocked,
     assert value['seconds_remaining'] == 22
     assert (root / 'settings.json').read_bytes() == frozen
     events, _ = budget._events(root)
-    assert [item['seq'] for item in events] == [1, 2, 3]
-    assert amendment['amendment_seq'] == events[2]['seq']
-    assert events[2]['operation_id'] == result['operation_id']
-    assert events[2]['parent_ref'] == contracts.record_ref(root / 'control-ledger/000002.json')
-    assert events[2]['before'] == dict(max_tokens=100, max_seconds=20)
-    assert events[2]['after'] == dict(max_tokens=200, max_seconds=30)
-    assert events[2]['at_unix'] == 150
+    # Current facts retain the latest clock and amendment, not every old phase.
+    assert [item['seq'] for item in events] == [2, 3]
+    event = events[-1]
+    assert amendment['amendment_seq'] == event['seq'] == events.state['seq']
+    assert event['operation_id'] == result['operation_id']
+    assert event['parent_ref'] == contracts.record_ref(root / 'control-ledger/000002.json')
+    assert event['before'] == dict(max_tokens=100, max_seconds=20)
+    assert event['after'] == dict(max_tokens=200, max_seconds=30)
+    assert event['at_unix'] == 150
 
 
 @pytest.mark.parametrize('note,changes', [('', dict(max_tokens=200)), ('Decision', {}),
@@ -258,9 +272,10 @@ def test_amend_rejects_writer_or_unknown_execution(clocked):
         with pytest.raises(RuntimeError, match='running controller'):
             budget.amend(root, max_tokens=200, authorization_note='Explicit operator decision')
     original_intent(root)
+    before = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
     with pytest.raises(RuntimeError, match='running or unknown'):
         budget.amend(root, max_tokens=200, authorization_note='Explicit operator decision')
-    assert not (root / 'control-ledger').exists()
+    assert {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == before
 
 
 def test_runner_inactive_append_holds_host_writer_until_finished(clocked, monkeypatch):
@@ -285,7 +300,8 @@ def test_runner_inactive_append_holds_host_writer_until_finished(clocked, monkey
 @pytest.mark.parametrize('entry', ['run', 'continue'])
 def test_first_job_input_failure_preserves_error_and_stops_idle_clock(clocked, capsys, entry):
     root, now = clocked
-    contracts.build_job(root, 1, 'H', [])
+    # Fail the first acquisition, rather than retaining a prepared task whose
+    # immutable input/route conflict has its own recovery result contract.
     (root.parent / 'public/objective.md').unlink()
     if entry == 'continue':
         assert main(['continue', '--root', str(root)]) == 1
@@ -319,7 +335,9 @@ def test_controller_exception_reconciles_clock_under_writer(clocked, monkeypatch
         raise failure
     monkeypatch.setattr(controller, '_start_closeout' if entry == 'closeout' else '_run', fail)
     if entry == 'worker_resume':
-        monkeypatch.setattr(controller.continuation, 'start', lambda *args: None)
+        if original == 'absent':
+            contracts.build_job(root, 1, 'H', [])
+        monkeypatch.setattr(controller.continuation, 'start', lambda *args, **kwargs: None)
     inactive = budget.inactive
     reconciled = []
     def check_lock(root, reason):
@@ -453,12 +471,10 @@ def test_open_interval_utc_rollback_cannot_refund_observed_consumption(clocked, 
     assert budget.snapshot(root)['consumed_seconds'] == (20 if action == 'transition' else 30)
 
 
+@pytest.mark.parametrize('clocked', [{'max_seconds': 3600}], indirect=True)
 def test_case02_clock_slew_uses_boot_consumption_without_false_stop(clocked, monkeypatch):
     root, now = clocked
     settings = contracts.settings(root)
-    settings['max_seconds'] = 3600
-    contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     # Replay the observed same-boot case02 anchors, without touching that instance.
     now[0] = 1791694089.621297
     ticks = [2899.955554225]
@@ -495,12 +511,10 @@ def test_changed_boot_charges_new_uptime_and_can_pause(clocked, monkeypatch):
     assert len(list((root / 'control-ledger').glob('*.json'))) == 2
 
 
+@pytest.mark.parametrize('clocked', [{'time_budget_basis': 'elapsed'}], indirect=True)
 def test_legacy_elapsed_instance_retains_its_original_deadline(clocked):
     root, now = clocked
     settings = contracts.settings(root)
-    settings.pop('time_budget_basis')
-    contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     now[0] = 105.
     transition(root, 'paused')
     now[0] = 130.
@@ -516,13 +530,10 @@ def test_legacy_elapsed_instance_retains_its_original_deadline(clocked):
     assert not (root / 'jobs').exists()
 
 
+@pytest.mark.parametrize('clocked', [{'time_budget_basis': 'elapsed'}], indirect=True)
 @pytest.mark.parametrize('action', ['snapshot', 'transition', 'amend'])
 def test_legacy_elapsed_ledger_rejects_open_utc_rollback_without_refund(clocked, monkeypatch, action):
     root, now = clocked
-    settings = contracts.settings(root)
-    settings.pop('time_budget_basis')
-    contracts.write(root / 'settings.json', settings)
-    contracts.write(root / 'settings-identity.json', dict(path='settings.json'))
     ticks = [100.]
     monkeypatch.setattr(budget.time, 'clock_gettime', lambda _: ticks[0])
     transition(root, 'advance')
@@ -545,7 +556,7 @@ def test_legacy_elapsed_ledger_rejects_open_utc_rollback_without_refund(clocked,
 def test_overlay_limits_reach_controller_and_actual_native_launch_boundary(clocked, monkeypatch):
     root, now = clocked
     settings = contracts.settings(root)
-    monkeypatch.setattr(native, 'usage', lambda _: dict(input_tokens=120, cached_input_tokens=0,
+    monkeypatch.setattr(native, 'usage', lambda *args, **kwargs: dict(input_tokens=120, cached_input_tokens=0,
         output_tokens=0, observed_tokens=120, unknown_steps=[]))
     assert controller._launch_limit(root, settings) == 'token_limit'
     budget.amend(root, max_tokens=200, max_seconds=5, authorization_note='Explicit operator decision')
@@ -575,5 +586,7 @@ def test_ledger_tamper_is_rejected_and_status_is_read_only(clocked):
     first = root / 'control-ledger/000001.json'
     event = contracts.read(first)
     contracts.write(first, dict(event, settings_ref=dict(path='other-settings.json')))
+    # Historical originals are audited explicitly; a bounded accepted-head
+    # projection deliberately does not reopen every retired event.
     with pytest.raises(ValueError, match='identity'):
-        budget.snapshot(root)
+        budget.audit_events(root)

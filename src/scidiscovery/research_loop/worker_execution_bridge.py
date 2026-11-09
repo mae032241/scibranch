@@ -637,12 +637,16 @@ def terminal_caller_error(root,job,record):
     return dict(diagnostic=note,arguments=request['arguments'])
 
 
-def _watch(server, stop, initial):
+def _watch(server, stop, initial, *, on_ready=None):
     previous=None
     if initial is not None:
         try:_handle(server,initial,retained=True)
-        except (OSError,ValueError):pass
+        except (OSError,ValueError):
+            if on_ready is not None:raise
         previous=initial
+    if on_ready is not None:
+        if stop.is_set():return
+        on_ready()
     while not stop.wait(.1):
         try:
             raw=_read_file(server.directory/'submit.json')
@@ -713,8 +717,11 @@ def _bridge_process(server,initial,parent_pid,ready):
         c.write(server.record/'bridge-process.json',identity)
         (server.record/'bridge-outcome.json').unlink(missing_ok=True)
         (server.record/'bridge-operation.json').unlink(missing_ok=True)
-        os.write(ready,b'1');os.close(ready);ready=None
-        _watch(server,server.stop,initial)
+        def reconciled():
+            nonlocal ready
+            # Namespace inventory must not race a retained response replacement.
+            os.write(ready,b'1');os.close(ready);ready=None
+        _watch(server,server.stop,initial,on_ready=reconciled)
     except _BridgeStopped:
         pass
     except BaseException as error:

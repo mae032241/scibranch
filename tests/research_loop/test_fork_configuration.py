@@ -10,6 +10,7 @@ from scidiscovery.research_loop import (
     execution_authority, fork_runtime, fork_service, fork_sources, formal_review,
 )
 from test_history_handoff import finish
+from execution_fixtures import execution_registry
 
 
 ALLOWANCE = dict(max_tokens=600, max_seconds=40, max_steps=3)

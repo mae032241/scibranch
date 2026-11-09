@@ -180,8 +180,11 @@ def _load_selected_base_facts(root, selected, *, base, policy, head, bind_inputs
         raise ValueError('Fork cannot replace the selected original scientific objective')
     job['fork_source'] = _selected_identity(selected)
     admitted=head.row(f'job/{job["step"]:03d}')
-    job['history']['prefix']=copy.deepcopy(head['prefix'] if admitted is None else admitted['prefix'])
-    job['history']['breadth_snapshot']=copy.deepcopy(head['search_ref'] if admitted is None else admitted['input_search_ref'])
+    # Formal review keeps the exact request's neutral input boundary. The
+    # child's accepted host prefix must not rewrite that frozen review context.
+    if not job.get('formal_review'):
+        job['history']['prefix']=copy.deepcopy(head['prefix'] if admitted is None else admitted['prefix'])
+        job['history']['breadth_snapshot']=copy.deepcopy(head['search_ref'] if admitted is None else admitted['input_search_ref'])
     if (job.get('search') or {}).get('breadth'):
         job['search']['breadth']['catalog']['prefix']=copy.deepcopy(job['history']['prefix'])
     if job.get('delivery_sources') is not None:

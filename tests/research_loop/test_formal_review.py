@@ -46,22 +46,77 @@ def formal_native_diagnostic(root,result):
 
 # This independent local process supplies protocol-shaped native/session events.
 # It never calls a model, backend or solver. Its identities are synthetic.
-LAUNCHER = '''import json,os,pathlib,sys,uuid
+LAUNCHER = r'''import hashlib,json,os,pathlib,shlex,subprocess,sys,tomllib,uuid
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);step=int(work.name)
-task=json.loads((work/'science-task.json').read_text());prompt=sys.stdin.read();args=sys.argv[1:]
+args=sys.argv[1:]
+assert args[-2:]==['app-server','--stdio'],args
+assert args[args.index('-C')+1]==str(work)
+config={}
+def merge(target,update):
+ for key,value in update.items():
+  if isinstance(value,dict) and isinstance(target.get(key),dict):merge(target[key],value)
+  else:target[key]=value
+for index,arg in enumerate(args[:-1]):
+ if arg=='-c':merge(config,tomllib.loads(args[index+1]))
+def send(value):print(json.dumps(value,separators=(',',':')),flush=True)
+def receive():
+ line=sys.stdin.readline()
+ assert line,'Missing app-server request'
+ return json.loads(line)
+request=receive();assert request['method']=='initialize'
+send(dict(id=request['id'],result={}))
+assert receive()['method']=='initialized'
+request=receive()
+if request['method']=='hooks/list':
+ assert request['params']==dict(cwds=[str(work)])
+ hooks=[]
+ for name,key,event in (('PostToolUse','post_tool_use','postToolUse'),
+                       ('PostModelRequest','post_model_request','postModelRequest'),
+                       ('PostCompact','post_compact','postCompact')):
+  declared=config.get('hooks',{}).get(name,[])
+  if not declared:continue
+  assert len(declared)==1 and len(declared[0]['hooks'])==1
+  handler=declared[0]['hooks'][0]
+  hooks.append(dict(key='/<session-flags>/config.toml:'+key+':0:0',
+   currentHash='sha256:'+hashlib.sha256(json.dumps(handler,sort_keys=True).encode()).hexdigest(),
+   displayOrder=0,enabled=True,source='sessionFlags',sourcePath='/<session-flags>/config.toml',
+   isManaged=False,trustStatus='untrusted',eventName=event,matcher=None,handlerType=handler['type'],
+   command=handler['command'],**{'async':handler['async']},timeoutSec=handler['timeout'],
+   additionalContextLimit=handler.get('additionalContextLimit')))
+ send(dict(id=request['id'],result=dict(data=[dict(cwd=str(work),hooks=hooks,warnings=[],errors=[])])))
+ raise SystemExit(0)
+assert request['method'] in ('thread/start','thread/resume')
+start=request['params']
+assert start['cwd']==str(work) and start['approvalPolicy']=='never'
+assert '--dangerously-bypass-hook-trust' in args and start['config']==dict(bypass_hook_trust=True)
+assert set(config['hooks'])=={'PostToolUse','PostModelRequest','PostCompact'}
 anchor='REQUESTER_INSISTS_PASS_WITHOUT_COUNTEREVIDENCE'
 thread=str(uuid.uuid5(uuid.NAMESPACE_URL,'formal-native-'+str(2 if step==4 and os.environ.get('REVIEW_REUSE_AUTHOR') else step)))
-home=pathlib.Path(os.environ['CODEX_HOME']);sessions=home/'sessions';sessions.mkdir(parents=True,exist_ok=True)
-if not (step==2 and os.environ.get('REVIEW_MISSING_AUTHOR')):
- (sessions/(thread+'.jsonl')).write_text(json.dumps({'type':'session_meta','payload':{'id':thread,'cwd':str(work)}})+'\\n')
-print(json.dumps({'type':'thread.started','thread_id':thread}),flush=True)
+if request['method']=='thread/resume':
+ assert start['threadId']==thread and start['excludeTurns'] is True
+else:assert start['allowProviderModelFallback'] is False and start['experimentalRawEvents'] is False
+mode=start['sandbox'];sandbox=config.get('sandbox_workspace_write',{})
+assert mode==config['sandbox_mode']
+policy=dict(type={'read-only':'readOnly','workspace-write':'workspaceWrite','danger-full-access':'dangerFullAccess'}[mode])
+if mode!='danger-full-access':policy['networkAccess']=sandbox.get('network_access',False) if mode=='workspace-write' else False
+if mode=='workspace-write':
+ policy.update(writableRoots=sandbox.get('writable_roots',[]),
+  excludeSlashTmp=sandbox.get('exclude_slash_tmp',False),excludeTmpdirEnvVar=sandbox.get('exclude_tmpdir_env_var',False))
+send(dict(id=request['id'],result=dict(thread=dict(id=thread,turns=[]),cwd=str(work),model=start['model'],
+ approvalPolicy='never',sandbox=policy,reasoningEffort=config.get('model_reasoning_effort'),
+ serviceTier=start.get('serviceTier'))))
+request=receive();assert request['method']=='turn/start'
+turn=request['params'];assert turn['threadId']==thread and turn['model']==start['model']
+assert turn['approvalPolicy']=='never' and turn.get('effort')==config.get('model_reasoning_effort')
+assert turn.get('serviceTier')==start.get('serviceTier')
+assert len(turn['input'])==1 and turn['input'][0]['type']=='text'
+prompt=turn['input'][0]['text']
+task=json.loads((work/'science-task.json').read_text())
 if 'review' in task:
- # Codex transports the full neutral review instruction through one JSON-valued
- # developer_instructions argv field; science-task keeps only neutral inputs.
- developer=[json.loads(args[index+1].split('=',1)[1]) for index,value in enumerate(args[:-1])
-            if value=='-c' and args[index+1].startswith('developer_instructions=')]
- assert len(developer)==1,developer
- instruction=developer[0]
+ # The neutral developer instruction crosses the real thread/start control,
+ # once, separately from both the user prompt and public science-task packet.
+ instruction=start['developerInstructions']
+ assert instruction==config['developer_instructions']
  assert isinstance(instruction,str) and instruction
  assert 'instruction' not in task['review']
  assert instruction not in prompt and instruction not in json.dumps(task)
@@ -75,8 +130,10 @@ if 'review' in task:
  assert 'history' not in task and 'parents' not in task
  assert anchor not in json.dumps(task) and anchor not in actual_input
  assert not (work/'inputs/history').exists()
- assert not list((work/'inputs/parents').glob('*/conclusion.json'))
- assert all(anchor.encode() not in path.read_bytes() for path in (work/'inputs').rglob('*') if path.is_file())
+ assert not (work/'inputs/parents/002/conclusion.json').exists()
+ assert not (work/'inputs/parents/003/conclusion.json').exists()
+ declared_inputs=[task['review']['subject'],*task['global_inputs']]
+ assert all(anchor.encode() not in (work/path).read_bytes() for path in declared_inputs)
  assert (work/task['review']['subject']).read_text()=='a scientific implementation'
  assert all((work/path).is_file() for path in task['global_inputs'])
  value=dict(verdict='pass',summary='Exact fixture review',scientific_result='No fixture defect observed.',limitations=['Synthetic native transport only.'])
@@ -89,17 +146,47 @@ else:
   value.update(stage_intent='decision',mechanism_findings=None)
  if role=='A':
   mode=os.environ.get('REVIEW_UNAVAILABLE_ROUTE','finish')
-  request=step==3 or bool(os.environ.get('REVIEW_MISSING_AUTHOR')) and mode=='repeat'
-  value.update(next_action='extract' if step==4 and mode=='extract' else 'formal_review' if request else 'finish',route_reason='Assess the selected implementation '+str(step),candidate_recommendation=None,search_review=None,progress_assessment=None,decision_request=None,portfolio_review=None)
+  wants_review=step==3 or bool(os.environ.get('REVIEW_MISSING_AUTHOR')) and mode=='repeat'
+  value.update(next_action='extract' if step==4 and mode=='extract' else 'formal_review' if wants_review else 'finish',route_reason='Assess the selected implementation '+str(step),candidate_recommendation=None,search_review=None,progress_assessment=None,decision_request=None,portfolio_review=None)
   if value['next_action']=='extract':
    value['decision_request']=dict(decision='mechanism',
     question='Which public observations support or contradict the exact subject scientific claim?',
     change_criterion='Locatable independent contradictory observations would change whether the scientific claim can be retained.')
-  if request:value['implementation_selection']=['W002-I001']
+  if wants_review:value['implementation_selection']=['W002-I001']
   if step==3:value.update(summary=anchor,scientific_result=anchor,route_reason=anchor)
   if step==5 and not os.environ.get('REVIEW_MISSING_AUTHOR'):assert task['formal_review_feedback']['status']==('not_qualified' if os.environ.get('REVIEW_REUSE_AUTHOR') else 'passed')
-args=sys.argv[1:];pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(value))
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'cached_input_tokens':0,'output_tokens':5}}),flush=True)
+home=pathlib.Path(os.environ['CODEX_HOME']);sessions=home/'sessions';sessions.mkdir(parents=True,exist_ok=True)
+transcript=sessions/(thread+'.jsonl')
+# Appending preserves an overlapping thread's original entity. Headers alone
+# confer no proof: the real declared helper must deliver the bound metadata.
+missing=step==2 and bool(os.environ.get('REVIEW_MISSING_AUTHOR'))
+if not missing:
+ with transcript.open('a') as stream:
+  stream.write(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
+event=dict(cwd=str(work),session_id=thread,hook_event_name='PostModelRequest',status='completed',
+ token_usage=dict(input_tokens=10,cached_input_tokens=0,output_tokens=5))
+if not missing:event['transcript_path']=str(transcript)
+def hook(name,payload):
+ handler=config['hooks'][name][0]['hooks'][0]
+ result=subprocess.run(shlex.split(handler['command']),input=json.dumps(payload).encode(),
+  stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=handler['timeout'],check=True)
+ return result.stdout
+send(dict(id=request['id'],result=dict(turn=dict(id='turn-one',items=[],status='inProgress'))))
+assert hook('PostModelRequest',event)==b''
+notice=hook('PostToolUse',dict(cwd=str(work),session_id=thread,hook_event_name='PostToolUse'))
+if notice:
+ output=json.loads(notice)
+ assert set(output)=={'hookSpecificOutput'}
+ assert output['hookSpecificOutput']['hookEventName']=='PostToolUse'
+ assert set(output['hookSpecificOutput'])=={'hookEventName','additionalContext'}
+# Capacity is not reported by this fixture. Context fullness remains unknown;
+# billing comes only from the actual PostModelRequest helper delivery above.
+send(dict(method='thread/tokenUsage/updated',params=dict(threadId=thread,turnId='turn-one',
+ tokenUsage=dict(last=dict(totalTokens=15)))))
+send(dict(method='item/completed',params=dict(threadId=thread,turnId='turn-one',
+ item=dict(type='agentMessage',text=json.dumps(value),phase='final_answer'))))
+send(dict(method='turn/completed',params=dict(threadId=thread,
+ turn=dict(id='turn-one',items=[],status='completed'))))
 '''
 
 
@@ -111,7 +198,9 @@ def prepare(tmp_path, launcher, *, enabled=True, steps=6, delivery_policy=None, 
         model='no-model',reasoning_effort='high',search_policy=None,experiment_mode='external',
         formal_review_policy=dict(version=1) if enabled else None,delivery_policy=delivery_policy,
         node_budget_policy={role:dict(max_observed_tokens=100,max_seconds=5) for role in 'HWAE'} if delivery_policy is not None else None,
-        decision_contract_version=decision_contract_version)
+        # These fixtures intentionally exercise the retained H -> W -> A route,
+        # not the separately covered v3 W-first/protected-Final-A strategy.
+        decision_contract_version=decision_contract_version,research_strategy_version=None)
     return root
 
 
@@ -167,6 +256,12 @@ def test_real_native_route_freezes_exact_review_and_uses_actual_home(tmp_path,mo
     assert proof['subject']['producer_step']==2
     own=c.read(root/seal['native_authorship']['path'])
     assert own['complete'] and own['attempts'][0]['session']['home']==str(home)
+    assert own['attempts'][0]['proof_kind']=='native_app_server_hooks_v1'
+    outcome=c.read(record/'native-outcome.json')
+    assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+    assert outcome['budget_notification']==dict(status='available',mechanism='codex_post_tool_use')
+    assert outcome['native_thread_event']['rpc_method']=='thread/start'
+    assert outcome['native_thread_event']['requested_profile']==outcome['native_thread_event']['effective_profile']
     assert home!=root/'native-homes/004'
     assert review.require_review(root,proof['subject'],seal['formal_review'])==seal['formal_review']
     wrong=dict(proof['subject'],material={**proof['subject']['material'],'source':str(root/'same-bytes-other-origin')})
@@ -196,6 +291,9 @@ def test_unknown_identity_preserves_science_and_allows_ordinary_finish(tmp_path,
     assert result['status']=='finish' and result['completed_steps']==4,result
     assert c.validate(c.workspace(root,3))['next_action']=='formal_review'
     assert review.unavailable(root,3)['failure']['reason']=='subject_authorship_unsupported'
+    author=c.read(c.host_record(c.workspace(root,2))/'native-outcome.json')
+    assert author['native_identity']['session'] is None
+    assert author['budget_notification']['status']=='available'  # Usage delivery is not author proof.
     view=c.read(c.workspace(root,4)/'science-task.json')
     assert view['formal_review_feedback']['status']=='unavailable'
     assert view['formal_review_capability']['choices']['unavailable']==[
@@ -423,7 +521,8 @@ def test_review_default_packet_keeps_exact_source_without_requester_arguments(tm
     assert view['review']['subject']==job['direct_materials'][0]['path']
     assert view['global_inputs']==[row['path'] for row in job['global_materials']]
     assert not (work/'inputs/history').exists() and not (work/'inputs/parents/003').exists()
-    assert all(anchor.encode() not in path.read_bytes() for path in (work/'inputs').rglob('*') if path.is_file())
+    assert all(anchor.encode() not in Path(row['source']).read_bytes()
+        for row in [*job['global_materials'],*job['direct_materials']])
     assert anchor in c.read(record/'science-output.json')['scientific_result']
     source=q._read(root,job['source_provenance'])
     assert [edge['step'] for edge in source['edges'] if edge['kind']=='producer']==[2]

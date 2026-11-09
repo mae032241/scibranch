@@ -347,7 +347,7 @@ def bind_new_job_facts(root, step, *, base):
     root = Path(root).resolve()
     with budget._operator_writer_from_base(root, base=base), _writer_from_base(root, base=base):
         from . import accepted_budget
-        head = accepted_budget.load(root, base=base)
+        head = accepted_budget.recover(root, accepted_budget.load(root, base=base))
         path = root / 'jobs' / f'{step:03d}.json'
         if path.exists():
             job = c.read(c.regular(path))

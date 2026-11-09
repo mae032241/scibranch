@@ -160,7 +160,7 @@ def material_inputs(root, job, *, sources, base=None, source=None):
         reference = job['formal_review']
         if source is not None:
             reference = dict(reference, origin_identity=reference.get('origin_identity', source.origin_identity))
-        binding = formal_review.input_binding(root, reference, sources=sources)
+        binding = formal_review.input_binding(root, reference, sources=sources, owner=source)
         scientific = binding.get('compiler_scientific_materials', [])
         expected = material_references.references(
             [row for row in binding['materials'] if row not in scientific], sources=sources)

@@ -56,6 +56,14 @@ class Backend(ABC):
     @abstractmethod
     def launch(self, profile, work, pending, schema, instruction): ...
     @abstractmethod
+    def bind_attempt(self, home, work, session=None): ...
+    @abstractmethod
+    def load_launch_facts(self, root, job, work, *, home, args, context, selected_code, source_facts, policy): ...
+    @abstractmethod
+    def wrap_launch(self, args, view_facts): ...
+    @abstractmethod
+    def combine_failures(self, failures, *, completed_before=None): ...
+    @abstractmethod
     def resume(self, args, profile, work, pending, schema, session): ...
     @abstractmethod
     def request(self, prompt, **context): ...
@@ -87,6 +95,15 @@ class Backend(ABC):
     def prepare_launch(self, args, work, attempt, env, view_facts, context, *, diagnostic=None): ...
     @abstractmethod
     def configure_observation(self, meter, work, attempt, thread, channel, *, required): ...
+    def bind_metadata_callback(self, meter, callback):
+        """Optional source seam: parent publication precedes native receipt ack.
+
+        Adapters without synchronous metadata delivery retain their existing
+        poll behavior without inspecting or mutating the opaque collector.
+        This does not grant execution authority to a helper.
+        """
+        return None
+
     @abstractmethod
     def finish_observation(self, meter, *, required): ...
     @abstractmethod
@@ -95,6 +112,34 @@ class Backend(ABC):
     def retain_terminal(self, meter, observation, terminal): ...
     @abstractmethod
     def recovery_capability(self, kind): ...
+    def retain_participant_evidence(self, outcome, intent, process):
+        """Native owner supplies final attempt facts once; no acquisition fallback."""
+        return None
+
+    @staticmethod
+    def validate_participant_process(outcome, process):
+        """Provider-specific retained writer binding, from already loaded facts."""
+        return None
+
+    def acquire_participant_session(self, outcome, intent, workspace):
+        """Acquire provider proof at the owner boundary from supplied originals.
+
+        Unsupported providers must not borrow another provider's session/header
+        format. Retained validation uses validate_participant_proof, never this
+        live acquisition hook.
+        """
+        raise ValueError('Native authorship acquisition unsupported')
+
+    @staticmethod
+    def validate_participant_header(header_bytes, outcome, workspace):
+        """Pure retained header semantics; unsupported formats stay unsupported."""
+        raise ValueError('Native authorship header proof unsupported')
+
+    @staticmethod
+    def validate_participant_proof(row, metadata, outcome, intent, workspace):
+        """Pure retained provider semantics; no reads or filesystem probes."""
+        raise ValueError('Native authorship proof unsupported')
+
     @abstractmethod
     def authorship_scope(self, binding): ...
     @abstractmethod
@@ -102,7 +147,8 @@ class Backend(ABC):
     @abstractmethod
     def authorship_proof_kind(self, binding): ...
     @abstractmethod
-    def prepare_execution(self, root, step, record, work, home, args, *, resume_position, job, intent, settings): ...
+    def prepare_execution(self, root, step, record, work, home, args, *, resume_position, job, intent, settings,
+                          source_facts, selected_code, material_sources): ...
     @abstractmethod
     def validate_resume_session(self, session, workspace, home): ...
     @abstractmethod
@@ -113,6 +159,15 @@ class Backend(ABC):
     def validate_session_event(self, event, thread): ...
     @abstractmethod
     def validate_configuration(self, options): ...
+    @classmethod
+    @abstractmethod
+    def validate_declaration(cls, settings):
+        """Pure early veto of explicit declarations, before preparation effects."""
+        ...
+    @abstractmethod
+    def validate_preparation(self, settings):
+        """Pure admission of the owner's complete, normalized prepared settings."""
+        ...
     @abstractmethod
     def permissions(self, settings): ...
     @abstractmethod
@@ -233,15 +288,20 @@ def configuration(backend='codex', launcher=None, native_options=None, *, existi
     if not isinstance(backend,str) or backend not in _PROVIDERS:
         raise ValueError('Unsupported native backend')
     if launcher is None:
-        launcher = _PROVIDERS[backend].default_launcher()
+        launcher = provider(backend).default_launcher()
     if (not isinstance(launcher, (list, tuple)) or not launcher
             or any(not isinstance(item, str) or not item or '\0' in item for item in launcher)):
         raise ValueError('Native launcher must be a nonempty argv')
-    options = _PROVIDERS[backend].validate_configuration(native_options)
+    options = provider(backend).validate_configuration(native_options)
     frozen = dict(native_backend=backend, native_launcher_argv=list(launcher),
                   native_options=options if native_options is not None else None)
     frozen['native_permissions'] = permission_summary(frozen)
-    adapter = selected(frozen)
+    # Carry frozen provider capabilities through revisions/forks, including a
+    # permission or launcher edit. A fresh declaration has no retained facts.
+    retained_capabilities = ((existing or {}).get('native_capabilities')
+        if existing is not None and existing.get('native_backend', DEFAULT_BACKEND) == backend else None)
+    adapter = selected(dict(frozen, **(dict(native_capabilities=retained_capabilities)
+        if retained_capabilities is not None else {})))
     retained=(existing or {}).get('native_capabilities',{}).get('native_launcher_contract',...)
     if existing is not None and retained is ...:
         raise ValueError('Frozen native namespace launcher contract is missing')
@@ -292,9 +352,9 @@ def _codex_permissions(settings):
 
 def selected(settings, *, schema_transport=None):
     backend=settings.get('native_backend','codex')
-    provider=_PROVIDERS.get(backend) if isinstance(backend,str) else None
-    if provider is None:raise ValueError('Unsupported frozen native backend')
-    return provider(settings,schema_transport=schema_transport)
+    try:selected_provider=provider(backend)
+    except ValueError as error:raise ValueError('Unsupported frozen native backend') from error
+    return selected_provider(settings,schema_transport=schema_transport)
 
 
 def _toml(value):
@@ -764,6 +824,31 @@ class Codex(Backend):
         return ([*self.launcher,'exec',*global_args,'resume','--json','--model',profile['model'],
                  *schema_args,'--output-last-message',str(pending),session['thread_id'],'-'],position)
 
+    @classmethod
+    def validate_declaration(cls, settings):
+        # Codex retains the generic owners' declaration checks.
+        return None
+
+    def validate_preparation(self, settings):
+        # Controller has completed the existing generic declaration validators;
+        # Codex adds no narrower preparation restrictions.
+        return None
+
+    def bind_attempt(self, home, work, session=None): pass
+
+    def load_launch_facts(self, root, job, work, *, home, args, context, selected_code, source_facts, policy):
+        from . import shared_input_views
+        return shared_input_views.load_wrap_facts(root,job,work,context=context,
+            selected_code=selected_code,source_facts=source_facts,policy=policy)
+
+    def wrap_launch(self, args, view_facts):
+        from . import shared_input_views
+        return shared_input_views.wrap_from_facts(view_facts,args)
+
+    def combine_failures(self, failures, *, completed_before=None):
+        from . import native_recovery
+        return native_recovery.combine(failures,completed_before=completed_before)
+
     def budget_hook_args(self, args, definition, *, trusted=False):
         if not self.standard or self.options is None:
             raise ValueError('Budget hook requires standard Codex with declared native permissions')
@@ -1043,6 +1128,55 @@ class Codex(Backend):
             or kind in {'automatic_recovery','format_fallback'} and self.standard)
         return dict(status='supported' if supported else 'unsupported',reason=None if supported else 'native_recovery_unsupported')
 
+    def acquire_participant_session(self, outcome, intent, workspace):
+        # Preserve Codex's original live acquisition checks without reopening
+        # the immutable outcome or the selected job policy in continuation.session.
+        from .continuation import ResumeUnavailable
+        from .native_usage import MetadataUnavailable
+        identity = outcome.get('native_identity') or {}
+        session = identity.get('session')
+        thread = outcome.get('thread_id')
+        if not isinstance(session, dict):
+            raise ResumeUnavailable('worker_resume_metadata_unavailable')
+        if thread is None or session.get('thread_id') != thread:
+            raise ResumeUnavailable('worker_resume_thread_unavailable')
+        if identity.get('home') is None:
+            raise ResumeUnavailable('worker_resume_metadata_unavailable')
+        if identity.get('path') != session.get('path'):
+            raise ValueError('Native session original path changed')
+        try:
+            self.validate_resume_session(session, workspace, identity['home'])
+            self.validate_session_event(outcome.get('native_thread_event'), thread)
+        except MetadataUnavailable as error:
+            raise ResumeUnavailable(str(error)) from error
+        return dict(session, thread_event=outcome.get('native_thread_event'))
+
+    @staticmethod
+    def validate_participant_header(header_bytes, outcome, workspace):
+        """Interpret unchanged legacy Codex header bytes without reopening a home."""
+        thread = outcome['thread_id']
+        event = json.loads(header_bytes)
+        if (not isinstance(event, dict) or not isinstance(event.get('payload'), dict)
+                or event.get('type') != 'session_meta' or event.get('payload', {}).get('id') != thread
+                or event['payload'].get('cwd') != str(workspace)):
+            raise ValueError('Native session identity or workspace changed')
+        return ('codex_exec', thread)
+
+    @staticmethod
+    def validate_participant_proof(row, metadata, outcome, intent, workspace):
+        """Original Codex hook proof semantics, including every negative gate."""
+        session = (outcome.get('native_identity') or {}).get('session')
+        event = outcome.get('native_thread_event')
+        if (not isinstance(session, dict) or session.get('source') != 'native_metadata_hooks'
+                or session.get('workspace') != str(workspace) or session.get('thread_id') != outcome.get('thread_id')
+                or not isinstance(event, dict) or event.get('type') != 'thread.started'
+                or event.get('thread_id') != session['thread_id']
+                or metadata.get('session') != dict(session, thread_event=event)
+                or row.get('session') != metadata['session']
+                or (outcome.get('budget_notification') or {}).get('status') != 'available'):
+            raise ValueError('Authorship compact native identity changed')
+        return Codex.validate_participant_event(event, outcome, intent, workspace)
+
     @staticmethod
     def authorship_scope(binding):
         return binding.get('participant_scope') in {'codex_exec_single_agent_v1','codex_app_server_single_agent_v1'}
@@ -1077,10 +1211,13 @@ class Codex(Backend):
         # transports; it is not a claim that this invocation used exec.
         return ('codex_exec',outcome['thread_id'])
 
-    def prepare_execution(self, root, step, record, work, home, args, *, resume_position, job, intent, settings):
+    def prepare_execution(self, root, step, record, work, home, args, *, resume_position, job, intent, settings,
+                          source_facts, selected_code, material_sources):
         from . import native_execution
-        return native_execution.prepare(root,step,record,work,home,args,standard=self.standard,
-            resume_position=resume_position,native_options=self.options,job=job,intent=intent,settings=settings)
+        return native_execution.prepare_from_facts(root,step,record,work,home,args,
+            resume_position=resume_position,job=job,intent=intent,settings=settings,
+            source_facts=source_facts,selected_code=selected_code,material_sources=material_sources,
+            projection=native_execution.codex_projection(self.standard,self.options))
 
     def validate_resume_session(self, session, workspace, home):
         from .native_usage import validate_session_binding
@@ -1243,6 +1380,14 @@ class Protocol(Backend):
         from .experiments import UnsupportedExecution
         raise UnsupportedExecution('The selected backend has no supported project namespace projection')
     def default_experiment_mode(self): return 'external'
+    @classmethod
+    def validate_declaration(cls, settings):
+        # Protocol retains the generic owners' declaration checks.
+        return None
+    def validate_preparation(self, settings):
+        # Retain Protocol's existing generic validation semantics. Its narrower
+        # resume/project/Skill contracts are already checked by their owners.
+        return None
     def skill_loading_contract(self,launcher,*,retained=None):
         raise ValueError('Custom native backend has no Skill loading contract')
 
@@ -1299,10 +1444,13 @@ class Protocol(Backend):
     def authorship_proof_kind(binding): raise ValueError('Native authorship unsupported')
     @staticmethod
     def validate_participant_event(event,outcome,intent,workspace): raise ValueError('Native authorship unsupported')
-    def prepare_execution(self,root,step,record,work,home,args,*,resume_position,job,intent,settings):
+    def prepare_execution(self,root,step,record,work,home,args,*,resume_position,job,intent,settings,
+                          source_facts,selected_code,material_sources):
         from . import native_execution
-        return native_execution.prepare(root,step,record,work,home,args,standard=False,
-            resume_position=resume_position,native_options=self.settings.get('native_options'),job=job,intent=intent,settings=settings)
+        return native_execution.prepare_from_facts(root,step,record,work,home,args,
+            resume_position=resume_position,job=job,intent=intent,settings=settings,
+            source_facts=source_facts,selected_code=selected_code,material_sources=material_sources,
+            projection=native_execution.codex_projection(False,self.settings.get('native_options')))
     def validate_resume_session(self,session,workspace,home): raise ValueError('Native resume unsupported')
     def format_rejection(self,event): return False
     def format_observation(self,event): return 'activity'
@@ -1341,6 +1489,17 @@ class Protocol(Backend):
         supported=fact in {'tokens','context','native_calls','terminal'}
         return dict(status='supported' if supported else 'unsupported',
             reason=None if supported else 'native_observation_unsupported')
+    def bind_attempt(self, home, work, session=None): pass
+    def load_launch_facts(self, root, job, work, *, home, args, context, selected_code, source_facts, policy):
+        from . import shared_input_views
+        return shared_input_views.load_wrap_facts(root,job,work,context=context,
+            selected_code=selected_code,source_facts=source_facts,policy=policy)
+    def wrap_launch(self, args, view_facts):
+        from . import shared_input_views
+        return shared_input_views.wrap_from_facts(view_facts,args)
+    def combine_failures(self, failures, *, completed_before=None):
+        from . import native_recovery
+        return native_recovery.combine(failures,completed_before=completed_before)
     def launch(self, *args):return list(self.settings['native_launcher_argv'])
     def request(self, prompt, *, profile, work, schema, formal_review=False, response_schema=None):
         permissions = permission_summary(self.settings)
@@ -1394,7 +1553,7 @@ class Protocol(Backend):
         return []
 
 
-_PROVIDERS={'codex':Codex,'protocol':Protocol}
+_PROVIDERS={'codex':Codex,'protocol':Protocol,'pi':'.pi_backend:Pi'}
 
 
 def names():
@@ -1404,25 +1563,29 @@ def names():
 def provider(name=DEFAULT_BACKEND):
     selected_provider=_PROVIDERS.get(name) if isinstance(name,str) else None
     if selected_provider is None:raise ValueError('Unsupported native backend')
+    if isinstance(selected_provider,str):
+        from importlib import import_module
+        module,attribute=selected_provider.split(':',1)
+        selected_provider=getattr(import_module(module,__package__),attribute)
+        _PROVIDERS[name]=selected_provider
     return selected_provider
 
 
 def renderer(name):
-    provider=_PROVIDERS.get(name)
-    if provider is None: raise ValueError('Native response rendering unsupported')
-    return provider
+    try:return provider(name)
+    except ValueError as error:raise ValueError('Native response rendering unsupported') from error
 
 
 def outcome_provider(outcome):
-    provider=_PROVIDERS.get(outcome.get('native_backend')) if isinstance(outcome,dict) else None
-    if provider is None:raise ValueError('Native outcome provider unsupported')
-    return provider
+    if not isinstance(outcome,dict):raise ValueError('Native outcome provider unsupported')
+    try:return provider(outcome.get('native_backend'))
+    except ValueError as error:raise ValueError('Native outcome provider unsupported') from error
 
 
 def participant_provider(binding):
     """Resolve retained proof formats explicitly, including sealed legacy facts."""
     if not isinstance(binding,dict):raise ValueError('Native participant identity unsupported')
-    matches=[provider for provider in _PROVIDERS.values() if provider.authorship_scope(binding)]
+    matches=[candidate for name in names() if (candidate:=provider(name)).authorship_scope(binding)]
     if len(matches)!=1: raise ValueError('Native participant identity unsupported')
     return matches[0]
 

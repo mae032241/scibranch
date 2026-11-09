@@ -47,7 +47,8 @@ UNAVAILABLE_REASONS = {'not_preflighted', 'unsupported_backend', 'undeclared_nat
 
 
 def public_channel(value):
-    if isinstance(value, dict) and value == dict(status='available', mechanism='codex_post_tool_use'):
+    if isinstance(value, dict) and value in (dict(status='available', mechanism='codex_post_tool_use'),
+            dict(status='available', mechanism='pi_tool_result')):
         return dict(value, limitation='Next local tool boundary only; running model requests and hosted web cannot be interrupted.')
     reason = value.get('reason') if isinstance(value, dict) else None
     return dict(status='unavailable', reason=reason if reason in UNAVAILABLE_REASONS else 'not_preflighted')
@@ -450,6 +451,69 @@ def record_metadata(work, attempt, event=None, *, reader=None):
         os.close(lock)
 
 
+def start_delivery(path, *, source, nonce, cwd, attempt):
+    """Private compact source seam; not a second usage counter or authority."""
+    path = Path(path)
+    if path.exists() or path.is_symlink(): raise ValueError('Metadata attempt already exists')
+    _publish_metadata(path, dict(version=1, source=source, nonce=nonce, cwd=str(cwd),
+        attempt=attempt, pending=False, pending_started_at=None, acknowledged=0,
+        sequence=0, event=None, fault=None))
+
+
+def update_delivery(path, nonce, sequence, *, fault=None):
+    """Parent acknowledgement AFTER acceptance/publication, or a sticky fault."""
+    path = Path(path)
+    lock = os.open(path.with_suffix('.lock'), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        value = read_metadata(path)
+        if value.get('nonce') != nonce or value.get('sequence') != sequence:
+            raise ValueError('Metadata watermark changed')
+        if fault is not None:
+            value['fault'] = value.get('fault') or fault
+        elif value.get('fault') is None and value.get('pending') is True:
+            value.update(pending=False, pending_started_at=None, acknowledged=sequence)
+        else:
+            raise ValueError('Metadata cannot be acknowledged')
+        _publish_metadata(path, value)
+        return value
+    finally:
+        os.close(lock)
+
+
+def deliver_metadata(path, nonce, event, *, timeout=5):
+    """Native->parent two-phase receipt. NEVER wait while holding the lock.
+
+    The source supplies a compact observation, not authorization. Acceptance and
+    shared review publication belong to the parent. Timeouts cannot be repaired
+    by a late acknowledgement or another invocation of this helper.
+    """
+    path = Path(path)
+    lock = os.open(path.with_suffix('.lock'), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        value = read_metadata(path)
+        if (value.get('nonce') != nonce or value.get('pending') is not False
+                or value.get('fault') is not None or value.get('sequence') != value.get('acknowledged')):
+            raise ValueError('Metadata delivery incomplete')
+        value.update(sequence=value['sequence'] + 1, pending=True,
+            pending_started_at=time.monotonic(), event=event)
+        _publish_metadata(path, value)
+        sequence = value['sequence']
+    finally:
+        os.close(lock)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = read_metadata(path)
+        if current.get('nonce') != nonce or current.get('sequence') != sequence or current.get('fault'):
+            raise ValueError('Metadata delivery failed')
+        if current.get('acknowledged') == sequence and current.get('pending') is False:
+            return
+        time.sleep(.01)
+    update_delivery(path, nonce, sequence, fault='native_metadata_delivery_timeout')
+    raise ValueError('Metadata delivery timeout')
+
+
 def definition(work, attempt, *, python=None):
     command = shlex.join([python or sys.executable, str(Path(work) / 'work' / HELPER),
         '--work', str(work), '--attempt', str(attempt)])
@@ -463,7 +527,7 @@ def definition(work, attempt, *, python=None):
         PostCompact=handler(command + ' --metadata'))
 
 
-def stage_helper(work):
+def stage_helper(work, *, empty_config=True):
     """Publish this small stdlib executable before readonly namespace assembly."""
     directory = Path(work) / 'work'
     destination = directory / HELPER
@@ -476,10 +540,11 @@ def stage_helper(work):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
-        empty = directory / EMPTY_CONFIG
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
-        os.close(fd)
-        os.replace(temporary, empty)
+        if empty_config:
+            empty = directory / EMPTY_CONFIG
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+            os.close(fd)
+            os.replace(temporary, empty)
         return destination
     finally:
         try:
@@ -621,6 +686,8 @@ def main(argv=None):
     parser.add_argument('--attempt', type=int, required=True)
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--metadata', action='store_true')
+    parser.add_argument('--delivery-path', type=Path)
+    parser.add_argument('--nonce')
     args = parser.parse_args(argv)
     if not args.work.is_absolute() or not 0 <= args.attempt <= 1_000_000:
         return 0
@@ -630,6 +697,14 @@ def main(argv=None):
                 and not stat.S_IMODE(Path(__file__).stat().st_mode) & 0o222
                 and (args.work / 'work/budget-status.json').is_file()):
             print(VISIBLE)
+        return 0
+    if args.delivery_path is not None:
+        try:
+            data = sys.stdin.buffer.read(8193)
+            if len(data) > 8192: return 1
+            deliver_metadata(args.delivery_path, args.nonce, json.loads(data))
+        except (OSError, ValueError, TypeError, KeyError):
+            return 1
         return 0
     if args.metadata:
         try:

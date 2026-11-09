@@ -1,0 +1,80 @@
+# Pi example; research.example.toml is the separate Codex example.
+# Copy beside your exact objective/public originals, replace placeholders, then:
+# scid-research config-check --config research.toml
+# scid-research prepare --config research.toml
+# scid-research start --root /absolute/project/research-instance
+# Paths below resolve relative to this TOML. Use the exact prepared instance root.
+# Edits affect new instances only; existing work keeps its frozen bindings/spend.
+version = 1
+
+[research]
+root = "research-instance"
+objective = "public/objective.md"
+public_root = "public"
+user_updates = []
+
+[agent]
+backend = "pi"
+# One installed executable, no arguments; omission also defaults to ["pi"].
+launcher = ["pi"]
+# Replace with an actually available exact provider/model-id, not a fuzzy name.
+model = "provider/exact-model-id"
+# Explicit and actually supported by that model; no substitution or clamp.
+reasoning_effort = "high"
+# Omitted roles inherit these fields. Do not add service_tier or Codex native options.
+# Keep credentials in the original native environment/home, never in this TOML.
+
+[permissions]
+# All four fields are required explicitly. Default Local requires workspace-write.
+workspace = "workspace-write"
+network = true
+web = "disabled"
+subagents = false
+# PI_OFFLINE limits automatic resources/catalog fetching, not provider/bash network.
+# Linux mounts are mandatory, with no unsandboxed fallback; same-user access is soft.
+
+[budget]
+max_tokens = 2000000
+max_seconds = 3600
+max_steps = 32
+# Finite all-role node targets inherit these original ceilings when omitted.
+# Targets are advisory; shared admission and finite real-execution limits still apply.
+
+# executor omitted: host-owned Local with local_execution:command and control Python.
+# Pi's scientific child has empty HOME and no native authentication/private sessions;
+# no Codex binary is required. For a different scientific Python, explicitly declare:
+# [executor]
+# mode = "local"
+# [executor.config]
+# executor = "local_execution:command"
+# [executor.config.configuration]
+# run_argv = ["/absolute/existing/scientific-env/bin/python"]
+# max_seconds = 120
+# Ordinary read-only scientific work instead needs BOTH workspace = "read-only"
+# above AND [executor] mode = "external". It is not tool-less auxiliary read-only.
+
+# policies omitted: current finite Pi RPC turn-scoped output-only repair + execution
+# wake, and common same_session W cadence with max_context_windows=1. Do not copy
+# Codex resume protocol IDs or add its automatic_recovery policy as a Pi default.
+# Policy declarations, chat and transport success grant no review/execution approval.
+# New supported preparations retain controlled single-native-session authorship proof.
+# Opt-in shared formal A requires complete authors/reviewers, disjoint participants
+# and a sealed pass for the exact subject; repair/resume stays the same author.
+# Frozen false capabilities/old unsupported receipts do not gain support retroactively.
+# Full native-call accounting and tool-less auxiliary read-only remain unsupported.
+# See docs/RESEARCH_CONFIGURATION.md for retained proof and same-user soft boundaries.
+# No delivery adapter is declared; artifacts remain in the instance.
+
+# Optional Skills: select installed live schema-v3 assets per role, not copies.
+# [skills.sets.analysis]
+# items = ["curve-analysis", "scientific-paper-evidence"]
+# [agent.roles.W]
+# skill_set = "analysis"
+# Native get_commands must prove exact selected manuals loaded valid frontmatter.
+# Packages/custom npmCommand and inherited SYSTEM.md/APPEND_SYSTEM.md are unsupported
+# at both the original agent directory and workspace .pi scope before startup.
+# Arbitrary user extensions are unsupported in this permission profile.
+
+[ui]
+port = 0
+open_browser = false
