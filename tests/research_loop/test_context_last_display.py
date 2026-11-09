@@ -31,12 +31,9 @@ def test_valid_then_unavailable_keeps_only_display_history(monkeypatch):
     assert shown['sample']['total_tokens'] == 30
     assert 'thread_id' not in shown['sample']
     rows = ui_view.token_details({}, current, context_display=shown)
-    context = next(row for row in rows if '历史快照' in row['label'])
-    assert '最近一次本地观测上下文' in context['label']
-    assert '30 / 100 · 30.0%' in context['value']
-    assert '本地观测时间 1970-01-01 00:02:20 UTC' in context['value']
-    assert '不代表当前窗口或当前占用' in context['value']
-    assert '当前上下文状态' in str(rows) and '上报时间未知' not in str(rows)
+    values = {row['label']: row['value'] for row in rows}
+    assert values['上下文'] == '30 / 100 · 30.0%'
+    assert values['更新时间'] == '1970-01-01 00:02:20 UTC'
     assert current == untouched and original['status'] == 'last_reported'
     assert 'token-feature' in ui_components.token_monitor(rows)
 
@@ -47,7 +44,9 @@ def test_never_valid_and_missing_scope_do_not_invent_history():
     shown = host._context_display_value(current, 1)
     assert shown == dict(status='unavailable')
     rows = ui_view.token_details({}, current, context_display=shown)
-    assert '尚未收到有效上下文快照' in str(rows)
+    values = {row['label']: row['value'] for row in rows}
+    assert values['上下文'] == '不可用'
+    assert values['更新时间'] == '未知'
     assert '后端未提供完整遥测或观测异常' not in str(rows)
     host._context_display_value(sample(), 2)
     assert host._context_display_value(dict(status='unavailable'), 3) == dict(status='unavailable')
@@ -117,7 +116,7 @@ def test_progress_api_retains_unavailable_and_adds_display_only_history(monkeypa
     assert stale['context'] == current == dict(status='unavailable')
     assert stale['context_windows']['windows_started'] == 2
     assert stale['context_display']['status'] == 'historical'
-    assert '不代表当前窗口或当前占用' in str(stale['token_details'])
+    assert dict((row['label'], row['value']) for row in stale['token_details'])['更新时间'] == '1970-01-01 00:02:10 UTC'
     assert len(reads) == 2
 
 
@@ -139,13 +138,27 @@ def test_shared_overview_snapshot_retains_history_without_changing_source_contex
     assert stale['view']['usage']['context'] == current
     assert stale['context_display']['status'] == 'historical'
     rows = ui_view.usage_stats(stale['view'], context_display=stale['context_display'])['tokens']['details']
-    assert '历史快照／等待更新' in str(rows)
+    assert dict((row['label'], row['value']) for row in rows)['更新时间'] == '1970-01-01 00:02:20 UTC'
 
 
-def test_fresh_reported_and_observed_labels_keep_their_time_source(monkeypatch):
-    monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
-    observed = str(ui_view.token_details({}, sample(observed_at=140)))
-    reported = str(ui_view.token_details({}, sample(reported_at=130)))
-    assert '最近一次本地观测上下文' in observed and '本地观测于 10 秒前' in observed
-    assert '上报时间未知' not in observed
-    assert '最近一次上报上下文' in reported and '上报于 20 秒前' in reported
+def test_context_rows_keep_fixed_shape_and_time_independent_values(monkeypatch):
+    current = sample(observed_at=140, reported_at=130)
+    missing = dict(status='unavailable', step=2, attempt=0)
+    historical = dict(status='historical', sample=current, current_status='out_of_order')
+    snapshots = []
+    for now in (150, 500):
+        monkeypatch.setattr(ui_view.time, 'time', lambda: now)
+        for context, display, value, updated in (
+            (current, None, '30 / 100 · 30.0%', '1970-01-01 00:02:20 UTC'),
+            (missing, historical, '30 / 100 · 30.0%', '1970-01-01 00:02:20 UTC'),
+            (missing, None, '不可用', '未知'),
+            (dict(current, current_window=False), None, '30 / 100 · 30.0%', '1970-01-01 00:02:20 UTC'),
+        ):
+            rows = ui_view.token_details({}, context, context_display=display)
+            assert rows[5:7] == [dict(label='上下文', value=value), dict(label='更新时间', value=updated)]
+            assert [row['label'] for row in rows] == ['输入', '缓存输入', '非缓存输入', '输出', '缓存命中率', '上下文', '更新时间', '观测限制']
+            assert rows[-1]['value'] == '运行中请求与平台上报延迟未计入；缓存为后端已记录值'
+            assert '<div class="token-feature"><dt>上下文</dt>' in ui_components.token_monitor(rows)
+            assert '<div class="token-note"><dt>更新时间</dt>' in ui_components.token_monitor(rows)
+            snapshots.append(rows)
+    assert snapshots[:4] == snapshots[4:]

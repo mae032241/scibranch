@@ -1939,11 +1939,11 @@ if (!rendered.includes('Public browser fixture')) throw new Error('Initial fixed
 await writeFile(process.env.SCID_TEST_ADVANCE, 'metered');
 await writeFile(join(dirname(transport), 'usage.json'), JSON.stringify({input_tokens:30,cached_input_tokens:20,output_tokens:2}));
 await writeFile(join(dirname(transport), 'usage-observation.json'), JSON.stringify({coverage:'live',context:{status:'last_reported',total_tokens:8,model_context_window:100}}));
-await waitFor(`(()=>{const rows=Object.fromEntries(Array.from(document.querySelectorAll('[data-token-details] dt'),label=>[label.textContent,label.nextElementSibling.textContent]));return rows['输入']==='30' && rows['缓存输入']==='20' && rows['非缓存输入']==='10' && rows['输出']==='2' && rows['缓存命中率']==='66.7%' && rows['最近一次上报上下文（阶段 1 / attempt 0）']?.startsWith('8 / 100 · 8.0%')})()`);
+await waitFor(`(()=>{const rows=Object.fromEntries(Array.from(document.querySelectorAll('[data-token-details] dt'),label=>[label.textContent,label.nextElementSibling.textContent]));return rows['输入']==='30' && rows['缓存输入']==='20' && rows['非缓存输入']==='10' && rows['输出']==='2' && rows['缓存命中率']==='66.7%' && rows['上下文']==='8 / 100 · 8.0%'})()`);
 await evaluate(`window.tokenPollSentinel='preserved';true`);
 await writeFile(join(dirname(transport), 'usage.json'), JSON.stringify({input_tokens:100,cached_input_tokens:80,output_tokens:5}));
 await writeFile(join(dirname(transport), 'usage-observation.json'), JSON.stringify({coverage:'live',context:{status:'last_reported',total_tokens:64,model_context_window:128}}));
-await waitFor(`(()=>{const rows=Object.fromEntries(Array.from(document.querySelectorAll('[data-token-details] dt'),label=>[label.textContent,label.nextElementSibling.textContent]));return rows['输入']==='100' && rows['缓存输入']==='80' && rows['非缓存输入']==='20' && rows['输出']==='5' && rows['缓存命中率']==='80.0%' && rows['最近一次上报上下文（阶段 1 / attempt 0）']?.startsWith('64 / 128 · 50.0%')})()`);
+await waitFor(`(()=>{const rows=Object.fromEntries(Array.from(document.querySelectorAll('[data-token-details] dt'),label=>[label.textContent,label.nextElementSibling.textContent]));return rows['输入']==='100' && rows['缓存输入']==='80' && rows['非缓存输入']==='20' && rows['输出']==='5' && rows['缓存命中率']==='80.0%' && rows['上下文']==='64 / 128 · 50.0%'})()`);
 if (!(await evaluate(`window.tokenPollSentinel==='preserved' && document.querySelector('[data-events]').textContent.includes('Public browser fixture')`))) throw new Error('Token updates reloaded the page or lost public output');
 await noOverflow(); await screenshot('token-monitor-progress-desktop');
 await call('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:true});

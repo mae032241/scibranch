@@ -351,10 +351,10 @@ def test_token_monitoring_keeps_cache_subset_and_context_independent(monkeypatch
     assert values['输入'] == '100' and values['缓存输入'] == '80'
     assert values['非缓存输入'] == '20' and values['输出'] == '5'
     assert values['缓存命中率'] == '80.0%'
-    assert values['最近一次上报上下文'] == '30 / 100 · 30.0%；上报于 10 秒前'
+    assert values['上下文'] == '30 / 100 · 30.0%'
     empty = ui_view.token_details(dict(input_tokens=0, cached_input_tokens=0, output_tokens=5))
     assert {row['label']: row['value'] for row in empty}['缓存命中率'] == '不可用'
-    assert '不可用' in {row['label']: row['value'] for row in empty}['最近一次上报上下文']
+    assert '不可用' in {row['label']: row['value'] for row in empty}['上下文']
 
 
 def test_candidate_rows_keep_observation_order_groups_marks_and_missing_values():

@@ -206,7 +206,7 @@ function tokenDetails(details) {
   const list = document.createElement('dl'); list.className = 'token-metrics';
   for (const item of details || []) {
     const row = document.createElement('div'), label = document.createElement('dt'), value = document.createElement('dd');
-    row.className = ['计量状态','观测限制','当前上下文状态'].includes(item.label) ? 'token-note' : (item.label === '缓存命中率' || item.label.startsWith('最近一次上报上下文') || item.label.startsWith('最近一次本地观测上下文') ? 'token-feature' : 'token-count');
+    row.className = ['计量状态','观测限制','更新时间'].includes(item.label) ? 'token-note' : (['缓存命中率','上下文'].includes(item.label) ? 'token-feature' : 'token-count');
     label.textContent = item.label;
     if (item.value.startsWith('不可用') || item.value.startsWith('尚未收到')) value.className = 'token-unavailable';
     const separator = row.className === 'token-note' ? -1 : item.value.indexOf('；');
@@ -214,6 +214,7 @@ function tokenDetails(details) {
     if (separator >= 0) { const report = document.createElement('span'); report.className = 'token-report'; report.textContent = item.value.slice(separator + 1); value.appendChild(report); }
     row.append(label, value); list.appendChild(row);
   }
+  if (slot.firstElementChild && slot.firstElementChild.isEqualNode(list)) return;
   slot.replaceChildren(list);
 }
 async function poll(selectedGeneration) {

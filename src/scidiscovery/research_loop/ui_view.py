@@ -960,43 +960,22 @@ def token_details(usage, context=None, *, context_display=None):
     historical = isinstance(context_display, dict) and context_display.get('status') == 'historical'
     shown_context = context_display.get('sample') if historical else context
     telemetry = native_usage.context(shown_context)
-    reported = telemetry.get('reported_at')
-    observed = telemetry.get('observed_at')
-    label = '最近一次本地观测上下文' if reported is None and observed is not None else '最近一次上报上下文'
-    if isinstance(shown_context, dict) and type(shown_context.get('step')) is int and type(shown_context.get('attempt')) is int:
-        label += f'（阶段 {shown_context["step"]} / attempt {shown_context["attempt"]}）'
-    if historical:
-        label += ' · 历史快照／等待更新'
+    updated = '未知'
     if telemetry['status'] == 'last_reported':
         value = f'{fmt_int(telemetry["total_tokens"])} / {fmt_int(telemetry["model_context_window"])} · {telemetry["ratio"]:.1%}'
         now = time.time()
-        if historical:
-            # Absolute source times remain true when a completed progress page
-            # stops polling; do not freeze a relative "seconds ago" label.
-            def stamp(value):
-                try:
-                    return time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(value)) if value is not None and value <= now else None
-                except (OverflowError, OSError, ValueError):
-                    return None
-            if reported is not None or observed is None:
-                value += '；' + ('上报时间 ' + stamp(reported) if stamp(reported) else '上报时间未知')
-            if observed is not None:
-                value += '；' + ('本地观测时间 ' + stamp(observed) if stamp(observed) else '本地观测时间未知')
-            value += '；仅为本界面已收到的历史快照，不代表当前窗口或当前占用'
-        elif reported is not None or observed is None:
-            age = now - reported if reported is not None else None
-            value += '；' + (f'上报于 {fmt_duration(age)}前' if age is not None and age >= 0 else '上报时间未知')
-        if observed is not None and not historical:
-            age = now - observed
-            value += '；' + (f'本地观测于 {fmt_duration(age)}前' if age >= 0 else '本地观测时间未知')
-        if telemetry.get('current_window') is False:value+='；非当前窗口，保留的历史上报'
+        for timestamp in (telemetry.get('observed_at'), telemetry.get('reported_at')):
+            if type(timestamp) not in (int, float) or not 0 <= timestamp <= now:
+                continue
+            try:
+                updated = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(timestamp))
+            except (OverflowError, OSError, ValueError):
+                continue
+            break
     else:
-        value = '尚未收到有效上下文快照；当前上下文不可用，等待更新'
-    details.append(dict(label=label, value=value))
-    if historical:
-        details.append(dict(label='当前上下文状态', value=(
-            '本次读取顺序或快照时间滞后；等待有效的新快照'
-            if context_display.get('current_status') == 'out_of_order' else '不可用；等待有效的新快照')))
+        value = '不可用'
+    details.append(dict(label='上下文', value=value))
+    details.append(dict(label='更新时间', value=updated))
     if usage.get('measurement_status'):
         details.append(dict(label='计量状态', value=usage['measurement_status']))
     details.append(dict(label='观测限制', value='运行中请求与平台上报延迟未计入；缓存为后端已记录值'))

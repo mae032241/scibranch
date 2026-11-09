@@ -8,33 +8,29 @@ from scidiscovery.research_loop import progress, public_output, ui_view
 from test_public_progress import line, message, transport
 
 
-@pytest.mark.parametrize('timestamps,label,timing', [
-    (dict(observed_at=140), '最近一次本地观测上下文', '本地观测于 10 秒前'),
-    (dict(reported_at=130), '最近一次上报上下文', '上报于 20 秒前'),
-    (dict(reported_at=130, observed_at=140), '最近一次上报上下文',
-     '上报于 20 秒前；本地观测于 10 秒前'),
-    ({}, '最近一次上报上下文', '上报时间未知'),
-    (dict(reported_at=160), '最近一次上报上下文', '上报时间未知'),
-    (dict(observed_at=160), '最近一次本地观测上下文', '本地观测时间未知'),
-    (dict(reported_at=160, observed_at=140), '最近一次上报上下文',
-     '上报时间未知；本地观测于 10 秒前'),
-    (dict(reported_at=130, observed_at=160), '最近一次上报上下文',
-     '上报于 20 秒前；本地观测时间未知'),
-    (dict(reported_at='invalid', observed_at=140), '最近一次本地观测上下文', '本地观测于 10 秒前'),
-    (dict(reported_at='invalid', observed_at=float('nan')), '最近一次上报上下文', '上报时间未知'),
-    (dict(reported_at=True, observed_at=-1), '最近一次上报上下文', '上报时间未知'),
+@pytest.mark.parametrize('timestamps,updated', [
+    (dict(observed_at=140), '1970-01-01 00:02:20 UTC'),
+    (dict(reported_at=130), '1970-01-01 00:02:10 UTC'),
+    (dict(reported_at=130, observed_at=140), '1970-01-01 00:02:20 UTC'),
+    ({}, '未知'),
+    (dict(reported_at=160), '未知'),
+    (dict(observed_at=160), '未知'),
+    (dict(reported_at=160, observed_at=140), '1970-01-01 00:02:20 UTC'),
+    (dict(reported_at=130, observed_at=160), '1970-01-01 00:02:10 UTC'),
+    (dict(reported_at='invalid', observed_at=140), '1970-01-01 00:02:20 UTC'),
+    (dict(reported_at=130, observed_at='invalid'), '1970-01-01 00:02:10 UTC'),
+    (dict(reported_at='invalid', observed_at=float('nan')), '未知'),
+    (dict(reported_at=True, observed_at=-1), '未知'),
 ])
-def test_context_time_labels_follow_the_available_source(monkeypatch, timestamps, label, timing):
+def test_context_update_time_uses_valid_original_source(monkeypatch, timestamps, updated):
     monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
     context = dict(status='last_reported', total_tokens=30, model_context_window=100,
                    step=2, attempt=1, **timestamps)
     usage = dict(input_tokens=100, cached_input_tokens=80, output_tokens=5)
     values = {row['label']: row['value'] for row in ui_view.token_details(usage, context)}
-    assert values[f'{label}（阶段 2 / attempt 1）'] == f'30 / 100 · 30.0%；{timing}'
+    assert values['上下文'] == '30 / 100 · 30.0%'
+    assert values['更新时间'] == updated
     assert values['输入'] == '100' and values['非缓存输入'] == '20'
-    if set(timestamps) == {'observed_at'}:
-        assert '上报时间未知' not in str(values)
-        assert '上报于' not in str(values)
 
 
 def clean(text, limit=16384):
