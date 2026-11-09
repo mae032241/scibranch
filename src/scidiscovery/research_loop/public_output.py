@@ -63,10 +63,12 @@ def event(value, clean):
     kind = value.get('type')
     if kind in {'session.started', 'turn.completed'}:
         return dict(type=kind)
-    if kind == 'message' and isinstance(value.get('text'), str):
+    if kind in {'message', 'thinking'} and isinstance(value.get('text'), str):
+        if not value['text'].strip(): return None
         text = clean(value['text'])
+        if not text.strip(): return None
         truncated=value.get('text_truncated') is True or len(value['text'])>16384
-        if truncated:text+='\n[显示片段；完整回答保留在原结果中。]'
+        if truncated:text+='\n[显示片段；完整文本保留在原始记录中。]'
         return dict(type=kind, text=text, omitted_characters=max(0, len(value['text']) - 16384),
             **(dict(text_truncated=True) if truncated else {}))
     if kind == 'tool' and isinstance(value.get('tool'), str) and value.get('status') in {'started', 'updated', 'completed', 'failed'}:

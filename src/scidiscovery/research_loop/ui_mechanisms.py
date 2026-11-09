@@ -1,4 +1,4 @@
-"""Bounded, read-only mechanism trails from verified sealed originals.
+"""Bounded mechanism ledger from sealed originals and an owner's public view.
 
 This is a navigation projection, not search-state reconstruction or a scientific
 verdict. Only explicit findings and observed bindings associate W evidence.
@@ -8,6 +8,9 @@ from __future__ import annotations
 from . import contracts as c, generic_results, search as scientific_search, ui_components as ui, ui_view
 
 MAX_RENDER_BYTES = 64 * 1024
+CALL_STATES = {'accepted': '已接受', 'submitted': '已提交，运行状态待观察', 'queued': '已观察排队',
+    'running': '已观察运行', 'cancelling': '正在取消', 'known_success': '执行成功',
+    'known_failed': '执行失败', 'not_submitted': '确认未提交', 'unknown': '状态未知'}
 
 
 def _ref(row):
@@ -33,8 +36,8 @@ def _metrics(candidates, clean):
     return result
 
 
-def project(reader, steps, clean, *, partial=False):
-    """Read at most WINDOW sealed stages, sharing the page's verified Reader."""
+def project(reader, steps, clean, *, live_executions=None, partial=False):
+    """Use the shared sealed Reader and explicitly supplied public owner facts."""
     steps = sorted(set(steps))
     shown = steps[-ui_view.WINDOW:]
     mechanisms, unbound, unresolved, errors = {}, [], [], []
@@ -89,7 +92,8 @@ def project(reader, steps, clean, *, partial=False):
                 if key not in versions:
                     versions.add(key)
                     item=mechanism(ref)
-                    item.update(label=label,authored_label=True,question=question,declared_in_window=True)
+                    item.update(label=label,authored_label=True,question=question,declared_in_window=True,
+                        revision=revision,declaration_status=row.get('status'),source_step=row.get('source_step'),source_role='W')
                     item['events'].append(dict(step=step,role='W',kind='declaration',label=label,text=question,
                         revision=revision,source_step=row.get('source_step'),source_role=row.get('source_role'),
                         declaration_scope='封存时接受的 W 声明' if row in live_rows else '原调用准确绑定'))
@@ -100,7 +104,8 @@ def project(reader, steps, clean, *, partial=False):
             for row in declared:
                 item = mechanism(row['mechanism_ref'])
                 if item['question'] is None:
-                    item.update(label=clean(row['label'], 300), authored_label=True, question=clean(row.get('minimal_test') or '', 2000))
+                    item.update(label=clean(row['label'], 300), authored_label=True, question=clean(row.get('minimal_test') or '', 2000),
+                        source_step=row.get('source_step'),source_role=row.get('source_role'))
             findings = {}
             declared_findings = c.scientific_field(job, payload, 'mechanism_findings')
             authored_findings=False
@@ -166,13 +171,72 @@ def project(reader, steps, clean, *, partial=False):
                     metrics=_metrics(candidates.get(ref, []), clean)))
         # A advice remains in its exact scientific original. It cannot become
         # an adopted mechanism disposition merely through this UI projection.
+    # The operation owner has already acquired and cleaned this compact view.
+    # No receipt reads, directory discovery or current-pointer fallback belongs here.
+    live = dict(available=False, coverage='unknown', research_available=False,
+        omitted_declarations=0, omitted_calls=0, unbound_calls=[])
+    if (isinstance(live_executions, dict) and type(live_executions.get('step')) is int
+            and live_executions['step']>0 and live_executions['step'] not in steps):
+        step=live_executions.get('step')
+        live.update(available=True,step=step, coverage=live_executions.get('coverage', 'unknown'),
+            omitted_calls=live_executions.get('omitted_count', 0))
+        research=live_executions.get('research')
+        if isinstance(research, dict):
+            live.update(research_available=True,revision=research['revision'],
+                omitted_declarations=research.get('omitted_count', 0))
+            for row in research['mechanisms']:
+                item=mechanism(row['mechanism_ref'])
+                item.update(label=clean(row.get('label') or row['mechanism_ref'],300), authored_label=True,
+                    question=clean(row.get('question') or '',2000), revision=row['revision'],
+                    declaration_status=row['status'], source_step=row.get('source_step'),
+                    source_role=row.get('source_role'), current=True,
+                    question_truncated=row.get('question_truncated') is True,declared_in_window=True)
+                item['events'].append(dict(step=step,role='W',kind='live_declaration',
+                    label=item['label'],text=item['question'],revision=row['revision'],
+                    status=row['status'],source_step=row.get('source_step'),source_role=row.get('source_role'),
+                    question_truncated=item['question_truncated']))
+        for call in live_executions.get('calls') or []:
+            binding=(call.get('display') or {}).get('research_binding')
+            event=dict(step=step,role='W',kind='live_call',call_id=clean(call['call_id'],128),
+                state=call.get('state','unknown'))
+            if not isinstance(binding, dict):
+                live['unbound_calls'].append(event)
+                continue
+            ref=binding['mechanism_ref']
+            event.update(revision=binding['revision'],source_step=binding.get('source_step'),
+                source_role=binding.get('source_role'),text=clean(binding.get('question') or '',2000))
+            item=mechanism(ref)
+            # An original call snapshot is evidence of its own binding only;
+            # it must never overwrite a later current declaration or retire state.
+            if not item['declared_in_window']:
+                item.update(label=clean(binding.get('label') or ref,300),authored_label=True,
+                    question=event['text'],source_step=binding.get('source_step'),
+                    source_role=binding.get('source_role'),revision=binding['revision'])
+            item['events'].append(event)
     return dict(mechanisms=list(mechanisms.values()), unbound=unbound, unresolved=unresolved, errors=errors,
-        omitted=len(steps) - len(shown), partial=partial,
+        omitted=len(steps) - len(shown), partial=partial, live=live,
         first=shown[0] if shown else None, last=shown[-1] if shown else None)
 
 
 def _event(event):
     step, role = event['step'], event['role']
+    if event.get('kind') in {'live_declaration', 'live_call'}:
+        body='<h4 class="mechanism-event-head">'+ui.link('W · 第 '+str(step)+' 阶段 · 尚未封存','/progress')+'</h4>'
+        if event['kind']=='live_declaration':
+            author=event.get('source_role')
+            body+='<p><strong>'+ui.translatable(event['label'])+'</strong> · revision '+str(event['revision'])+' · '+ui.esc({'active':'活跃','retired':'已退役'}.get(event['status'],'状态未记录'))+'</p>'
+            provenance=('当前 W 声明' if author=='W' else '继承机制；原作者 H' if author=='H' else '声明作者未记录，不作为 W 已声明机制')
+            body+='<p class="note">'+provenance+'；声明不表示科学发现。</p>'
+        else:
+            body+='<p>原调用 '+ui.esc(event['call_id'])+' · '+ui.esc(CALL_STATES.get(event['state'],'状态未知'))+' · 准确绑定 revision '+str(event['revision'])+'</p>'
+            body+='<p class="note">执行观察不表示科学认可；此调用保留原绑定版本。</p>'
+        source=event.get('source_step')
+        if type(source) is int and source>0:
+            body+='<p>'+ui.link('声明来源 '+(event.get('source_role') or '作者未记录')+' · 第 '+str(source)+' 阶段','/progress' if source==step else '/results/'+str(source))+'</p>'
+        else:body+='<p class="note">声明来源阶段未记录。</p>'
+        if event.get('text'):body+='<p>'+ui.translatable(event['text'])+'</p>'
+        if event.get('question_truncated'):body+='<p class="note">问题仅显示已有公共摘要；完整声明待封存原文核对。</p>'
+        return '<li class="mechanism-event">'+body+'</li>'
     body = '<h4 class="mechanism-event-head"><span class="role role-' + role + '">' + role + '</span> ' + ui.link('第 ' + str(step) + ' 阶段 · ' + ui_view.ROLE_LABELS[role], '/results/' + str(step)) + '</h4>'
     declaration=event.get('kind')=='declaration'
     if declaration:
@@ -213,31 +277,52 @@ def _event(event):
 
 
 def _summary(item, *, compact=False):
-    status = ui_view.DISPOSITIONS.get(item['status'], item['status']) if item['status'] else '科学判断见阶段原文'
+    status = {'active':'活跃','retired':'已退役'}.get(item.get('declaration_status'), '声明状态未记录；科学判断见阶段原文')
     body = '<article class="mechanism-card"><header class="mechanism-card-head"><h3>' + (ui.translatable(ui_view.first_sentence(item['label'], 80) if compact else item['label']) if item.get('authored_label', True) else ui.esc(item['label'])) + '</h3><span class="badge mechanism-status">' + ui.esc(status) + '</span></header>'
-    if not compact:
+    if item.get('revision') is not None:
+        body+='<p class="note">'+ui.esc(item['ref'])+' · revision '+str(item['revision'])+(' · 当前 W 观察，当前阶段尚未封存' if item.get('current') else ' · 原文或准确调用绑定')+'</p>'
+    source=item.get('source_step')
+    if type(source) is int and source>0:
+        body+='<p class="note">'+ui.link('声明来源 '+(item.get('source_role') or '作者未记录')+' · 第 '+str(source)+' 阶段','/progress' if any(event['step']==source and event.get('kind') in {'live_declaration','live_call'} for event in item['events']) else '/results/'+str(source))+'</p>'
+    if not compact or item.get('current'):
         body += '<dl class="mechanism-overview"><div><dt>可证伪问题</dt><dd>' + (ui.translatable(ui_view.first_sentence(item['question'], 96)) if item['question'] else '本窗口未记录可证伪问题。') + '</dd></div>'
-        latest_w = next((event for event in reversed(item['events']) if event['role'] == 'W' and event.get('kind')!='declaration'), None)
+        latest_w = next((event for event in reversed(item['events']) if event['role'] == 'W' and not event.get('kind')), None)
         finding = None
         if latest_w:
             texts = [row['text'] for row in latest_w['findings']] or [latest_w.get('text')]
             finding = ui_view.first_sentence(texts[0], 120)
-        body += '<div><dt>最近 W 记录' + (' · ' + ui.link('第 ' + str(latest_w['step']) + ' 阶段', '/results/' + str(latest_w['step'])) if latest_w else '') + '</dt><dd>' + (ui.translatable(finding) if finding else '本窗口尚未记录逐机制的作者发现。') + '</dd></div>'
+        body += '<div><dt>封存 W 作者发现' + (' · ' + ui.link('第 ' + str(latest_w['step']) + ' 阶段', '/results/' + str(latest_w['step'])) if latest_w else '') + '</dt><dd>' + (ui.translatable(finding) if finding else '本窗口尚未记录逐机制的作者发现。') + '</dd></div>'
+        if item.get('question_truncated'):body+='<div><dt>摘要范围</dt><dd>问题仅显示已有公共摘要，完整声明待封存原文核对。</dd></div>'
         body += '</dl>'
     return body
 
 
-def render(value):
+def render(value, *, compact=False):
     """Escaped complete markup, with a display-only UTF-8 budget for SSE."""
-    body = '<section class="mechanism-trails"><h2>机制探索过程</h2>'
+    overview=compact
+    live=value.get('live') or {}
+    ledger_key='worker-mechanism-ledger:' + ('overview' if overview else 'history')
+    ledger_meta=('观察不可用' if 'error' in value else '可见 W 声明 '+str(sum(item.get('source_role')=='W' for item in value['mechanisms']))+' 个')
+    if live.get('available'):
+        ledger_meta+=' · 当前 W · 第 '+str(live['step'])+' 阶段'
+    body = '<details class="mechanism-trails" data-details-key="'+ledger_key+'"><summary data-live-focus="'+ledger_key+'"><h2>W 已声明机制 <span class="mechanism-ledger-meta">'+ui.esc(ledger_meta)+'</span></h2></summary>'
     if 'error' in value:
-        return ui.Safe(body + ui.error_inline(value, what='机制探索过程') + '</section>')
-    body += '<p class="note">仅封存阶段：按 H/W 声明和 W 的明确机制关联串联；A 判断保留在阶段原文中。不同评估口径分别保留，候选顺序不代表科学排序。每个机制展开后可查看中间过程与原文。</p>'
+        return ui.Safe(body + ui.error_inline(value, what='机制探索过程') + '</details>')
+    body += '<p class="note">W 声明账本：当前未封存声明与原调用的准确绑定、封存作者发现分别展示。声明、运行状态与调用数均不表示已验证结论；A 判断保留在阶段原文中。每个机制可展开核对过程与来源。</p>'
+    if live.get('available'):
+        body+='<p class="note">当前 W · 第 '+str(live['step'])+' 阶段 · '+ui.esc({'observed':'本地观察','partial':'部分观察，调用仅为已观察下界','unknown':'观察不可用'}.get(live['coverage'],'观察不可用'))+' · 尚未封存。'+(' 声明账本版本 revision '+str(live['revision'])+'。' if live.get('research_available') else '')+'</p>'
+        if not live.get('research_available'):body+=ui.empty('当前 W 机制声明观察不可用；缺失观察不表示尚未声明。')
+        elif not any(item.get('current') and item.get('source_role')=='W' for item in value['mechanisms']):
+            body+=ui.empty('当前公共观察中尚无可展示的 W 声明；存在遗漏，不能判断是否尚未声明。' if live.get('omitted_declarations') else '当前公共观察中 W 尚未声明机制；继承的历史机制单列保留。')
+        if live.get('omitted_declarations'):body+='<p class="note">已有公共视图另有 '+str(live['omitted_declarations'])+' 个声明未展开；账本为部分记录。</p>'
+        if live.get('omitted_calls'):body+='<p class="note">已有公共视图另有 '+str(live['omitted_calls'])+' 个原调用未展开；逐机制调用仅为已观察范围。</p>'
     if value['omitted'] or value['partial']:
         body += '<p class="note">仅汇集当前窗口内至多 ' + str(ui_view.WINDOW) + ' 个已封存阶段；较早记录未汇入，机制记录可能不完整。' + ui.link('按阶段查看更早原文', '/results?after=0') + '</p>'
-    if not value['mechanisms']:
-        body += ui.empty('尚无可读取的机制声明或明确绑定的机制证据。')
+    if not any(item.get('source_role')=='W' for item in value['mechanisms']):
+        body += ui.empty('尚无可读取的 W 已声明机制；历史来源与明确绑定记录不作为 W 新声明。')
     tail = ''
+    if live.get('unbound_calls'):
+        tail+='<p class="note">以下原调用的机制关联未知，未归入任何机制：'+ '；'.join(ui.esc(row['call_id'])+' · '+ui.esc(CALL_STATES.get(row['state'],'状态未知')) for row in live['unbound_calls'])+'。不根据工具名或标签推断关联。</p>'
     if value['unbound']:
         tail += '<p class="note">以下 W 阶段没有明确的逐机制关联，未归入任一机制：' + '、'.join(ui.link('第 ' + str(step) + ' 阶段', '/results/' + str(step)) for step in value['unbound']) + '。</p>'
     for row in value['unresolved']:
@@ -247,21 +332,29 @@ def render(value):
     # Reserve summaries before spending bytes on details. Oversized histories
     # retain mechanism labels/status and navigate to the exact stage originals.
     size = lambda text: len(text.encode('utf-8'))
-    summaries = [_summary(item) for item in value['mechanisms']]
-    compact = size(body + tail + ''.join(summaries)) > MAX_RENDER_BYTES // 2
+    items=sorted(value['mechanisms'],key=lambda item:(item.get('source_role')!='W',not item.get('current')))
+    summaries = [_summary(item,compact=compact) for item in items]
+    compact = compact or size(body + tail + ''.join(summaries)) > MAX_RENDER_BYTES // 2
     if compact:
-        summaries = [_summary(item, compact=True) for item in value['mechanisms']]
-        body += '<p class="note">记录较长，机制摘要已缩短；完整问题与发现请查看阶段原文。</p>'
+        summaries = [_summary(item, compact=True) for item in items]
+        body += '<p class="note">机制摘要已缩短；展开可核对声明、原调用与封存作者发现。'+ui.link('查看研究过程','/results')+'</p>'
     body += '<div class="mechanism-grid">'
-    closing = '</div>' + tail + '</section>'
+    closing = '</div>' + tail + '</details>'
     reserve = size(closing) + sum(size(summary + '</article>') for summary in summaries)
-    for index, (item, summary) in enumerate(zip(value['mechanisms'], summaries)):
+    history_started=False
+    for index, (item, summary) in enumerate(zip(items, summaries)):
+        if item.get('source_role')!='W' and not history_started:
+            body+='<h3>历史机制与明确绑定记录</h3><p class="note">以下保留原作者 H 或缺失来源，不作为 W 已声明机制。</p>'
+            history_started=True
         reserve -= size(summary + '</article>')
         key = 'mechanism:' + item['ref']
         opening = '<details class="mechanism-details" data-details-key="' + ui.esc(key) + '"><summary data-live-focus="' + ui.esc(key) + '">查看完整过程与原文 <span class="mechanism-record-count">' + str(len(item['events'])) + ' 条记录</span></summary>'
-        fallback = '<p class="note">详细过程因显示长度限制未展开；请查看对应阶段原文：' + '、'.join(ui.link('第 ' + str(step) + ' 阶段', '/results/' + str(step)) for step in sorted({event['step'] for event in item['events']})) + '。</p>'
+        fallback = '<p class="note">详细过程因显示长度限制未展开；请查看对应阶段：' + '、'.join(ui.link('第 ' + str(step) + ' 阶段', '/progress' if any(event['step']==step and event.get('kind') in {'live_declaration','live_call'} for event in item['events']) else '/results/' + str(step)) for step in sorted({event['step'] for event in item['events']})) + '。</p>'
         history_note = '' if item['declared_in_window'] else '<p class="note">本窗口未包含该机制的 H/W 声明原文；声明信息仅在任务保留时显示，请从相关阶段原文核对声明版本。</p>'
-        details = opening + history_note + '<ol class="mechanism-timeline">' + ''.join(_event(event) for event in item['events']) + '</ol></details>'
+        events=[event for event in item['events'] if event.get('kind') in {'live_declaration','live_call'}] if overview else item['events']
+        historical_note=('<p class="note">封存历史与作者发现请'+ui.link('查看研究过程','/results')+'。</p>'
+            if overview and len(events)<len(item['events']) else '')
+        details = opening + history_note + historical_note + '<ol class="mechanism-timeline">' + ''.join(_event(event) for event in events) + '</ol></details>'
         if size(body + summary + details + '</article>') + reserve > MAX_RENDER_BYTES:
             details = opening + fallback + '</details>'
         article = summary + details + '</article>'

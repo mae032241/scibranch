@@ -145,7 +145,8 @@ def test_host_verified_terminal_hint_survives_actual_client_and_cli_stdout(chain
         diagnostic=Path(config['record_dir']).parent/'bridge-diagnostic.json')
     monkeypatch.setattr(bridge,'_configuration',lambda server:config)
     executions=[]
-    def execute(server,arguments):
+    def execute(server,arguments,*,submission_ref=None):
+        assert submission_ref=='S001'
         executions.append(arguments)
         # The operation response remains uncertain; verified retained terminal
         # originals still own the public consumption hint for this exact call.

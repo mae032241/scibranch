@@ -947,7 +947,7 @@ def exhausted_limits(view, used_steps):
 
 # ---------------------------------------------------------------- usage
 
-def token_details(usage, context=None):
+def token_details(usage, context=None, *, context_display=None):
     """Shared overview and exact-attempt labels; context is never accumulated."""
     meter = native_usage.tokens(usage)
     details = []
@@ -957,30 +957,53 @@ def token_details(usage, context=None):
         details.append(dict(label=label, value=fmt_int(value) if value is not None else '不可用'))
     hit = native_usage.breakdown(meter).get('cache_hit_ratio')
     details.append(dict(label='缓存命中率', value=f'{hit:.1%}' if hit is not None else '不可用'))
-    telemetry = native_usage.context(context)
-    label = '最近一次上报上下文'
-    if isinstance(context, dict) and type(context.get('step')) is int and type(context.get('attempt')) is int:
-        label += f'（阶段 {context["step"]} / attempt {context["attempt"]}）'
+    historical = isinstance(context_display, dict) and context_display.get('status') == 'historical'
+    shown_context = context_display.get('sample') if historical else context
+    telemetry = native_usage.context(shown_context)
+    reported = telemetry.get('reported_at')
+    observed = telemetry.get('observed_at')
+    label = '最近一次本地观测上下文' if reported is None and observed is not None else '最近一次上报上下文'
+    if isinstance(shown_context, dict) and type(shown_context.get('step')) is int and type(shown_context.get('attempt')) is int:
+        label += f'（阶段 {shown_context["step"]} / attempt {shown_context["attempt"]}）'
+    if historical:
+        label += ' · 历史快照／等待更新'
     if telemetry['status'] == 'last_reported':
         value = f'{fmt_int(telemetry["total_tokens"])} / {fmt_int(telemetry["model_context_window"])} · {telemetry["ratio"]:.1%}'
-        stamp = telemetry.get('reported_at')
-        age = time.time() - stamp if stamp is not None else None
-        value += '；' + (f'上报于 {fmt_duration(age)}前' if age is not None and age >= 0 else '上报时间未知')
-        observed=telemetry.get('observed_at')
-        observed_age=time.time()-observed if observed is not None else None
-        if observed_age is not None and observed_age>=0:
-            value+='；本地观测于 '+fmt_duration(observed_age)+'前'
+        now = time.time()
+        if historical:
+            # Absolute source times remain true when a completed progress page
+            # stops polling; do not freeze a relative "seconds ago" label.
+            def stamp(value):
+                try:
+                    return time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(value)) if value is not None and value <= now else None
+                except (OverflowError, OSError, ValueError):
+                    return None
+            if reported is not None or observed is None:
+                value += '；' + ('上报时间 ' + stamp(reported) if stamp(reported) else '上报时间未知')
+            if observed is not None:
+                value += '；' + ('本地观测时间 ' + stamp(observed) if stamp(observed) else '本地观测时间未知')
+            value += '；仅为本界面已收到的历史快照，不代表当前窗口或当前占用'
+        elif reported is not None or observed is None:
+            age = now - reported if reported is not None else None
+            value += '；' + (f'上报于 {fmt_duration(age)}前' if age is not None and age >= 0 else '上报时间未知')
+        if observed is not None and not historical:
+            age = now - observed
+            value += '；' + (f'本地观测于 {fmt_duration(age)}前' if age >= 0 else '本地观测时间未知')
         if telemetry.get('current_window') is False:value+='；非当前窗口，保留的历史上报'
     else:
-        value = '不可用（后端未提供完整遥测或观测异常）'
+        value = '尚未收到有效上下文快照；当前上下文不可用，等待更新'
     details.append(dict(label=label, value=value))
+    if historical:
+        details.append(dict(label='当前上下文状态', value=(
+            '本次读取顺序或快照时间滞后；等待有效的新快照'
+            if context_display.get('current_status') == 'out_of_order' else '不可用；等待有效的新快照')))
     if usage.get('measurement_status'):
         details.append(dict(label='计量状态', value=usage['measurement_status']))
     details.append(dict(label='观测限制', value='运行中请求与平台上报延迟未计入；缓存为后端已记录值'))
     return details
 
 
-def usage_stats(view, *, used_steps=None, candidates=None):
+def usage_stats(view, *, used_steps=None, candidates=None, context_display=None):
     budget = view.get('budget') or {}
     usage = view.get('usage') or {}
     closeout = view.get('closeout') or {}
@@ -988,7 +1011,7 @@ def usage_stats(view, *, used_steps=None, candidates=None):
     limit = budget.get('max_tokens')
     tokens = dict(label='模型用量（tokens）', value=fmt_tokens(observed),
                   limit='不限' if 'max_tokens' in budget and limit is None else fmt_tokens(limit) if limit else '未记录',
-                  raw=observed, raw_limit=limit, notes=[], details=token_details(usage, usage.get('context')))
+                  raw=observed, raw_limit=limit, notes=[], details=token_details(usage, usage.get('context'), context_display=context_display))
     tokens['percent'] = percent(observed, limit)
     overrun = closeout.get('final_overrun') if isinstance(closeout.get('final_overrun'), dict) else None
     over = observed is not None and limit and observed > limit
@@ -1217,6 +1240,7 @@ def project(root, view, *, final_step=None, objective=None, memo=None):
                     for line in [item['h'], *item['w'], *item['a'], *item['others']] if line)
     mechanism_trails = guarded(ui_mechanisms.project, reader,
         [node['step'] for node in nodes if node.get('state') in SEALED], clean,
+        live_executions=view.get('live_executions'),
         partial=bool(nodes) and nodes[0]['step'] > 1, clean=clean)
     memory_node=next((getattr(reader,'_nodes',{}).get(node['step'],{}) for node in reversed(nodes)
         if node.get('state') in SEALED),{})

@@ -97,27 +97,45 @@ class ContextRequests:
         self.pending = None; self.dirty = False; self.closed = True
 
 
-def resource_policy():
+def resource_policy(mode='closed'):
     """Public projection facts, not private settings or scientific permission."""
+    from .pi_backend import resource_mode
+    if resource_mode(mode) == 'configured':
+        return dict(profile='pi_configured_extensions_v1', configured_packages='native',
+            custom_package_resolution=False, automatic_resource_network='offline',
+            provider_requests='unchanged', native_network='unrestricted', inherited_system_prompts='absent',
+            observation_scope='primary_session', token_accounting='lower_bound', complete_native_authorship=False)
     return dict(profile='pi_explicit_resources_v1', configured_packages='absent_or_empty',
         custom_package_resolution=False, automatic_resource_network='offline',
         provider_requests='unchanged', native_network='unrestricted', inherited_system_prompts='absent')
 
 
-def validate_resource_settings(global_settings, project_settings):
+def runtime_resource_mode(policy):
+    """Accept only exact owner-projected policies, without selector fallback."""
+    for mode in ('closed', 'configured'):
+        expected = resource_policy(mode)
+        if (isinstance(policy, dict) and policy == expected
+                and all(type(policy[key]) is type(value) for key, value in expected.items())):
+            return mode
+    raise TransportFault('resource_policy_missing_or_changed')
+
+
+def validate_resource_settings(global_settings, project_settings, *, mode='closed'):
     """Pure NativeRuntimeProfile admission, not an SDK capability assertion.
 
     DefaultResourceLoader.reload resolves configured packages BEFORE applying
     --no-* resource filters. PI_OFFLINE prevents refresh/install, but a missing
     user npm managed path can still execute npmCommand to locate legacy global
     storage. No supported CLI switch disables that resolution per invocation.
-    Reject both scopes, even with --no-approve or an empty Skill selection; do
-    not merge away a global reference with an empty project override.
+    Closed mode refuses packages in either scope; configured delegates packages
+    to the offline native resolver. Both modes refuse a custom npmCommand.
     """
+    from .pi_backend import resource_mode
+    mode = resource_mode(mode)
     for settings in (global_settings, project_settings):
         if not isinstance(settings, dict):
             raise TransportFault('Pi NativeRuntimeProfile requires object settings')
-        if 'packages' in settings and settings['packages'] != []:
+        if mode == 'closed' and 'packages' in settings and settings['packages'] != []:
             raise TransportFault('Pi NativeRuntimeProfile does not support configured package references; --offline and --no-skills do not disable package resolution')
         if 'npmCommand' in settings and settings['npmCommand'] not in (None, []):
             raise TransportFault('Pi NativeRuntimeProfile does not support custom package resolution (npmCommand)')
@@ -151,7 +169,7 @@ def load_prompt_sources(agent, work):
     validate_prompt_sources(tuple(present))
 
 
-def load_resource_settings(agent, work):
+def load_resource_settings(agent, work, *, mode='closed'):
     """Effect-boundary owner: fixed SDK prompt paths and two settings originals.
 
     No settings copy, auth read, ancestor search, package/cache discovery, or
@@ -182,9 +200,9 @@ def load_resource_settings(agent, work):
             raise TransportFault('Pi NativeRuntimeProfile settings changed during acquisition')
         # SDK frontmatter/settings readers strip a UTF-8 BOM too.
         values.append(decode(data.decode('utf-8-sig')) if data else {})
-    validate_resource_settings(*values)
+    validate_resource_settings(*values, mode=mode)
     # Return only the explicit resource policy, never private settings contents.
-    return resource_policy()
+    return resource_policy(mode)
 
 
 def resource_proof(value):
@@ -202,28 +220,43 @@ def resource_proof(value):
     return tuple(dict(row) for row in value)
 
 
-def validate_resources(data, resources, *, observation=None):
+def validate_resources(data, resources, *, observation=None, mode='closed'):
     """Native inventory must equal the exact live owner selection before prompt.
 
     No command name, argv flag or user extension establishes permission. The
     controlled internal observer is the one exact original-source exception;
     it still requires a separate private startup frame before the sole prompt.
     """
-    if not isinstance(data, dict) or set(data) != {'commands'} or not isinstance(data['commands'], list):
+    from .pi_backend import resource_mode
+    mode = resource_mode(mode)
+    if (not isinstance(data, dict) or set(data) != {'commands'} or not isinstance(data['commands'], list)
+            or len(data['commands']) > 4096):
         raise TransportFault('resource_binding_mismatch')
     expected = {row['path'] for row in resources}
     seen, names = set(), set()
     internal = False
+    from .pi_observation import command_proof
+    observer_command = command_proof(observation['extension']) if observation is not None else None
     for command in data['commands']:
         if not isinstance(command, dict): raise TransportFault('resource_binding_mismatch')
         if observation is not None:
-            from .pi_observation import command_proof
-            if command == command_proof(observation['extension']):
+            if command == observer_command:
                 if internal: raise TransportFault('resource_binding_mismatch')
                 internal = True
                 continue
         name = command.get('name'); description = command.get('description')
         source = command.get('sourceInfo')
+        if mode == 'configured' and (not isinstance(source, dict) or source.get('path') not in expected):
+            # Native extensions may register commands without sourceInfo. This
+            # inventory is not an assertion that every package/hook/tool loaded.
+            # An extension may not impersonate the internal observer or a Skill.
+            if (not isinstance(name, str) or not name.strip() or name in names
+                    or name.startswith('skill:') or command.get('source') != 'extension'
+                    or observer_command is not None and (name == observer_command['name']
+                        or isinstance(source, dict) and source.get('path') == observation['extension'])):
+                raise TransportFault('resource_binding_mismatch')
+            names.add(name)
+            continue
         if (not isinstance(name, str) or not name.startswith('skill:') or name in names
                 or not isinstance(description, str) or not description.strip()
                 or not isinstance(source, dict) or not isinstance(source.get('path'), str)
@@ -243,6 +276,8 @@ def validate_resources(data, resources, *, observation=None):
                     origin='top-level', baseDir=str(Path(path).parent))):
             raise TransportFault('resource_binding_mismatch')
         seen.add(path); names.add(name)
+    if observer_command is not None and observer_command['name'] in names:
+        raise TransportFault('resource_binding_mismatch')
     if seen != expected: raise TransportFault('resource_binding_mismatch')
     if observation is not None and observation['required'] and not internal:
         raise TransportFault('pi_observer_source_unavailable')
@@ -251,7 +286,8 @@ def validate_resources(data, resources, *, observation=None):
 
 class Binding:
     """Pure command correlation. Neither rc=0 nor agent_end is completion."""
-    def __init__(self, provider, model, thinking, path, prompt, *, expected_session=None, resources=(), observation=None):
+    def __init__(self, provider, model, thinking, path, prompt, *, expected_session=None, resources=(), observation=None,
+            resource_mode='closed'):
         self.provider, self.model, self.thinking = provider, model, thinking
         self.path, self.prompt = path, prompt
         self.pending = {}; self.number = 0; self.session_id = expected_session
@@ -259,6 +295,8 @@ class Binding:
         self.prompt_sent = self.accepted = self.idle = False
         self.settled = None
         self.resources = resource_proof(list(resources))
+        from .pi_backend import resource_mode as validate_mode
+        self.resource_mode = validate_mode(resource_mode)
         self.resources_bound = False
         self.observation = observation
         self.observer_start = None
@@ -303,7 +341,7 @@ class Binding:
             return self.command('get_commands')
         if kind == 'get_commands':
             if self.resources_bound or self.prompt_sent: raise TransportFault('resource_binding_mismatch')
-            internal = validate_resources(data, self.resources, observation=self.observation)
+            internal = validate_resources(data, self.resources, observation=self.observation, mode=self.resource_mode)
             if (internal != (self.observer_start is not None)
                     or internal and self.observer_start['session_id'] != self.session_id):
                 raise TransportFault('pi_observer_start_or_source_missing')
@@ -373,7 +411,7 @@ def observation_proof(value):
     return dict(value)
 
 
-def _arguments(argv, *, observation=None):
+def _arguments(argv, *, observation=None, resource_mode='closed'):
     if not argv or argv[0] != '--' or len(argv) < 2: raise TransportFault('invalid_launcher')
     child = list(argv[1:])
     def option(flag):
@@ -381,9 +419,11 @@ def _arguments(argv, *, observation=None):
         return child[child.index(flag) + 1]
     if option('--mode') != 'rpc': raise TransportFault('invalid_launcher')
     provider, model, thinking = option('--provider'), option('--model'), option('--thinking')
-    from .pi_backend import validate_profile, RESOURCE_FLAGS
+    from .pi_backend import validate_profile, RESOURCE_FLAGS, resource_flags
+    flags = resource_flags(resource_mode)
     validate_profile(dict(model=provider + '/' + model, reasoning_effort=thinking))
-    if (any(child.count(flag) != 1 for flag in RESOURCE_FLAGS)
+    if (any(child.count(flag) != 1 for flag in flags)
+            or any(flag in child for flag in set(RESOURCE_FLAGS) - set(flags))
             or any(flag in child for flag in ('--continue', '--resume', '--no-session', '--session-id'))
             or option('--tools') != 'read,bash,edit,write,grep,find,ls'):
         raise TransportFault('invalid_launcher')
@@ -394,7 +434,7 @@ def _arguments(argv, *, observation=None):
     seen = set(); index = 1
     while index < len(child):
         flag = child[index]; index += 1
-        if flag in RESOURCE_FLAGS: continue
+        if flag in flags: continue
         if flag not in singles | {'--skill', '--extension'} or index >= len(child):
             raise TransportFault('invalid_launcher')
         value = child[index]; index += 1
@@ -429,7 +469,8 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
     if argv and argv[0] == '--resume-proof':
         if len(argv) < 4:raise TransportFault('invalid_resume_proof')
         session = decode(argv[1]); argv = argv[2:]
-    child, provider, model, thinking, path, skills = _arguments(argv, observation=observation)
+    mode = runtime_resource_mode(runtime_policy)
+    child, provider, model, thinking, path, skills = _arguments(argv, observation=observation, resource_mode=mode)
     if skills != tuple(row['path'] for row in resources):
         raise TransportFault('resource_binding_mismatch')
     context = ContextRequests(); published_context = dict(status='unavailable')
@@ -442,15 +483,15 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
                     or session.get('profile') != dict(model=provider + '/' + model,
                         reasoning_effort=thinking, service_tier=None)):
                 raise TransportFault('resume_model_or_path_changed')
-            original = load_resume_original(session, Path.cwd(), session.get('home'))
+            original = load_resume_original(session, Path.cwd(), session.get('home'), resource_mode=mode)
         # The namespace launch owner acquired and admitted current settings.
         # This consumer never rereads them or substitutes an offline-only grant.
-        if runtime_policy != resource_policy():
-            raise TransportFault('resource_policy_missing_or_changed')
+        # The exact policy was validated before argv parsing or Popen.
     except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
         emit(fault_event()); return 1
     binding = Binding(provider, model, thinking, path, prompt,
-        expected_session=session['thread_id'] if session is not None else None, resources=resources, observation=observation)
+        expected_session=session['thread_id'] if session is not None else None, resources=resources,
+        observation=observation, resource_mode=mode)
     process = popen(child, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     failed = emitted_header = closing = stdout_eof = False
     accepted_header = accepted_identity = None

@@ -78,7 +78,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 or _existing_settings['advisory_scope_version']!=1 or research_strategy_version!=3)):
         raise ValueError('Unsupported frozen advisory scope')
     if supervision_policy is _DEFAULT_SUPERVISION_POLICY:
-        supervision_policy=(supervision.AUTOMATIC_REFLECTION_POLICY if research_strategy_version==3 else supervision.DEFAULT_POLICY)
+        supervision_policy=(supervision.DEFAULT_WORKER_FIRST_REFLECTION_POLICY if research_strategy_version==3 else supervision.DEFAULT_POLICY)
     if research_strategy_version is not None and (type(research_strategy_version) is not int or research_strategy_version not in (1, 2, 3)):
         raise ValueError('Unsupported research strategy version')
     storage_limits = storage.configuration(storage_policy)
@@ -2570,26 +2570,32 @@ def worker_closeout(root: Path, step: int, *, max_tokens, max_seconds, authoriza
         return _start_closeout(root,step,step+1,'operator_author_closeout')
 
 
-def worker_resume(root: Path, step: int, *, expected_attempt=None):
+def worker_resume(root: Path, step: int, *, expected_attempt=None, after_interrupt=False,
+        native_intent_ref=None, new_context=False):
     """Explicitly accept one continuation, or collect its already accepted work."""
     from .protocol import require_current
     require_current(root)
     root = Path(root).resolve()
     with _writer(root), _inactive_on_error(root, 'worker_resume_failed'):
-        return _worker_resume_locked(root, step,expected_attempt=expected_attempt)
+        return _worker_resume_locked(root, step,expected_attempt=expected_attempt,
+            after_interrupt=after_interrupt,native_intent_ref=native_intent_ref,new_context=new_context)
 
 
-def _worker_resume_locked(root, step, *, expected_attempt=None):
+def _worker_resume_locked(root, step, *, expected_attempt=None, after_interrupt=False,
+        native_intent_ref=None, new_context=False):
     """Original resume gates under an already-held controller writer."""
     try:
         if type(step) is not int or not 0 < step <= budget.historical_step_limit(root):
             raise ValueError('An exact prepared node is required')
         if expected_attempt is not None and (type(expected_attempt) is not int or expected_attempt < 0):
             raise ValueError('Expected attempt must be an exact nonnegative integer')
-        _native_call(root, step, operation=partial(continuation.start,expected_attempt=expected_attempt))
+        options=dict(expected_attempt=expected_attempt)
+        if after_interrupt:
+            options.update(after_interrupt=True,native_intent_ref=native_intent_ref,new_context=new_context)
+        _native_call(root, step, operation=partial(continuation.start,**options))
         return _run(root)
     except (continuation.ResumeUnavailable, budget.NodeBudgetUnavailable) as error:
-        if isinstance(error, budget.NodeBudgetUnavailable) and error.reason == 'worker_resume_budget_unavailable':
+        if not after_interrupt and isinstance(error, budget.NodeBudgetUnavailable) and error.reason == 'worker_resume_budget_unavailable':
             return _run(root)
         budget.inactive(root, 'worker_resume_unavailable')
         return dict(status='worker_resume_unavailable', reason=getattr(error, 'reason', str(error)), usage=native.usage(root))

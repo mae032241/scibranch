@@ -8,6 +8,7 @@ import argparse
 import errno
 from collections.abc import Mapping
 from contextlib import contextmanager, ExitStack
+from contextvars import ContextVar
 from dataclasses import asdict
 import fcntl
 import importlib.metadata
@@ -47,6 +48,23 @@ INPUT_SOURCES_SCHEMA = 'scidiscovery.managed-input-sources.v1'
 INPUT_SOURCES_CONTRACT = dict(version=1, view='exact_snapshot_sources',
     authoring='current_job_experiment_directory', inputs='frozen_job_originals_and_read_copies',
     scope='framework_declared_inputs_only')
+_DIAGNOSTIC_REPORTER = ContextVar('execution_diagnostic_reporter',default=None)
+
+
+@contextmanager
+def diagnostic_reporter(reporter,*,clean):
+    """Let the active bridge publish an exception acquired by its CLI owner."""
+    token=_DIAGNOSTIC_REPORTER.set(dict(report=reporter,clean=clean))
+    try:yield
+    finally:_DIAGNOSTIC_REPORTER.reset(token)
+
+
+def _report_diagnostic(error):
+    reporter=_DIAGNOSTIC_REPORTER.get()
+    if reporter is None:return False
+    try:reporter['report'](error)
+    except Exception:pass  # Troubleshooting publication cannot change call facts.
+    return True
 
 
 class IntegrityError(ValueError):
@@ -535,7 +553,8 @@ def _validate_author_file_failure(observation,accepted):
 def _diagnostic(error, fallback, *, config=None, detail=False):
     # Keep the full exception in host diagnostics. Explicit detailed feedback
     # uses the existing public cleaner for known private paths and credentials.
-    if isinstance(config,dict) and isinstance(config.get('record_dir'),str):
+    reported=_report_diagnostic(error)
+    if not reported and isinstance(config,dict) and isinstance(config.get('record_dir'),str):
         try:
             from . import contracts as c
             directory=Path(config['record_dir']).parent/'execution-diagnostics'
@@ -544,6 +563,10 @@ def _diagnostic(error, fallback, *, config=None, detail=False):
                 note=''.join(traceback.format_exception(error))))
         except (OSError,ValueError,TypeError):pass
     if detail and isinstance(config,dict):
+        reporter=_DIAGNOSTIC_REPORTER.get()
+        if reporter is not None:
+            try:return reporter['clean'](f'{fallback}: {type(error).__name__}: {error}',2048)
+            except Exception:return f'{fallback}: {type(error).__name__}; detailed diagnostic view unavailable'
         from . import public_output,experiment_client,contracts as c
         try:
             root=experiment_client.root_for_configuration(config,allow_standalone=True)
@@ -2459,6 +2482,45 @@ def caller_feedback(error):
     return dict(status='caller_error',accepted=False,error=error.error,note=str(error))
 
 
+RESEARCH_FILE_HELP = ('Path to an ordinary task JSON file containing W-first declarations, '
+    'exact mechanism_ref and experiment_question {question,change_criterion}. '
+    'Write the JSON to work/research.json first, then use --research work/research.json; inline JSON is not supported')
+
+
+def research_file_argument(value):
+    """Reject inline declarations before treating the argument as a file path."""
+    text=os.fspath(value)
+    if text.lstrip().startswith(('{','[','"')):
+        raise CallerError('The --research argument requires a JSON file path, not inline JSON. '
+            'Write the JSON to a task workspace file first, then use --research work/research.json.',
+            error='research_file_required')
+    return Path(value)
+
+
+class _ResearchFileArgument(argparse.Action):
+    def __call__(self,parser,namespace,value,option_string=None):
+        # argparse's type conversion wraps ValueError (including CallerError)
+        # and would discard the concrete file-writing correction above.
+        setattr(namespace,self.dest,research_file_argument(value))
+
+
+def _research_path_error(error):
+    """Classify an invalid author-selected path without masking original failures."""
+    if error.errno!=errno.ENAMETOOLONG:raise error
+    raise CallerError('The --research file path is too long. Write the JSON to an ordinary '
+        'task workspace file first, then use --research work/research.json.',
+        error='research_file_required') from None
+
+
+def _research_input_reference(config,path,*,facts):
+    from . import experiment_client
+    try:return experiment_client._observe_input_reference(config,path,facts=facts)
+    except OSError as error:
+        # Bound-original failures are already IntegrityError at the input owner.
+        # Only an unbound author path can reach this argument correction.
+        _research_path_error(error)
+
+
 def _cli_parser(*,configuration=True):
     parser=_CallerArgumentParser(prog='exp',description=__doc__)
     if configuration:parser.add_argument('--config',type=Path,required=True)
@@ -2470,11 +2532,11 @@ def _cli_parser(*,configuration=True):
     run.add_argument('--change-intent')
     research_choice=run.add_mutually_exclusive_group()
     research_choice.add_argument('--mechanism')
-    research_choice.add_argument('--research',type=Path,help='W-first JSON declarations, exact mechanism_ref and experiment_question {question,change_criterion}')
+    research_choice.add_argument('--research',action=_ResearchFileArgument,help=RESEARCH_FILE_HELP)
     run.add_argument('arguments',nargs=argparse.REMAINDER,help='When declared by the selected executor, script arguments after --; passed as argv, never shell text')
     sub.add_parser('lineage-status')
     declarations=sub.add_parser('research-declare',help='Register exact W mechanism identities without submitting an experiment')
-    declarations.add_argument('--research',type=Path,required=True)
+    declarations.add_argument('--research',action=_ResearchFileArgument,required=True,help=RESEARCH_FILE_HELP)
     compile_command = sub.add_parser('compile', help='Optional local compilation of scientific slots; grants no execution')
     compile_command.add_argument('--implementation', type=Path, required=True)
     compile_command.add_argument('--scientific-files', type=Path, required=True, help='JSON slot-name to listed scientific input alias map; {} for self-contained sources')
@@ -2505,13 +2567,16 @@ def main(argv=None):
     parser,_=_cli_parser()
     try:args=parser.parse_args(argv)
     except CallerError as error:
+        _report_diagnostic(error)
         print(json.dumps(caller_feedback(error),allow_nan=False));return 2
     args.config=args.config.absolute()
     try:args.config.lstat()
-    except FileNotFoundError:
+    except FileNotFoundError as error:
+        _report_diagnostic(error)
         result=caller_feedback(CallerError('Configuration client is missing. From the assigned task use --config work/experiment-config.json or exp help; do not recreate control configuration.',error='config_not_found'))
         print(json.dumps(result,allow_nan=False));return 2
-    except OSError:
+    except OSError as error:
+        _report_diagnostic(error)
         print(json.dumps(dict(status='integrity_error',note='Configuration client cannot be read; preserve its original and report the unavailable input.'),allow_nan=False));return 3
     owner_lease = ExitStack();feedback_config=None;accepted_call_id=None;original_operation_started=True
     try:
@@ -2539,8 +2604,10 @@ def main(argv=None):
             if not worker_research.enabled(config):raise CallerError('Live declarations require the frozen W-first strategy')
             _require_new_execution(config)
             facts=experiment_client.load_client_facts(config)
-            reference=experiment_client._observe_input_reference(config,args.research,facts=facts)
-            declared=worker_research.request(json.loads(read(reference['path'],MAX_BYTES)),batch=False)
+            reference=_research_input_reference(config,args.research,facts=facts)
+            raw=read(reference['path'],MAX_BYTES)
+            try:declared=worker_research.request(json.loads(raw),batch=False)
+            except (ValueError,TypeError,KeyError) as error:raise CallerError(str(error)) from error
             records=Records(config)
             with records.admission_lease(context=storage.Deadline(config['max_seconds'])):
                 review=review_status(config)
@@ -2606,8 +2673,9 @@ def main(argv=None):
             if args.research is not None:
                 from . import worker_research, experiment_client
                 if not worker_research.enabled(config):raise CallerError('Live experiment declarations require the frozen W-first strategy')
-                reference=experiment_client._observe_input_reference(config,args.research,facts=client_facts)
-                try:mechanism=worker_research.request(json.loads(read(reference['path'],MAX_BYTES)))
+                reference=_research_input_reference(config,args.research,facts=client_facts)
+                raw=read(reference['path'],MAX_BYTES)
+                try:mechanism=worker_research.request(json.loads(raw))
                 except (ValueError,TypeError,KeyError) as error:raise CallerError(str(error)) from error
             arguments=args.arguments[1:] if args.arguments[:1]==['--'] else args.arguments
             options=dict(arguments=arguments,experiment_directory=str(args.experiment_dir.absolute()) if args.experiment_dir else None)
@@ -2743,6 +2811,7 @@ def main(argv=None):
             review=review_feedback(feedback_config),
             qualification='Execution metadata does not establish scientific or candidate qualification.')
     except (_AdmissionBudgetRefused,common._AdmissionBudgetRefused) as error:
+        _report_diagnostic(error)
         if args.command=='run' and accepted_call_id is None:
             result=dict(status=error.status,reason=error.reason,accepted=False,
                 note=('The shared budget refused this new execution.' if error.status=='budget_exhausted'
@@ -2753,6 +2822,7 @@ def main(argv=None):
                 dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
             code=3
     except (_AdmissionReviewRequired,common._AdmissionReviewRequired) as error:
+        _report_diagnostic(error)
         if accepted_call_id is None and args.command=='run' and str(error) in {'worker_progress_review_due','worker_direction_review_due',
                 'worker_context_review_due','worker_context_observation_unknown'}:
             result=dict(status='review_required',reason=str(error),accepted=False,
@@ -2762,6 +2832,7 @@ def main(argv=None):
                 dict(status='review_required',reason=_diagnostic(error,'Original execution review required; request the declared review before continuing',config=feedback_config),accepted=False))
         code=2
     except (_AdmissionOpportunityRequired,common._AdmissionOpportunityRequired) as error:
+        _report_diagnostic(error)
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unresolved',accepted=False,reason=error.reason,
                 available_mechanisms=error.available_mechanisms,
@@ -2769,6 +2840,7 @@ def main(argv=None):
                     'Choose an available authorized H mechanism before another request'),config=feedback_config)))
         code=2
     except (ReviewRequired,common.ReviewRequired,breadth.OpportunityRequired) as error:
+        _report_diagnostic(error)
         if accepted_call_id is None and args.command=='run' and str(error) in {'worker_progress_review_due','worker_direction_review_due',
                 'worker_context_review_due','worker_context_observation_unknown'}:
             result=dict(status='review_required',reason=str(error),accepted=False,
@@ -2779,36 +2851,43 @@ def main(argv=None):
                 dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
             code=3
     except (ConcurrentExecution,common.ConcurrentExecution) as error:
+        _report_diagnostic(error)
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unknown',note=_diagnostic(error,'Execution preparation outcome is unknown; preserve the original preparation without replay',config=feedback_config)))
         code=2
     except (IntegrityError,common.IntegrityError,feedback.history.ObserverIntegrityError) as error:
+        _report_diagnostic(error)
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='integrity_error',note=_diagnostic(error,'Execution original integrity check failed; preserve originals and report this call',config=feedback_config)))
         code=3
     except OSError as error:
+        _report_diagnostic(error)
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='integrity_error',note=_diagnostic(error,'Execution original cannot be read; preserve originals and report the unavailable input',config=feedback_config)))
         code=3
     except (CommandOptionsError,common.CommandOptionsError) as error:
+        _report_diagnostic(error)
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             caller_feedback(CallerError(_diagnostic(error,'Requested command options are unavailable',config=feedback_config,detail=True))))
         code=2
     except (CallerError,common.CallerError) as error:
+        _report_diagnostic(error)
         result=_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else caller_feedback(error)
         code=2
     except ValueError as error:
+        _report_diagnostic(error)
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unavailable' if isinstance(error,(UnsupportedExecution,common.UnsupportedExecution)) else 'unresolved',note=_diagnostic(error,'Execution request could not be resolved; check declared inputs and preserve any original call',config=feedback_config)))
         code=2
     except Exception as error:
+        _report_diagnostic(error)
         result=(_accepted_failure(feedback_config,accepted_call_id,error,args.command,operation_started=original_operation_started) if accepted_call_id is not None else
             dict(status='unknown',note=_diagnostic(error,'Execution provider outcome is unknown; reconcile the original call and never repeat submission',config=feedback_config)))
         code=3
     finally:owner_lease.close()
     if result.get('status')=='integrity_error':code=3
     if (args.command in {'run','query','lookup','collect','cancel','reconcile'}
-            or args.command=='compile' and result.get('status')=='caller_error'
+            or args.command in {'compile','research-declare'} and result.get('status')=='caller_error'
             and result.get('accepted') is False):
         from . import managed_wait
         result['handoff']=managed_wait.handoff(feedback_config,result,args.command,getattr(args,'call_id',None))

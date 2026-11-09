@@ -4,7 +4,7 @@ Ordinary submission files request existing experiment CLI operations. Host origi
 dispatch configuration never enter the scientific namespace. The launcher's
 trusted process wrapper preserves the declared scientific execution namespace.
 """
-from contextlib import contextmanager, redirect_stdout, redirect_stderr
+from contextlib import contextmanager, nullcontext, redirect_stdout, redirect_stderr
 from contextvars import ContextVar
 import fcntl
 import ctypes
@@ -20,6 +20,8 @@ import time
 from types import SimpleNamespace
 import sys
 import threading
+import traceback
+import uuid
 
 MAX_BYTES = 256_000
 MAX_REQUEST_BYTES = 64_000
@@ -82,7 +84,7 @@ def _option_arguments(arguments):
 
 
 def _arguments(arguments, work, config=None):
-    from .experiments import CallerError
+    from .experiments import CallerError,research_file_argument,_research_path_error
     if (not isinstance(arguments,list) or not arguments
             or any(not isinstance(arg,str) or '\x00' in arg for arg in arguments)
             or arguments[0] not in COMMANDS):
@@ -102,9 +104,13 @@ def _arguments(arguments, work, config=None):
             if re.fullmatch(r'[1-9][0-9]*',value) is None:
                 raise CallerError('Use the exact positive decimal mechanism number from the frozen public catalog.')
         if option in PATH_OPTIONS:
-            path=Path(value)
+            path=research_file_argument(value) if option=='--research' else Path(value)
             if not path.is_absolute():path=work/path
-            if (path.resolve()!=path or not path.is_relative_to(work)
+            try:resolved=path.resolve()
+            except OSError as error:
+                if option=='--research':_research_path_error(error)
+                raise
+            if (resolved!=path or not path.is_relative_to(work)
                     or path==work):
                 raise CallerError('Use an ordinary scientific file inside the assigned task workspace; do not use links or parent directories.')
             if option!='--output':
@@ -122,6 +128,9 @@ def _arguments(arguments, work, config=None):
                     elif not path.is_file():raise FileNotFoundError(path)
                 except FileNotFoundError:
                     raise CallerError(f'The selected {option} scientific input is missing. Write or select its task file; script paths are relative to the task workspace, independently of --experiment-dir.',error='scientific_input_not_found') from None
+                except OSError as error:
+                    if option=='--research':_research_path_error(error)
+                    raise
             value=str(path)
         # Inline values may themselves start with an option prefix. Preserve
         # their argparse meaning after owner validation and path resolution.
@@ -241,7 +250,82 @@ def _configuration(server):
     return config
 
 
-def _execute(server, arguments):
+def _exception_details(error):
+    """Capture the original chain without locals; source names have no host paths."""
+    captured=traceback.TracebackException.from_exception(error,capture_locals=False)
+    pending=[captured];seen=set()
+    while pending:
+        item=pending.pop()
+        if id(item) in seen:continue
+        seen.add(id(item));item.__suppress_context__=False
+        # Python's default ExceptionGroup presentation omits wide/deep groups.
+        # Diagnostics retain the complete actual group without a new quota.
+        item.max_group_width=sys.maxsize;item.max_group_depth=sys.maxsize
+        pending.extend(value for value in (item.__cause__,item.__context__) if value is not None)
+        pending.extend(getattr(item,'exceptions',None) or ())
+    original=''.join(captured.format(chain=True));frames=[];names={};pending=[error];seen=set()
+    while pending:
+        item=pending.pop()
+        if id(item) in seen:continue
+        seen.add(id(item));current=item.__traceback__
+        while current is not None:
+            frame=current.tb_frame;module=frame.f_globals.get('__name__','')
+            if not isinstance(module,str) or re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*',module) is None:
+                module='<python>'
+            frames.append(dict(module=module,function=frame.f_code.co_name,line=current.tb_lineno))
+            names[frame.f_code.co_filename]=module
+            current=current.tb_next
+        pending.extend(value for value in (item.__cause__,item.__context__) if value is not None)
+        pending.extend(getattr(item,'exceptions',None) or ())
+    public=original
+    for filename,module in sorted(names.items(),key=lambda item:len(item[0]),reverse=True):
+        public=public.replace(filename,module)
+    return original,public,frames
+
+
+def _publish_diagnostic(server,error,submission_ref):
+    """Publish troubleshooting views; failures never change execution facts."""
+    from . import contracts as c
+    try:
+        reference='D'+uuid.uuid4().hex
+        original,public,frames=_exception_details(error)
+        binding=dict(version=1,diagnostic_ref=reference,step=server.client['step'],
+            attempt=server.client['attempt'],submission_ref=submission_ref,error=type(error).__name__)
+        private=server.diagnostic.parent/(reference+'.json')
+        if private.resolve()!=private or private.exists():return None
+        c.write(private,dict(binding,note=str(error),traceback=original,frames=frames))
+    except Exception:return None
+    try:
+        # Keep the historical entry while each response retains its own original.
+        if server.diagnostic.resolve()!=server.diagnostic:raise ValueError('Exact private diagnostic path required')
+        c.write(server.diagnostic,dict(binding,note=str(error)[:2048],traceback=original,frames=frames))
+    except Exception:pass
+    try:
+        clean=server.diagnostic_clean
+        directory=server.directory/'diagnostics'
+        if directory.resolve()!=directory:return None
+        directory.mkdir(mode=0o700,exist_ok=True)
+        path=directory/(reference+'.json')
+        if path.resolve()!=path or path.exists():return None
+        source=[{key:clean(value,None) if isinstance(value,str) else value for key,value in frame.items()} for frame in frames]
+        c.write(path,dict(binding,note=clean(str(error),None),traceback=clean(public,None),
+            frames=source,purpose='Troubleshooting only; this diagnostic does not establish scientific evidence or execution acceptance.'))
+        relative=path.relative_to(server.work).as_posix()
+        return dict(reference=reference,path=relative,
+            read_hint='Read this task-relative JSON file on demand for the original exception chain and source frames. '
+                'Use it to diagnose this response; preserve its accepted/unknown state and never replay an unknown call.',
+            **(dict(source_location=source[-1]) if source else {}))
+    except Exception:return None
+
+
+def _with_diagnostic(server,response,error,submission_ref):
+    diagnostic=_publish_diagnostic(server,error,submission_ref)
+    if diagnostic is not None:
+        response=dict(response,result=dict(response['result'],diagnostic=diagnostic))
+    return response
+
+
+def _execute(server, arguments, *, submission_ref=None):
     from . import experiments as e
     config=_configuration(server)
     arguments=_arguments(arguments,server.work,config)
@@ -271,12 +355,27 @@ def _execute(server, arguments):
         return server.launch(config,accepted,command,cwd)
     trusted_launch.check_available=getattr(server.launch,'check_available',lambda:None)
     token=_LOCAL_LAUNCH.set(trusted_launch)
+    diagnostics=[];reported={}
+    def report(error):
+        if id(error) in reported:return
+        # Retain only this operation's actual objects, preventing ID reuse from
+        # merging two distinct exceptions before the invocation completes.
+        reported[id(error)]=error
+        if submission_ref is None:return
+        diagnostic=_publish_diagnostic(server,error,submission_ref)
+        if diagnostic is not None:diagnostics.append(diagnostic)
     try:
-        with _environment(server.environment),redirect_stdout(out),redirect_stderr(err):
+        reporting=(e.diagnostic_reporter(report,clean=server.diagnostic_clean)
+            if submission_ref is not None else nullcontext())
+        with _environment(server.environment),redirect_stdout(out),redirect_stderr(err),reporting:
             try:code=e.main(['--config',str(server.config_path),*arguments])
             except SystemExit:raise ValueError('Scientific execution command options are invalid') from None
     finally:_LOCAL_LAUNCH.reset(token)
-    return dict(code=code,result=json.loads(out.getvalue()))
+    result=json.loads(out.getvalue())
+    if diagnostics:
+        result=dict(result,diagnostic=diagnostics[-1],
+            **(dict(related_diagnostics=diagnostics[:-1]) if len(diagnostics)>1 else {}))
+    return dict(code=code,result=result)
 
 
 def _unknown():
@@ -398,6 +497,7 @@ def _verify_calls(config, calls, *, arguments=None, response=None):
 
 def _pending_cache(response,calls):
     result=_unknown();original=response.get('result',{})
+    result['result'].update({key:original[key] for key in ('diagnostic','related_diagnostics') if key in original})
     reference=original.get('call_id')
     if reference is None and len(calls)==1:reference=calls[0]['call_id']
     if reference is not None:result['result']['call_id']=reference
@@ -500,9 +600,9 @@ def _handle(server, raw, *, retained=False):
                             'Read earlier retained files from the assigned inputs/history node index and its material IDs. '
                             'Preserve any existing unknown submission and reconcile it with its original owner. '
                             'Do not resubmit the earlier experiment.',error='call_outside_current_task')
-                response=_unknown() if retained else _execute(server,request['arguments'])
+                response=_unknown() if retained else _execute(server,request['arguments'],submission_ref=reference)
             except e.CallerError as error:
-                response=dict(code=2,result=e.caller_feedback(error))
+                response=_with_diagnostic(server,dict(code=2,result=e.caller_feedback(error)),error,reference)
             calls=[] if retained else _response_calls(server,request,response,before)
             _verify_calls(server.configuration,calls,arguments=request['arguments'],response=response)
             # A fresh e.main return owns its verified pending state and handle.
@@ -512,17 +612,15 @@ def _handle(server, raw, *, retained=False):
             c.write(claim/'outcome.json',dict(submission=e.proof(claim/'binding.json'),response=e.proof(claim/'response.json'),calls=calls))
         response=dict(response,submission_ref=reference,request=request)
     except e.CallerError as error:
-        response=dict(code=2,result=e.caller_feedback(error),submission_ref=reference,request=request)
+        response=_with_diagnostic(server,dict(code=2,result=e.caller_feedback(error),submission_ref=reference,request=request),error,reference)
     except Exception as error:
-        # Private diagnostics retain control paths; scientific files do not.
-        try:c.write(server.diagnostic,dict(error=type(error).__name__,note=str(error)[:2048]))
-        except (OSError,ValueError):pass
         response=dict(code=3,result=dict(status='integrity_error',
             note='Scientific submission could not be verified; preserve original calls'),submission_ref=reference,request=request)
+        response=_with_diagnostic(server,response,error,reference)
     arguments=request['arguments']
     if (isinstance(arguments,list) and arguments and isinstance(arguments[0],str)
             and (arguments[0] in {'run','query','lookup','collect','cancel','reconcile'}
-                or arguments[0] in {'compile','retire'} and response['result'].get('status')=='caller_error'
+                or arguments[0] in {'compile','retire','research-declare'} and response['result'].get('status')=='caller_error'
                 and response['result'].get('accepted') is False)):
         # Recompute only the public projection, never cached claim originals.
         # A retained unknown remains unknown even if its old hint said to wait.
@@ -753,12 +851,13 @@ def _bridge_deadline(root,configuration):
 
 
 @contextmanager
-def serve(directory, config_path, work, *, launch, environment=None):
+def serve(directory, config_path, work, *, launch, environment=None, diagnostic_clean=None, cancelled=None):
     """One isolated host bridge, stopped and reaped before the task can seal."""
     from . import contracts as c,experiment_client,experiments as e,execution,runtime
     directory=Path(directory).absolute();work=Path(work).absolute();config_path=Path(config_path).absolute()
     if (directory!=work/SUBMISSION_DIRECTORY or directory.resolve()!=directory
-            or work.resolve()!=work or not callable(launch)):
+            or work.resolve()!=work or not callable(launch)
+            or cancelled is not None and not callable(cancelled)):
         raise ValueError('Exact ordinary scientific submission directory required')
     directory.mkdir(mode=0o700,parents=True,exist_ok=True)
     client=c.read(c.regular(config_path));configuration=experiment_client.resolve(config_path,client)
@@ -773,6 +872,7 @@ def serve(directory, config_path, work, *, launch, environment=None):
     identity=execution.identity(root,client['step'],client['attempt'])
     server=SimpleNamespace(directory=directory,work=work,config_path=config_path,client=client,
         configuration=configuration,launch=launch,environment=dict(environment or {}),
+        diagnostic_clean=diagnostic_clean,
         claims=claims,diagnostic=diagnostic/'latest-error.json',record=record,identity=identity,stop=threading.Event())
     try:initial=_read_file(directory/'submit.json')
     except FileNotFoundError:initial=None
@@ -798,7 +898,8 @@ def serve(directory, config_path, work, *, launch, environment=None):
             except (OSError,ValueError,IndexError):pass
         if receipt is not None and runtime.process_matches(receipt,identity):os.kill(pid,signal.SIGUSR1)
         idle_deadline=time.clock_gettime(time.CLOCK_BOOTTIME)+5
-        while receipt is not None and runtime.process_matches(receipt,identity):
+        while (receipt is not None and runtime.process_matches(receipt,identity)
+                and not (cancelled is not None and cancelled())):
             # Read the operation's original permission, not today's balance.
             # New effects publish this marker before checking the stop signal.
             path=record/'bridge-operation.json'

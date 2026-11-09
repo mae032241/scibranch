@@ -33,6 +33,28 @@ RESUME_INSTRUCTION = 'Same task/scope/permissions/budget; no accepted unknown-ca
 OUTPUT_REPAIR_INSTRUCTION = 'Fix diagnosed JSON/layout only; full JSON; keep science/plans/limits. No work/rerun/resubmit; W grants unchanged; no prior experiment implied: '
 WORK_REPAIR_INSTRUCTION = 'Complete missing assigned work under original authorization; reuse results; never replay accepted unknown calls. Report obstacles/limits. Diagnosis: '
 FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; follow stage_response.'
+OPERATOR_INTERRUPT_VERSION = 1
+
+
+def interrupt_binding(record, step, attempt, intent):
+    """Pure binding to this accepted original; never select another attempt."""
+    return dict(version=1, reason='operator_interrupt', step=step, attempt=attempt,
+        task_ref=intent['task_ref'], native_intent_ref=dict(path=str(record / 'native-intent.json')))
+
+
+def _interrupt_requested(record, binding):
+    """The native owner observes only its exact durable interrupt request."""
+    from .contracts import regular
+    path = record / 'interrupt.request'
+    if not path.exists() and not path.is_symlink():
+        return False
+    if read(regular(path)) != binding:
+        raise ValueError('Native interrupt request changed its exact original binding')
+    return True
+
+
+class _OperatorInterrupt(RuntimeError):
+    pass
 
 
 def render_scientific_request(job, task, intent, *, backend_name, instruction_transport,
@@ -127,6 +149,16 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             if continuity['mode']=='resume_requested' else
             ' New native context; retain W question/evidence; no unknown-call replay.')
     if intent.get('continuation_kind')=='fragment':prompt+='\n'+FRAGMENT_INSTRUCTION
+    if intent.get('continuation_kind')=='operator_resume':
+        prompt+=(' Operator explicitly continued this same interrupted task. Preserve prior work, consumed budgets and context history. '
+            'First inspect retained original experiment calls and query/reconcile unknown calls through their original handles; '
+            'never replay an accepted or unknown experiment. This new model turn grants no new experiment permission. '
+            'Native context mode: '+intent['context_mode']+'.')
+    if intent.get('continuation_kind')=='reentry' and intent.get('explicit_recovery'):
+        prompt+=(' Explicit recovery of this same interrupted task; keep partial files, evidence, consumed budgets and context history. '
+            'Inspect original experiment handles first. Query/reconcile uncertain originals; never replay an accepted or unknown experiment. '
+            'Missing billing/authorship stays incomplete and grants no extra qualification or permission. Native context mode: '
+            +intent['context_mode']+'.')
     if author:
         prompt+=(' Author-only closeout: read '+author['facts']+'. Completed originals only; '
             'no experiment/training/refinement/submission/replay/backend query/collection. '
@@ -232,7 +264,8 @@ def execute_native(root: Path, step: int, *, final_report=None):
     if node_anchor is not None and job['role'] == 'W' and search.launch_reason(root, job):
         raise ValueError('W dispatch violates its frozen search authorization')
     anchor = search.accept(root, job) if node_anchor is None else None
-    intent = dict(step=step, task_ref=record_ref(job_path), prepared_at=time.time(), **profile_binding,
+    intent = dict(step=step, task_ref=record_ref(job_path), prepared_at=time.time(),
+        operator_interrupt_version=OPERATOR_INTERRUPT_VERSION, **profile_binding,
         **(dict(search_slice=anchor) if anchor is not None else {}),
         **(dict(budget_slice=node_anchor) if node_anchor is not None else {}))
     if job.get('worker_continuation') is not None:
@@ -279,7 +312,7 @@ def wait_native(root: Path, step: int, *, _reentry_started=False, inventory=None
                 # Outcome publication precedes the runner's final writes. Wait
                 # for this exact owner before sealing or returning control.
                 runner = record / 'runner-process.json'
-                if runner.exists() and runtime.process_matches(read(runner), execution.identity(root, step)):
+                if runner.exists() and runtime.process_live(read(runner), execution.identity(root, step)):
                     time.sleep(.1)
                     continue
                 refused = control_budget.prelaunch_budget_reason(root, step, record)
@@ -367,6 +400,7 @@ def run_native(root: Path, step: int, attempt=0):
     record.mkdir(parents=True, exist_ok=True)
     native_facts=native_execution.load_native_facts(record,task_ref=record_ref(job_path))
     intent = native_facts['intent']
+    interrupt = interrupt_binding(record, step, attempt, intent)
     final_return = control_budget.final_a_return(root, job, intent)
     profile = profiles.validate_intent(settings, job, intent)
     initial_backend=backends.selected(settings)
@@ -408,6 +442,9 @@ def run_native(root: Path, step: int, attempt=0):
     if intent.get('continuation_kind') == 'automatic_recovery':
         from . import continuation
         continuation.validate_automatic(root, step, intent)
+    if intent.get('continuation_kind') == 'operator_resume':
+        from . import continuation
+        continuation.validate_operator_resume(root,step,intent,execution.record(root,step,attempt-1))
     if not attempt and job.get('worker_continuation') is not None:
         from . import continuation
         consultation_context=continuation.consultation_intent(job,intent,settings=settings,backend=backend)
@@ -423,7 +460,8 @@ def run_native(root: Path, step: int, attempt=0):
             from .continuation import ResumeUnavailable
             raise ResumeUnavailable('worker_resume_unsupported_backend')
         from .contracts import regular
-        continuation.validate_repair(root, step, intent)
+        if intent.get('continuation_kind') != 'operator_resume':
+            continuation.validate_repair(root, step, intent)
         session = intent['session']
         backend.validate_resume_session(session,work,execution.home(root,step,attempt))
         resume_session=session
@@ -589,7 +627,16 @@ def run_native(root: Path, step: int, attempt=0):
     code_exports = []
     launch_started = False
     bridge_stopped = False
+    def observe_interrupt():
+        nonlocal stop
+        requested = _interrupt_requested(record, interrupt)
+        if requested:
+            stop = ('cleanup_unknown' if cleanup == 'cleanup_unknown' else
+                stop or terminal_fault or 'operator_interrupt')
+        return requested
     try:
+        if observe_interrupt():
+            raise _OperatorInterrupt('Operator interrupted this exact original before native submission')
         with (record / 'native.jsonl').open('wb') as log, (record / 'native.stderr').open('wb') as err, (record / 'native-public.jsonl').open('w') as public_log:
             # Submission happens here, after runner/watchdog startup. Recheck
             # all shared limits; this fresh intent alone is not missing usage.
@@ -635,7 +682,8 @@ def run_native(root: Path, step: int, attempt=0):
                     source_facts=view_sources,selected_code=selected_code,material_sources=producer_sources)
                 scientific_lifetime.enter_context(worker_execution_bridge.serve(
                     work/worker_execution_bridge.SUBMISSION_DIRECTORY,work/'work/experiment-config.json',work,
-                    launch=launch))
+                    launch=launch, diagnostic_clean=public_clean,
+                    cancelled=observe_interrupt))
             if namespace_launcher is None:
                 view_facts=backend.load_launch_facts(root,job,work,home=meter_home,args=args,context=view_context,
                     selected_code=selected_code,source_facts=view_sources,policy=settings)
@@ -660,6 +708,8 @@ def run_native(root: Path, step: int, attempt=0):
                 raise MetadataUnavailable('Frozen context window policy requires native compaction observation')
             backend.configure_observation(live_meter,work,attempt,thread_id,notice_channel,required=required_context)
             context_observation=backend.snapshot_observation(live_meter)
+            if observe_interrupt():
+                raise _OperatorInterrupt('Operator interrupted this exact original before native submission')
             launch_started = True
             with shared_input_views.popen_arguments(args) as (launch_args, pass_fds):
                 process = subprocess.Popen(launch_args, cwd=work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -771,6 +821,7 @@ def run_native(root: Path, step: int, attempt=0):
                             elif event.get('completed'):
                                 terminal_usage_missing = True
                     observation = backend.poll_observation(live_meter)
+                    observe_interrupt()
                     stop = stop or metadata_stop(observation,
                         required=context_policy is not None and checkpoint.ordinary_worker(job))
                     if observation.get('context_windows') != context_observation.get('context_windows') or observation.get('context') != context_observation.get('context'):
@@ -809,7 +860,8 @@ def run_native(root: Path, step: int, attempt=0):
         if process is None and isinstance(exc,OSError) and exc.errno==errno.E2BIG:
             error=UnsupportedExecution('Shared input readonly mount plan exceeds the operating system launch capability')
         from .native_usage import MetadataUnavailable
-        stop = ('native_metadata_unsupported' if isinstance(error, MetadataUnavailable) and process is None else
+        stop = ('operator_interrupt' if isinstance(error, _OperatorInterrupt) else
+            'native_metadata_unsupported' if isinstance(error, MetadataUnavailable) and process is None else
             'shared_input_view_unsupported' if isinstance(error,UnsupportedExecution) and process is None else 'native_error_unknown')
     finally:
         try:

@@ -77,11 +77,17 @@ def accepted_interrupted_native(tmp_path, monkeypatch, *, after_wake=False, mete
     session.parent.mkdir(parents=True)
     session.write_text(json.dumps(dict(type='session_meta', payload=dict(
         id=THREAD, cwd=str(c.workspace(root, 1)))))+'\n')
+    # Match the current hook receipt contract; the interrupted owner never
+    # published native-outcome.json and recovery must not invent one.
+    info=session.stat()
+    c.write(record/'usage-observation.json',dict(session_binding=dict(
+        source='native_metadata_hooks',thread_id=THREAD,workspace=str(c.workspace(root,1)),
+        home=str(home),path=str(session),identity=[info.st_dev,info.st_ino],offset=info.st_size)))
     (c.workspace(root, 1)/'work').mkdir(exist_ok=True)
     (c.workspace(root, 1)/'work/checkpoint').write_text('original checkpoint')
     originals = [root/'settings.json', root/'jobs/001.json', session,
         record/'native-intent.json', record/'runner-process.json',
-        record/'native-process.json', record/'native.jsonl']
+        record/'native-process.json', record/'native.jsonl',record/'usage-observation.json']
     if meter:
         originals.append(record/'usage.json')
     return root, record, {path: path.read_bytes() for path in originals}

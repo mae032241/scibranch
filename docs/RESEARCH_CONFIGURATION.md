@@ -144,8 +144,11 @@ folds, bagging, expansion and ordering, and chooses H/E consultation through
 `stage_intent=revise_h/extract` with a concrete `consultation_question`. The exact
 requester, evidence and materials are frozen; H/E return directly to W through
 the existing Backend continuity contract. Marked ordinary A returns only
-`continue_w` with `decision_request:null`; `supervision_result=continue_existing`
-means return to W, not endorsement or confirmation of its scientific direction.
+`continue_w` with `decision_request:null` and meaningful `scientific_result`.
+Control recognizes that advice was returned without requiring the redundant
+`supervision_result` marker or filling it into the original answer. An explicitly
+conflicting marker or route still requires correction; no scientific endorsement
+or execution permission follows.
 The next W task does not promote A's `route_reason` or require the preceding local
 focus. A trigger alone proves no stagnation. Missing scope markers preserve old
 ordinary-A action/evidence/closeout authority on configuration revision, recovery
@@ -176,9 +179,10 @@ Under frozen earlier strategies, explicit W `exploration_rounds`, exact-original
 counting and A coverage are maintained by the common ledger/controller, independently
 of the agent backend. The architecture
 owns the reporting fields, trigger defaults and purpose-specific contract.
-New W-first preparations freeze supervision policy 3 with bounded automatic
-ordinary A reflection: mode=review, consecutive_calls=4, a 20% first-review floor
-and spacing, 30%/65% shared-budget checkpoints and max_automatic_reviews=2.
+New W-first preparations freeze supervision policy 4 with
+`require_fresh_input=true`: mode=review, consecutive_calls=4, a 10% consumption
+floor and spacing, no fixed checkpoints and no default review-count cap. Each
+finite shared-budget dimension caps cumulative automatic-A admission at 25%.
 The exact W question/clues/evidence are assessed under the frozen advisory scope.
 Frozen policy 2 retains its automatic-A-off default. Original-call notices and
 enforced reviews are separate settings; exact original calls count once across
@@ -201,7 +205,9 @@ H/E 建议写入 `scientific_result`，没有实质问题就不新增约束。�
 扩展与先后顺序由 W 自主选择，W 可用 `stage_intent=revise_h/extract` 和具体
 `consultation_question` 咨询 H/E。准确请求者、证据与材料冻结，H/E 答复经既有 Backend 续接
 直接返回 W。有标记的普通 A 只返回 `continue_w`、`decision_request:null`；
-`supervision_result=continue_existing` 只是返回 W 的代码，不认可或确认其科学方向。
+并提供有效 `scientific_result`。控制据此识别建议已返回，不再要求冗余的
+`supervision_result` 标记，也不把缺值补写进原回答；显式冲突标记或非法路线仍须补正，
+不由此赋予科学认可或执行权限。
 下一 W 主任务不嵌入 A 的 `route_reason` 或要求保持前一局部焦点。触发本身不证明停滞。
 无此职责标记的旧任务在修订、恢复及 fork 后保留原普通 A 动作、证据请求和收口权限；
 这个内部职责标记不增加公开监督策略版本号。
@@ -221,15 +227,17 @@ v2/v3 即使有候选也可全部拒绝，可用性不等于资格；best-effort
 `supervision_result=continue_existing` 与 `continue_w` 放行原工作，不编造新缺口。
 旧冻结策略的 `exploration_rounds`、准确原件计数和 A 覆盖边界由公共账本/控制层维护，与 Agent
 后端无关；报告字段、默认触发策略和按目的区分的统一合同由上述架构维护。
-新 W-first 准备默认冻结监督 policy 3：`review`、连续原调用 4、首次与间隔至少 20% 预算、30%／65% 共享预算检查点、最多两次自动普通 A。A 根据 W 作者问题／线索／证据按冻结职责判断；触发只表示检查机会。旧冻结 policy 2 仍保留自动 A 默认关闭。可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
+新 W-first 准备默认冻结监督 policy 4，显式 `require_fresh_input=true`：`review`、连续原调用 4、首次与间隔至少 10% 消费、无固定检查点、默认无次数帽；每个有限共享预算维度以 25% 作为自动 A 累计消费的软准入帽。A 根据 W 作者问题／线索／证据按冻结职责诊断；触发只表示检查机会。旧冻结 policy 2 仍保留自动 A 默认关闭。可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
 不把投入当科学轮次或停滞判决。旧冻结监督策略保留原节奏。
 自动监督是尚未证明收益的实验性调度启发式，不是停滞判断；直接 API 的
 `supervision_policy=None` 可关闭，不新增科学分类器、搜索树或知识库。
 
-New preparations can declare the current policy through `policies.supervision`
-in TOML, or `supervision_policy` in the direct API. For example:
+New preparations can declare a supervision policy through `policies.supervision`
+in TOML, or `supervision_policy` in the direct API. The earlier policy 3 remains
+an explicit choice:
 
-新准备可用 TOML 的 `policies.supervision` 或直接 API 的 `supervision_policy` 显式声明：
+新准备可用 TOML 的 `policies.supervision` 或直接 API 的 `supervision_policy` 显式声明。
+以下旧 policy 3 仍可选择：
 
 ```toml
 [policies.supervision]
@@ -251,20 +259,22 @@ policy 3 的正数最低投入同时约束首次自动反思与后续间隔，�
 策略随实例冻结，配置修订不重置计数；新实例可用 `mode="off"` 关闭自动反思，直接 API
 也可沿用 `None`。下例保留可显式选择的旧 policy 2 投入提醒语义。
 
-Policy 4 is a provisional experimental opt-in for new preparations. The default
-remains policy 3; `research_strategy_version` stays 3 and frozen policies 1/2/3
-do not change. The ongoing V3 two-automatic-A scientific test keeps its original
-settings and is separate from V4 validation. The draft below uses 25% of each
+New preparations default to policy 4 with the explicit boolean
+`require_fresh_input=true`; `research_strategy_version` stays 3. Frozen policies
+1/2/3 and explicit older policy 4 without this flag keep their original cadence.
+The ongoing V3 two-automatic-A scientific test keeps its original settings.
+Scientific benefit remains unverified. The declaration below uses 25% of each
 finite shared-budget dimension as a soft cumulative automatic ordinary-A ceiling:
 
-policy 4 只供新准备显式选择，设置暂定且科学收益未经验证。默认仍是 policy 3，
-`research_strategy_version` 仍为 3；旧 policy 1/2/3 和正在进行的 V3 两次自动 A
-科学测试保留冻结设置。下例的 25% 是各有限共享预算维度中自动普通 A 累计消费的软准入帽：
+新准备默认 policy 4 并显式声明布尔值 `require_fresh_input=true`，科学收益仍未经验证。
+`research_strategy_version` 仍为 3；旧 policy 1/2/3、未带该字段的旧显式 policy 4 和正在
+进行的 V3 两次自动 A 科学测试保留冻结节奏。下例的 25% 是各有限共享预算维度中自动普通 A 累计消费的软准入帽：
 
 ```toml
 [policies.supervision]
 version = 4
 mode = "review"
+require_fresh_input = true
 consecutive_calls = 4
 min_budget_fraction = 0.10
 budget_checkpoints = []
@@ -288,8 +298,16 @@ Setting `mode="off"` disables automatic A, and `notice` retains advisory behavio
 `mode="off"` 关闭自动 A，`notice` 保留提醒语义。
 
 Changed accepted authored questions or exact original receipts provide control
-opportunities, without classifying new scientific evidence. Consumption can also
-provide an operational check with no new experiment. Each automatic ordinary A
+opportunities, without classifying scientific progress. With
+`require_fresh_input=true`, consumption without a new author/receipt input leaves
+an operational notice and cannot force A or block new W experiments. Explicit
+`false`, or an absent flag in an older v4 declaration, retains the earlier
+operational automatic-review opportunity. Live call counts do not yet supply
+author/receipt freshness: the first long W is therefore not interrupted by
+consumption alone. Counts, scores, elapsed time and engineering failures do not
+prove stagnation. Ordinary A distinguishes productive deepening from repeated
+investment lacking new distinguishing evidence and returns fallible advice;
+W chooses the response. Each automatic ordinary A
 is charged its actual separately metered tokens and active seconds across all
 attempts, independently of its verdict; normalized fraction differences are not
 costs. An unlimited shared dimension does not gate admission. Unknown or partial
@@ -305,8 +323,12 @@ live interval under existing call/consumption thresholds before an older pending
 A, without treating unreviewed inputs as covered. Configuration changes and recovery do not reset
 consumed budgets or original identities.
 
-已接受的作者问题或准确原调用收据变化只提供控制检查机会，不判定新科学证据；无新实验时
-也可按消费边界进行运行检查。自动普通 A 按准确任务全部尝试的实际 token／活动秒分别计费，
+已接受的作者问题或准确原调用收据变化只提供诊断机会，不判定科研进展。
+`require_fresh_input=true` 时，没有新作者／回执输入的消费只保留运行提醒，不强制 A，
+也不阻塞 W 新实验。旧显式 v4 省略该字段或显式设为 `false` 保留原运行检查机会。
+实时调用数尚不提供作者／回执 freshness，所以首个长 W 不会仅因消费被打断。
+次数、分数、耗时和工程失败不证明科研停滞；普通 A 区分正常深化与重复投入却没有新辨别证据，
+只给可质疑的建议，由 W 决定如何响应。自动普通 A 按准确任务全部尝试的实际 token／活动秒分别计费，
 与科学结论无关，不能相减归一化占比当作费用。共享预算无上限的维度不限制准入。
 缺测保留未知和已知下界，先核对原用量，只抑制额外自动 A；预算帽或次数帽也只抑制额外
 自动 A，不锁住 W，原 query／collect 仍可用。软准入帽允许在途 A 超出，不新增强杀。
@@ -390,16 +412,16 @@ lower bounds, and existing formal-review and execution gates still apply.
 ## Declaration fields / 声明字段
 
 Unknown tables and fields are rejected. Fields and defaults below remain subject
-to the selected backend's capability checks; Pi requires the explicit restricted
-permissions described below, not the general permission defaults.
+to the selected backend's capability checks; Pi requires the explicit permissions
+for its selected resource profile below, not the general permission defaults.
 Except for the exact absolute
 `project.base_root`, paths listed below resolve relative to the TOML file,
 including `~` expansion; changing the caller's working directory does not
 change them. Only a path-like `agent.launcher[0]` is resolved this way; remaining
 argv elements are literal native arguments, so use absolute paths for their inputs.
 
-未知表和字段会拒绝；下列字段及默认值仍须满足所选后端能力校验。Pi 须显式声明下文的
-受限权限组合，不能使用通用权限默认值。除要求准确绝对路径的 `project.base_root` 外，下列路径相对 TOML
+未知表和字段会拒绝；下列字段及默认值仍须满足所选后端能力校验。Pi 须显式声明下文所选
+资源 profile 的权限组合，不能使用通用权限默认值。除要求准确绝对路径的 `project.base_root` 外，下列路径相对 TOML
 所在目录解析，也支持 `~`。launcher 只有带路径的
 首项如此解析，后续 argv 是原生参数，不猜测其路径含义，所需文件宜用绝对路径。
 
@@ -413,6 +435,7 @@ argv elements are literal native arguments, so use absolute paths for their inpu
 | `permissions` | `workspace`: `read-only`, `workspace-write` (default), or `danger-full-access`; `network`: boolean (default false); `web`: `disabled` (default), `cached`, or `live`; `subagents`: boolean (default false) |
 | `agent.native.sandbox_workspace_write` | Codex-specific / Codex 专用: `writable_roots` (path array), `network_access`, `exclude_tmpdir_env_var`, `exclude_slash_tmp`; network declarations must agree / 网络声明须一致 |
 | `agent.native.features` | Codex-specific / Codex 专用: `fast_mode` (boolean) |
+| `agent.native.resource_mode` | Pi-specific / Pi 专用: `closed` (default when omitted / 省略时默认) or explicit / 显式 `configured`; see native resources and permissions below / 原生资源与权限见下文。 |
 | `budget` | Required finite / 必填有限值: `max_tokens`, `max_seconds`, `max_steps`; optional / 可选: `candidate_extra_slots`, `portfolio_review_after_cycles`, `node_targets`, `role_shares`, `breadth`, `correction`, `storage`; legacy `max_output_item_bytes`, `max_output_total_bytes` remain accepted/frozen without file-byte enforcement / 旧字节字段仍接受并冻结，不限制文件字节 |
 | `budget.node_targets.H`, `.W`, `.A`, `.E` | Complete positive finite role targets with `max_observed_tokens` and `max_seconds`; token targets are advisory, as is W time under its context-window policy; saved legacy fragments retain their time review cadence / 四角色完整正有限目标；token 为建议，W 上下文窗口策略下时间目标也为建议，旧冻结 fragment 保留原时间复核节奏，不增加总额 |
 | `budget.breadth` | `max_w_seconds`, `max_w_observed_tokens`, `max_requested_repairs`; optional positive integer / 可选正整数 `initial_calls` |
@@ -474,8 +497,8 @@ keep the legacy 85% notice and count gate, exported as explicit public version 1
 Version 2 is the new default; explicit public 1 preserves legacy meaning. Handoff
 does not automatically request A. An explicit `handoff` also starts a new W; marked W's `extract` requests E evidence consultation, while `revise_h` and `review` request
 serial H and A consultation respectively. These H/A/E routes require a concrete
-nonblank `consultation_question` and return to a successor W job. New
-policy-3 jobs may retain the original native W session through the selected
+nonblank `consultation_question` and return to a successor W job. Jobs with the
+new advisory scope or reflection policy 3/4 may retain the original native W session through the selected
 Backend capability and original/successor validation; unsupported or unavailable
 continuity explicitly uses a new context. Requested resume is never reported as
 observed success, and unknown submission is not replayed. Pi currently does not
@@ -512,7 +535,7 @@ rejects them without migration or settings edits.
 达到 90% 只提醒收口，压缩后继续工作；已启动窗口数超过冻结额度且当前新鲜占用严格大于 70%
 才交新 W，不自动 A。因此 max=1 为一个完整窗加下个窗 70%，max=2 为两个完整窗加下个窗 70%。
 缺失或过期占比不新增停止条件，压缩本身不交接。旧无版本声明保留 85% 提醒和按次数交接门禁，导出时写公开版本 1；新准备默认版本 2，显式 1 可保留旧语义。显式 `handoff` 同样交新 W；`revise_h`
-和 `review` 分别请求串行 H/A 咨询，有职责标记的 W 还可用 `extract` 咨询 E，三条路线均须具体非空 `consultation_question`，结束后交后继 W 任务；新 policy 3 的任务可通过统一 `Backend` 校验后续接原生 W 会话，不支持或原连续性不可用时明确新上下文，未确认续接不当成功，也不重放未知提交。Pi 当前不支持 `consultation_resume`，H/A/E 咨询返回明确使用 `new_context`；同一逻辑任务 fragment／补填／唤醒仍可按各自门槛追加原 Pi session。策略 v2/v3 用 `decision` 请求提交前 Final A；已冻结 v1
+和 `review` 分别请求串行 H/A 咨询，有职责标记的 W 还可用 `extract` 咨询 E，三条路线均须具体非空 `consultation_question`，结束后交后继 W 任务；有新 advisory 职责标记或 reflection policy 3/4 的任务可通过统一 `Backend` 校验后续接原生 W 会话，不支持或原连续性不可用时明确新上下文，未确认续接不当成功，也不重放未知提交。Pi 当前不支持 `consultation_resume`，H/A/E 咨询返回明确使用 `new_context`；同一逻辑任务 fragment／补填／唤醒仍可按各自门槛追加原 Pi session。策略 v2/v3 用 `decision` 请求提交前 Final A；已冻结 v1
 直接请求 protected Final A，无策略字段的旧 W 仍请求普通 A 评估。
 咨询不消费正式 A 周期，不改变主线、推荐或资格；正式独审保持精确 subject 和中性输入。
 
@@ -598,9 +621,21 @@ All four permissions must be explicit. Default/implied Local and projects requir
 `workspace-write` before preparation effects. For ordinary read-only scientific
 work, explicitly choose `workspace="read-only"` **and** `[executor] mode="external"`.
 This does not enable tool-less auxiliary translation or stronger NoNetwork.
+The resource profile selects the required web/subagent declarations:
+
+| Pi resource mode | Required explicit permissions | Native resources |
+| --- | --- | --- |
+| omitted or `closed` | `network=true`, `web="disabled"`, `subagents=false`; workspace as above | Controlled resources; nonempty native `packages` refused. |
+| `configured` | `network=true`, `web="live"`, `subagents=false`; workspace as above | Trusted configured extensions and installed packages, cache-only. Extension behavior is not fully constrained; complete native authorship is unsupported. |
 
 四项权限须全部显式声明。默认／隐含 Local 与工程在准备副作用前要求 workspace-write；
 普通只读科学工作须同时显式选择 read-only 和 external，不等于支持无工具辅助翻译或更强禁网。
+省略 `agent.native.resource_mode` 或显式 `closed` 保留原受控 profile：network=true、
+web=disabled、subagents=false，非空原生 packages 会拒绝。显式 `configured` 必须同时声明
+network=true、web=live、subagents=false，workspace 同上。显式 mode 授权可信扩展，false 表示
+不请求 Backend 原生委派；不保证扩展不能自行创建子调用或进程。实际 `effective.subagents`
+为 unknown（null），enforcement 为 `extension_dependent`。Pi 原生子代理能力仍 unsupported，
+小任务由 W 自己完成，大或复杂证据由 W 自主考虑 E；closed 仍须 web=disabled。
 
 ```toml
 [agent]
@@ -615,6 +650,23 @@ web = "disabled"
 subagents = false
 # executor omitted: Local; use the full example for paths and finite budgets.
 ```
+
+To load already installed native packages, replace the permissions above and add
+this Pi-only table in the complete declaration; do not duplicate existing TOML tables:
+
+```toml
+[agent.native]
+resource_mode = "configured"
+
+[permissions]
+workspace = "workspace-write"
+network = true
+web = "live"
+subagents = false
+```
+
+要加载已安装原生包，在完整声明中加入上述 Pi 专用表并替换原权限表，不要重复 TOML 表。
+只读科学工作改为 `workspace="read-only"`，并显式声明 `[executor] mode="external"`。
 
 Linux mounts are required with no unsandboxed fallback. The framework-owned top
 level is read-only; workspace-write opens `work/`, `artifacts/`, `experiments/`,
@@ -642,23 +694,34 @@ loaded valid native frontmatter, with original local/temporary/top-level provena
 and its own base directory before the sole prompt. Python YAML metadata alone is
 not loading proof. Live assets and aliases remain read-only. Exact source-original
 overlays are applied last, after write grants including the native auth directory.
-Arbitrary user extensions are unsupported in this profile because hooks can mutate tools/permissions/model calls;
-Native itself can load extensions. Only the known read-only framework observer is
-admitted by exact command-source proof and private startup framing. It registers
-no tool/provider, adds no model call, prompt or continuation.
+In `closed`, arbitrary user extensions are unsupported because hooks can mutate
+tools/permissions/model calls; only the known read-only framework observer is
+admitted by exact command-source proof and private startup framing. In
+`configured`, additional native extension commands are allowed, while exact selected
+Skill bindings and the framework observer's source/start proof remain required.
+The observer itself registers no tool/provider and adds no model call, prompt or continuation.
 
 Live Skill schema v3 冻结选择与来源，不冻结或复制字节、不建 hash registry。唯一 prompt
 前由 native get_commands 核对每份准确手册、有效原生 frontmatter、原 local/temporary/top-level
 来源及自身 base directory；Python YAML 元数据不等于加载证明。live 资产与别名保持只读；
-准确来源原件在可写授权（包括 native auth 目录例外）之后最后只读覆盖。任意用户扩展因 hook 可改变工具／权限／
-模型调用而不受此 profile 支持，不是 Native 不能加载扩展。唯一已知只读框架 observer 通过
-准确 command 来源及私有启动帧准入，不注册工具／provider，不新增模型调用、prompt 或续接。
+准确来源原件在可写授权（包括 native auth 目录例外）之后最后只读覆盖。closed 因 hook 可改变
+工具／权限／模型调用而不支持任意用户扩展，只准入有准确 command 来源及私有启动帧证明的
+已知只读框架 observer。configured 允许额外扩展 command，仍须校验所选 Skill 的准确绑定及
+框架 observer 的来源／启动证明。observer 自身不注册工具／provider，不新增模型调用、prompt 或续接。
 
 `<agent-dir>` means inherited `PI_CODING_AGENT_DIR`, or `$HOME/.pi/agent` when
 unset; `<workspace>` is the exact scientific task workspace. Before any native
 startup, both `<agent-dir>/settings.json` and `<workspace>/.pi/settings.json`
-require absent/empty `packages` and no custom
-`npmCommand`. The four exact paths `<agent-dir>/SYSTEM.md`,
+require absent/empty `packages` in `closed`. In `configured`, the original SDK
+resolves and loads already installed packages from those settings; the framework
+does not install or refresh packages, rewrite settings, or copy authentication.
+Only `--no-extensions` is removed: `--offline`, `--no-approve`, `--no-context-files`,
+`--no-skills`, `--no-mcp`, `--no-prompt-templates` and `--no-themes` remain.
+Package Skills, prompts and themes are not automatically imported; explicit
+framework-selected Skills still use the common selection and exact-source checks.
+Native package loading errors remain errors. A command inventory establishes
+required bindings, not that every configured package loaded successfully.
+Both profiles reject custom `npmCommand`. The four exact paths `<agent-dir>/SYSTEM.md`,
 `<agent-dir>/APPEND_SYSTEM.md`, `<workspace>/.pi/SYSTEM.md` and
 `<workspace>/.pi/APPEND_SYSTEM.md` must be absent. `--no-context-files` does not
 suppress those prompt sources; offline mode does not disable package resolution.
@@ -667,8 +730,14 @@ controls automatic resource fetch/catalog activity, not explicit provider or bas
 network access: network stays true, and `web=disabled` is not network isolation.
 
 `<agent-dir>` 指继承的 PI_CODING_AGENT_DIR，未设时为 `$HOME/.pi/agent`；`<workspace>`
-指准确科学任务工作区。任何 Native 启动前，两处准确 settings.json 均须 packages 缺失／为空且无自定义 npmCommand；
-上述四个准确 SYSTEM.md／APPEND_SYSTEM.md 路径均须不存在。--no-context-files 不抑制这些
+指准确科学任务工作区。closed 在任何 Native 启动前要求两处准确 settings.json 的 packages
+缺失／为空。configured 将已安装包交原 SDK 按原配置解析／加载，不安装或刷新，不改写 settings
+或复制认证。仅去掉 --no-extensions；--offline、--no-approve、--no-context-files、--no-skills、
+--no-mcp、--no-prompt-templates、--no-themes 仍保留。包自身的 Skills、prompts、themes 不自动
+导入；框架显式所选 Skills 仍走统一选择与准确来源校验。包加载失败保留原生错误，command
+清单只校验所需绑定，不证明全部包已成功加载。例如已安装的 `npm:pi-web-access`、
+`npm:pi-guard-sandbox`、`npm:pi-gauge` 可保留在原全局 packages 中，无须另改全局配置。
+两种 profile 都拒绝自定义 npmCommand；上述四个准确 SYSTEM.md／APPEND_SYSTEM.md 路径均须不存在。--no-context-files 不抑制这些
 隐藏 prompt，offline 不禁用 package resolution；框架不修改用户配置或复制认证。
 PI_OFFLINE 只管理自动资源获取／目录活动，不限制显式 provider 或 bash 联网；network 仍为
 true，web=disabled 不构成禁网。
@@ -683,12 +752,19 @@ usage. Exhaustive `native_calls` is unsupported because auxiliary summaries,
 retries and warming are not fully receipted; persisted response counts are only
 lower bounds, including for optional caller policies. Private native IDs, paths
 and nonces are not public telemetry or scientific evidence.
+In both profiles the framework observer covers the main Pi session only and
+retains the common 90% notice / strictly above 70% handoff rule. Configured
+extensions may make additional calls whose coverage is unknown; observed tokens
+remain lower bounds, without a complete provider-call or author census.
 
 合格元数据使用真实持久化 native user-entry ID、准确 session／窗口／新鲜度；压缩取保存
 cursor 后唯一新追加项，不按相同旧摘要匹配。占用为 SDK 估计，不是准确 token 或累计账单；
 压缩后 native null 在新用量前保持不可用。辅助摘要、重试与 warming 回执不完整，完整
 native_calls 不支持，response 计数仅为下界，可选调用者策略也不能假装完整。私有 native ID、
 路径、nonce 不进入公开遥测或科学证据。
+两种 profile 的框架 observer 都只覆盖主 Pi session，上下文／压缩计量沿用公共的 90% 提醒及
+严格超过 70% 才交接规则。configured 扩展的额外调用覆盖未知，观测 token 保留下界，不能
+据此声称完整 provider-call 或作者普查。
 
 The parent synchronously publishes existing control budget/review/admission facts
 before acknowledging required metadata. Delivery faults stop required-policy
@@ -716,8 +792,11 @@ submission require same-call reconciliation, never automatic resubmission.
 
 Common formal-review, execution-authority, resource, selection, audit, delivery
 and observer policies are not blanket-vetoed by Pi. Their common owners validate
-and gate actual use. New supported Pi preparations freeze controlled
-single-native-session authorship support. Actual retained launch/resource and
+and gate actual use. New supported `closed` Pi preparations freeze controlled
+single-native-session authorship support. `configured` freezes complete native
+authorship as false because extension participants and calls are not fully covered;
+it gains no exact-subject formal qualification that requires complete proof.
+Actual retained launch/resource and
 observer-source/start proof, accepted prompt, persisted user/branch/response facts,
 terminal delivery and stopped-writer process/prefix evidence establish the native
 participant. A capability declaration or session-bound event alone is insufficient.
@@ -746,7 +825,9 @@ response-schema flags remain unsupported. This is not a claim of full scientific
 qualification or backend parity. See the [architecture](ARCHITECTURE.md).
 
 Pi 不一概否决公共正式审查、执行授权、资源、选择、审计、交付及 observer 策略；真实使用由
-公共 owner 校验及把关。新受支持 Pi 准备冻结受控单原生 session 作者证明能力。实际留存的
+公共 owner 校验及把关。新受支持 closed Pi 准备冻结受控单原生 session 作者证明能力；
+configured 因扩展参与者与调用覆盖不完整，冻结完整原生作者能力为 false，不能获得要求完整
+证明的准确 subject 正式资格。实际留存的
 启动／资源、observer 来源／启动证明、已接受 prompt、持久化 user／branch／response 事实、
 终态交付及已停止 writer 的进程／前缀证据共同确认原生参与者；能力声明或 session-bound
 事件本身不够。SDK session 是稳定作者，补填／续接、新 attempt 或不同私有 home 不会把
@@ -1243,7 +1324,8 @@ The framework does not force all agents into one directory sandbox.
 | Standard Codex `workspace-write` | Network follows the frozen `network` declaration through its native sandbox. / 网络按冻结声明由原生 sandbox 实施。 |
 | Standard Codex `read-only` | Effective network is false even when `network = true` was requested. / 即使请求联网，实际仍离线。 |
 | Standard Codex `danger-full-access` | Filesystem and network are unrestricted; effective network is true. `network = false` remains recorded intent and cannot be enforced in this mode. / 文件与网络无 sandbox；离线请求仅保留为意图，不能实施。 |
-| Pi supported profile / Pi 受支持 profile | Explicit read-only/external or workspace-write; network remains unrestricted, including provider/bash. Linux mounts protect exact originals; no unsandboxed fallback. / 显式只读 external 或 workspace-write，provider/bash 仍联网，Linux 挂载保护准确原件，无无沙箱回退。 |
+| Pi `closed` | Explicit read-only/external or workspace-write, network=true, web=disabled, subagents=false; provider/bash network remains unrestricted. Linux mounts protect exact originals; no unsandboxed fallback. / 显式只读 external 或 workspace-write，network=true、web=disabled、subagents=false；provider/bash 仍联网，Linux 挂载保护准确原件，无无沙箱回退。 |
+| Pi `configured` | Same workspace/network declarations, web=live, subagents=false; trusted extensions may add capabilities. Effective subagents is unknown (`null`), enforcement is `extension_dependent`; false requests no Backend delegation, without proving extension-created child calls/processes are forbidden. / 工作区／联网声明同上，web=live、subagents=false；可信扩展可增加能力，实际 subagents 为 unknown（null），实施方式为 extension_dependent；false 不请求 Backend 委派，不证明扩展子调用／进程已禁止。 |
 | `protocol` or a custom launcher / 自定义 launcher | Effective access is unknown; enforcement is `hint_only`, owned by the launcher. / 实际访问未知，权限仅提示，由 launcher 实施。 |
 
 The default managed local command executor has narrower supported permission
@@ -1274,7 +1356,7 @@ The standard Codex path obtains optional occupancy from genuine `thread/tokenUsa
 | Backend / 后端 | Transport and limits / 输运与限制 |
 | --- | --- |
 | `codex` | Standard launches own an app-server connection and exact thread/turn event projection; custom launchers retain their declared transport. Model profiles, permissions, original home and finite recovery remain frozen. Complete participant scope requires the qualified single-agent path with subagents disabled. / 标准启动持有 app-server 连接并投影准确 thread／turn 事件，自定义 launcher 保留所声明输运；profile、权限、原 home 与有限恢复保持冻结。完整作者范围须使用已核对的单 Agent 路径并关闭子 Agent。 |
-| `pi` | Exact model/thinking RPC with one prompt per invocation, finite exact-session resume, common H/W/A/E and Local/project/Skill consumers; prompt schema, original UTF-8 and separate billing/metadata. New supported preparations retain controlled single-native-session authorship for the shared exact-subject independent formal A gates; frozen unsupported capabilities/receipts stay unsupported. Full native calls and auxiliary tool-less read-only remain unsupported. / 准确模型与 thinking RPC，每 invocation 一次 prompt，有限同 session 续接，复用公共角色及 Local/工程/Skill 消费；prompt Schema、原始 UTF-8、账单与元数据分开。新受支持准备留存受控单原生 session 作者证明，沿公共准确 subject 独立正式 A 门槛；冻结 unsupported 能力／回执不升级。完整 native-call 与无工具辅助只读仍不支持。 |
+| `pi` | Exact model/thinking RPC with one prompt per invocation, finite exact-session resume, common H/W/A/E and Local/project/Skill consumers; prompt schema, original UTF-8 and separate billing/metadata. New supported `closed` preparations retain controlled single-native-session authorship for the shared exact-subject independent formal A gates. Explicit `configured` loads installed native extensions/packages cache-only and has no complete authorship proof. Frozen unsupported capabilities/receipts stay unsupported. Full native calls, native subagents and auxiliary tool-less read-only remain unsupported. / 准确模型与 thinking RPC，每 invocation 一次 prompt，有限同 session 续接，复用公共角色及 Local/工程/Skill 消费；prompt Schema、原始 UTF-8、账单与元数据分开。新受支持 closed 准备留存受控单原生 session 作者证明，沿公共准确 subject 独立正式 A 门槛；显式 configured 只加载缓存中已安装的原生扩展／包，不具完整作者证明。冻结 unsupported 能力／回执不升级。完整 native-call、原生子代理与无工具辅助只读仍不支持。 |
 | `protocol` | Runs the exact supplied argv, sends one JSON request on stdin, reads JSONL events. Permissions are declarations with `enforcement = "hint_only"`; the launcher owns actual access controls. No native session resume or complete native authorship attestation; formal independent review is unavailable. / 精确 argv、stdin JSON、stdout JSONL；权限仅作提示，由 launcher 实施，不支持原线程恢复或完整作者证明，不能正式独审。 |
 
 The protocol request identifies `protocol = "scidiscovery-agent-v1"` and contains

@@ -101,10 +101,9 @@ def role_contract(job):
         return 'Use subagents only if the Backend and original permissions support them; otherwise do small tasks yourself without a handoff. W decides whether large/complex evidence warrants E.'
     if advisory_assessment(job):
         return ('Diagnose only evidence-backed lock-in, ignored counterevidence/critical alternatives, goal drift or serious logic errors. '
-            'No material issue means no new constraints; counts/low scores alone prove none. Do not select methods, depth, folds, bagging or search order, or ban broader exploration. '
+            'No material issue means no new constraints; counts, low scores, elapsed time and engineering failures alone prove none. Distinguish productive deepening from repeated investment without new distinguishing evidence. Do not select methods, depth, folds, bagging or search order, or ban broader exploration. '
             'W judges advice and chooses self-fix, H for alternatives, E for missing evidence, or evidence-based disagreement. '
             'Return continue_w with decision_request=null; advice stays in scientific_result, never a binding work order or finalization request. '
-            +('supervision_result=continue_existing means return to W, not endorsement of its current route. ' if job.get('supervision_request') is not None else '')
             +'Final A remains a separate pre-delivery assessment; preserve original permissions, qualification and formal independence.')
     if job.get('research_strategy_version') in {2,3}:
         if scope=='delivery_review':

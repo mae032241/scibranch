@@ -165,7 +165,9 @@ def validate_message(message, profile):
 
 class ResumeEntries:
     """Strict context admission before the SDK's skip/migrate/coerce loader."""
-    def __init__(self, profile):
+    def __init__(self, profile, *, resource_mode='closed'):
+        from .pi_backend import resource_mode as validate_resource_mode
+        self.resource_mode = validate_resource_mode(resource_mode)
         self.profile = profile; self.seen = set(); self.editable = {}; self.tools = set()
         self.conversation = False; self.leaf = None
 
@@ -218,9 +220,14 @@ class ResumeEntries:
             if not isinstance(value.get('summary'), str) or value.get('fromId') not in self.seen:
                 raise ValueError('Pi resume branch summary invalid')
         elif kind == 'custom':
-            # Virtual model routing and extension state cannot silently change
-            # an exact physical model's frozen binding on native reload.
-            raise ValueError('Pi resume extension state unsupported')
+            if self.resource_mode != 'configured':
+                raise ValueError('Pi resume extension state unsupported')
+            # Configured extensions own opaque native state. Admit its native
+            # envelope, never interpret data as model, permission or usage facts.
+            # The exact SDK model/thinking handshake still precedes the prompt.
+            if (set(value) - {'type', 'id', 'parentId', 'timestamp', 'customType', 'data'}
+                    or not isinstance(value.get('customType'), str)):
+                raise ValueError('Pi resume custom state invalid')
         elif kind not in {'usage', 'label', 'session_info'}:
             raise ValueError('Pi resume entry unsupported')
         if 'usage' in value and (kind not in {'usage', 'compaction', 'branch_summary'}
@@ -243,10 +250,10 @@ def open_original(home, path):
     return os.fdopen(fd, 'rb')
 
 
-def load_resume_original(session, workspace, home):
+def load_resume_original(session, workspace, home, *, resource_mode='closed'):
     """One bounded producer read, retained by the attempt owner for its meter."""
     path = validate_resume_binding(session, workspace, home)
-    validator = ResumeEntries(session['profile']); digest = hashlib.sha256()
+    validator = ResumeEntries(session['profile'], resource_mode=resource_mode); digest = hashlib.sha256()
     with open_original(home, path) as stream:
         info = os.fstat(stream.fileno())
         if (list((info.st_dev, info.st_ino)) != session['identity']
@@ -276,7 +283,8 @@ def load_resume_original(session, workspace, home):
             or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1):
         raise ValueError('Pi resume original changed during admission')
     return dict(session=dict(session), info=info, header=header, anchor=anchor,
-        digest=digest, seen=set(validator.seen), leaf=validator.leaf)
+        digest=digest, seen=set(validator.seen), leaf=validator.leaf,
+        resource_mode=validator.resource_mode)
 
 
 def _signature(info):
@@ -306,10 +314,11 @@ def recheck_prefix(original, *, phase='prelaunch'):
         if digest.digest() != original['digest'].digest():
             raise ValueError('Pi resume original changed')
         if phase == 'native_setup':
-            validator = ResumeEntries(session['profile'])
+            validator = ResumeEntries(session['profile'], resource_mode=original['resource_mode'])
             validator.seen = set(original['seen']); leaf = original['leaf']
             fields = {'model_change': {'provider', 'modelId'},
                 'thinking_level_change': {'thinkingLevel'}}
+            if validator.resource_mode == 'configured':fields['custom'] = {'customType'}
             while stream.tell() < info.st_size:
                 line = stream.readline(min(LINE_BYTES + 1, info.st_size - stream.tell()))
                 if not line or len(line) > LINE_BYTES or not line.endswith(b'\n'):
@@ -318,6 +327,7 @@ def recheck_prefix(original, *, phase='prelaunch'):
                 if (not isinstance(value, dict) or not isinstance(value.get('type'), str)
                         or value['type'] not in fields
                         or set(value) != {'type', 'id', 'parentId', 'timestamp'} | fields[value['type']]
+                            | ({'data'} if value['type'] == 'custom' and 'data' in value else set())
                         or any(not isinstance(value[key], str) for key in fields[value['type']])
                         or value.get('parentId') != leaf):
                     raise ValueError('Pi resume work or unknown metadata before binding')

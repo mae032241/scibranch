@@ -1,6 +1,6 @@
 """Bounded reconnectable public progress, shared by CLI and the loopback UI.
 
-Only typed backend messages and tool names/status are projected from the private
+Only typed backend messages and explicit public thinking are projected from the private
 native transport. Cursors contain offsets and opaque file identity, never text.
 A reader failure cannot change execution, receipts, originals or usage coverage.
 """
@@ -83,11 +83,18 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
             intent_bytes = contracts.regular(intent_path, limit=MAX_BYTES).read_bytes()
             intent = json.loads(intent_bytes)
             result['state'] = 'intent_present'
-            runner_path = record / 'runner-process.json'
-            if runner_path.exists():
-                runner = contracts.read(contracts.regular(runner_path, limit=4096))
-                runtime_binding = contracts.record_ref(intent_path) if attempt else job['job_ref']
-                result['state'] = 'running' if runtime.process_matches(runner, runtime_binding) else 'unknown'
+            runtime_binding = dict(path=str(intent_path)) if attempt else job['job_ref']
+            if intent.get('task_ref') != job['job_ref']:
+                result['state'] = 'unknown'
+            else:
+                for name in ('runner-process.json', 'native-process.json'):
+                    try:owner=contracts.read(contracts.regular(record/name, limit=4096))
+                    except FileNotFoundError:continue
+                    except (OSError,ValueError,TypeError):
+                        result['state']='unknown';continue
+                    result['state']='unknown'
+                    if runtime.process_live(owner,runtime_binding):
+                        result['state']='running';break
             if type(intent.get('prepared_at')) in (int, float):
                 result['prepared_at'] = intent['prepared_at']
         meter_path = record / 'usage.json'
@@ -174,9 +181,15 @@ def read(root, step, *, attempt=0, cursor=None, limit_bytes=65536, tail=False):
                     malformed += 1
                     continue
                 for projected in projected_events:
+                    # Lifecycle and tokens have their own status/monitor slots.
+                    # Keep consuming every original byte even when no public
+                    # prose survives this work-record projection.
+                    if projected.get('type') not in {'message', 'thinking'}:
+                        continue
                     safe = public_output.event(projected, clean)
-                    if safe is not None:
-                        result['events'].append(safe)
+                    if safe is None:
+                        continue
+                    result['events'].append(safe)
             offset += consumed
             current = dict(v=2, binding=binding, stream=identity, offset=offset, skip=skipping)
             # Detect changes during this single bounded read before returning it.

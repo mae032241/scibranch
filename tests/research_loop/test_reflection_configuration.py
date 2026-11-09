@@ -18,7 +18,7 @@ def test_new_common_prepare_freezes_reflection_without_a_codex_default(tmp_path)
     root,_=prepare(tmp_path)
     selected=c.settings(root)
     assert selected['native_backend']=='protocol'
-    assert selected['supervision_policy']==supervision.AUTOMATIC_REFLECTION_POLICY
+    assert selected['supervision_policy']==supervision.DEFAULT_WORKER_FIRST_REFLECTION_POLICY
     job=c.build_job(root,1,'W',[])
     assert job['worker_continuity_version']==1
     head=accepted_budget.read(root)
@@ -26,7 +26,9 @@ def test_new_common_prepare_freezes_reflection_without_a_codex_default(tmp_path)
 
 
 def test_existing_worker_first_off_policy_is_not_upgraded_by_configuration_validation(tmp_path):
-    root,options=prepare(tmp_path,supervision_policy=supervision.WORKER_FIRST_POLICY)
+    # Freeze a legacy strategy without the independent new advisory contract.
+    root,options=prepare(tmp_path,research_strategy_version=2,
+        supervision_policy=supervision.WORKER_FIRST_POLICY)
     before=(root/'settings.json').read_bytes();original=c.settings(root)
     changed=dict(options,model='another-explicit-model',validate_only=True,_existing_settings=original)
     changed.pop('supervision_policy')

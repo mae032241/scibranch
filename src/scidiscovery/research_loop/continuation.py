@@ -354,6 +354,7 @@ def _start_technical_restart(root, step, paths, *, outcome, expected_attempt):
     number=len(paths)
     record=execution.origin(root,step)/'continuations'/f'{number:03d}'
     intent=dict(step=step,attempt=number,continuation_kind='technical_restart',
+        operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION,
         context_mode='new_context',native_home=str(root/'native-homes'/f'{step:03d}'/f'context-{number:03d}'),
         **binding,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
         root_intent_ref=c.record_ref(paths[0]/'native-intent.json'),previous=execution.proof(paths[-1]),
@@ -686,7 +687,8 @@ def _automatic_start_locked(root, step, decision, *, inventory=None, recovery_wa
     number = len(paths)
     record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
-    intent = dict(step=step, attempt=number, continuation_kind='automatic_recovery', **binding,
+    intent = dict(step=step, attempt=number, continuation_kind='automatic_recovery',
+        operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION, **binding,
         task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
         root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
         budget_slice=anchor, automatic_recovery=request)
@@ -779,6 +781,33 @@ def validate_session_header(line, thread, workspace):
         raise ValueError('Native session identity or workspace changed')
 
 
+def _interrupted_session_facts(root, step, record):
+    """Acquire exact retained hook facts; absence of an outcome stays absent."""
+    intent=c.read(c.regular(record/'native-intent.json'))
+    snapshot=record/'usage-observation.json'
+    observation=c.read(c.regular(snapshot)) if snapshot.exists() else {}
+    value=observation.get('session_binding') or intent.get('session')
+    if not isinstance(value,dict):
+        raise ResumeUnavailable('worker_resume_metadata_unavailable')
+    thread=value.get('thread_id')
+    if not isinstance(thread,str) or not thread:
+        raise ResumeUnavailable('worker_resume_thread_unavailable')
+    events=[]
+    stream=record/'native.jsonl'
+    if stream.exists():
+        # Only the original owner's bounded native event prefix is inspected.
+        # Arbitrary tool-input arrays and non-event JSON cannot bind a session.
+        with c.regular(stream).open('rb') as source:
+            prefix=source.read(1024*1024)
+        for line in prefix.splitlines():
+            try:raw=json.loads(line)
+            except (ValueError,UnicodeError,RecursionError):continue
+            if not isinstance(raw,dict) or not isinstance(raw.get('type'),str):continue
+            events.append(raw)
+    return dict(session=value,thread=thread,home=value.get('home'),
+        thread_event=value.get('thread_event'),events=events)
+
+
 def session(root, step, record, *, home=None, session_path=None, identity_proof=False):
     """Retain exact hook/session metadata; the transcript is an opaque original."""
     from . import backends
@@ -786,25 +815,37 @@ def session(root, step, record, *, home=None, session_path=None, identity_proof=
     backend=backends.selected(configuration_updates.for_step(root, step))
     if backend.recovery_capability('resume').get('status') != 'supported':
         raise ResumeUnavailable('worker_resume_unsupported_backend')
-    outcome = c.native_outcome(record)
-    thread = outcome.get('thread_id')
-    identity = outcome.get('native_identity') or {}
-    value = identity.get('session')
+    if (record/'native-outcome.json').exists():
+        outcome = c.native_outcome(record)
+        identity = outcome.get('native_identity') or {}
+        facts=dict(session=identity.get('session'),thread=outcome.get('thread_id'),
+            home=identity.get('home'),thread_event=outcome.get('native_thread_event'))
+    else:
+        facts=_interrupted_session_facts(root,step,record)
+    thread = facts['thread']
+    value = facts['session']
     if not isinstance(value, dict):
         raise ResumeUnavailable('worker_resume_metadata_unavailable')
     if thread is None or value.get('thread_id') != thread:
         raise ResumeUnavailable('worker_resume_thread_unavailable')
-    actual_home = home if home is not None else identity.get('home')
+    actual_home = home if home is not None else facts['home']
     if actual_home is None:
         raise ResumeUnavailable('worker_resume_metadata_unavailable')
     if session_path is not None and str(session_path) != value.get('path'):
         raise ValueError('Native session original path changed')
     try:
         backend.validate_resume_session(value,c.workspace(root, step),actual_home)
-        backend.validate_session_event(outcome.get('native_thread_event'),thread)
+        thread_event=facts['thread_event']
+        if thread_event is None:
+            for event in facts.get('events',[]):
+                try:backend.validate_session_event(event,thread)
+                except (ValueError,TypeError,KeyError,IndexError,AttributeError):continue
+                thread_event=event;break
+        if thread_event is None:
+            raise ResumeUnavailable('worker_resume_thread_unavailable')
+        backend.validate_session_event(thread_event,thread)
     except MetadataUnavailable as error:
         raise ResumeUnavailable(str(error)) from error
-    thread_event = outcome.get('native_thread_event')
     return dict(value, **(dict(thread_event=thread_event) if identity_proof else {}))
 
 
@@ -817,99 +858,243 @@ def interruption(root, job, record):
             or saved.get('intent_ref') != c.record_ref(record / 'native-intent.json')
             or type(saved.get('advance_seconds')) not in (int, float)):
         raise ValueError('Interrupted original identity changed')
-    for name in ('runner-process.json', 'native-process.json'):
+    proof=saved.get('stop_proof')
+    if proof is not None and (not isinstance(proof,dict) or proof.get('status')!='stopped'
+            or proof.get('kind') not in {'boot_changed','same_boot_stopped','owner_cleanup'}
+            or proof.get('groups_absent') is not True
+            or proof.get('boot_id') != saved.get('stamp',{}).get('boot_id')
+            or not isinstance(proof.get('processes'),dict) or not isinstance(proof.get('observed'),dict)
+            or proof.get('kind')!='owner_cleanup' and not {'runner-process.json','native-process.json'} <= set(proof['processes'])):
+        raise ValueError('Interrupted original stop proof changed')
+    if proof is not None and proof['kind']=='owner_cleanup':
+        if proof.get('outcome_ref') != dict(path=str(record/'native-outcome.json')):
+            raise ValueError('Interrupted cleanup lost its exact original outcome')
+        outcome=c.read(c.regular(record/'native-outcome.json'))
+        if (outcome.get('cleanup')!='observed_group_cleaned' or outcome.get('stop_reason')=='cleanup_unknown'
+                or outcome.get('returncode')==0 and outcome.get('terminal_observed') is True and not outcome.get('stop_reason')):
+            raise ValueError('Interrupted cleanup has no qualified failed original')
+    retained_meter=saved.get('retained_meter')
+    if retained_meter is not None:
+        from . import accepted_budget
+        accepted=accepted_budget.native_attempt(root,job['step'],record)
+        if (accepted is None or accepted.get('status')!='closed' or accepted.get('meter')!=retained_meter
+                or saved.get('meter_source')!='accepted_native_terminal'):
+            raise ValueError('Interrupted retained billing changed its accepted original')
+    names=proof['processes'] if proof is not None else ('runner-process.json','native-process.json')
+    for name in names:
+        if name not in {'runner-process.json','native-process.json','bridge-process.json','watchdog-process.json'}:
+            raise ValueError('Interrupted original process proof changed')
         identity = c.read(c.regular(record / name))
         if (saved.get('processes', {}).get(name) != c.record_ref(record / name)
                 or identity.get('task_ref') != binding
                 or not isinstance(identity.get('boot_id'), str) or not identity['boot_id']
-                or identity['boot_id'] == saved.get('stamp', {}).get('boot_id')
+                or proof is None and identity['boot_id'] == saved.get('stamp', {}).get('boot_id')
                 or any(type(identity.get(key)) is not int or identity[key] <= 0
                        for key in ('pid','start_ticks','pgid','sid','ppid'))):
             raise ValueError('Interrupted original process binding changed')
+        if proof is not None and (proof['processes'][name] != identity
+                or proof['kind']=='boot_changed' and (identity['boot_id']==proof['boot_id']
+                    or proof['observed'].get(name)!='previous_boot')
+                or proof['kind']=='same_boot_stopped' and (identity['boot_id']!=proof['boot_id']
+                    or proof['observed'].get(name) not in {'absent','reused','zombie','dead'})
+                or proof['kind']=='owner_cleanup' and (proof['observed'].get(name) not in
+                    {'previous_boot','absent','reused','zombie','dead'} or
+                    (proof['observed'].get(name)=='previous_boot') != (identity['boot_id']!=proof['boot_id']))):
+            raise ValueError('Interrupted original stop observation changed')
     return saved
 
 
-def validate_reentry(root, job, intent, prior):
-    saved = interruption(root, job, prior)
-    original = c.read(c.regular(prior / 'native-intent.json'))
+def validate_reentry(root, job, intent, prior, *, saved, original, settings, source_session, accepted_anchor):
+    """Pure retained reentry validation; the operation owner acquires facts."""
     anchor = intent.get('budget_slice', {})
     expected = dict(original['budget_slice'], boot_id=anchor.get('boot_id'),
         advance_seconds=saved['advance_seconds'],
         previous_tokens=saved['budget_slice']['observed_tokens'],
         previous_seconds=saved['budget_slice']['advance_seconds'])
-    policy = configuration_updates.for_step(root, job['step']).get('resume_policy') or {}
+    if intent.get('explicit_recovery') is True and isinstance(accepted_anchor,dict):
+        expected.update({key:accepted_anchor.get(key) for key in ('boot_id','advance_seconds','shared_limits')})
+    policy = settings.get('resume_policy') or {}
     default_home = policy.get('native_home') if policy.get('output_only') else None
     home = original.get('native_home', original.get('session', {}).get('home',
         default_home or str(root / 'native-homes' / f'{job["step"]:03d}')))
     selected = intent.get('session') or {}
-    if (intent.get('interruption') != c.record_ref(prior / 'interruption.json')
+    mode=intent.get('context_mode','same_session')
+    if (intent.get('interruption') != dict(path=str(prior/'interruption.json'))
             or not isinstance(anchor.get('boot_id'), str) or not anchor['boot_id']
-            or anchor != expected
-            or selected.get('home') != home
-            or selected != session(root, job['step'], prior, home=home, session_path=selected.get('path'))):
+            or anchor != expected or anchor != accepted_anchor or mode not in {'same_session','new_context'}):
         raise ValueError('Reentry changed its original session or consumed budget')
+    if mode=='new_context':
+        if (intent.get('session') is not None or intent.get('native_home') != str(root/'native-homes'/
+                f'{job["step"]:03d}'/f'context-{intent["attempt"]:03d}')
+                or intent.get('explicit_recovery') is not True):
+            raise ValueError('New-context reentry changed its explicit original scope')
+    elif (selected.get('home') != home or not isinstance(source_session,dict) or selected != source_session):
+        raise ValueError('Reentry changed its original session')
 
 
-def reenter(root, step):
+def reenter(root, step, *, explicit=False, expected_attempt=None, native_intent_ref=None, new_context=False):
     """Resume the original local session after reboot, retaining all old facts."""
     with budget._operator_writer(root):
-        return _reenter_locked(root, step)
+        return _reenter_locked(root, step,explicit=explicit,expected_attempt=expected_attempt,
+            native_intent_ref=native_intent_ref,new_context=new_context)
 
 
-def _reenter_locked(root, step):
+def _owner_interruption_proof(record, binding, outcome, stamp):
+    """Positive original cleanup remains useful when ancillary receipts lack."""
+    if outcome.get('cleanup')!='observed_group_cleaned' or outcome.get('stop_reason')=='cleanup_unknown':
+        raise ResumeUnavailable('unexpected_recovery_cleanup_unconfirmed')
+    receipts={}
+    for name in ('runner-process.json','native-process.json','bridge-process.json','watchdog-process.json'):
+        path=record/name
+        try:
+            path.lstat()
+            receipt=c.read(c.regular(path))
+        except FileNotFoundError:continue
+        except (OSError,ValueError,TypeError):
+            raise ResumeUnavailable('unexpected_recovery_original_process_receipt_unavailable') from None
+        if not runtime._bound_group_identity(receipt,binding):
+            raise ResumeUnavailable('unexpected_recovery_original_process_identity_invalid')
+        receipts[name]=receipt
+    observed={}
+    if receipts:
+        actual=runtime.probe_owned_processes(receipts,binding,current_boot=stamp['boot_id'])
+        if actual['status']!='stopped':
+            raise ResumeUnavailable('unexpected_recovery_'+actual['reason'])
+        observed=actual['observed']
+    return dict(status='stopped',kind='owner_cleanup',boot_id=stamp['boot_id'],groups_absent=True,
+        processes=receipts,observed=observed,
+        outcome_ref=dict(path=str(record/'native-outcome.json')))
+
+
+def _reenter_locked(root, step, *, explicit=False, expected_attempt=None, native_intent_ref=None, new_context=False):
     inventory=None
     from .protocol import require_current
     require_current(root)
     # Reentry continues an already accepted full task. The policy's output-only
     # restriction still governs new repairs, not this interrupted task.
-    validate_launcher(root, step)
     job = validate_task(root, step,inventory=inventory)
     require_current(root, job)
     paths = execution.records(root, step); prior = paths[-1]
+    if explicit:
+        if type(expected_attempt) is not int or not 0<=expected_attempt<len(paths):
+            raise ResumeUnavailable('unexpected_recovery_exact_attempt_required')
+        source=paths[expected_attempt]
+        if native_intent_ref != dict(path=str(source/'native-intent.json')):
+            raise ResumeUnavailable('unexpected_recovery_source_changed')
+        if expected_attempt < len(paths)-1:
+            accepted=c.read(c.regular(paths[expected_attempt+1]/'native-intent.json'))
+            if (accepted.get('continuation_kind')!='reentry'
+                    or accepted.get('interruption') != dict(path=str(source/'interruption.json'))
+                    or accepted.get('recovery_new_context',False) is not bool(new_context)):
+                raise ResumeUnavailable('unexpected_recovery_source_changed')
+            return accepted
     state = runtime.node_state(root, step)
-    if state in {'running','terminal','sealed','waiting','unstarted'}:
+    original_outcome=c.native_outcome(prior) if (prior/'native-outcome.json').exists() else None
+    completed=bool(original_outcome and original_outcome.get('returncode')==0
+        and original_outcome.get('terminal_observed') is True and not original_outcome.get('stop_reason')
+        and original_outcome.get('cleanup')=='observed_group_cleaned')
+    if state in {'running','sealed','waiting','unstarted'} or state=='terminal' and (not explicit or completed):
         return c.read(c.regular(prior / 'native-intent.json'))
-    if state != 'interrupted':
+    if state != 'interrupted' and not explicit:
         raise ResumeUnavailable('worker_resume_original_not_interrupted')
-    session_ref = session(root, step, prior)
+    from . import accepted_budget,backends,correction
+    head=accepted_budget.read(root)
+    if (head.current_job is None or head.current_job['step']!=step
+            or head.current_job['job_ref'] != dict(path=str(root/'jobs'/f'{step:03d}.json'))):
+        raise ResumeUnavailable('unexpected_recovery_current_job_changed')
+    stamp=budget.clock_stamp()
+    binding=execution.identity(root,step,len(paths)-1)
+    proof=(_owner_interruption_proof(prior,binding,original_outcome,stamp) if original_outcome is not None
+        else runtime.probe_interruption(prior,binding,current_boot=stamp['boot_id']))
+    if proof['status']!='stopped':
+        raise ResumeUnavailable('unexpected_recovery_'+proof['reason'])
+    # The new typed proof observes every retained bridge/watchdog identity and
+    # its group directly. A missing old bridge outcome remains missing; it is
+    # not stronger than this fresh, exact positive stopped-writer observation.
     settings = configuration_updates.for_step(root, step)
     from . import profiles
     original = c.read(c.regular(prior / 'native-intent.json'))
+    accepted_source=accepted_budget.native_attempt(root,step,prior,head=head)
+    if accepted_source is None:raise ValueError('Interrupted native has no accepted original')
     if (original.get('continuation_kind') == 'author_closeout'
             or original.get('output_repair') or original.get('work_repair')
             or not isinstance(original.get('budget_slice'), dict)):
         raise ResumeUnavailable('worker_resume_interrupted_scope_unavailable')
+    if explicit and (job.get('formal_review') or job.get('final_only') or job.get('final_report')
+            or job.get('purpose') in {'closeout','delivery_review','delivery_correction'}
+            or head['closeout'] is not None or head['final_return'] is not None):
+        raise ResumeUnavailable('operator_resume_special_scope_requires_existing_recovery')
+    if correction.gate(root,step-1) is not None:
+        raise ResumeUnavailable('worker_resume_correction_paused')
+    backend=backends.selected(settings).for_job(job)
+    mode='new_context' if explicit and (new_context or not backend.supports_resume) else 'same_session'
+    session_ref=None
+    if mode=='same_session':
+        validate_launcher(root,step)
+        session_ref=session(root,step,prior)
     profile_binding = profiles.binding(settings, job)
     profiles.validate_intent(settings, job, original)
     budget.transition(root, 'advance', 'resume_interrupted_original')
+    # The transition publishes a newer accepted clock boundary. The marker
+    # snapshot must sample after that mutation, never reuse the probe's stamp.
+    stamp=budget.clock_stamp()
+    if proof['boot_id']!=stamp['boot_id']:
+        raise ResumeUnavailable('unexpected_recovery_current_boot_changed')
     marker = prior / 'interruption.json'
     if not marker.exists():
-        stamp = budget.clock_stamp(); snapshot = budget.snapshot(root, sample_stamp=stamp)
+        snapshot = budget.snapshot(root, sample_stamp=stamp)
         meter = c.read(c.regular(prior / 'usage.json')) if (prior / 'usage.json').exists() else None
+        retained_meter=None
+        if meter is None and accepted_source.get('status')=='closed' and accepted_source.get('meter') is not None:
+            retained_meter=accepted_source['meter'];meter=retained_meter
         reported = meter or dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
         if native._usage_event(dict(type='turn.completed', usage=reported)) != reported:
             raise ValueError('Interrupted native usage changed')
         report = dict(role=job['role'], limits=original['budget_slice']['limits'],
-            advance_seconds=budget._node_duration(root,job,original,snapshot),
+            advance_seconds=budget._node_duration(root,job,original,dict(snapshot,**original['budget_slice']['shared_limits'])),
             observed_tokens=original['budget_slice'].get('previous_tokens',0)+reported['input_tokens']+reported['output_tokens'],
             dispatches=len(paths), usage_observed=meter is not None, **reported)
+        retained_report=(original_outcome or {}).get('budget_slice')
+        if (isinstance(retained_report,dict) and retained_report.get('role')==job['role']
+                and retained_report.get('limits')==original['budget_slice']['limits']
+                and type(retained_report.get('advance_seconds')) in (int,float)):
+            report=dict(retained_report)
         c.write(marker, dict(task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
             intent_ref=c.record_ref(prior / 'native-intent.json'), stamp=stamp,
             advance_seconds=snapshot['advance_seconds'], budget_slice=report,
-            processes={name:c.record_ref(prior/name) for name in ('runner-process.json','native-process.json')}))
+            source_session=session_ref,
+            **(dict(retained_meter=retained_meter,meter_source='accepted_native_terminal')
+                if retained_meter is not None else {}),
+            stop_proof=proof,processes={name:dict(path=str(prior/name)) for name in proof['processes']}))
     saved = interruption(root, job, prior)
     # Validate the saved prefix against the same persisted attempt meters used
     # for ordinary continuation admission before publishing a new reentry.
-    tokens, seconds = budget._attempt_consumption(root, job, paths)
+    descriptor=dict(continuation_kind='reentry',interruption=dict(path=str(marker)))
+    tokens, seconds = budget._attempt_consumption(root,job,paths,reentry_successor=descriptor)
     anchor = dict(original['budget_slice'], boot_id=budget.clock_stamp()['boot_id'],
         advance_seconds=saved['advance_seconds'], previous_tokens=tokens, previous_seconds=seconds)
+    if explicit:
+        report=saved['budget_slice']
+        settled_meter=({key:report[key] for key in ('input_tokens','cached_input_tokens','output_tokens')}
+            if report['usage_observed'] else None)
+        if accepted_source['status']!='closed':
+            accepted_budget.accept_terminal(root,step,prior,meter=settled_meter,unknown=True)
+            accepted_source=dict(accepted_source,status='closed')
+        anchor=budget.accept_continuation(root,job,paths,interruption_ref=dict(path=str(marker)))
     number = len(paths); record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
-    intent = dict(step=step, attempt=number, continuation_kind='reentry', **profile_binding,
+    intent = dict(step=step, attempt=number, continuation_kind='reentry',
+        operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION, **profile_binding,
         task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
         root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(prior),
-        session=session_ref, budget_slice=anchor, interruption=c.record_ref(marker))
-    validate_reentry(root, job, intent, prior)
+        context_mode=mode,budget_slice=anchor,interruption=c.record_ref(marker),
+        **(dict(explicit_recovery=True,recovery_new_context=bool(new_context)) if explicit else {}))
+    if session_ref is not None:intent['session']=session_ref
+    else:
+        intent.update(native_home=str(root/'native-homes'/f'{step:03d}'/f'context-{number:03d}'),
+            context_reason='operator_selected_new_context' if new_context else 'native_resume_unsupported_backend')
+    validate_reentry(root,job,intent,prior,saved=saved,original=original,settings=settings,
+        source_session=session_ref,accepted_anchor=anchor)
     from . import accepted_budget
     # A reboot ends this local writer without producing a native outcome.
     # Close its accepted accounting with the retained observed lower bound;
@@ -918,8 +1103,10 @@ def _reenter_locked(root, step):
     report = saved['budget_slice']
     meter = ({key: report[key] for key in ('input_tokens', 'cached_input_tokens', 'output_tokens')}
         if report['usage_observed'] else None)
-    accepted_budget.accept_terminal(root,step,prior,meter=meter,unknown=True)
+    if accepted_source['status']!='closed':
+        accepted_budget.accept_terminal(root,step,prior,meter=meter,unknown=True)
     accepted_budget.accept_native(root,step,record,intent)
+    if explicit:(root/'pause.request').unlink(missing_ok=True)
     runtime.start(root, step, number)
     return intent
 
@@ -1162,6 +1349,8 @@ def validate_repair_chain(root, step, chain):
     """Terminal execution checks every repair source without replaying projections."""
     for number, record in enumerate(chain[1:], 1):
         intent = c.read(c.regular(record / 'native-intent.json'))
+        if intent.get('continuation_kind') == 'operator_resume':
+            validate_operator_resume(root,step,intent,chain[number-1])
         if intent.get('output_repair') is not None or intent.get('work_repair') is not None:
             # execution.records already verified task/attempt/previous identities.
             # Avoid terminal -> scientific projection -> terminal recursion.
@@ -1301,7 +1490,8 @@ def fragment_start(root, step, *, inventory):
     number = len(paths)
     record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
-    intent = dict(step=step, attempt=number, continuation_kind='fragment', context_mode=mode, **profile_binding,
+    intent = dict(step=step, attempt=number, continuation_kind='fragment', context_mode=mode,
+                  operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION, **profile_binding,
                   task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
                   root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
                   fragment_checkpoint=dict(path=(last / 'checkpoint.json').relative_to(root).as_posix()), budget_slice=anchor)
@@ -1315,11 +1505,176 @@ def fragment_start(root, step, *, inventory):
     return intent
 
 
-def start(root, step, *, inventory=None, expected_attempt=None):
+def operator_resume_binding(record, attempt):
+    return dict(source_attempt=attempt, intent_ref=dict(path=str(record/'native-intent.json')),
+        outcome_ref=dict(path=str(record/'native-outcome.json')),
+        interrupt_ref=dict(path=str(record/'interrupt.request')))
+
+
+def operator_resume_source(record, intent, outcome, request):
+    """Pure exact-source predicate, also consumed by the budget owner."""
+    attempt = intent.get('attempt', 0)
+    return (type(attempt) is int and attempt >= 0
+        and request == operator_resume_binding(record, attempt)
+        and type(intent.get('operator_interrupt_version')) is int
+        and intent['operator_interrupt_version'] == native.OPERATOR_INTERRUPT_VERSION
+        and outcome.get('stop_reason') == 'operator_interrupt'
+        and (outcome.get('cleanup') == 'observed_group_cleaned'
+            or outcome.get('native_started') is False and outcome.get('cleanup') is None))
+
+
+def validate_operator_resume(root, step, intent, prior):
+    source = c.read(c.regular(prior/'native-intent.json'))
+    outcome = c.read(c.regular(prior/'native-outcome.json'))
+    if (intent.get('continuation_kind') != 'operator_resume'
+            or not operator_resume_source(prior, source, outcome, intent.get('operator_resume'))
+            or intent.get('attempt') != source.get('attempt', 0) + 1
+            or intent.get('task_ref') != source.get('task_ref')
+            or source.get('continuation_kind') == 'author_closeout'
+            or source.get('output_repair') or source.get('work_repair')
+            or intent.get('context_mode') not in {'same_session','new_context'}
+            or intent.get('context_mode') == 'new_context' and (
+                intent.get('session') is not None or intent.get('native_home') != str(
+                    root/'native-homes'/f'{step:03d}'/f'context-{intent["attempt"]:03d}'))
+            or intent.get('context_mode') == 'same_session' and (
+                not isinstance(intent.get('session'),dict) or intent.get('operator_new_context') is not False)
+            or c.read(c.regular(prior/'interrupt.request')) != native.interrupt_binding(
+                prior, step, source.get('attempt', 0), source)):
+        raise ValueError('Operator continuation changed its exact interrupted original')
+
+
+def _start_operator_resume(root, step, *, expected_attempt, native_intent_ref, new_context=False):
+    from . import accepted_budget, backends, correction, fork_runtime, profiles, worker_execution_bridge
+    if type(expected_attempt) is not int or expected_attempt < 0:
+        raise ResumeUnavailable('operator_resume_exact_attempt_required')
+    paths = execution.records(root, step)
+    source = execution.origin(root, step)
+    if expected_attempt:
+        source = source/'continuations'/f'{expected_attempt:03d}'
+    if native_intent_ref != dict(path=str(source/'native-intent.json')):
+        raise ResumeUnavailable('operator_resume_original_reference_changed')
+    if expected_attempt < len(paths)-1:
+        successor = c.read(c.regular(paths[expected_attempt+1]/'native-intent.json'))
+        if (successor.get('continuation_kind') != 'operator_resume'
+                or successor.get('operator_resume') != operator_resume_binding(source, expected_attempt)
+                or successor.get('operator_new_context') is not bool(new_context)):
+            raise ResumeUnavailable('operator_resume_source_attempt_changed')
+        return native.wait_native(root, step, _reentry_started=True)
+    if expected_attempt != len(paths)-1:
+        raise ResumeUnavailable('operator_resume_source_attempt_changed')
+    job = validate_task(root, step)
+    head = accepted_budget.read(root)
+    settings = c.settings_for_job(root, job, base=head.base, head=head)
+    intents = [c.read(c.regular(path/'native-intent.json')) for path in paths]
+    original = intents[-1]
+    outcome = c.read(c.regular(source/'native-outcome.json'))
+    request = operator_resume_binding(source, expected_attempt)
+    if not operator_resume_source(source, original, outcome, request):
+        raise ResumeUnavailable('operator_resume_original_not_cleanly_interrupted')
+    if (job.get('formal_review') or job.get('purpose') in {'closeout', 'delivery_review', 'delivery_correction'}
+            or job.get('final_only') or job.get('final_report') or head['closeout'] is not None
+            or head['final_return'] is not None or any(item.get('continuation_kind') == 'author_closeout'
+                or item.get('output_repair') or item.get('work_repair') for item in intents)):
+        raise ResumeUnavailable('operator_resume_special_scope_requires_existing_recovery')
+    task = dict(path=str(root/'jobs'/f'{step:03d}.json'))
+    if (head.current_job is None or head.current_job['step'] != step
+            or head.current_job['job_ref'] != task or original.get('task_ref') != task
+            or (execution.origin(root,step)/'result-identity.json').exists()
+            or any((execution.origin(root,later)/'native-intent.json').exists()
+                for later in fork_runtime.local_steps(root,include_native=True) if later > step)):
+        raise ResumeUnavailable('operator_resume_current_job_changed')
+    if correction.gate(root,step-1) is not None:
+        raise ResumeUnavailable('worker_resume_correction_paused')
+    if c.read(c.regular(source/'interrupt.request')) != native.interrupt_binding(source,step,expected_attempt,original):
+        raise ValueError('Operator continuation lost its exact interrupt request')
+    binding = execution.identity(root,step,expected_attempt)
+    missing_process_receipts=[]
+    for name in ('runner-process.json','native-process.json'):
+        path=source/name
+        if not path.exists():
+            if outcome.get('native_started') is not False:
+                missing_process_receipts.append(name)
+            continue  # The exact owner outcome already positively confirms cleanup.
+        receipt=c.read(c.regular(path))
+        if (not isinstance(receipt,dict) or receipt.get('task_ref') != binding
+                or not isinstance(receipt.get('boot_id'),str) or not receipt['boot_id']
+                or any(type(receipt.get(key)) is not int or receipt[key] <= 0
+                    for key in ('pid','start_ticks','pgid','sid','ppid'))):
+            raise ValueError('Operator continuation original process identity changed')
+        retained=(outcome.get('execution_processes') or {}).get(name)
+        if retained is not None and retained != dict(path=str(path)):
+            raise ValueError('Operator continuation original process reference changed')
+        if runtime.process_matches(receipt,binding):
+            raise ResumeUnavailable('worker_resume_original_running')
+    worker_execution_bridge.stopped(source,binding)
+    backend=backends.selected(settings).for_job(job)
+    mode='new_context' if new_context or not backend.supports_resume else 'same_session'
+    session_ref=None
+    if mode=='same_session':
+        limits=settings.get('resume_policy') or {}
+        used=sum(item.get('continuation_kind') in {'repair','operator_resume'} and item.get('session') is not None for item in intents)
+        if used >= limits.get('max_attempts',0):
+            raise ResumeUnavailable('operator_resume_session_limit_select_new_context')
+        session_ref=_automatic_session(root,step,source,outcome)
+    profiles.validate_intent(settings,job,intents[0])
+    meter=c.read(c.regular(source/'usage.json')) if (source/'usage.json').exists() else None
+    current=head['current_native']
+    if current is not None:
+        if current['record'] != source.relative_to(root).as_posix():
+            raise ResumeUnavailable('operator_resume_current_attempt_changed')
+        accepted_budget.accept_terminal_from_base(root,step,source,base=head.base,meter=meter,
+            unknown=(outcome.get('metering') or {}).get('coverage') != 'terminal',metering=outcome.get('metering'))
+    budget.transition(root,'advance','explicit_operator_interrupt_continuation')
+    anchor=budget.accept_continuation(root,job,paths,operator_resume=request)
+    number=len(paths);record=execution.origin(root,step)/'continuations'/f'{number:03d}'
+    intent=dict(step=step,attempt=number,continuation_kind='operator_resume',operator_resume=request,
+        operator_new_context=bool(new_context),
+        operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION,context_mode=mode,
+        **profiles.binding(settings,job),task_ref=task,root_intent_ref=c.record_ref(paths[0]/'native-intent.json'),
+        previous=execution.proof(source),budget_slice=anchor)
+    if session_ref is not None:intent['session']=session_ref
+    else:
+        intent['native_home']=str(root/'native-homes'/f'{step:03d}'/f'context-{number:03d}')
+        intent['context_reason']='operator_selected_new_context' if new_context else 'native_resume_unsupported_backend'
+    if missing_process_receipts:
+        intent['source_missing_process_receipts']=missing_process_receipts
+    validate_operator_resume(root,step,intent,source)
+    record.mkdir(parents=True,exist_ok=True)
+    accepted_budget.accept_native(root,step,record,intent)
+    (root/'pause.request').unlink(missing_ok=True)
+    runtime.start(root,step,number)
+    return native.wait_native(root,step,_reentry_started=True)
+
+
+def start(root, step, *, inventory=None, expected_attempt=None, after_interrupt=False, native_intent_ref=None, new_context=False):
     from .protocol import require_current
     require_current(root)
     from . import contracts as _contracts
     require_current(root,_contracts.read(_contracts.regular(Path(root)/'jobs'/f'{step:03d}.json')))
+    if after_interrupt:
+        with budget._operator_writer(root):
+            paths=execution.records(root,step)
+            if type(expected_attempt) is not int or not 0<=expected_attempt<len(paths):
+                raise ResumeUnavailable('unexpected_recovery_exact_attempt_required')
+            source=paths[expected_attempt]
+            if native_intent_ref != dict(path=str(source/'native-intent.json')):
+                raise ResumeUnavailable('unexpected_recovery_source_changed')
+            if not (source/'native-outcome.json').exists():
+                before=paths[-1]
+                reenter(root,step,explicit=True,expected_attempt=expected_attempt,
+                    native_intent_ref=native_intent_ref,new_context=new_context)
+                return native.wait_native(root,step,_reentry_started=execution.record(root,step)!=before)
+            source_outcome=c.native_outcome(source)
+            if (source_outcome.get('returncode')==0 and source_outcome.get('terminal_observed') is True
+                    and not source_outcome.get('stop_reason') and source_outcome.get('cleanup')=='observed_group_cleaned'):
+                return native.wait_native(root,step)
+            if source_outcome.get('stop_reason')!='operator_interrupt':
+                before=paths[-1]
+                reenter(root,step,explicit=True,expected_attempt=expected_attempt,
+                    native_intent_ref=native_intent_ref,new_context=new_context)
+                return native.wait_native(root,step,_reentry_started=execution.record(root,step)!=before)
+            return _start_operator_resume(root,step,expected_attempt=expected_attempt,
+                native_intent_ref=native_intent_ref,new_context=new_context)
     if (execution.origin(root, step) / 'result-identity.json').exists():
         return c.read(execution.origin(root,step)/'result.json')
     paths = execution.records(root, step)
@@ -1399,7 +1754,9 @@ def start(root, step, *, inventory=None, expected_attempt=None):
     anchor = budget.accept_continuation(root, job, paths, output_repair=repair if not work_repair else None,inventory=inventory)
     record = execution.origin(root, step) / 'continuations' / f'{number:03d}'
     record.mkdir(parents=True, exist_ok=True)
-    intent = dict(step=step, attempt=number, continuation_kind='repair', **profile_binding, task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
+    intent = dict(step=step, attempt=number, continuation_kind='repair',
+                  operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION,
+                  **profile_binding, task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
                   root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
                   session=session_ref, budget_slice=anchor,
                   **({('work_repair' if work_repair else 'output_repair'):repair} if repair is not None else {}))
@@ -1477,7 +1834,8 @@ def wake_start(root,step,observations,*,inventory=None):
     anchor=budget.accept_continuation(root,job,paths)
     record=execution.origin(root,step)/'continuations'/f'{number:03d}'
     record.mkdir(parents=True,exist_ok=True)
-    intent=dict(step=step,attempt=number,continuation_kind='execution_wake',**profile_binding,
+    intent=dict(step=step,attempt=number,continuation_kind='execution_wake',
+        operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION,**profile_binding,
         task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),root_intent_ref=c.record_ref(paths[0]/'native-intent.json'),
         previous=execution.proof(last),session=session_ref,budget_slice=anchor,execution_wake=request)
     from . import accepted_budget

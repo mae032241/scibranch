@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import ctypes
+import errno
 import fcntl
 import os
 from pathlib import Path
@@ -35,6 +36,17 @@ def process_matches(identity, task_ref):
                         for key in ('pid', 'boot_id', 'start_ticks', 'pgid', 'sid')))
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         return False
+
+
+def process_live(identity, task_ref):
+    """Fresh owner liveness; saved identity/open state is not a live process."""
+    if not _bound_group_identity(identity,task_ref):return False
+    try:current=process_identity(identity['pid'],task_ref)
+    except (OSError,ValueError,KeyError,TypeError,IndexError):return False
+    if (not _bound_group_identity(current,task_ref) or not isinstance(current.get('state'),str)
+            or not current['state']):return False
+    return (current['state'] not in {'Z','X','x'}
+        and all(current.get(key)==identity[key] for key in ('pid','boot_id','start_ticks','pgid','sid')))
 
 
 def _subreaper():
@@ -92,6 +104,84 @@ def bound_group_stopped(identity, task_ref):
     """Read-only positive absence of one exact owner and its original group."""
     return (_bound_group_identity(identity,task_ref)
         and not process_matches(identity,task_ref) and not _observed_group_members(identity))
+
+
+def probe_interruption(record, binding, *, current_boot):
+    """One explicit writer's positive stopped-owner probe, retaining errors."""
+    receipts={}
+    if not isinstance(current_boot,str) or not current_boot:
+        return dict(status='unknown',reason='current_boot_unavailable')
+    for name in ('runner-process.json','native-process.json','bridge-process.json','watchdog-process.json'):
+        path=Path(record)/name
+        if name not in {'runner-process.json','native-process.json'}:
+            try:path.lstat()
+            except OSError as error:
+                if error.errno in {errno.ENOENT,errno.ESRCH}:continue
+                return dict(status='unknown',reason='original_process_receipt_unavailable')
+        try:identity=contracts.read(contracts.regular(path))
+        except (OSError,ValueError,TypeError):
+            return dict(status='unknown',reason='original_process_receipt_unavailable')
+        if not _bound_group_identity(identity,binding):
+            return dict(status='unknown',reason='original_process_identity_invalid')
+        receipts[name]=identity
+    return probe_owned_processes(receipts,binding,current_boot=current_boot)
+
+
+def probe_owned_processes(receipts, binding, *, current_boot):
+    """Probe already acquired owner identities with the same tri-state rules."""
+    if not isinstance(current_boot,str) or not current_boot:
+        return dict(status='unknown',reason='current_boot_unavailable')
+    if not isinstance(receipts,dict) or not receipts:
+        return dict(status='unknown',reason='original_process_receipt_unavailable')
+    observed={}
+    for name,identity in receipts.items():
+        if not _bound_group_identity(identity,binding):
+            return dict(status='unknown',reason='original_process_identity_invalid')
+        if identity['boot_id'] != current_boot:
+            observed[name]='previous_boot';continue
+        try:current=process_identity(identity['pid'],binding)
+        except OSError as error:
+            if error.errno not in {errno.ENOENT,errno.ESRCH}:
+                return dict(status='unknown',reason='original_process_probe_unavailable')
+            observed[name]='absent';continue
+        except (ValueError,KeyError,TypeError,IndexError):
+            return dict(status='unknown',reason='original_process_probe_invalid')
+        if not isinstance(current,dict) or not isinstance(current.get('state'),str):
+            return dict(status='unknown',reason='original_process_probe_invalid')
+        same=all(current.get(key)==identity[key] for key in ('pid','boot_id','start_ticks','pgid','sid'))
+        if same and current['state'] not in {'Z','X','x'}:
+            return dict(status='running',reason='original_owner_running')
+        if current.get('boot_id') != current_boot or any(type(current.get(key)) is not int or current[key]<=0
+                for key in ('pid','start_ticks','pgid','sid','ppid')):
+            return dict(status='unknown',reason='original_process_probe_invalid')
+        observed[name]=('zombie' if current['state']=='Z' else 'dead') if same else 'reused'
+    if len({identity['boot_id'] for identity in receipts.values()}) != 1:
+        return dict(status='unknown',reason='original_process_boots_disagree')
+    # A reboot positively excludes all processes from that boot. Same-boot
+    # leader absence is insufficient while original descendants may survive.
+    if any(identity['boot_id']==current_boot for identity in receipts.values()):
+        try:entries=list(Path('/proc').iterdir())
+        except OSError:return dict(status='unknown',reason='original_group_probe_unavailable')
+        for entry in entries:
+            if not entry.name.isdecimal():continue
+            try:member=process_identity(int(entry.name),binding)
+            except OSError as error:
+                if error.errno in {errno.ENOENT,errno.ESRCH}:continue
+                return dict(status='unknown',reason='original_group_probe_unavailable')
+            except (ValueError,KeyError,TypeError,IndexError):
+                return dict(status='unknown',reason='original_group_probe_invalid')
+            if (not isinstance(member,dict) or not isinstance(member.get('boot_id'),str) or not member['boot_id']
+                    or not isinstance(member.get('state'),str) or not member['state']
+                    or any(type(member.get(key)) is not int or member[key]<0 for key in
+                        ('pid','start_ticks','pgid','sid','ppid')) or member['pid']<=0):
+                return dict(status='unknown',reason='original_group_probe_invalid')
+            for identity in receipts.values():
+                if (member.get('boot_id')==identity['boot_id'] and member.get('pgid')==identity['pgid']
+                        and member.get('sid')==identity['sid'] and member.get('state') not in {'Z','X','x'}
+                        and type(member.get('start_ticks')) is int and member['start_ticks']>=identity['start_ticks']):
+                    return dict(status='unknown',reason='original_group_members_remain')
+    return dict(status='stopped',kind='boot_changed' if all(value=='previous_boot' for value in observed.values())
+        else 'same_boot_stopped',boot_id=current_boot,processes=receipts,observed=observed,groups_absent=True)
 
 
 def stop_bound_group(identity, task_ref):
@@ -163,12 +253,11 @@ def node_state(root, step):
         if intent.get('continuation_kind') in {'reentry','automatic_recovery'} and not any(
                 (record / name).exists() for name in ('runner-process.json','native-process.json')):
             return 'unstarted'  # Reuse this accepted identity and its exact recovery scope.
-        runner = contracts.read(record / 'runner-process.json')
-        if process_matches(runner, binding):
-            return 'running'
-        child = record / 'native-process.json'
-        if child.exists() and process_matches(contracts.read(child), binding):
-            return 'running'
+        for name in ('runner-process.json','native-process.json'):
+            try:receipt=contracts.read(contracts.regular(record/name))
+            except (OSError,ValueError,TypeError):continue
+            if process_live(receipt,binding):
+                return 'running'
         if interrupted(record, binding):
             return 'interrupted'
     except (OSError, ValueError, KeyError, TypeError):

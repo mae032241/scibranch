@@ -56,7 +56,10 @@ def test_original_call_revision_stays_frozen_when_same_w_revises_without_a_call(
     assert projected['research']['revision']==2
     assert projected['research_investment']['total_calls']==1
     html=instance_ui.InstanceUI._execution_activity(projected)
-    assert 'revision 1' in html and 'A revised mechanism question' in html
+    assert 'revision 1' in html and 'W 已声明机制账本' in html
+    ledger=ui_mechanisms.render(ui_mechanisms.project(None,[],clean,live_executions=projected))
+    assert 'A revised mechanism question' in ledger and 'revision 2' in ledger
+    assert first['mechanisms']['w001.m1']['question'] in ledger and '准确绑定 revision 1' in ledger
     assert '原调用总数：1' in html and '当前连续投入：1' in html
     assert '科学轮次、研究深度或科学认可' in html
     assert str(root) not in html and 'job_ref' not in json.dumps(projected)
@@ -70,7 +73,9 @@ def test_no_call_declaration_uses_same_view_missing_investment_stays_unknown(tmp
     assert value['calls']==[] and value['research_investment'] is None
     assert value['research']['mechanisms'][0]['mechanism_ref']=='w001.m1'
     html=instance_ui.InstanceUI._execution_activity(value)
-    assert '缺失视图不表示零投入' in html and 'w001.m1' in html
+    assert '缺失视图不表示零投入' in html and 'W 已声明机制账本' in html
+    ledger=ui_mechanisms.render(ui_mechanisms.project(None,[],clean,live_executions=value))
+    assert 'w001.m1' in ledger and 'Which controlled observation separates the alternatives?' in ledger
     path=Path(config['record_dir'])/'live-status.json'
     raw=json.loads(path.read_text());raw['scope']['execution_key']={'path':'/foreign/jobs/001.json'}
     path.write_text(json.dumps(raw))

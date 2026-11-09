@@ -179,9 +179,9 @@ def token_monitor(rows=None, *, scope='当前阶段 · 本次助手用量', live
     body += '<div data-token-details><dl class="token-metrics">'
     for row in rows or []:
         label = row['label']
-        cls = 'token-note' if label in {'计量状态', '观测限制'} else ('token-feature' if label == '缓存命中率' or label.startswith('最近一次上报上下文') else 'token-count')
+        cls = 'token-note' if label in {'计量状态', '观测限制', '当前上下文状态'} else ('token-feature' if label == '缓存命中率' or label.startswith(('最近一次上报上下文', '最近一次本地观测上下文')) else 'token-count')
         main, separator, report = str(row['value']).partition('；') if cls != 'token-note' else (str(row['value']), '', '')
-        body += '<div class="' + cls + '"><dt>' + esc(label) + '</dt><dd' + (' class="token-unavailable"' if main.startswith('不可用') else '') + '>' + esc(main)
+        body += '<div class="' + cls + '"><dt>' + esc(label) + '</dt><dd' + (' class="token-unavailable"' if main.startswith(('不可用', '尚未收到')) else '') + '>' + esc(main)
         if separator:
             body += '<span class="token-report">' + esc(report) + '</span>'
         body += '</dd></div>'

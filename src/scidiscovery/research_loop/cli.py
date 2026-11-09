@@ -96,6 +96,8 @@ def main(argv=None):
     start.add_argument('--continue', dest='continue_run', action='store_true')
     start.add_argument('--resume-step', type=int, help='Resume one exact known failed node through its existing frozen continuation gates')
     start.add_argument('--expected-attempt', type=int, help='Exact failed source attempt for an explicit prelaunch replacement; repeated requests collect its accepted replacement')
+    start.add_argument('--after-interrupt', action='store_true', help='Explicitly recover the exact interrupted original; collect a live call without replacing it')
+    start.add_argument('--new-context', action='store_true', help='Explicitly select a new native context for that same interrupted task')
     start.add_argument('--ack-correction')
     start.add_argument('--authorization-note')
     operations = commands.add_parser('operations', help='Read host control operation receipts')
@@ -124,6 +126,11 @@ def main(argv=None):
         if name == 'status':
             command.add_argument('--no-live-feedback',action='store_true',
                 help='Read compact owner control facts without opening native progress messages')
+        if name == 'pause':
+            command.add_argument('--immediate', action='store_true',
+                help='Ask the exact original runner to stop through its normal cleanup path')
+            command.add_argument('--step', type=int, help='Exact original step to interrupt; requires --immediate and --attempt')
+            command.add_argument('--attempt', type=int, help='Exact original attempt, starting at 0; never inferred from latest work')
         if name == 'continue':
             command.add_argument('--ack-correction', help='Exact current published pause trigger ID; permits one nondeferred A cycle')
             command.add_argument('--authorization-note', help='External operator decision; not authentication or a budget amendment')
@@ -151,6 +158,8 @@ def main(argv=None):
     resume.add_argument('--root', type=Path, required=True)
     resume.add_argument('--step', type=int, required=True)
     resume.add_argument('--expected-attempt', type=int, help='Exact failed source attempt for an explicit prelaunch replacement')
+    resume.add_argument('--after-interrupt', action='store_true', help='Recover the exact interrupted original, including confirmed unexpected stops; never replay an experiment')
+    resume.add_argument('--new-context', action='store_true', help='Explicitly select new context while preserving task, permissions and consumed budgets')
     recover=commands.add_parser('execution-recover',help='Append same-call terminal evidence for a sealed unknown; new nodes freeze its recovery prefix')
     recover.add_argument('--root',type=Path,required=True)
     recover.add_argument('--step',type=int,required=True)
@@ -283,9 +292,19 @@ def main(argv=None):
             from . import progress
             result = progress.read(root, args.step, attempt=args.attempt, cursor=args.cursor, limit_bytes=args.limit_bytes)
         elif args.command == 'start':
+            options={}
+            if args.after_interrupt:
+                if args.resume_step is None or args.expected_attempt is None:
+                    raise ValueError('--after-interrupt requires --resume-step and --expected-attempt')
+                record=root.resolve()/'native-evidence'/f'{args.resume_step:03d}'
+                if args.expected_attempt:record=record/'continuations'/f'{args.expected_attempt:03d}'
+                options.update(after_interrupt=True,native_intent_ref=dict(path=str(record/'native-intent.json')),
+                    new_context=args.new_context)
+            elif args.new_context:
+                raise ValueError('--new-context requires --after-interrupt')
             result = instance_control.start_background(root, continue_run=args.continue_run,
                 ack_correction=args.ack_correction, authorization_note=args.authorization_note,
-                resume_step=args.resume_step,expected_attempt=args.expected_attempt)
+                resume_step=args.resume_step,expected_attempt=args.expected_attempt,**options)
         elif args.command in {'result', 'materials', 'artifact'}:
             from . import instance_science
             if args.command == 'result':
@@ -335,7 +354,17 @@ def main(argv=None):
                 authorization_note=args.authorization_note,successor=args.successor,
                 authorization_statement=args.authorization_statement)
         elif args.command == 'worker-resume':
-            result = controller.worker_resume(root, args.step,expected_attempt=args.expected_attempt)
+            options={}
+            if args.after_interrupt:
+                if args.expected_attempt is None:
+                    raise ValueError('--after-interrupt requires --expected-attempt')
+                record=root.resolve()/'native-evidence'/f'{args.step:03d}'
+                if args.expected_attempt:record=record/'continuations'/f'{args.expected_attempt:03d}'
+                options.update(after_interrupt=True,native_intent_ref=dict(path=str(record/'native-intent.json')),
+                    new_context=args.new_context)
+            elif args.new_context:
+                raise ValueError('--new-context requires --after-interrupt')
+            result = controller.worker_resume(root, args.step,expected_attempt=args.expected_attempt,**options)
         elif args.command == 'status':
             result = status(root,live_feedback=False) if args.no_live_feedback else status(root)
         elif args.command == 'closeout':
@@ -355,7 +384,18 @@ def main(argv=None):
                 result = instance_control.request_budget_amendment(root, max_tokens=args.max_tokens, max_seconds=args.max_seconds, max_steps=args.max_steps,
                                       authorization_note=args.authorization_note, authorization_statement=args.authorization_statement)
         elif args.command == 'pause':
-            result = request_pause(root)
+            if args.step is not None or args.attempt is not None:
+                if not args.immediate or args.step is None or args.attempt is None:
+                    raise ValueError('Immediate interrupt requires --immediate, --step and --attempt together')
+                record = root.resolve() / 'native-evidence' / f'{args.step:03d}'
+                if args.attempt:
+                    record = record / 'continuations' / f'{args.attempt:03d}'
+                result = instance_control.request_interrupt(root, step=args.step, expected_attempt=args.attempt,
+                    native_intent_ref=dict(path=str(record / 'native-intent.json')))
+            elif args.immediate:
+                result = instance_control.request_interrupt(root)
+            else:
+                result = request_pause(root)
         elif args.command == 'continue':
             result = continue_instance(root, ack_correction=args.ack_correction,
                                        authorization_note=args.authorization_note)
@@ -367,6 +407,8 @@ def main(argv=None):
     print(json.dumps(result, ensure_ascii=False))
     if result.get('status') == 'instance_deleted':
         return 0
+    if result.get('status') == 'interrupt_requested':
+        return 0  # Request acceptance is not cleanup or external cancellation.
     if args.command == 'execution-preparation-maintain':
         return 0 if result.get('status') in {'partial', 'accepted_unpublished', 'already_published', 'partial_discarded', 'accepted_published'} else 2
     if args.command == 'execution-resume' and args.maintenance is not None:

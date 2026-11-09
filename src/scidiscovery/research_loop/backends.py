@@ -1283,6 +1283,11 @@ class Codex(Backend):
             return [dict(type='turn.completed'), *([dict(type='usage',usage=usage)] if usage else [])]
         item=value.get('item')
         if kind not in {'item.started','item.updated','item.completed'} or not isinstance(item,dict):return []
+        # The SDK's reasoning item text is its public summary. Publish the
+        # completed snapshot once, never infer text from private metadata.
+        if item.get('type')=='reasoning' and kind=='item.completed' and isinstance(item.get('text'),str):
+            return [dict(type='thinking',text=item['text'],
+                **(dict(text_truncated=True) if item.get('text_truncated') is True else {}))]
         if item.get('type')=='agent_message' and isinstance(item.get('text'),str):
             return [dict(type='message',text=item['text'],
                 **(dict(text_truncated=True) if item.get('text_truncated') is True else {}))]
@@ -1547,7 +1552,9 @@ class Protocol(Backend):
         if kind=='usage':
             usage=_usage(value.get('usage'))
             return [dict(type='usage',usage=usage)] if usage else []
-        if kind=='message' and isinstance(value.get('text'),str):return [dict(type='message',text=value['text'])]
+        if kind in {'message','thinking'} and isinstance(value.get('text'),str):
+            return [dict(type=kind,text=value['text'],
+                **(dict(text_truncated=True) if value.get('text_truncated') is True else {}))]
         if kind=='tool' and isinstance(value.get('tool'),str) and value.get('status') in {'started','updated','completed','failed'}:
             return [dict(type='tool',tool=value['tool'][:128],status=value['status'])]
         return []

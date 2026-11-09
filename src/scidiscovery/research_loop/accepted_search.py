@@ -716,12 +716,16 @@ def _supervision(delta, job, payload, seal, observation, *, origin, bindings, va
     if diagnostics:
         state['diagnostics']=diagnostics[:4]
         state['diagnostics_omitted_count']=max(0,len(diagnostics)-4)
+    from . import decision
+    returned_advice=decision.advice_returned(job,payload)
     result=c.scientific_field(job,payload,'supervision_result') if job['role']=='A' else None
     science=payload.get('scientific_result')
     meaningful=isinstance(science,str) and bool(science.strip())
     routes={'continue_existing':{'continue_w'},'request_evidence':{'continue_w','revise_h','extract'},'finalize':{'finish','deliver'}}
+    returned=(returned_advice if c.guidance.advisory_assessment(job) else
+        isinstance(result,str) and payload.get('next_action') in routes.get(result,set()))
     if (job['role']=='A' and valid and isinstance(request,dict) and meaningful
-            and isinstance(result,str) and payload.get('next_action') in routes.get(result,set())):
+            and returned):
         frozen=request.get('cutoff') or {};count=frozen.get('total_rounds')
         original=delta.get('round',frozen['round_id']) if isinstance(frozen.get('round_id'),str) else None
         bound=(type(count) is int and state['covered_rounds']<=count<=state['total_rounds'] and

@@ -1428,7 +1428,9 @@ def _validate_stopped_report(root, value):
         # invocation report; only its predecessor reports can supply this cost.
         last = contracts.read(chain[-1] / 'native-intent.json')
         tokens, seconds = _attempt_consumption(root, job, chain[:-1],
-            automatic_successor=last if last.get('continuation_kind') == 'automatic_recovery' else None)
+            automatic_successor=last if last.get('continuation_kind') == 'automatic_recovery' else None,
+            operator_successor=last if last.get('continuation_kind') == 'operator_resume' else None,
+            reentry_successor=last if last.get('continuation_kind')=='reentry' else None)
         anchor = last.get('budget_slice') or {}
         if anchor.get('previous_tokens') != tokens or anchor.get('previous_seconds') != seconds:
             raise ValueError('Stopped continuation changed its consumed original budget')
@@ -2091,30 +2093,39 @@ def _validate_direct_delivery_action(event, *, begin, actions, confirmed, settin
         raise ValueError('Direct delivery exceeds its exact bounded operation')
 
 
-def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic_successor=None):
+def _attempt_consumption(root, job, paths, *, automatic_recovery=None, automatic_successor=None,
+        operator_resume=None, operator_successor=None, reentry_successor=None):
     """Derive cumulative consumption from exact completed native facts."""
     policy=contracts.settings(root,job)
-    receipts=[_attempt_receipt(root,job,path,
-        intent=contracts.read(contracts.regular(path/'native-intent.json'))) for path in paths]
+    intents=[contracts.read(contracts.regular(path/'native-intent.json')) for path in paths]
+    receipts=[]
+    for number,(path,intent) in enumerate(zip(paths,intents)):
+        successor=intents[number+1] if number+1<len(intents) else reentry_successor or {}
+        receipts.append(_attempt_receipt(root,job,path,intent=intent,
+            interruption_ref=successor.get('interruption') if successor.get('continuation_kind')=='reentry' else None))
     return _attempt_consumption_from_facts(root,job,receipts,policy=policy,
         limits=node_limits(root,job,settings=policy),task_ref=contracts.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),automatic_recovery=automatic_recovery,
-        automatic_successor=automatic_successor)
+        automatic_successor=automatic_successor,operator_resume=operator_resume,operator_successor=operator_successor)
 
 
-def _attempt_receipt(root,job,path,*,intent):
+def _attempt_receipt(root,job,path,*,intent,interruption_ref=None):
     """Load a required predecessor's receipt, retaining missing billing."""
-    interrupted=not (path/'native-outcome.json').exists()
+    if interruption_ref is not None and interruption_ref != dict(path=str(path/'interruption.json')):
+        raise ValueError('Interrupted receipt changed its exact accepted successor')
+    interrupted=interruption_ref is not None or not (path/'native-outcome.json').exists()
     if interrupted:
         from . import continuation
         saved=continuation.interruption(root,job,path)
         original=dict(budget_slice=saved['budget_slice'])
     else:original=contracts.read(contracts.regular(path/'native-outcome.json'))
     meter=contracts.read(contracts.regular(path/'usage.json')) if (path/'usage.json').exists() else None
+    if interrupted and meter is None:
+        meter=saved.get('retained_meter')
     return path,intent,original,meter,interrupted
 
 
 def _attempt_consumption_from_facts(root,job,receipts,*,policy,limits,task_ref,
-        automatic_recovery=None,automatic_successor=None):
+        automatic_recovery=None,automatic_successor=None,operator_resume=None,operator_successor=None):
     """Apply the original accounting predicates to the owner's read receipts."""
     from . import native
     tokens, seconds = 0, 0.
@@ -2124,7 +2135,7 @@ def _attempt_consumption_from_facts(root,job,receipts,*,policy,limits,task_ref,
         if (meter is None and not interrupted and not native_recovery.never_started(original)
                 and not native_completion_known(dict(original,stop_reason=None),policy)):
             from . import continuation
-            successor = receipts[number+1][1] if number+1<len(receipts) else automatic_successor or {}
+            successor = receipts[number+1][1] if number+1<len(receipts) else automatic_successor or operator_successor or {}
             automatic = ((automatic_recovery is not None and number == len(receipts) - 1)
                          or successor.get('continuation_kind') == 'automatic_recovery')
             from . import native_recovery
@@ -2133,7 +2144,11 @@ def _attempt_consumption_from_facts(root,job,receipts,*,policy,limits,task_ref,
             eligible = (continuation._format_source_from_facts(path,policy=policy,intent=intent,outcome=original) is not None if negotiation else
                 automatic and native_recovery.recoverable_source(
                     continuation._automatic_source_from_facts(path,policy=policy,intent=intent,outcome=original)))
-            if not automatic or not eligible:
+            explicit = operator_resume if number == len(receipts)-1 else None
+            if successor.get('continuation_kind') == 'operator_resume':
+                explicit = successor.get('operator_resume')
+            operator = explicit is not None and continuation.operator_resume_source(path,intent,original,explicit)
+            if not operator and (not automatic or not eligible):
                 raise ValueError('Missing billing has no known original completion')
         # An absent meter contributes no reported tokens to the lower bound;
         # retain its absence and unknown coverage, never publish a zero meter.
@@ -2181,7 +2196,9 @@ def _node_duration(root, job, intent, limits):
         # Retain that verified boundary so its failed source's unknown billing
         # remains a lower bound during runner admission/reporting as at accept.
         original = _attempt_consumption(root, job, paths[:number],
-            automatic_successor=accepted if accepted.get('continuation_kind') == 'automatic_recovery' else None)
+            automatic_successor=accepted if accepted.get('continuation_kind') == 'automatic_recovery' else None,
+            operator_successor=accepted if accepted.get('continuation_kind') == 'operator_resume' else None,
+            reentry_successor=accepted if accepted.get('continuation_kind')=='reentry' else None)
         if prior != original[1] or prior_tokens != original[0]:
             raise ValueError('Continuation cannot refund original consumption')
     elif prior_tokens or prior:
@@ -2326,7 +2343,8 @@ def node_report(root, job, intent, meter):
                 limits=intent['budget_slice']['limits'])
 
 
-def accept_continuation(root, job, paths, *, output_repair=None, automatic_recovery=None, inventory=None):
+def accept_continuation(root, job, paths, *, output_repair=None, automatic_recovery=None, inventory=None,
+        operator_resume=None, interruption_ref=None):
     from .protocol import require_current
     require_current(root,job)
     final=final_a_barrier(root)
@@ -2342,7 +2360,22 @@ def accept_continuation(root, job, paths, *, output_repair=None, automatic_recov
         current = continuation.automatic_decision(root, job['step'], inventory=inventory)
         if current != automatic_recovery or current.get('action') not in {'continue', 'retry'}:
             raise ValueError('Automatic recovery budget admission lost its exact source decision')
-    tokens, seconds = _attempt_consumption(root, job, paths, automatic_recovery=automatic_recovery)
+    if operator_resume is not None:
+        from . import continuation
+        source=paths[-1]
+        original=contracts.read(contracts.regular(source/'native-intent.json'))
+        outcome=contracts.read(contracts.regular(source/'native-outcome.json'))
+        if not continuation.operator_resume_source(source,original,outcome,operator_resume):
+            raise ValueError('Operator continuation budget lost its exact interrupted source')
+    reentry=None
+    if interruption_ref is not None:
+        from . import continuation
+        if operator_resume is not None or automatic_recovery is not None or interruption_ref != dict(path=str(paths[-1]/'interruption.json')):
+            raise ValueError('Reentry budget admission changed its exact interrupted source')
+        continuation.interruption(root,job,paths[-1])
+        reentry=dict(continuation_kind='reentry',interruption=interruption_ref)
+    tokens, seconds = _attempt_consumption(root, job, paths, automatic_recovery=automatic_recovery,
+        operator_resume=operator_resume,reentry_successor=reentry)
     policy = node_limits(root, job)
     limits, stamp = _observe_node_clock(root)
     meter = native.usage(root)
@@ -2359,7 +2392,7 @@ def accept_continuation(root, job, paths, *, output_repair=None, automatic_recov
     node_mode(root)
     reserve = (closeout_floor(settings, preparation_seconds=closeout_state(root)['begin']['preparation_seconds'])
         if job.get('purpose') == 'closeout' else delivery_reserve(settings)) or dict(tokens=0, seconds=0, steps=0)
-    unknown = _usage_unknown(meter, (job['step'],) if automatic_recovery is not None else ())
+    unknown = _usage_unknown(meter, (job['step'],) if automatic_recovery is not None or operator_resume is not None or interruption_ref is not None else ())
     if (unknown
             or budget_limits.reached(budget_limits.remaining(
                 limits['max_tokens'], meter.get('accounted_tokens', meter['observed_tokens'])), reserve['tokens'])

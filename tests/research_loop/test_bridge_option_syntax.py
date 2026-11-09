@@ -164,7 +164,8 @@ def test_equals_call_id_preserves_response_evidence_handoff_and_original_replay(
         root=tmp_path/'records', calls=lambda: [Path('original-call')]))
     executions = []
 
-    def execute(given, arguments):
+    def execute(given, arguments, *, submission_ref=None):
+        assert submission_ref=='S001'
         executions.append(list(arguments))
         return dict(code=2, result=dict(status='unknown'))
 

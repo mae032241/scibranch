@@ -171,7 +171,7 @@ def test_large_detail_history_preserves_summary_and_links_with_complete_bounded_
     assert '/results/2' in rendered and '/results/' + str(ui_view.WINDOW) in rendered
     assert rendered.count('<article') == rendered.count('</article>')
     assert rendered.count('<details') == rendered.count('</details>')
-    assert rendered.endswith('</section>')
+    assert rendered.endswith('</details>')
 
 
 def test_public_cleaning_and_html_escape_apply_before_render_and_keys_never_merge(tmp_path, monkeypatch):
@@ -208,7 +208,8 @@ def sealed_fixture(tmp_path, findings):
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, ['never-invoked'], max_tokens=100000,
         max_seconds=600, max_steps=6, model='fixture', reasoning_effort='high',
-        experiment_mode='external', search_policy=search.DEFAULT_POLICY)
+        experiment_mode='external', search_policy=search.DEFAULT_POLICY,
+        research_strategy_version=2)
     plan = dict(scope='One mechanism comparison', commitments=[commitment()], focus=dict(index=None, action='screen'))
     finish(root, 1, 'H', [], action='experiment', search_choice=plan)
     finish(root, 2, 'W', [1], mechanism_findings=findings,stage_intent='decision')

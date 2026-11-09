@@ -162,8 +162,12 @@ def _node(root, step, job, memo=None):
         state = 'prepared'
     else:
         runner = _read(record / 'runner-process.json', {})
+        expected=dict(path=str(root/'jobs'/f'{step:03d}.json')) if record==records[0] else dict(path=str(record/'native-intent.json'))
         try:
-            state = 'running' if runner and runtime.process_matches(runner, runner.get('task_ref')) else 'unknown'
+            state = 'running' if runner and runtime.process_live(runner,expected) else 'unknown'
+            if state=='unknown':
+                child=_read(record/'native-process.json',{})
+                if child and runtime.process_live(child,expected):state='running'
         except (OSError, ValueError, KeyError):
             state = 'unknown'
     accepted_recovery = intent.get('automatic_recovery')
@@ -201,10 +205,51 @@ def _node(root, step, job, memo=None):
     from . import ui_semantics
     reflection=ui_semantics.reflection(job)
     worker_continuation=ui_semantics.worker_continuation(job,outcome)
+    interrupt_target = None
+    interrupt_requested = False
+    attempt = intent.get('attempt', 0)
+    origin = root / 'native-evidence' / f'{step:03d}'
+    interrupt_support = 'unsupported' if intent else None
+    operator_resume_target = None
+    unexpected_recovery_target = None
+    if (intent.get('step') == step and type(attempt) is int and attempt >= 0
+            and intent.get('task_ref') == dict(path=str(root / 'jobs' / f'{step:03d}.json'))):
+        expected_record = origin if attempt == 0 else origin / 'continuations' / f'{attempt:03d}'
+        if record == expected_record:
+            from . import native
+            if (state!='running' and (not outcome or outcome.get('cleanup')=='observed_group_cleaned'
+                    and not native_completed(dict(outcome,state=state)))
+                    and not any(job.get(key) for key in ('formal_review','final_only','final_report'))
+                    and job.get('purpose') not in {'closeout','delivery_review','delivery_correction'}
+                    and intent.get('continuation_kind')!='author_closeout'
+                    and not intent.get('output_repair') and not intent.get('work_repair')):
+                unexpected_recovery_target=dict(step=step,attempt=attempt,
+                    native_intent_ref=dict(path=str(record/'native-intent.json')))
+            if (type(intent.get('operator_interrupt_version')) is int
+                    and intent['operator_interrupt_version'] == native.OPERATOR_INTERRUPT_VERSION):
+                interrupt_support = 'supported'
+                binding = native.interrupt_binding(record, step, attempt, intent)
+                interrupt_target = dict(step=step, attempt=attempt,
+                    native_intent_ref=binding['native_intent_ref'])
+                interrupt_requested = not outcome and _read(record / 'interrupt.request') == binding
+                if (outcome.get('stop_reason') == 'operator_interrupt'
+                        and not any(job.get(key) for key in ('formal_review','final_only','final_report'))
+                        and job.get('purpose') not in {'closeout','delivery_review','delivery_correction'}
+                        and intent.get('continuation_kind') != 'author_closeout'
+                        and not intent.get('output_repair') and not intent.get('work_repair')
+                        and (outcome.get('cleanup') == 'observed_group_cleaned'
+                            or outcome.get('native_started') is False and outcome.get('cleanup') is None)):
+                    operator_resume_target = interrupt_target
     return dict(step=step, role=job['role'], kind=ui_semantics.kind(job),role_label=ui_semantics.role_label(job),
         **(dict(reflection=reflection) if reflection is not None else {}),
         **(dict(worker_continuation=worker_continuation) if worker_continuation is not None else {}),
         state=state, continuations=len(records) - 1,
+        **(dict(interrupt_support=interrupt_support) if interrupt_support is not None else {}),
+        **(dict(operator_resume_target=operator_resume_target) if operator_resume_target is not None else {}),
+        **(dict(unexpected_recovery_target=unexpected_recovery_target)
+            if unexpected_recovery_target is not None else {}),
+        **(dict(interrupt_target=interrupt_target, interrupt_requested=interrupt_requested)
+            if interrupt_target is not None else {}),
         **(dict(technical_diagnostic=technical_diagnostic) if technical_diagnostic is not None else {}),
         **(dict(technical_stop=technical_stop) if technical_stop is not None else {}),
         **(dict(automatic_recovery=shown) if shown is not None else {}),

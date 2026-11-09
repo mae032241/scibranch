@@ -57,8 +57,11 @@ ceilings when none are supplied. Explicit policies keep their own common gates;
 Pi no longer blanket-vetoes common scientific policies. Accepting a declaration
 is neither formal qualification nor an execution grant.
 
-New supported Pi preparations freeze controlled single-native-session authorship
-support. Actual retained launch/resource and observer-source/start proof, accepted
+New supported `closed` Pi preparations freeze controlled single-native-session authorship
+support. Explicit `configured` resources freeze complete native authorship false:
+extension participants and calls are not fully covered. Ordinary W/A/Final A gains
+no additional blocker; complete proof remains required by the explicit formal
+qualification contract. Actual retained launch/resource and observer-source/start proof, accepted
 prompt and persisted session contributions, terminal delivery and stopped-writer
 process/prefix evidence establish the participant; a session label alone does not.
 The SDK session is the stable author across repair/resume, so a new attempt cannot
@@ -81,8 +84,15 @@ resumption of older paused or not-yet-dispatched forks. Stronger NoNetwork and t
 unsupported; ordinary read-only scientific tasks are a distinct supported profile.
 This integration claims neither complete scientific qualification nor backend parity.
 
+Pi-specific `[agent.native] resource_mode` is `closed` when omitted or explicitly
+set to `closed`; explicit `configured` enables trusted installed native extensions/packages.
 All four permission fields must be explicit: `workspace=read-only` or
-`workspace-write`, `network=true`, `web=disabled`, `subagents=false`.
+`workspace-write`, `network=true`, and for `closed`, `web=disabled`, `subagents=false`.
+Configured requires `web=live`, `subagents=false`; explicit mode authorizes trusted
+extensions. False requests no Backend delegation, without proving extension-created
+child calls/processes are forbidden: effective subagents is unknown (`null`) and
+enforcement is `extension_dependent`. Native Pi subagents remain unsupported:
+W handles small work itself and chooses E for larger evidence.
 Default/implied Local and declared projects require `workspace-write` before
 preparation effects; read-only requires explicit external mode. Linux mounts are
 mandatory, without an unsandboxed fallback. The framework-owned workspace top
@@ -104,20 +114,32 @@ native `get_commands`, with valid native-parsed frontmatter and original-source
 provenance before each invocation's sole prompt; Python metadata parsing alone
 is not proof of native loading. Selected assets and workspace inode aliases remain
 read-only. Exact source-original overlays are applied after write grants, including
-the native auth-directory exception. Automatic context/resource discovery is filtered; arbitrary user extensions are
-unsupported in this profile because hooks can change tools, permissions or model
-calls, not because Native cannot load extensions. Only the known read-only internal
-observer is admitted by exact native command-source proof and private startup
-framing; it adds no tool, model call, second prompt or continuation.
+the native auth-directory exception. Automatic context/resource discovery is filtered.
+In `closed`, arbitrary user extensions are unsupported because hooks can change
+tools, permissions or model calls; only the known read-only internal observer is
+admitted by exact native command-source proof and private startup framing. Configured
+allows extra extension commands while retaining exact selected Skill and observer
+source/start checks. The observer itself adds no tool, model call, second prompt or continuation.
 
 Here `<agent-dir>` is the inherited `PI_CODING_AGENT_DIR`, or `$HOME/.pi/agent`
 when unset; `<workspace>` is the exact scientific task workspace. Before native
 startup, both `<agent-dir>/settings.json` and `<workspace>/.pi/settings.json` must
-have absent/empty `packages` and no custom `npmCommand`.
+have absent/empty `packages` in `closed`. Configured leaves those original settings
+unchanged and delegates installed package loading to the original SDK, cache-only,
+without automatic installation or refresh. It removes only `--no-extensions`,
+retaining `--offline`, `--no-approve`, `--no-context-files`, `--no-skills`, `--no-mcp`,
+`--no-prompt-templates` and `--no-themes`. Package Skills/prompts/themes are not
+automatically imported; selected framework Skills keep their common exact-source
+contract. Native loading errors remain errors; command inventory is no proof that
+every package loaded. Both profiles reject custom `npmCommand`.
 The four prompt candidates must be absent: `<agent-dir>/SYSTEM.md`,
 `<agent-dir>/APPEND_SYSTEM.md`, `<workspace>/.pi/SYSTEM.md` and
 `<workspace>/.pi/APPEND_SYSTEM.md`. `--no-context-files` does not suppress these
 hidden prompt sources, and offline mode does not disable package resolution.
+The framework observer covers only the main Pi session in either profile and keeps
+the common 90% notice / strictly above 70% handoff rules. Configured extension calls
+have unknown coverage; observed tokens remain lower bounds and exhaustive native
+call accounting stays unsupported.
 No user configuration or authentication is edited or copied. `PI_OFFLINE` governs
 automatic resource fetch/catalog activity; explicit provider and bash network
 access remain allowed. Disabling web plugins is not network isolation.
@@ -255,9 +277,11 @@ reasoning flaws. It states findings and possible H/E consultation suggestions in
 `scientific_result`; no material issue means no new constraint. W owns routine
 strategy, model, depth, folds, bagging, expansion and ordering, and decides whether
 to consult H or E. Calls, low scores and budget points alone are not evidence of
-lock-in. Ordinary A returns only `continue_w` with `decision_request:null`.
-For a frozen automatic request, `supervision_result=continue_existing` is only
-the return-to-W wire code; it does not endorse or confirm the scientific direction.
+lock-in. Ordinary A returns meaningful `scientific_result`, `continue_w` and
+`decision_request:null`. Control recognizes this return without requiring the
+redundant `supervision_result` code or filling it into the original answer;
+an explicit conflicting code or route still requires correction. Returning advice
+does not endorse or confirm the scientific direction.
 The successor W task does not promote A's `route_reason` into its main question
 or require preservation of the preceding local focus. The diagnostic scope is
 independent of trigger policy 3/4 and adds no public policy-version bump.
@@ -325,7 +349,8 @@ strategy v1 requests protected Final A directly, while unmarked legacy W uses it
 assessment. Consultation is a
 serial job with `purpose=worker_consultation` and an exact W return binding. Its
 return creates a successor W job with the exact preceding W and advice originals.
-New reflection-policy-3 jobs freeze worker_continuity_version=1: the selected
+New advisory-scope jobs, or jobs with reflection policy 3/4, freeze
+`worker_continuity_version=1`: the selected
 Backend may resume the original native W session after validating its original
 workspace/home and the successor invocation. This is serial, not a nested call.
 Unsupported capability, changed profile/backend, inherited sources, unavailable
@@ -440,12 +465,13 @@ from similar labels. The public research index exposes bounded round excerpts,
 evidence pointers, counts, covered boundaries and due reasons. Agent-authored text
 cannot overwrite these host counters or mark supervision complete.
 
-New W-first preparations default to frozen supervision policy version 3: review
-mode, four consecutive original calls as one trigger, shared-budget checkpoints
-at 30% and 65%, a 20% first-review floor and 20% spacing after accepted review
-completion, and at most two automatic ordinary A reviews. These are inspection
-opportunities, not stagnation verdicts. A receives the authored question, clues
-and exact evidence under its frozen advisory scope. A consumption remains in the original shared budget.
+New W-first preparations default to frozen supervision policy 4 with explicit
+`require_fresh_input=true`: review mode, four original calls as one trigger,
+a 10% consumption floor and spacing, no fixed budget checkpoints and no default
+review-count cap. Automatic A has a separate 25% soft admission ceiling in each
+finite shared-budget dimension. These are diagnostic opportunities, not
+stagnation verdicts. A receives the authored question, clues and exact evidence
+under its frozen advisory scope; its consumption remains in the original shared budget.
 Original-call notices and enforced reviews remain separate settings; each
 original counts once across continuation and recovery. Frozen policy version 2
 keeps its original automatic-A-off default; version 1 retains its own cadence.
@@ -460,21 +486,22 @@ These automatic checkpoints are experimental scheduling heuristics, with no
 measured scientific benefit; they do not classify stagnation. The existing
 `supervision_policy=None` opt-out adds no new classifier, search tree or knowledge database.
 
-Supervision policy 4 is an explicit, provisional opt-in for new preparations;
-the default remains policy 3 and `research_strategy_version` remains 3. The
-ongoing V3 two-automatic-A scientific test retains its frozen policy and cannot
-establish V4's scientific benefit. Policies 1/2/3 keep their existing behavior.
-V4's draft settings use four original calls, positive `min_budget_fraction=0.10`
-for both the first-review floor and consumption since the preceding assessment
-completion, no fixed `budget_checkpoints`, and separate automatic-A budget
-fractions of 0.25 for tokens and 0.25 for active seconds. An optional
-`max_automatic_reviews` is an emergency count cap; its default is `None` (omit
-it in TOML), rather than a fixed two-review limit.
+`research_strategy_version` remains 3. Frozen policies 1/2/3 and explicit older
+policy 4 without the fresh-input flag retain their original cadence; the ongoing
+V3 scientific test is unchanged. Scientific benefit remains unverified. Detailed
+configuration and optional emergency caps are maintained in
+[Research configuration](RESEARCH_CONFIGURATION.md).
 
 V4 compares the accepted authored question and exact original-receipt frontier;
-a changed input provides a review opportunity, without a host verdict of new
-scientific evidence. Consumption can also provide an operational opportunity
-with no new experiment. Its frozen ordinary-A request carries `policy_version=4`,
+a changed input provides a diagnostic opportunity, without a host verdict of
+scientific progress. With `require_fresh_input=true`, consumption without fresh
+input leaves an operational status notice and cannot automatically request A or
+block W experiments. An absent flag or explicit `false` retains old v4 operational
+opportunities. Live call investment does not yet supply author/receipt freshness,
+so the first long W is not interrupted by consumption alone. Counts, scores,
+elapsed time and engineering failures alone prove no stagnation; ordinary A
+distinguishes productive deepening from repetition lacking new distinguishing
+evidence, and W decides how to respond. Its frozen ordinary-A request carries `policy_version=4`,
 the exact source W, input cutoffs and original shared-budget scope. The UI
 requires the complete marker and displays only allowlisted reasons and scalar
 summaries; raw budget scope, private paths, native threads and authentication
@@ -551,14 +578,16 @@ original finite deadline while observing explicit recovery; cancellation cleans
 exact bound owners under the writer fence, retaining `cleanup_unknown` if proof
 is missing. A technical pause or cancellation is not a scientific conclusion.
 
-Marked A receives `supervision_request` and returns advice through
-`supervision_result=continue_existing`, `continue_w` and `decision_request:null`.
-This is a return-to-W code, not an endorsement of the current direction. Unmarked
+Marked A receives `supervision_request` and returns advice through meaningful
+`scientific_result`, `continue_w` and `decision_request:null`. The redundant
+`supervision_result` is optional and control never fills it into the original;
+explicit conflicting markers or routes are rejected. Advice does not endorse
+the current direction. Unmarked
 A retains frozen `request_evidence` with bounded `decision_request` and `finalize`
 with `finish/deliver`; legacy tasks without a strategy marker retain direct
 finalization authority. Triggers prove no scientific failure. W chooses whether
-and how to adapt or consult H/E. Scoped decision errors use the same original's
-bounded output repair.
+and how to adapt or consult H/E. Errors in other required scoped decision fields
+still use the same original's bounded output repair.
 
 Reports and reusable diagnostic scripts belong in `artifacts/`; `work/` is scratch.
 H's `minimal_test` accepts nonempty text, objects or lists. Derived mechanism
@@ -588,7 +617,8 @@ An authored package occupying it is returned for delivery correction, preserving
 original calls and outputs without rerunning experiments.
 
 Public progress uses accepted node identities independently of job-body size.
-The exploration-investment UI consumes the accepted search producer's version.
+The mechanism ledger displays W-authored identities and exact source revisions;
+historical H declarations remain distinct.
 Candidate downloads keep the exact sealed member and saved call-output binding,
 including originals retained in place. FINAL submission and confirmation remain
 distinct actions; only confirmation of the active FINAL marks delivery complete.
@@ -1758,6 +1788,20 @@ after its cache is cleared or evicted. These are display projections, never scie
 admission evidence. Displayed time uses the control budget's interval rules, including
 supported cross-boot intervals; unreadable intervals remain unknown. Public progress
 uses bounded catchup, explicit omissions and links to newly sealed conclusions.
+Its event feed contains nonblank assistant messages and backend-provided thinking
+text, collapsed by default. Tool lifecycle and token usage events stay out of the
+feed; usage remains in the meter panel. Display-only context history retains the
+last valid sample within its exact node/attempt and labels it historical when
+current telemetry is unavailable. It never supplies control telemetry.
+After confirmed operator or unexpected interruption, explicit continuation of ordinary work
+preserves the original task, permissions, consumed budgets and unknown calls.
+Missing billing or complete authorship is not an ordinary continuation gate;
+unknown external calls still cannot be resubmitted. The [CLI guide](ROOTLESS_CLI.zh-CN.md)
+owns the controls and restricted-scope recovery boundaries.
+Saved running/open status is historical. Current local liveness uses the original
+boot, PID, start identity and process state; stale or reused PIDs and zombies do
+not establish running work. Confirmed stopped work can retain missing terminal
+records, while a live original is collected and uncertain execution stays unknown.
 
 Field translation is a separate application service, with explicit model start
 and its own cache. Translation sets the native shell and image tool switches to

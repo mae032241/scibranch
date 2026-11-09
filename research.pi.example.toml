@@ -24,6 +24,10 @@ reasoning_effort = "high"
 # Omitted roles inherit these fields. Do not add service_tier or Codex native options.
 # Keep credentials in the original native environment/home, never in this TOML.
 
+[agent.native]
+# Omission or "closed" preserves the controlled profile, including package refusal.
+resource_mode = "closed"
+
 [permissions]
 # All four fields are required explicitly. Default Local requires workspace-write.
 workspace = "workspace-write"
@@ -32,6 +36,30 @@ web = "disabled"
 subagents = false
 # PI_OFFLINE limits automatic resources/catalog fetching, not provider/bash network.
 # Linux mounts are mandatory, with no unsandboxed fallback; same-user access is soft.
+
+# To use trusted, already installed native extensions/packages, replace the existing
+# agent.native and permissions tables above with these tables (do not duplicate them):
+# [agent.native]
+# resource_mode = "configured"
+# [permissions]
+# workspace = "workspace-write"
+# network = true
+# web = "live"
+# subagents = false
+# For ordinary read-only scientific work use workspace = "read-only" AND external
+# executor mode below. Explicit configured mode authorizes trusted extensions;
+# subagents=false requests no Backend delegation, without forbidding extension child
+# calls/processes. Effective subagents is unknown (null), enforcement extension_dependent.
+# Pi native subagents remain unsupported. W handles small work itself and may ask E
+# for large/complex evidence. Closed must retain web="disabled", subagents=false.
+# Original HOME, PI_CODING_AGENT_DIR, settings and auth are neither copied nor edited.
+# Configured uses the original SDK to load cached installed packages; no automatic
+# package install/refresh. Existing npm:pi-web-access, npm:pi-guard-sandbox and
+# npm:pi-gauge entries may remain in the original global settings packages array.
+# Only --no-extensions is removed; offline/no-approve/no-context-files/no-skills/
+# no-mcp/no-prompt-templates/no-themes remain. Package Skills/prompts/themes are not
+# auto-imported; framework-selected Skills retain exact selection/source checks.
+# Loading errors remain native errors; command inventory is not proof every package loaded.
 
 [budget]
 max_tokens = 2000000
@@ -57,11 +85,15 @@ max_steps = 32
 # wake, and common same_session W cadence with max_context_windows=1. Do not copy
 # Codex resume protocol IDs or add its automatic_recovery policy as a Pi default.
 # Policy declarations, chat and transport success grant no review/execution approval.
-# New supported preparations retain controlled single-native-session authorship proof.
+# New supported closed preparations retain controlled single-native-session authorship proof.
+# Configured freezes complete native authorship false; extension calls/participants
+# have unknown coverage. Ordinary W/A/Final A gain no additional blocker from this.
 # Opt-in shared formal A requires complete authors/reviewers, disjoint participants
 # and a sealed pass for the exact subject; repair/resume stays the same author.
 # Frozen false capabilities/old unsupported receipts do not gain support retroactively.
 # Full native-call accounting and tool-less auxiliary read-only remain unsupported.
+# The framework observer covers only the main Pi session in both profiles and keeps
+# the common 90% notice / strictly above 70% handoff rules; tokens remain lower bounds.
 # See docs/RESEARCH_CONFIGURATION.md for retained proof and same-user soft boundaries.
 # No delivery adapter is declared; artifacts remain in the instance.
 
@@ -71,9 +103,11 @@ max_steps = 32
 # [agent.roles.W]
 # skill_set = "analysis"
 # Native get_commands must prove exact selected manuals loaded valid frontmatter.
-# Packages/custom npmCommand and inherited SYSTEM.md/APPEND_SYSTEM.md are unsupported
-# at both the original agent directory and workspace .pi scope before startup.
-# Arbitrary user extensions are unsupported in this permission profile.
+# Closed refuses nonempty packages and arbitrary user extensions. Configured allows
+# cached installed native packages/extensions, including extra extension commands,
+# while retaining observer and selected Skill exact-source checks.
+# Both profiles refuse custom npmCommand and inherited SYSTEM.md/APPEND_SYSTEM.md
+# at the original agent directory and workspace .pi scope before startup.
 
 [ui]
 port = 0

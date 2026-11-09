@@ -33,15 +33,16 @@ def test_public_reader_is_typed_private_cleaned_and_exact_byte_cursor(tmp_path):
     root, _, log = transport(tmp_path)
     raw = b''.join([
         line(dict(type='thread.started', thread_id='private-native-session')),
-        line(dict(type='item.completed', item=dict(type='reasoning', text='hidden-reasoning'))),
+        line(dict(type='item.completed', item=dict(type='reasoning', text='Public reasoning summary',
+            metadata=dict(private='hidden-reasoning')))),
         line(message(f'测量 {root}/native-homes/001 api_key="credential-bytes" Bearer opaque-value')),
         line(dict(type='item.completed', item=dict(type='mcp_tool_call', tool='experiment',
             arguments={'token': 'hidden-argument'}, result='hidden-output', status='completed'))),
     ])
     log.write_bytes(raw)
     result = progress.read(root, 1)
-    assert result['events'][0] == dict(type='session.started')
-    assert result['events'][-1] == dict(type='tool', tool='experiment', status='completed')
+    assert [item['type'] for item in result['events']] == ['thinking', 'message']
+    assert result['events'][0]['text'] == 'Public reasoning summary'
     public = json.dumps(result, ensure_ascii=False)
     for private in ('private-native-session', 'hidden-reasoning', str(root), 'credential-bytes', 'opaque-value', 'hidden-argument', 'hidden-output'):
         assert private not in public
@@ -111,9 +112,12 @@ def test_real_cli_progress_and_http_reader_share_projection_and_resume_cursor(tm
     status, body, headers = ui.get('/nodes/1/events', host=ui.host, cookie=cookie)
     assert status == 200 and headers['Content-Type'].startswith('application/json')
     displayed = json.loads(body)
-    assert set(displayed) - set(value) == {'progress_label', 'token_details'}
+    presentation = {'progress_label', 'token_details', 'context_display', 'omission_label'}
+    assert set(displayed) - set(value) == presentation
     assert {name: item for name, item in displayed.items()
-            if name not in {'progress_label', 'token_details'}} == value
+            if name not in presentation} == value
+    assert displayed['context_display'] == {'status': 'unavailable'}
+    assert displayed['omission_label'] == ''
     assert displayed['progress_label'].endswith('公开日志已连接')
     from scidiscovery.research_loop import ui_view
     assert displayed['token_details'] == ui_view.token_details(value['usage'], dict(value['context'], step=1, attempt=0))

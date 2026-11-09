@@ -102,6 +102,59 @@ def request_pause(root):
     return dict(status='pause_requested', accepted_work='allowed_to_finish_and_seal')
 
 
+@owner_effect
+def request_interrupt(root, *, step=None, expected_attempt=None, native_intent_ref=None):
+    """Ask the original runner to stop; the caller never signals a process.
+
+    A stale browser target remains that exact target. Pausing also prevents an
+    automatic successor, while only the runner can publish cleanup/outcome.
+    """
+    from . import accepted_budget
+    root = Path(root).resolve()
+    idle = step is None and expected_attempt is None and native_intent_ref is None
+    if not idle and (type(step) is not int or step <= 0
+            or type(expected_attempt) is not int or expected_attempt < 0):
+        raise ValueError('Exact original step and attempt required for immediate interrupt')
+    record = None if idle else root / 'native-evidence' / f'{step:03d}'
+    if not idle and expected_attempt:
+        record = record / 'continuations' / f'{expected_attempt:03d}'
+    if not idle and native_intent_ref != dict(path=str(record / 'native-intent.json')):
+        raise ValueError('Immediate interrupt requires the exact original native intent reference')
+    request_pause(root)
+    if idle:
+        return dict(status='pause_requested', accepted_work='no_native_target_requested')
+    target = dict(step=step, attempt=expected_attempt, native_intent_ref=native_intent_ref)
+    with budget._ledger_writer(root) as base:
+        head = accepted_budget.load(root, base=base)
+        current = head['current_native']
+        job = head.current_job
+        if (current is None or job is None or current.get('step') != step
+                or current.get('record') != record.relative_to(root).as_posix()
+                or job.get('step') != step or job.get('native_record') != current['record']):
+            return dict(status='interrupt_unavailable', reason='original_target_no_longer_current',
+                paused=True, target=target)
+        intent = current['intent']
+        if (intent.get('step') != step or intent.get('attempt', 0) != expected_attempt
+                or intent.get('task_ref') != job['job_ref']
+                or head.control_file(record / 'native-intent.json') != intent):
+            raise ValueError('Immediate interrupt original accepted intent changed')
+        if (type(intent.get('operator_interrupt_version')) is not int
+                or intent['operator_interrupt_version'] != native.OPERATOR_INTERRUPT_VERSION):
+            return dict(status='interrupt_unsupported', reason='original_runner_interrupt_unsupported',
+                paused=True, target=target,
+                limitation='This frozen original runner does not declare immediate interruption; only the next-node pause was requested.')
+        binding = native.interrupt_binding(record, step, expected_attempt, intent)
+        path = record / 'interrupt.request'
+        if path.exists() or path.is_symlink():
+            if contracts.read(contracts.regular(path)) != binding:
+                raise ValueError('Immediate interrupt request belongs to another exact original')
+        else:
+            contracts.write(path, binding)
+    return dict(status='interrupt_requested', target=target,
+        accepted_work='original_owner_stop_requested', cleanup='not_yet_confirmed',
+        limitation='Local interruption does not prove cancellation of an external original call; no replay is authorized.')
+
+
 def continue_instance(root, *, ack_correction=None, authorization_note=None):
     root = Path(root).resolve()
     # A second caller cannot clear a live owner's next-node pause.

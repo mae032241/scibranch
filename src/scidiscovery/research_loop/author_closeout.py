@@ -720,6 +720,7 @@ def start(root, step, *, max_tokens, max_seconds, authorization_note):
     projection.write_bytes(_check(root,permit['original_experiment_config']).read_bytes())
     projection.chmod(0o400)
     intent=dict(step=step,attempt=1,continuation_kind='author_closeout',context_mode='new_context',
+        operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION,
         task_ref=binding,root_intent_ref=c.record_ref(origin/'native-intent.json'),previous=execution.proof(origin),
         budget_slice=anchor,author_closeout=_ref(root,path),
         worker_view_version=1,author_closeout_science_facts=_ref(root,science_path),
@@ -882,6 +883,7 @@ def start_successor(root, step, *, max_tokens, max_seconds, authorization_note,
     science_path=record/'author-closeout-science.json'
     c.write(science_path,science_facts(root,step));science_path.chmod(0o400)
     intent=dict(step=step,attempt=2,continuation_kind='author_closeout',context_mode='new_context',
+        operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION,
         task_ref=binding,root_intent_ref=c.record_ref(origin/'native-intent.json'),previous=execution.proof(prior),
         budget_slice=anchor,author_closeout=_ref(root,path),author_closeout_facts=_ref(root,record/'author-closeout-facts.json'),
         worker_view_version=1,author_closeout_science_facts=_ref(root,science_path),

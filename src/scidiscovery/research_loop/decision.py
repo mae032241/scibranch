@@ -21,6 +21,16 @@ def _request(job,payload):
     return request if request is not None and all(request[key].strip() for key in ('question','change_criterion')) else None
 
 
+def advice_returned(job,payload):
+    """Recognize a scoped return to W, without supplying an authored verdict."""
+    science=payload.get('scientific_result')
+    return (c.guidance.advisory_assessment(job)
+        and isinstance(science,str) and bool(science.strip())
+        and payload.get('next_action')=='continue_w'
+        and 'decision_request' in payload and payload['decision_request'] is None
+        and payload.get('supervision_result') in (None,'continue_existing'))
+
+
 def validate_supervision(job,payload):
     """Validate a scoped A direction decision from supplied values, without I/O."""
     if job['role']!='A' or job.get('supervision_request') is None or (c.guidance.purpose(job)!='assessment' and not c.guidance.advisory_assessment(job)):
@@ -30,11 +40,11 @@ def validate_supervision(job,payload):
     science=payload.get('scientific_result')
     meaningful=isinstance(science,str) and bool(science.strip())
     if c.guidance.advisory_assessment(job):
-        if meaningful and result=='continue_existing' and action=='continue_w' and payload.get('decision_request') is None:
-            return result
+        if advice_returned(job,payload):
+            return 'advice_returned'
         from .output_repair import OutputRepairRequired
         raise OutputRepairRequired('a_supervision_result_inconsistent',
-            'Return continue_w with supervision_result=continue_existing and decision_request=null. '
+            'Return continue_w with decision_request=null; omit supervision_result or retain continue_existing if already supplied. '
             'Use nonblank scientific_result for the evidence-backed concern or no material issue; W decides how to respond. No binding work or finalization request.')
     if meaningful and result=='continue_existing' and action=='continue_w' and payload.get('decision_request') is None:
         return result
@@ -60,10 +70,7 @@ def require_request(job,payload):
                 'Supply nonblank scientific_result. continue_w requires one concrete decision_request with question and change_criterion; no additional authorization is granted.')
         return _request(job,payload) if payload.get('next_action')=='continue_w' else None
     if c.guidance.advisory_assessment(job):
-        science=payload.get('scientific_result')
-        if (not isinstance(science,str) or not science.strip()
-                or payload.get('next_action')!='continue_w'
-                or 'decision_request' not in payload or payload['decision_request'] is not None):
+        if not advice_returned(job,payload):
             from .output_repair import OutputRepairRequired
             raise OutputRepairRequired('a_advisory_scope_inconsistent',
                 'Give nonblank scientific_result diagnosing a material evidence-backed reasoning concern or no material issue. '

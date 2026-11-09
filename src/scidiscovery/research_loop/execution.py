@@ -140,6 +140,10 @@ def validate_records(root, step):
         for path in directory.iterdir() if path.is_dir() and (path/'native-intent.json').exists()]
     limit += sum(item.get('continuation_kind') in {'reentry','technical_restart'}
         for item in retained_continuations)
+    operator_count=sum(item.get('continuation_kind') == 'operator_resume' for item in retained_continuations)
+    if operator_count >= budget.historical_step_limit(root):
+        raise ValueError('Operator continuations exceed their shared finite steps')
+    limit += operator_count
     if sum(item.get('continuation_kind') == 'technical_restart' for item in retained_continuations) >= budget.historical_step_limit(root):
         raise ValueError('Technical restart attempts exceed their shared finite steps')
     from . import author_closeout
@@ -194,8 +198,10 @@ def validate_records(root, step):
         if ((settings.get('resume_policy') or {}).get('output_only') and kind in {'repair','fragment','execution_wake'}
                 and not output_repair and not wake_authorized and not (kind == 'fragment' and fragments)):
             raise ValueError('Output-only policy cannot authorize scientific continuation')
-        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','reentry','automatic_recovery','technical_restart'} or kind == 'fragment' and not fragments:
+        if kind not in {'repair', 'fragment', 'execution_wake','author_closeout','reentry','automatic_recovery','technical_restart','operator_resume'} or kind == 'fragment' and not fragments:
             raise ValueError('Native continuation kind differs from its frozen policy')
+        if kind == 'operator_resume':
+            continuation.validate_operator_resume(root,step,intent,result[-1])
         if kind == 'technical_restart':
             previous_intents=[c.read(c.regular(item/'native-intent.json')) for item in result]
             outcomes=[c.read(c.regular(item/'native-outcome.json')) for item in result]
@@ -207,7 +213,22 @@ def validate_records(root, step):
             continuation.validate_automatic(root, step, intent, prior_record=result[-1],
                 prior_intents=[c.read(c.regular(item / 'native-intent.json')) for item in result])
         if kind == 'reentry':
-            continuation.validate_reentry(root, job, intent, result[-1])
+            prior=result[-1]
+            saved=continuation.interruption(root,job,prior)
+            source=c.read(c.regular(prior/'native-intent.json'))
+            selected=None
+            if intent.get('context_mode','same_session')!='new_context':
+                selected=saved.get('source_session')
+                if not isinstance(selected,dict):
+                    # Legacy markers have no retained session fact. This owner
+                    # acquires control metadata only; history never reopens SDK
+                    # session bodies or repeats launch-time mutable acceptance.
+                    selected=continuation._interrupted_session_facts(root,step,prior)['session']
+            from . import accepted_budget
+            accepted=accepted_budget.native_attempt(root,step,path)
+            if accepted is None:raise ValueError('Reentry has no accepted budget original')
+            continuation.validate_reentry(root,job,intent,prior,saved=saved,original=source,
+                settings=settings,source_session=selected,accepted_anchor=accepted['intent'].get('budget_slice'))
         if kind=='author_closeout':
             if verified_authors is not None:
                 author_closeout.require_intent_eligibility(root,job,intent,verified=verified_authors[number])
@@ -315,8 +336,10 @@ def accept_current_terminal(root, step, chain, outcome):
     intents=[c.read(c.regular(path/'native-intent.json')) for path in chain]
     policy=configuration_updates.for_step(root,step)
     from . import budget
-    receipts=[budget._attempt_receipt(root,job,path,intent=intent)
-        for path,intent in zip(chain,intents)]
+    receipts=[budget._attempt_receipt(root,job,path,intent=intent,
+        interruption_ref=intents[index+1].get('interruption') if index+1<len(intents)
+            and intents[index+1].get('continuation_kind')=='reentry' else None)
+        for index,(path,intent) in enumerate(zip(chain,intents))]
     from . import continuation
     technical_facts=([continuation._prelaunch_original_facts(root,step,path,attempt=index)
         for index,path in enumerate(chain[:-1])]
@@ -333,8 +356,10 @@ def accept_current_terminal(root, step, chain, outcome):
 def accept_current_terminal_for_inventory(root,job,inventory,*,original_outcome,meter):
     """Consume this owner's chain, current receipt and selected policy."""
     from . import budget
-    receipts=[budget._attempt_receipt(root,job,path,intent=intent)
-        for path,intent in zip(inventory.chain[:-1],inventory.intents[:-1])]
+    receipts=[budget._attempt_receipt(root,job,path,intent=intent,
+        interruption_ref=inventory.intents[index+1].get('interruption')
+            if inventory.intents[index+1].get('continuation_kind')=='reentry' else None)
+        for index,(path,intent) in enumerate(zip(inventory.chain[:-1],inventory.intents[:-1]))]
     receipts.append((inventory.record,inventory.native_intent,original_outcome,meter,False))
     from . import continuation
     technical_facts=([continuation._prelaunch_original_facts(root,job['step'],path,attempt=index)

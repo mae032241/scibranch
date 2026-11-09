@@ -228,7 +228,7 @@ def _confirm_no_replacement_originals(root, goal_id, step, attempt, unknown):
 
 
 def start_background(root, *, continue_run=False, ack_correction=None, authorization_note=None, resume_step=None,
-                     operation_id=None,expected_attempt=None):
+                     operation_id=None,expected_attempt=None,after_interrupt=False,native_intent_ref=None,new_context=False):
     """Hand the existing single-writer lock to an independent controller process."""
     root = Path(root).resolve()
     from .instance_owner import lease
@@ -241,6 +241,12 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
             if resume_step is None or type(expected_attempt) is not int or expected_attempt < 0:
                 raise ValueError('Expected attempt requires an exact worker resume source')
             request['expected_attempt']=expected_attempt
+        if after_interrupt:
+            if resume_step is None or expected_attempt is None or not isinstance(native_intent_ref,dict):
+                raise ValueError('Interrupted continuation requires an exact source step, attempt and intent reference')
+            request.update(after_interrupt=True,native_intent_ref=native_intent_ref,new_context=bool(new_context))
+        elif native_intent_ref is not None or new_context:
+            raise ValueError('Operator context selection requires explicit after-interrupt continuation')
         if operation_id is not None:
             with budget._ledger_writer(root):
                 previous = _replay(root, operation_id, 'controller', request)
@@ -255,6 +261,8 @@ def start_background(root, *, continue_run=False, ack_correction=None, authoriza
             path = contracts.regular(root / 'jobs' / f'{resume_step:03d}.json')
             action = dict(kind='worker_resume', step=resume_step, job_ref=contracts.record_ref(path))
             if expected_attempt is not None:action['expected_attempt']=expected_attempt
+            if after_interrupt:
+                action.update(after_interrupt=True,native_intent_ref=native_intent_ref,new_context=bool(new_context))
         descriptor = os.open(root / 'host-run.lock', os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
             try:
@@ -392,8 +400,11 @@ def _child(root, operation_id, descriptor):
                 path = contracts.regular(root / 'jobs' / f'{action["step"]:03d}.json')
                 if contracts.record_ref(path) != action['job_ref']:
                     raise ValueError('Detached resume lost its exact original scientific task')
-                result = controller._worker_resume_locked(root, action['step'],
-                    expected_attempt=action.get('expected_attempt'))
+                options=dict(expected_attempt=action.get('expected_attempt'))
+                if action.get('after_interrupt'):
+                    options.update(after_interrupt=True,native_intent_ref=action['native_intent_ref'],
+                        new_context=action['new_context'])
+                result = controller._worker_resume_locked(root, action['step'],**options)
             else:
                 result = (controller._run(root, continue_wait=action['wait_target'])
                     if action['kind'] == 'continue' else controller._run(root))

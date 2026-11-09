@@ -28,6 +28,19 @@ PARTICIPANT_SCOPE = 'pi_controlled_session_v1'
 PARTICIPANT_PROOF = 'pi_controlled_native_v1'
 
 
+def resource_mode(value='closed'):
+    """Pure explicit selector; unknown modes never fall back to closed."""
+    if not isinstance(value, str) or value not in {'closed', 'configured'}:
+        raise ValueError('Pi resource_mode must be closed or configured')
+    return value
+
+
+def resource_flags(mode='closed'):
+    mode = resource_mode(mode)
+    return tuple(flag for flag in RESOURCE_FLAGS
+        if mode == 'closed' or flag != '--no-extensions')
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
         separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
@@ -48,16 +61,18 @@ def _hash(value):
 
 def _controlled_transport(value, launch, session, prompt_hash):
     """Pure bridge receipt validation; no executable/session/source probes."""
-    from .pi_transport import CONTROLLED_EXIT, _arguments, observation_proof, resource_policy, resource_proof
+    from .pi_transport import CONTROLLED_EXIT, _arguments, observation_proof, runtime_resource_mode, resource_proof
     from .pi_observation import validate_start, START, command_proof
     observer = observation_proof(launch['observer'])
+    mode = runtime_resource_mode(launch['resource_policy'])
+    kind = 'pi_cli_closed_resources_v1' if mode == 'closed' else 'pi_cli_configured_extensions_v1'
     source = launch['observer_source']
     if (set(launch) != {'kind', 'launcher', 'resource_policy', 'resources', 'observer', 'observer_source', 'source_readonly'}
-            or launch.get('kind') != 'pi_cli_closed_resources_v1' or launch.get('source_readonly') is not True
+            or launch.get('kind') != kind or launch.get('source_readonly') is not True
             or not isinstance(source, dict) or set(source) != {'version', 'path', 'sha256', 'size_bytes'}
             or type(source.get('version')) is not int or source['version'] != 1
             or source.get('path') != observer['extension'] or not _hash(source.get('sha256')) or type(source.get('size_bytes')) is not int
-            or source['size_bytes'] <= 0 or launch.get('resource_policy') != resource_policy()
+            or source['size_bytes'] <= 0
             or not isinstance(value, dict) or set(value) != {'type', 'version', 'argv', 'session_id',
                 'path', 'workspace', 'profile', 'resource_policy', 'resources', 'observer_start', 'observer_command',
                 'prompt_sha256', 'disposition', 'settled', 'idle', 'stdin_closed', 'stdout_eof', 'drained',
@@ -76,6 +91,8 @@ def _controlled_transport(value, launch, session, prompt_hash):
             or type(value.get('pending_commands')) is not int or value['pending_commands'] != 0
             or type(value.get('returncode')) is not int or value['returncode'] != 0):
         raise ValueError('pi_authorship_transport_incomplete')
+    if runtime_resource_mode(value['resource_policy']) != mode:
+        raise ValueError('pi_authorship_resource_profile_changed')
     start = value.get('observer_start')
     if not isinstance(start, dict) or validate_start(dict(start, type=START), observer,
             session=session['thread_id']) != start:
@@ -83,7 +100,7 @@ def _controlled_transport(value, launch, session, prompt_hash):
     argv = value.get('argv')
     if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) for arg in argv):
         raise ValueError('pi_authorship_launch_changed')
-    child, provider, model, thinking, path, skills = _arguments(['--', *argv], observation=observer)
+    child, provider, model, thinking, path, skills = _arguments(['--', *argv], observation=observer, resource_mode=mode)
     if (child[0] != launch['launcher'] or path != session['path']
             or dict(model=provider + '/' + model, reasoning_effort=thinking, service_tier=None) != session['profile']
             or skills != tuple(row['path'] for row in resource_proof(launch['resources']))):
@@ -110,6 +127,8 @@ def _participant_from_facts(outcome, intent, workspace):
                 'launch', 'transport', 'persisted', 'prefix_verified', 'intent_sha256', 'outcome_sha256', 'process'}
             or type(proof.get('version')) is not int or proof['version'] != 1
             or proof.get('kind') != PARTICIPANT_PROOF or proof.get('capability') != PARTICIPANT_SCOPE
+            or not isinstance(proof.get('launch'), dict)
+            or proof['launch'].get('kind') != 'pi_cli_closed_resources_v1'
             or not isinstance(session, dict) or proof.get('session') != session
             or binding.get('path') != session.get('path') or binding.get('home') != session.get('home')
             or binding.get('session_id') != outcome.get('thread_id')
@@ -221,11 +240,14 @@ def validate_launcher(launcher):
 def validate_configuration(options):
     if isinstance(options, dict) and 'pi_extensions' in options:
         raise ValueError('Pi requires explicit supported permissions: user extensions are unsupported because native hooks can add web tools, subagents and model calls; exact paths do not attest web=disabled or subagents=false')
-    expected = dict(network=True, web='disabled', subagents=False)
-    if (not isinstance(options, dict) or set(options) != {*expected, 'workspace'}
+    if not isinstance(options, dict):
+        raise ValueError('Pi requires explicit supported permissions')
+    mode = resource_mode(options.get('resource_mode', 'closed'))
+    expected = dict(network=True, web='live' if mode == 'configured' else 'disabled', subagents=False)
+    if (set(options) - {'resource_mode'} != {*expected, 'workspace'}
             or not isinstance(options.get('workspace'), str) or options['workspace'] not in {'read-only', 'workspace-write'}
             or any(type(options[k]) is not type(v) or options[k] != v for k, v in expected.items())):
-        raise ValueError('Pi requires explicit workspace=read-only or workspace-write, network=true, web=disabled, subagents=false; all other native options are unsupported')
+        raise ValueError('Pi requires explicit workspace=read-only or workspace-write, network=true, subagents=false; closed requires web=disabled, configured requires web=live')
     return dict(options)
 
 
@@ -660,6 +682,8 @@ class Pi(Backend):
     def complete_authorship(self):
         try: validate_configuration(self.settings.get('native_options'))
         except ValueError: return False
+        if self.settings['native_options'].get('resource_mode', 'closed') != 'closed':
+            return False
         retained = self.settings.get('native_capabilities')
         return (retained.get('complete_native_authorship') is True if isinstance(retained, dict)
             else 'native_capabilities' not in self.settings and 'goal_id' not in self.settings)
@@ -689,9 +713,10 @@ class Pi(Backend):
     def profile_defaults(): return dict(model=None, reasoning_effort=None, service_tier=None)
     @staticmethod
     def declaration_options(options, *, base):
-        if not isinstance(options, dict) or options:
-            raise ValueError('Pi supports no user agent.native extensions: unrestricted native hooks cannot attest web=disabled or subagents=false')
-        return {}
+        if not isinstance(options, dict) or set(options) - {'resource_mode'}:
+            raise ValueError('Pi agent.native supports only explicit resource_mode=closed or configured')
+        if 'resource_mode' in options: resource_mode(options['resource_mode'])
+        return dict(options)
     @staticmethod
     def validate_configuration(options): return validate_configuration(options)
     @classmethod
@@ -708,6 +733,8 @@ class Pi(Backend):
         # The shared form consumes these provider descriptions; it must still
         # submit explicit permission declarations, never pre-grant defaults.
         return (
+            dict(path='agent.native.resource_mode', label='Pi 原生资源', choices=('closed', 'configured'),
+                description='缺省 closed；configured 允许原设置中的已安装原生包/扩展，须 web=live、subagents=false；扩展行为由用户信任，不代表完整调用计量。'),
             dict(path='agent.model', label='Pi 精确模型', required=True, placeholder='provider/model-id',
                 description='必须填写完整精确 provider/model-id（可含字面冒号或方括号）；thinking 单独声明，不接受模糊、通配或后缀解析替换模型。'),
             dict(path='agent.reasoning_effort', label='Pi thinking', required=True,
@@ -720,10 +747,10 @@ class Pi(Backend):
                 description='默认采用 Local 执行，必须明确选择 workspace-write。read-only 仅支持显式 external，不能扩大 Local 写权限。'),
             dict(path='permissions.network', label='Pi 网络权限', kind='boolean', required=True,
                 description='必须明确允许联网（true）；Pi 不支持禁网投影。'),
-            dict(path='permissions.web', label='Pi 网页检索', choices=('disabled',), required=True,
-                description='必须明确 disabled；不限制 bash 或 provider 的网络访问。'),
+            dict(path='permissions.web', label='Pi 网页检索', choices=('disabled', 'live'), required=True,
+                description='closed 要求 disabled；configured 要求 live，允许可信原生扩展联网；不限制 bash 或 provider 的网络访问。'),
             dict(path='permissions.subagents', label='Pi 子助手', kind='boolean', required=True,
-                description='必须明确 false；不支持原生子助手或用户扩展。'),
+                description='两种 profile 均须 false：不请求 Backend 原生委派。configured 的可信扩展仍可能另开调用/进程，false 不证明其行为受禁。'),
         )
     @staticmethod
     def default_home():
@@ -741,12 +768,14 @@ class Pi(Backend):
     def validate_resume_policy(self, value): return validate_resume_policy(value)
     @staticmethod
     def default_experiment_mode(): return 'local'
-    def public_options(self, options): return {k: options[k] for k in ('workspace', 'network', 'web', 'subagents')}
+    def public_options(self, options): return dict(validate_configuration(options))
     def permissions(self, settings):
         options = validate_configuration(settings.get('native_options'))
         from .pi_transport import resource_policy
-        return dict(requested=options, effective=dict(options),
-            resource_policy=resource_policy(),
+        configured = options.get('resource_mode', 'closed') == 'configured'
+        declared = {key: options[key] for key in ('workspace', 'network', 'web', 'subagents')}
+        result = dict(requested=declared, effective=dict(declared),
+            resource_policy=resource_policy(options.get('resource_mode', 'closed')),
             enforcement=dict(workspace=('host_readonly_mounts' if options['workspace'] == 'read-only'
                 else 'host_workspace_mounts_with_readonly_originals'), network='unrestricted',
                 web='no_extensions', subagents='no_default_subagent_extension'),
@@ -764,6 +793,18 @@ class Pi(Backend):
                 'Skill selection freezes bundle directory identities, not manual/script bytes or native names. The native SDK parses live SKILL.md YAML; get_commands must expose one valid named/described Skill per exact selected manual with original local/temporary/top-level provenance and its own baseDir. Missing, colliding or unselected sources fail closed before the prompt. Selected resource symlinks are unsupported, including managed Local with instruction loading excluded.',
                 'Formal response transport supplies no scientific qualification or complete authorship.',
                 'Native context occupancy is an SDK estimate qualified at persisted native boundaries, not cumulative billing. Exhaustive native calls remain unsupported: auxiliary summarization, retries and warming are not fully receipted; response receipts are only a lower bound.'])
+        if configured:
+            result['enforcement'].update(web='trusted_native_extensions', subagents='extension_dependent')
+            result['effective']['subagents'] = None
+            result['limitations'] = [
+                'Configured mode loads original cached native packages/extensions with --offline and the SDK default resolver; custom npmCommand remains unsupported. No settings/auth copies or automatic package installation are supplied by the framework.',
+                'web=live permits trusted native extensions. subagents=false requests no Backend native delegation; extensions may create independent calls/processes, so their delegation behavior is unknown and Backend native subagents remain unsupported.',
+                'Readonly originals and Linux namespace mounts remain required. Native authentication/runtime stays in the original writable agent directory; scientific Local children retain an isolated empty HOME without native authentication.',
+                'Automatic Skills, prompt templates, themes, MCP and context files remain disabled; selected framework Skills and the readonly observer retain exact source validation. The four inherited SYSTEM.md/APPEND_SYSTEM.md candidates must remain absent.',
+                'Observations cover the primary session only. Extension model calls are not completely metered; token receipts are a lower bound, exhaustive native calls and complete authorship are unsupported.',
+                'Native extensions and same-user processes remain trusted; this is not a hostile-worker or confidentiality boundary.']
+            result['observation_scope'] = 'primary_session'
+        return result
     def launcher_contract(self, launcher, *, retained):
         validate_launcher(launcher)
         if retained is not ... and retained is not None: raise ValueError('Pi frozen launcher contract changed')
@@ -823,7 +864,8 @@ class Pi(Backend):
         self.engine.profile = self._profile
         provider, model = profile['model'].split('/', 1)
         self._args = [sys.executable, '-m', 'scidiscovery.research_loop.pi_transport', '--', *self.launcher,
-            '--mode', 'rpc', *RESOURCE_FLAGS, '--tools', 'read,bash,edit,write,grep,find,ls',
+            '--mode', 'rpc', *resource_flags(self.settings['native_options'].get('resource_mode', 'closed')),
+            '--tools', 'read,bash,edit,write,grep,find,ls',
             '--session', self._binding['path'], '--session-dir', str(Path(self._binding['path']).parent),
             '--provider', provider, '--model', model, '--thinking', profile['reasoning_effort']]
         return list(self._args)
@@ -958,12 +1000,17 @@ class Pi(Backend):
         return pi_namespace.wrap_from_facts(view_facts, args)
     def prepare_launch(self, args, work, attempt, env, view_facts, context, *, diagnostic=None):
         from . import checkpoint
+        from .pi_transport import runtime_resource_mode
+        mode = runtime_resource_mode(view_facts.get('resource_policy'))
+        if mode != self.settings['native_options'].get('resource_mode', 'closed'):
+            raise ValueError('Pi launch resource profile changed from its frozen declaration')
         if self._observer_staged:
             required = bool((self.settings.get('worker_fragment_policy') or {}).get('max_context_windows')
                 is not None and self._job is not None and checkpoint.ordinary_worker(self._job))
             self._observation_proof['required'] = required
             view_facts = dict(view_facts, observation=dict(self._observation_proof))
-            self._launch_evidence = dict(kind='pi_cli_closed_resources_v1',
+            self._launch_evidence = dict(kind=('pi_cli_closed_resources_v1' if mode == 'closed'
+                else 'pi_cli_configured_extensions_v1'),
                 launcher=str(view_facts['launcher']), resource_policy=copy.deepcopy(view_facts['resource_policy']),
                 resources=[dict(row) for row in view_facts['resources']],
                 observer=dict(self._observation_proof), observer_source=dict(self._observer_source), source_readonly=True)
@@ -988,7 +1035,8 @@ class Pi(Backend):
         from .pi_sessions import load_resume_original
         # This is the operation owner's explicit acquisition boundary. Binding,
         # argv construction and metering consume these facts without reloading.
-        self._resume_original = load_resume_original(session, workspace, home)
+        mode = validate_configuration(self.settings.get('native_options')).get('resource_mode', 'closed')
+        self._resume_original = load_resume_original(session, workspace, home, resource_mode=mode)
         return session
     def recovery_capability(self, kind):
         supported = kind in {'resume', 'automatic_recovery', 'technical_restart'}
@@ -1111,13 +1159,26 @@ class Pi(Backend):
             if not isinstance(message, dict) or message.get('role') != 'assistant': return []
             content = message.get('content')
             if isinstance(content, list) and len(content) <= 1024:
-                texts = [b['text'] for b in content if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str)]
-                if texts and sum(map(len, texts)) <= 1024 * 1024: result.append(dict(type='message', text=''.join(texts)))
+                # End snapshots contain the SDK's explicit public text and
+                # thinking blocks. Ignore deltas so reconnects do not repeat
+                # the same thinking, and never inspect tool arguments.
+                blocks = []
+                for block in content:
+                    if not isinstance(block, dict): continue
+                    field = {'text': 'text', 'thinking': 'thinking'}.get(block.get('type')) if isinstance(block.get('type'), str) else None
+                    if field and isinstance(block.get(field), str):
+                        public_kind = 'message' if field == 'text' else 'thinking'
+                        if blocks and blocks[-1]['type'] == public_kind:
+                            blocks[-1]['text'] += block[field]
+                        else: blocks.append(dict(type=public_kind, text=block[field]))
+                if sum(len(block['text']) for block in blocks) <= 1024 * 1024: result.extend(blocks)
             usage = message.get('usage')
         elif kind == 'message_update': usage = value.get('usage')
         elif kind == 'compaction_end' and isinstance(value.get('result'), dict): usage = value['result'].get('usage')
         elif kind == 'entry_appended' and isinstance(value.get('entry'), dict) and value['entry'].get('type') in {'usage', 'compaction', 'branch_summary'}:
             usage = value['entry'].get('usage')
         converted = usage_tokens(usage)
-        if converted is not None: result.append(dict(type='usage', usage=converted))
+        # Pi streams valid all-zero usage placeholders before measured tokens.
+        # Suppress only public noise; native accounting keeps its own originals.
+        if converted is not None and any(converted.values()): result.append(dict(type='usage', usage=converted))
         return result

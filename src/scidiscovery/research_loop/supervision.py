@@ -18,10 +18,14 @@ WORKER_FIRST_POLICY = dict(version=2, mode='off', consecutive_calls=4,
 # never a host judgment that scientific progress has stalled.
 AUTOMATIC_REFLECTION_POLICY = dict(version=3, mode='review', consecutive_calls=4,
     min_budget_fraction=0.20, budget_checkpoints=[0.30, 0.65], max_automatic_reviews=2)
-# Provisional opt-in admission settings; no change to the selected v3 default.
+# Historical opt-in v4 admission settings; retain their operational cadence.
 ADAPTIVE_REFLECTION_POLICY = dict(version=4, mode='review', consecutive_calls=4,
     min_budget_fraction=0.10, budget_checkpoints=[], max_automatic_reviews=None,
     automatic_budget_fraction=dict(tokens=0.25, seconds=0.25))
+# New preparations require an actual new author/receipt input. An explicit old
+# v4 policy without this optional flag keeps its original operational cadence.
+DEFAULT_WORKER_FIRST_REFLECTION_POLICY = dict(ADAPTIVE_REFLECTION_POLICY,
+    require_fresh_input=True)
 _UNOBSERVED = object()
 
 
@@ -32,7 +36,12 @@ def policy(value=None):
     if value.get('version')==4:
         value.setdefault('max_automatic_reviews',None)
     modern=type(value.get('version')) is int and value['version'] in (2,3,4)
-    if set(value) != set(ADAPTIVE_REFLECTION_POLICY if value.get('version')==4 else WORKER_FIRST_POLICY if modern else DEFAULT_POLICY):
+    expected=set(ADAPTIVE_REFLECTION_POLICY if value.get('version')==4 else WORKER_FIRST_POLICY if modern else DEFAULT_POLICY)
+    if value.get('version')==4 and 'require_fresh_input' in value:
+        if type(value['require_fresh_input']) is not bool:
+            raise ValueError('Adaptive reflection fresh-input requirement must be boolean')
+        expected.add('require_fresh_input')
+    if set(value) != expected:
         raise ValueError('Exact scientific supervision policy required')
     if type(value['version']) is not int or value['version'] not in (1,2,3,4):
         raise ValueError('Unsupported scientific supervision policy')
@@ -479,6 +488,7 @@ def _adaptive_due(state, facts, fraction):
             chosen['automatic_budget_fraction'][name]*facts['limits'][name] for name in dimensions) else
         'emergency_review_count_cap' if chosen['max_automatic_reviews'] is not None
             and state['automatic_reviews']>=chosen['max_automatic_reviews'] else
+        'no_new_review_input' if chosen.get('require_fresh_input',False) and not fresh else
         'cooldown' if cooldown else 'no_new_review_input' if not reasons else None)
     return dict(due=bool(reasons),reasons=reasons,cutoff=cutoff(state),
         automatic_allowed=bool(reasons) and suppression is None,cooldown=cooldown,

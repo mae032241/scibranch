@@ -121,8 +121,14 @@ Local；launcher 仅一个可执行程序、不带参数（默认 `pi`）。必�
 及显式模型支持的 thinking，不替换模型或截档；不支持 service_tier、Codex native 选项或
 native response-schema flag。全部解析角色与命名 Worker（包括未使用者）均须合法。
 
-四项权限须显式声明：workspace-write（或 read-only）、network=true、web=disabled、
-subagents=false。默认／隐含 Local 及声明工程在准备副作用前要求 workspace-write；
+Pi 资源 profile 由 `[agent.native] resource_mode` 选择。省略或显式 `closed` 保留原受控
+行为，四项权限须显式声明：workspace-write（或 read-only）、network=true、web=disabled、
+subagents=false。显式 `configured` 允许原生已安装扩展／包，必须改为 network=true、
+web=live、subagents=false，workspace 仍为 workspace-write 或 read-only。显式 mode 授权
+可信扩展；false 表示不请求 Backend 原生委派，不保证扩展不能自行创建子调用或进程。
+实际 effective.subagents 为 unknown（null），enforcement 为 extension_dependent。Pi 原生
+子代理能力仍 unsupported，W 自己完成小任务，大或复杂证据由 W 自主考虑 E；closed 仍须 web=disabled。
+默认／隐含 Local 及声明工程在准备副作用前要求 workspace-write；
 普通只读科学工作须同时显式 external，不等于支持无工具辅助翻译或更强 NoNetwork。
 默认有限策略为 `pi_rpc_v1`、`usage_scope=turn`、`max_attempts=2`、
 `output_repair=true`、`output_only=true`、`execution_wake=true`；不要手工套用 Codex resume
@@ -139,17 +145,40 @@ PI_CODING_AGENT_DIR 与认证只供 Native 沿用，不复制或重定向；仅�
 
 Skill v3 冻结选择和安装来源，不复制资产或建 hash registry；native get_commands 必须
 证明准确手册已由原生 frontmatter 解析加载，Python YAML 元数据不是加载证明。live 资产
-及 inode 别名只读；准确来源原件在可写授权（包括 native auth 目录例外）之后最后只读覆盖。任意用户扩展在此权限 profile 不支持，
-因为 hook 可改变工具／权限／模型调用，不是 Native 不能加载扩展。唯一已知只读内部
-observer 用准确 command 原来源及私有启动帧证明，不新增工具、模型调用、第二 prompt 或续接。
+及 inode 别名只读；准确来源原件在可写授权（包括 native auth 目录例外）之后最后只读覆盖。
+closed 因 hook 可改变工具／权限／模型调用而拒绝任意用户扩展，只准入已知只读内部
+observer。configured 允许额外扩展 command，仍须核验 observer 的准确原来源／私有启动帧
+及所选 Skill 绑定；observer 自身不新增工具、模型调用、第二 prompt 或续接。
 
 `<agent-dir>` 指继承的 PI_CODING_AGENT_DIR，未设时为 `$HOME/.pi/agent`；`<workspace>`
-是准确科学任务工作区。Native 启动前，原 agent settings.json 与 workspace .pi/settings.json 均须 packages
-缺失／为空且无自定义 npmCommand；四个准确路径 `<agent-dir>/SYSTEM.md`、
+是准确科学任务工作区。closed 在 Native 启动前要求原 agent settings.json 与 workspace
+.pi/settings.json 的 packages 缺失／为空。configured 将原配置中的已安装包交原 SDK
+解析／加载，只去掉 --no-extensions，保留 --offline、--no-approve、--no-context-files、
+--no-skills、--no-mcp、--no-prompt-templates、--no-themes；不自动安装或刷新包，不自动导入
+包自己的 Skills／prompts／themes。框架显式所选 Skills 仍走统一选择及准确来源校验。
+例如原全局 packages 中已安装的 `npm:pi-web-access`、`npm:pi-guard-sandbox`、`npm:pi-gauge`
+可保留，不需另改全局配置。加载失败保留原生错误，command 清单不证明每个包已成功加载。
+两种 profile 仍拒绝自定义 npmCommand；四个准确路径 `<agent-dir>/SYSTEM.md`、
 `<agent-dir>/APPEND_SYSTEM.md`、`<workspace>/.pi/SYSTEM.md`、
 `<workspace>/.pi/APPEND_SYSTEM.md` 均须不存在。--no-context-files 不屏蔽这些隐藏 prompt，
 offline 不禁用 package resolution；框架不修改用户配置或认证。PI_OFFLINE 仅限制自动资源
 获取／目录活动，显式 provider 和 bash 仍联网，web=disabled 不构成禁网。
+
+在完整 TOML 中加载已安装包，加入下表并替换已有 permissions 表；勿重复 TOML 表：
+
+```toml
+[agent.native]
+resource_mode = "configured"
+
+[permissions]
+workspace = "workspace-write"
+network = true
+web = "live"
+subagents = false
+```
+
+只读科学工作同时改用 `workspace="read-only"` 与 `[executor] mode="external"`。
+原 HOME、PI_CODING_AGENT_DIR、settings 与认证不复制、不改写。
 
 真实持久化 native user-entry ID、session、窗口及新鲜度限定合格观测；压缩取 cursor 后
 唯一新追加项，不按相同旧摘要识别。当前占用是 SDK 估计，不是准确 token 或累计账单；
@@ -159,6 +188,9 @@ native_calls 不支持，response 计数仅为下界，可选调用者策略也�
 发布既有预算／复核／准入事实，交付故障停止依赖该策略的工作；独立建议只在自然发生的
 顶层 tool result 追加有界提醒，按种类每逻辑节点一次、跨 resume 保留，不增加 LLM turn，
 不改变原结果、错误、details 或用量。只读 marker 不可写时如实保留建议不可用。
+两种 profile 的框架 observer 都只覆盖主 Pi session，上下文／压缩计量仍沿公共 90% 提醒、
+严格超过 70% 才交接规则。configured 包的额外调用覆盖未知，观测 token 保留下界，
+不能声称完整原生调用或作者证明。
 
 每 invocation 唯一 prompt 前核对模型和 thinking；完成须空闲终态、RPC 排空、正常退出
 及进程组清理。模型编写科学 JSON，当前 Schema 仅随 prompt 发送；最终原始 UTF-8（含
@@ -169,13 +201,15 @@ native_calls 不支持，response 计数仅为下界，可选调用者策略也�
 及任何未知提交须核对同一原调用，不自动重提。
 
 公共正式审查、执行授权、资源、选择、审计、交付及 observer 策略不再被 Pi 一概否决，
-但真实使用仍由公共 owner 把关。新受支持 Pi 准备支持受控单原生 session 作者证明：须实际
+但真实使用仍由公共 owner 把关。新受支持 closed Pi 准备支持受控单原生 session 作者证明：须实际
 留存启动／资源、observer 来源／启动、已接受 prompt、持久化 session 贡献、终态交付及
 已停止 writer 的进程／前缀证据，能力声明或 session 标签本身不够。SDK session 是稳定
 作者，补填／续接或新 attempt 不能让同一 actor 自审合格。既有正式 A 仅在显式冻结审查
 策略下，准确 subject 的作者与审查者证据均完整、参与者集合不相交且封存 verdict 为
 `pass` 时赋予该 subject 审查资格，不自动产生 verdict 或执行许可。正式 A 使用普通原生
 生命周期与声明权限，准确 subject 输入保持只读，不走无工具辅助只读服务。
+configured 冻结完整原生作者能力为 false，不能取得要求完整作者／审查者证明的正式资格；
+普通 W/A/Final A 不因此增加阻断。
 
 留存作者／审查校验不重新打开 live native session，私有 home 删除后及框架历史任务 fork
 （含嵌套 fork）中仍可使用；这不授权缺失原件时的 live resume。冻结 false 能力与旧
@@ -186,6 +220,69 @@ tier 与 native schema flag 仍不支持。聊天、输运完成或测试不授�
 当前受支持历史任务 fork 不承诺旧暂停或尚未首派工 fork 的迁移续跑。
 不宣称科学研究资格、科学完整验收或后端完全等价。详细合同见
 [Pi 配置参考](RESEARCH_CONFIGURATION.md#experimental-pi--common-research-path--实验性-pi公共研究路径)。
+
+## 暂停与立即中断
+
+网页管理入口在工作运行中提供“本阶段结束后暂停”和“立即中断当前工作”；已请求阶段后暂停时，仍可选择立即中断。
+前者允许当前已接受工作完成和封存；后者绑定点击前页面所见的准确阶段、attempt 和原 native intent，
+请求原 runner 停止当前工作并阻止下一阶段。页面所见任务已变化时，只保留暂停，不转而中断新的任务。
+只读页面不能提交控制请求。
+
+立即中断只对原 `native-intent.json` 显式声明 `operator_interrupt_version=1` 的新运行器生效。
+旧冻结执行器不会因重启开发版网页而取得该能力；页面为其保留阶段后暂停并说明不支持立即中断，
+CLI 请求也只留下暂停、返回 `interrupt_unsupported`，不写中断标记或假报成功。
+需要停止旧执行器时，先在原宿主核对启动方式；仅原科学执行器仍在前台并由该终端管理时可用 Ctrl+C。
+停止网页终端不会停止后台研究；请核对原任务与清理结果，不要重提未知调用。
+
+同一控制入口的 CLI 用法：
+
+```sh
+scid-research pause --root /absolute/project/research-instance
+scid-research pause --root /absolute/project/research-instance --immediate --step 1 --attempt 0
+```
+
+阶段和 attempt 必须按所见原任务显式填写，不按最新编号猜测。省略两者的 `pause --immediate` 仅请求暂停，
+不会选择或中断任何工作。请求回执只表示请求已记录；原 runner 在提交前或运行轮询中观察请求，
+沿所有 Backend 共用的原清理链停止本机进程，通常在下一次一秒轮询后开始清理，实际完成还取决于已有回调与清理耗时。
+停止和清理结果以该原任务的 `native-outcome.json` 为准；清理未知仍保持未知。
+
+已用预算、原身份、输出和用量下界保留，不补造科学结论或封存。停止本机进程不证明外部原调用已取消，
+未知提交必须核对同一原调用，不得重提。原 attempt 的中断请求保留，继续入口不会静默删除它或自动重放被中断工作；
+恢复仍须满足既有原任务资格与预算条件。
+
+普通 H/W/A/E 任务确认中断并清理后，网页管理入口提供“接续已中断的工作”。这在同一研究、同一逻辑任务下，
+按所见的准确阶段、attempt 和 native intent 接受一个新的模型工作轮；完成后仍走原封存及后续控制路线。
+原中断标记、原文件、原实验调用身份、已消费 token／时间和上下文窗口历史均保留，不重新准备研究或重置预算。
+
+```sh
+scid-research worker-resume --root /absolute/project/research-instance --step 1 --expected-attempt 0 --after-interrupt
+# 需要独立后台控制回执时：
+scid-research start --root /absolute/project/research-instance --resume-step 1 --expected-attempt 0 --after-interrupt
+```
+
+后端支持且可验证时接续原 native session；后端不支持会话续接时，回执明确使用新上下文。
+原会话元数据未知时不自动退到新调用；可在网页高级入口显式选择新上下文，或为上述命令增加 `--new-context`。
+原会话有限续接次数用完时也可显式选择新上下文，但原 token／时间／步骤上限和权限不会增加。
+重复同一控制请求只收集其已接受的准确后继，不另选 attempt 或多启动一次。
+
+已确认停止的 native 调用缺少账单时，保留其观测下界和 unknown，不把该计量缺口当成仍在运行的实验。
+接续模型可在原权限内继续工作；真正未确认的受管实验仍须按原 call ID 查询、收集或对账，新的实验提交仍受原 gate 拒绝，
+不会因点击接续而重发。跨 attempt 继续使用同一逻辑任务的记录目录，并按原调用的原配置与权限访问旧 handle。
+FINAL、作者收尾及已接受的输出补填等受限 scope 不走此普通接续分支，仍使用其原有有限恢复条件与入口；
+普通接续不会赋予这些任务新的科学工作或实验权限。
+
+网页或控制进程断开时，仍活的原 native 只重新收集，不启动替身。对于同 boot 意外退出、主机／WSL 重启后
+已确认停止的普通原任务，网页提供“核对并恢复原任务”和直接可见的“用新上下文恢复该原任务”，CLI 复用上述
+`worker-resume --after-interrupt --expected-attempt N`，需要新上下文时加 `--new-context`。
+原 outcome、账单或完整作者信息缺失不会要求重建整个研究；原件、部分输出、已消费预算及未知状态保留。
+已有可信完整终态则只收集封存。进程或清理探测仍未知时，界面显示准确阶段／attempt 与机械原因，不假称已经停止或自动重试。
+这里 PID／boot／start-ticks 的实际存活核对只针对原宿主控制环境中的本机 native／bridge 等进程；
+受管远端或容器实验仍由既有 Backend 按原 call ID 查询，本机 worker 停止不等同外部实验取消。
+保存的 `running/open` 只说明历史状态；总览与公开进度会重新核对原 boot、PID、启动标识和进程状态，
+排除 PID 复用及僵尸进程，不因文件和修改时间未变化就缓存旧的运行状态。
+恢复已受理但新进程尚未启动时，重复准确请求接回同一已接受后继，不另建一次调用。
+预算耗尽时，先凭已验证的停止事实幂等结算旧消耗，不自动启动后继；可按既有预算入口追加共享额度，
+再恢复同一原任务，原角色额度和已知消耗不重置。
 
 ## 可选 Skill 选择
 
@@ -207,17 +304,24 @@ skill_set = "analysis"
 错误列出名称、准确预期路径与修复方式。仅支持 Skill schema v3 安装绑定；旧 manifest/对象
 格式在读取资产前拒绝，fork 不提供旧格式兼容或迁移。
 
-Codex 的此选择不屏蔽其它原生用户、系统或插件来源；Pi 按上述显式资源 profile 只接受
-准确所选手册及受控 observer。两者都不改变声明的原生权限。标准 Codex 保留其冻结的
+Codex 的此选择不屏蔽其它原生用户、系统或插件来源；Pi 的 closed 只接受准确所选手册及
+受控 observer，configured 另允许原生已安装扩展／包，但不自动导入包的 Skills、prompts
+或 themes。两者都不改变声明的原生权限。标准 Codex 保留其冻结的
 原生 home 与认证；Cov 专用启动器及其认证复制路径已移除。完整来源、profile 与更新合同见
 [配置参考](RESEARCH_CONFIGURATION.md#selected-framework-skills--按角色选择框架-skill)。
 
 ## 机制编号与精确引用
 
-新默认策略 v3 的 W 使用 `--research JSON`，在受管实验前声明稳定机制身份和批次问题，
+新默认策略 v3 的 W 使用 `--research JSON_FILE`，在受管实验前声明稳定机制身份和批次问题，
 无需先经 H、先覆盖固定方法族或封存后另开 W。初探可没有成熟候选；同 session 可显式
 修订、合并、退役和恢复机制。以下以当前 W 节点 `001` 为例；其他节点使用其准确 W 前缀，
 跨 W 复用已保留的稳定引用。
+
+`run --research` 与 `research-declare --research` 都要求工作区内普通 JSON 文件的路径，
+不接受内联 JSON。先将声明写入 `work/research.json`，再传 `--research work/research.json`；
+路径相对当前任务工作区解析。内联值或过长的 research 文件路径会在执行接受之前返回
+`caller_error`、`accepted=false`，提示修正参数；本次拒绝没有产生可用于 reconcile 的原调用。
+声明内容仍按原科学声明 schema 验证，文件路径参数不会转换或猜测机制身份与字段。
 
 ```sh
 cat > work/research-batch.json <<'JSON'
@@ -268,7 +372,7 @@ H 只需声明方法方向，不要求填写测试协议或验收标准。可选
 
 新默认研究由 W 组织问题、设计、实现并依据观察调整。H 回答 W 的具体问题，提供替代机制、表示及廉价区分办法；有职责标记的普通 A 诊断有证据的局部锁定、忽略反证、目标偏移或严重逻辑缺陷，也可说明无实质问题；诊断建议交回 W，不认可或确认当前方向。Final A 独立评价关键交付主张、复现和限制。
 
-新准备仅在 Backend 支持时默认允许 W 的原生子代理，其他角色不默认开启；原生 Pi 不支持，不强补。角色 `[agent.roles.W] subagents = false` 可明确关闭，显式角色 bool 优先于 `[permissions] subagents`，否则沿全局显式值，再按能力决定默认。实际 job/intent 独立冻结 `native_subagents`，模型 profile 不混入 bool，导出保留角色选择，旧任务缺字段保持原权限。能力不支持的显式启用会拒绝，不伪造可用性。支持且允许时，简单证据提取、独立小脚本优先交原生子代理；不支持或禁用时 W 自己做小任务，不额外交接；只有规模大或复杂证据才由 W 自主考虑 E。主线程可准确续接，但子代理作者和 token 未获完整覆盖；已报告用量保留下界及未知，不补零或授独审资格。
+新准备仅在 Backend 支持时默认允许 W 的原生子代理，其他角色不默认开启；原生 Pi 不支持，不强补。角色 `[agent.roles.W] subagents = false` 可明确关闭，显式角色 bool 优先于 `[permissions] subagents`，否则沿全局显式值，再按能力决定默认。实际 job/intent 独立冻结 `native_subagents`，模型 profile 不混入 bool，导出保留角色选择，旧任务缺字段保持原权限。能力不支持的显式启用会拒绝，不伪造可用性。Pi configured 的 subagents=false 不请求 Backend 委派，但扩展自身的子调用／进程行为仍未知。支持且允许时，简单证据提取、独立小脚本优先交原生子代理；不支持或禁用时 W 自己做小任务，不额外交接；只有规模大或复杂证据才由 W 自主考虑 E。主线程可准确续接，但子代理作者和 token 未获完整覆盖；已报告用量保留下界及未知，不补零或授独审资格。
 
 W 的工作单位是一段连贯的科学探索，不是单次运行或穷举网格。v3 按当前未解问题选择能改变下一步的观察，不要求先覆盖固定方法方向；旧实例保留原分配合同。根据有信息量的观察保留暂定最佳候选与剩余误差，继续选择有用的表示、实现、调优和检查，保存可运行成果、准确脚本与依赖，并用紧凑增量交接。一次弱结果、一次实验完成或 token 软目标本身不要求立即转 A；W 可在原权限和预算内连续完成有用批次，咨询或换上下文不重置投入。v3/v2 提交前须经过 Final A，普通咨询不授最终资格；完成调用也不等于科学资格。
 
@@ -586,6 +690,10 @@ protocol/自定义 launcher 权限为 hint_only、实际访问未知；详见[�
 工作台已加载列表、实例总览、用量、当前阶段和最新结论通过同源 SSE 自动同步；断线后自动重连并读取完整状态，不刷新整页，也不清空正在填写的配置、预算或方向建议。`/progress` 自动跟随当前节点；`/nodes/<step>/progress?attempt=N` 固定查看指定历史节点，公开输出仍用原有有界、不透明游标增量读取。等待结论会显示等待原因；无职责标记的旧普通 A 的 `wait` 可由管理者明确点击“继续研究”请求重新决策，网页不会自动重试。
 每轮进度追读至多四页，然后回到两秒轮询；页面最多保留200条事件，明确提示已省略、
 尚待追读和显示窗口移除的内容。新结论封存后提供结论入口，当前公开输出不冒充封存结果。
+公开工作记录只显示非空助手消息和后端实际提供的 thinking 文本；thinking 默认折叠，
+手动展开后，后续增量更新保留展开状态。工具开始／完成和用量更新不进入记录流，
+原工具记录不改写，用量仍在统计面板显示。当前上下文暂不可用时，网页可显示同一阶段／
+执行尝试内上次收到的有效历史快照及采样时间；它不代表当前窗口占用，也不参与控制判断。
 
 工作台和结果页面直接展示已保存的结论、用量和控制记录；浏览与下载已封存结果不重新计算文件哈希，也不重跑封存、资格或历史输入核对。科学执行与提交仍使用其原有准入流程。
 显示缓存复用前检查保存来源的元数据，并串行处理失效与淘汰；全历史摘要不受完整节点缓存
@@ -1288,8 +1396,15 @@ W 的 `science-task.json` 会报告 `managed_execution_wait.wake_authorized`。
 对既有调用查询、收集或取消失败，不会抹去已核验的原执行终态。失败回执的 `status` 描述
 本次操作，存在的 `state` 来自已核验原终态。除原件完整性错误外，明确发生在该操作开始前
 的加载、资源或其他预检失败均报不可用，审查要求单独保留；宿主配置问题不授权 W 修改冻结
-配置。真正提交后失联仍保留原 ID 与 unknown。后端异常原文只留宿主诊断，公开回执给
-安全的操作、错误类别和下一步；客户端保留宿主 `handoff`。
+配置。真正提交后失联仍保留原 ID 与 unknown。执行 bridge 捕获的错误及其 CLI 原异常
+owner 报告的错误，会在回执 `diagnostic` 中给出唯一 `reference`、任务相对 `path` 和
+`read_hint`；Agent 可按需读取 `work/experiment/diagnostics/<diagnostic.reference>.json` 形式的 JSON
+文件，展开经私有路径和凭据净化的完整原异常链及源码帧。实际路径以回执 `diagnostic.path`
+为准，正文不默认放入回执，不采集栈帧局部变量；源码位置使用 module、function、line。
+完整私有堆栈另存宿主，后续错误不覆盖已返回的独立诊断引用。诊断发布失败时不返回虚构链接，
+也不改变原错误分类、accepted/unknown、原调用身份或核对要求。直接 CLI 没有桥接诊断 owner
+时不声称存在可读诊断；未实际捕获的异常也不会由返回字符串重造堆栈。诊断只供排错，不作为
+实验、作者科学证据或资格判断；客户端保留宿主 `handoff`。
 阻塞式执行器在调用内等待后返回回执，W 仍按返回的 `handoff` 行动，无需另选阻塞分支。
 `action=return_control` 表示原调用可查且已冻结唤醒能力，W 正常交回当前科学 JSON；
 `poll_original` 要求在同一 native turn 按 `poll_interval_seconds`（默认 1 秒）持续等待、

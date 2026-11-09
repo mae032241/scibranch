@@ -57,7 +57,7 @@ def project_policy(settings):
     if (options['workspace']!='workspace-write'
             or settings.get('native_capabilities',{}).get('native_launcher_contract') is not None):
         raise _unsupported('projects require an explicit workspace-write policy without a custom launcher contract')
-    return dict(workspace='workspace-write',network=True,web='disabled',subagents=False)
+    return options
 
 
 def project_boundary(project, *, root, work, protected):
@@ -112,7 +112,8 @@ def _validate_execution_runtime(value,paths):
 
 def execution_arguments_from_facts(value, command, *, policy_cwd, project, cwd):
     """Pure scientific argv: no Pi executable, auth, CODEX_HOME or native query."""
-    if value['policy']!=dict(workspace='workspace-write',network=True,web='disabled',subagents=False):
+    from .pi_backend import validate_configuration
+    if validate_configuration(value['policy'])['workspace'] != 'workspace-write':
         raise _unsupported('scientific permissions differ from the frozen native declaration')
     if project is not None:
         return ['/bin/sh','-c','cd "$1" && shift && exec "$@"','scid-project-cwd',cwd,*command]
@@ -166,7 +167,7 @@ def load_facts(root, job, work, *, policy, native_home, native_argv, context,
         selected_code, source_facts, observation=None):
     from . import shared_input_views as views
     from .pi_backend import validate_configuration, validate_launcher
-    validate_configuration(policy.get('native_options'))
+    options = validate_configuration(policy.get('native_options'))
     validate_launcher(policy.get('native_launcher_argv'))
     if source_facts is None or selected_code is None:
         raise _unsupported('the operation owner must supply accepted source and selected-code facts')
@@ -196,7 +197,7 @@ def load_facts(root, job, work, *, policy, native_home, native_argv, context,
     # candidates are observed once at native admission, even for empty Skills,
     # before capability probes, projection writes, or ANY native process.
     # No prompt-content read, ancestor/package discovery or auth/config copying.
-    resource_policy = load_resource_settings(auth, work)
+    resource_policy = load_resource_settings(auth, work, mode=options.get('resource_mode', 'closed'))
     entry = shutil.which(native_argv[0])
     if entry is None: raise _unsupported('selected launcher unavailable')
     launcher = _ordinary(Path(entry).resolve(strict=True), directory=False)
@@ -331,9 +332,8 @@ def wrap_from_facts(facts, argv):
     # The controlled observer has its own exact private-source proof slot;
     # selected Skills confer no arbitrary user-extension grant.
     import json
-    from .pi_transport import resource_policy, resource_proof
-    if facts.get('resource_policy') != resource_policy():
-        raise _unsupported('launch owner must admit the current NativeRuntimeProfile settings and prompt-source absence')
+    from .pi_transport import runtime_resource_mode, resource_proof
+    runtime_resource_mode(facts.get('resource_policy'))
     if 'resources' not in facts:
         raise _unsupported('launch owner must supply explicit resource facts, including empty selection')
     resources = resource_proof(list(facts['resources']))
