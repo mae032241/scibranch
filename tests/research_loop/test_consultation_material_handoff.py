@@ -13,7 +13,13 @@ from test_history_handoff import finish
 @pytest.mark.parametrize('choice', ['omitted', [], ['H001-I001'], ['W999-I001']])
 def test_consultation_preserves_requesting_worker_materials_and_selection(
         tmp_path, monkeypatch, role, intent, choice):
-    root, _ = direct_instance(tmp_path)
+    prepare=controller.prepare
+    with monkeypatch.context() as legacy:
+        legacy.setattr(controller,'prepare',lambda *args,**kwargs:
+            prepare(*args,**kwargs,research_strategy_version=2))
+        root, _ = direct_instance(tmp_path)
+    assert c.settings(root)['research_strategy_version']==2
+    assert 'advisory_scope_version' not in c.settings(root)
     stopped_seals(monkeypatch)
     finish(root, 1, 'H', [], action='experiment', files={
         'other.py': 'An unselected alternative.', 'seed.py': 'The W-selected original.'})

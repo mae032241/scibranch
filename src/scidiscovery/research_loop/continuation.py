@@ -22,11 +22,15 @@ def consultation_binding(root, job, *, parents):
         return None
     advice=parents[job['step']-1]
     consultant=advice['job']
-    if (consultant.get('role') not in {'H','A'} or consultant.get('formal_review')
+    if (consultant.get('role') not in ({'H','A','E'} if job.get('advisory_scope_version')==1 else {'H','A'}) or consultant.get('formal_review')
             or any(consultant.get(key) for key in ('final_only','final_report',
                 'engineering_repair','author_correction','correction_request'))
             or consultant.get('purpose') not in {None,'worker_consultation'}
             or (consultant.get('evidence_return') or {}).get('kind') is not None):
+        return None
+    if consultant.get('role')=='E' and (consultant.get('advisory_scope_version')!=1
+            or consultant.get('purpose')!='worker_consultation'
+            or (consultant.get('evidence_return') or {}).get('role')!='W'):
         return None
     requester=(consultant.get('evidence_return') or {}).get('step')
     if consultant.get('purpose')!='worker_consultation':
@@ -105,7 +109,9 @@ def consultation_launch(root, job, *, settings, backend, profile):
     if (seal.get('control_outcome') or {}).get('stage_end_reason') in {
             'worker_context_review_due','worker_context_observation_unknown'}:
         return fresh('consultation_resume_context_rotation_required')
-    if original.get('native_profile')!=profile:
+    if (original.get('native_profile')!=profile
+            or ('native_subagents' in original)!=('native_subagents' in job)
+            or original.get('native_subagents')!=job.get('native_subagents')):
         return fresh('consultation_resume_profile_changed')
     native_identity=outcome.get('native_identity') or {}
     retained=native_identity.get('session')
@@ -984,11 +990,11 @@ def seal_or_repair(root, step, *, inventory):
                 from . import worker_delivery
                 delivery=worker_delivery.assessment(root,job,science,record,inventory=inventory)
                 if science['stage_intent']!='continue':worker_delivery.require_output_clarification(science,delivery)
-                if (science['stage_intent'] in {'handoff','revise_h','review'} or review_required and science['stage_intent']=='continue') and (
+                if (science['stage_intent'] in {'handoff','revise_h','review','extract'} or review_required and science['stage_intent']=='continue') and (
                         any(call['status']=='unknown' for call in inventory.managed_calls)
                         or ((job.get('search') or {}).get('breadth') or {}).get('prior_unknown')):
                     raise ResumeUnavailable('worker_handoff_original_execution_unknown')
-                if science['stage_intent'] in {'handoff','revise_h','review'}:
+                if science['stage_intent'] in {'handoff','revise_h','review','extract'}:
                     # Explicit ordinary W handoffs retain incomplete work; the
                     # original stopped-writer and managed-wait gates above still apply.
                     checkpoint.end_stage(root,job,record,'worker_'+science['stage_intent'],inventory=inventory)
@@ -1275,10 +1281,15 @@ def fragment_start(root, step, *, inventory):
     mode = checkpoint.policy(settings['worker_fragment_policy'])['context']
     maximum = settings['worker_fragment_policy'].get('max_context_windows')
     windows = (inventory.native_outcome.get('metering') or {}).get('context_windows') or {}
-    if (mode == 'new_context' and maximum is not None
-            and type(windows.get('windows_started')) is int and windows['windows_started'] >= maximum):
+    context_version=settings['worker_fragment_policy'].get('context_handoff_version')
+    from . import budget_notice
+    context_reason=(budget_notice.worker_context_status(maximum,inventory.native_outcome.get('metering'),
+        version=context_version)['reason'] if context_version==2 and maximum is not None else None)
+    legacy_exhausted=(context_version in (None,1) and mode=='new_context' and maximum is not None
+        and type(windows.get('windows_started')) is int and windows['windows_started']>=maximum)
+    if context_reason is not None or legacy_exhausted:
         error = ResumeUnavailable('worker_fragment_review_requested')
-        error.review_reason = 'worker_context_review_due'
+        error.review_reason = context_reason or 'worker_context_review_due'
         raise error
     session_ref = session(root, step, last) if mode == 'same_session' else None
     from . import profiles

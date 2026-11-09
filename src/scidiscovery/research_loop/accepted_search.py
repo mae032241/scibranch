@@ -259,17 +259,17 @@ def _live_mechanisms(delta, job, observation, *, origin, initial_calls):
 
 
 def prepare_node(root, job, payload, seal, *, summary, lookup, observation, delivery_facts=None, usage_lookup=None,
-        budget_fraction=None, completion_fraction=None):
+        budget_fraction=None, completion_fraction=None, budget_facts=None, automatic_review_cost=None, question_changed=None, job_ref=None):
     """Independent entry: produce this node's policy and exact original owner."""
     from . import contracts as c
     return prepare_node_from_facts(root,job,payload,seal,summary=summary,lookup=lookup,
         observation=observation,delivery_facts=delivery_facts,usage_lookup=usage_lookup,policy=c.settings(root,job),
         origin=_origin(root,job['step']),budget_fraction=budget_fraction,
-        completion_fraction=completion_fraction)
+        completion_fraction=completion_fraction,budget_facts=budget_facts,automatic_review_cost=automatic_review_cost,question_changed=question_changed,job_ref=job_ref)
 
 
 def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observation,
-        policy, origin, delivery_facts=None, usage_lookup=None, budget_fraction=None, completion_fraction=None):
+        policy, origin, delivery_facts=None, usage_lookup=None, budget_fraction=None, completion_fraction=None, budget_facts=None, automatic_review_cost=None, question_changed=None, job_ref=None):
     """Copy the small breadth table and apply this accepted original's facts.
 
     ``lookup`` must read at the same canonical accepted head as ``summary``. The
@@ -432,7 +432,7 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
             grant = current['extra_grant']
             if binding.get('grant') is not None and grant and binding['grant']['source_a'] == grant['source_a']:
                 grant['used_calls'] += 1
-    if role == 'A' and not consultation and payload.get('next_action')!='audit':
+    if role == 'A' and not consultation and not c.guidance.advisory_assessment(job) and payload.get('next_action')!='audit':
         candidate = payload.get('candidate_recommendation')
         # Only an original visible before this A may occupy its authored slot.
         # An unresolved optional citation is retained in the raw original, not
@@ -442,11 +442,12 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
             current['historical_a_recommendation'] = current['a_recommended']
         current['latest_a_step'] = step
         current['a_recommended'] = dict(candidate_id=candidate, author_step=step) if candidate is not None else None
-    _portfolio(delta, job, payload, observation, valid and ordinary and not consultation, initial_calls,usage_lookup)
+    _portfolio(delta, job, payload, observation, valid and ordinary and not consultation and not c.guidance.advisory_assessment(job), initial_calls,usage_lookup)
     _work(delta, job, payload, valid and ordinary and not consultation)
     _supervision(delta,job,payload,seal,observation,origin=origin,
-        bindings=round_bindings,valid=valid and ordinary and not consultation,policy=policy,
-        budget_fraction=budget_fraction,completion_fraction=completion_fraction)
+        bindings=round_bindings,valid=valid and ordinary and (not consultation or
+            c.guidance.advisory_assessment(job) and job.get('supervision_request') is not None),policy=policy,
+        budget_fraction=budget_fraction,completion_fraction=completion_fraction,budget_facts=budget_facts,automatic_review_cost=automatic_review_cost,question_changed=question_changed,job_ref=job_ref)
     if role=='W' and job.get('research_strategy_version')==3:
         from . import supervision
         for row in ((observation or {}).get('research_state') or {}).get('mechanisms',{}).values():
@@ -458,7 +459,12 @@ def prepare_node_from_facts(root, job, payload, seal, *, summary, lookup, observ
             call_identity=json.dumps(call['scope']['job_ref'],sort_keys=True,separators=(',',':'))+':'+call['call_id']
             current['supervision']=supervision.add_investment(current['supervision'],dict(
                 original_call_id=call_identity,mechanism_ref=binding['mechanism_ref'],
-                predecessors=copy.deepcopy((binding.get('research_binding') or {}).get('predecessors',[]))))
+                predecessors=copy.deepcopy((binding.get('research_binding') or {}).get('predecessors',[])),
+                completed_receipt=call.get('status') in {'known_success','known_failed'}
+                    and isinstance(call.get('accepted'),dict)))
+    if role=='W' and valid and ordinary and not consultation:
+        from . import supervision
+        current['supervision']=supervision.authored_question_revision(current['supervision'],question_changed)
     if role=='W' and job.get('candidate_nomination_mechanisms'):
         from . import candidate_nominations
         authored=c.scientific_field(job,payload,'candidate_nominations')
@@ -627,7 +633,7 @@ def _work(delta, job, payload, valid):
 
 
 def _supervision(delta, job, payload, seal, observation, *, origin, bindings, valid, policy,
-        budget_fraction=None, completion_fraction=None):
+        budget_fraction=None, completion_fraction=None, budget_facts=None, automatic_review_cost=None, question_changed=None, job_ref=None):
     """Accept explicit experiment batches against this W's produced originals.
 
     Only host-produced observation facts and the pre-update stable mechanism
@@ -642,6 +648,8 @@ def _supervision(delta, job, payload, seal, observation, *, origin, bindings, va
     elif state['policy']!=chosen:
         raise ValueError('Accepted scientific supervision policy cannot change')
     request=job.get('supervision_request')
+    supervision.validate_adaptive_request(state,request,job=job,budget_facts=budget_facts,
+        source_w=delta.summary.get('last_w'))
     fraction=request.get('budget_fraction') if isinstance(request,dict) else None
     state=supervision.observe(supervision.observe(state,fraction),budget_fraction)
     diagnostics=[]
@@ -721,7 +729,9 @@ def _supervision(delta, job, payload, seal, observation, *, origin, bindings, va
              or original is not None and original['ordinal']==count and original['source_step']==frozen.get('source_step')
                 and original['source_step']<job['step']))
         if bound:
-            state=supervision.cover(state,request,source_step=job['step'],completion_fraction=completion_fraction)
+            state=supervision.cover(state,request,source_step=job['step'],completion_fraction=completion_fraction,budget_facts=budget_facts)
+    state=supervision.charge_automatic(state,request,cost=automatic_review_cost,budget_facts=budget_facts,
+        job=job,job_ref=job_ref)
     delta.summary['supervision']=state
 
 
@@ -763,6 +773,10 @@ def prepare_recovery(*, summary, lookup, step, call_id, resolved,recovery_ref):
         raise ValueError('Recovery cannot replace known original scientific facts')
     if original['mechanism_binding'] is not None:
         delta.summary['opportunity_unknown_count'] += int(resolved['status'] == 'unknown') - int(original['status'] == 'unknown')
+    if (original['status']=='unknown' and resolved['status'] in {'known_success','known_failed'}
+            and delta.summary['supervision']['policy']['version']==4
+            and isinstance(resolved.get('accepted'),dict)):
+        delta.summary['supervision']['adaptive']['receipts']+=1
     original['status'] = resolved['status']
     original['recovery_ref']=copy.deepcopy(recovery_ref)
     _record_terminal(delta,original)

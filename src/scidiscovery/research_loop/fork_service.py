@@ -380,7 +380,7 @@ def _prepare(plan, request, transaction, *, _on_created=None):
     options['launcher'] = copy.deepcopy(selected_settings['native_launcher_argv'])
     # Editing declarations omit disabled options and literal role guidance.
     # Restore those exact values after the ordinary defaults have been applied.
-    for field in ('search_policy', 'role_guidance', 'storage_policy'):
+    for field in ('search_policy', 'role_guidance', 'storage_policy', 'worker_fragment_policy'):
         options[field] = copy.deepcopy(selected_settings.get(field))
     if selected_settings.get('delivery_policy') is not None:
         # Keep declared invocation spellings while rebuilding (and checking)

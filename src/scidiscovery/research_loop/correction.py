@@ -206,7 +206,7 @@ def project(root, before_step=None):
             for review in reviews.values():
                 if review is not None and review['trigger']['trigger_id'] == request['trigger_id']:
                     review['response_h'] = step
-        if (job['role'] != 'A' or job.get('purpose') in {'closeout','formal_review','worker_consultation'} or job.get('handoff_protocol', 1) < 6
+        if (job['role'] != 'A' or c.guidance.advisory_assessment(job) or job.get('purpose') in {'closeout','formal_review','worker_consultation'} or job.get('handoff_protocol', 1) < 6
                 or job.get('author_correction') is not None
                 or seal.get('control_outcome', {}).get('decision_status') == 'unresolved'
                 or seal.get('control_outcome', {}).get('portfolio_status') == 'unresolved'

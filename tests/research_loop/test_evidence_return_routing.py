@@ -30,10 +30,13 @@ def _seal_output(root, step, role, action, reason, *, missing=False):
         payload['search_plan' if role == 'H' else 'search_review'] = None
     if role == 'A':
         payload.update(candidate_recommendation=None, selection_explanation=None,
-            progress_assessment=None, decision_request=None, portfolio_review=None,
+            progress_assessment=None, decision_request=(dict(decision='mechanism',question=reason,
+                change_criterion='The exact requested source resolves or preserves this bounded evidence gap.')
+                if action in {'extract','revise_h'} else None), portfolio_review=None,
             final_coverage=None)
     if role == 'W':
-        payload.update(stage_intent='review', mechanism_findings=None, candidate_nominations=None)
+        # A continuing legacy W asks ordinary assessment, not W consultation or Final A.
+        payload.update(stage_intent='continue', mechanism_findings=None, candidate_nominations=None)
     if role == 'E' and not missing:
         (work / 'artifacts' / f'source-{step}.txt').write_text('Synthetic requested source.')
     intent = dict(task_ref=contracts.record_ref(job_path))
@@ -59,7 +62,9 @@ def test_evidence_return_reassesses_exact_request_and_allows_new_extraction(
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, ['fake'], max_tokens=10000,
         max_seconds=300, max_steps=12, model='fixture', reasoning_effort='high',
-        search_policy=None, experiment_mode='external')
+        search_policy=None, experiment_mode='external', research_strategy_version=2)
+    assert contracts.settings(root)['research_strategy_version']==2
+    assert 'advisory_scope_version' not in contracts.settings(root)
     stopped_seals(monkeypatch)
     if requester_role == 'H':
         plan = [('H', 'extract', QUESTIONS[0]), ('E', '', ''),

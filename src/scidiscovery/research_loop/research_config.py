@@ -209,7 +209,7 @@ def from_document(document, *, base):
         result['delivery_policy'] = delivery
     policies = _table(document.get('policies', {}),
         {'formal_review', 'execution_authority', 'candidate_audit', 'decision_contract',
-         'selection', 'worker_context', 'worker_context_windows', 'resume', 'history_observer', 'supervision'}, 'policies')
+         'selection', 'worker_context', 'worker_context_windows', 'worker_context_handoff_version', 'resume', 'history_observer', 'supervision'}, 'policies')
     for source, target in (('formal_review', 'formal_review_policy'),
                            ('execution_authority', 'execution_authority_policy'),
                            ('candidate_audit', 'candidate_audit_policy')):
@@ -229,6 +229,8 @@ def from_document(document, *, base):
         result['worker_fragment_policy'] = dict(context=policies['worker_context'])
     if 'worker_context_windows' in policies:
         result.setdefault('worker_fragment_policy', dict(context='same_session'))['max_context_windows'] = policies['worker_context_windows']
+    if 'worker_context_handoff_version' in policies:
+        result.setdefault('worker_fragment_policy',dict(context='same_session'))['context_handoff_version']=policies['worker_context_handoff_version']
     result['ui'] = copy.deepcopy(_table(document.get('ui', {}),
         {'port', 'open_browser', 'approval_secret_file'}, 'ui'))
     if 'approval_secret_file' in result['ui']:
@@ -425,6 +427,10 @@ def to_document(root, settings=None):
     for source, target in (('selection_policy', 'selection'), ('resume_policy', 'resume'), ('history_observer', 'history_observer'),('supervision_policy','supervision')):
         if value.get(source) is not None:
             policies[target] = copy.deepcopy(value[source])
+    supervision=policies.get('supervision')
+    if (isinstance(supervision,dict) and supervision.get('version')==4
+            and supervision.get('max_automatic_reviews') is None):
+        supervision.pop('max_automatic_reviews',None)
     if isinstance(policies.get('resume'), dict):
         policies['resume'].pop('launcher_files', None)
     observer = policies.get('history_observer')
@@ -435,6 +441,7 @@ def to_document(root, settings=None):
         policies['worker_context'] = copy.deepcopy(value['worker_fragment_policy']['context'])
         if 'max_context_windows' in value['worker_fragment_policy']:
             policies['worker_context_windows'] = value['worker_fragment_policy']['max_context_windows']
+            policies['worker_context_handoff_version'] = value['worker_fragment_policy'].get('context_handoff_version',1)
     result = dict(version=1, research=research, agent=agent, permissions=permissions,
                   budget=budgets, executor=executor, policies=policies, ui=copy.deepcopy(value.get('ui', {})))
     if value.get('skills') is not None:

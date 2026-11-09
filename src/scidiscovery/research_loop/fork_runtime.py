@@ -13,7 +13,7 @@ FROZEN_TASK_SETTINGS = (
     'final_a_completion_policy', 'live_feedback_version', 'experiment_interface_version',
     'managed_admission_version', 'worker_view_version', 'storage_policy',
     'skills', 'worker_profiles', 'role_profile_declarations', 'project',
-    'supervision_policy', 'supervision_budget_basis', 'research_strategy_version',
+    'supervision_policy', 'supervision_budget_basis', 'research_strategy_version', 'advisory_scope_version',
 )
 
 

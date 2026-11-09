@@ -379,7 +379,7 @@ def assessment(root,job,science,record,*,inventory,source_attempt=None):
     if facts['capacity'] or facts['unknown'] or facts['prior_unknown']:correction=file_correction=None
     file_blocked=(finding_coverage(science,[],[file_correction['mechanism_ref']])['blocked'] if file_correction else set())
     authored_end=('worker_'+science['stage_intent']
-        if science.get('stage_intent') in {'decision','handoff','revise_h','review'} else None)
+        if science.get('stage_intent') in {'decision','handoff','revise_h','review','extract'} else None)
     file_reason='scientific_blocked' if file_blocked else authored_end
     if not applicable(job):
         active=correction or file_correction

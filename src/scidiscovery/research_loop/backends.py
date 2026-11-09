@@ -34,6 +34,10 @@ class Backend(ABC):
     this interface. Unsupported interactions return explicit capability facts
     or raise before submission; optional telemetry remains unknown.
     """
+    def subagent_capability(self):
+        """Optional native capability; older providers remain unsupported."""
+        return dict(status='unsupported', reason='native_subagents_unsupported')
+
     @property
     @abstractmethod
     def name(self): ...
@@ -721,6 +725,10 @@ class Codex(Backend):
     def complete_authorship(self):
         return self.standard and not (self.options or {}).get('subagents',False)
 
+    def subagent_capability(self):
+        return dict(status='supported' if self.standard else 'unsupported',
+            reason=None if self.standard else 'native_subagents_unsupported')
+
     def launch(self, profile, work, pending, schema, instruction):
         configs = []
         for field,key in (('reasoning_effort','model_reasoning_effort'),('service_tier','service_tier')):
@@ -801,8 +809,14 @@ class Codex(Backend):
         return SessionUsage(home,work,session=session,context_state=context_state)
 
     def observe(self,meter,event): return _observe_meter(meter,event)
-    def snapshot_observation(self,meter): return meter.snapshot()
-    def poll_observation(self,meter): return meter.poll()
+    def _usage_scope(self, value):
+        if (self.options or {}).get('subagents') is True:
+            return dict(value, usage_scope='native_main_thread', subagent_usage_coverage='unknown',
+                unreported_usage='Subagent usage, running requests and reporting delay are unmeasured.')
+        return value
+
+    def snapshot_observation(self,meter): return self._usage_scope(meter.snapshot())
+    def poll_observation(self,meter): return self._usage_scope(meter.poll())
     def observation_fault(self,meter): return meter.fault
 
     def event(self, value):
@@ -846,7 +860,17 @@ class Codex(Backend):
     def event_selector(self,*,source): return CodexEvents()
 
     def for_job(self, job):
-        return Codex(self.settings,schema_transport='prompt') if self.standard and not job.get('formal_review') else self
+        settings = self.settings
+        if 'native_subagents' in job:
+            value = job['native_subagents']
+            if type(value) is not bool:
+                raise ValueError('Frozen native subagent permission must be boolean')
+            if value and self.subagent_capability()['status'] != 'supported':
+                raise ValueError('Frozen native subagent permission is unsupported')
+            settings = dict(settings, native_options=_native_options(dict(
+                settings.get('native_options') or {}, subagents=value)))
+        transport = 'prompt' if self.standard and not job.get('formal_review') else self.active_schema_transport
+        return Codex(settings, schema_transport=transport) if settings is not self.settings or transport != self.active_schema_transport else self
 
     def apply_home(self, env, home, *, isolated):
         if isolated: env['CODEX_HOME'] = str(home)
@@ -880,7 +904,7 @@ class Codex(Backend):
             raise MetadataUnavailable('Native required metadata capability unavailable: '+str(channel.get('reason')))
 
     def finish_observation(self, meter, *, required):
-        return meter.finish_context() if required else meter.poll()
+        return self._usage_scope(meter.finish_context() if required else meter.poll())
 
     def terminal_usage(self, event, meter):
         current=event.get('usage')
@@ -1015,7 +1039,7 @@ class Codex(Backend):
 
     def recovery_capability(self, kind):
         supported=(kind=='technical_restart' or kind=='resume' and self.supports_resume
-            or kind=='consultation_resume' and self.app_server_transport and self.complete_authorship
+            or kind=='consultation_resume' and self.app_server_transport and self.supports_resume
             or kind in {'automatic_recovery','format_fallback'} and self.standard)
         return dict(status='supported' if supported else 'unsupported',reason=None if supported else 'native_recovery_unsupported')
 
@@ -1082,7 +1106,7 @@ class Codex(Backend):
 
     @staticmethod
     def validate_configuration(options): return _native_options(options)
-    def permissions(self,settings): return _codex_permissions(settings)
+    def permissions(self,settings): return _codex_permissions(dict(settings,native_options=self.options))
     def launcher_contract(self,launcher,*,retained):
         from . import skill_supply
         return skill_supply.codex_native_launcher_contract(launcher,retained=retained)
@@ -1229,7 +1253,16 @@ class Protocol(Backend):
     def resume(self,*args,**kwargs): raise ValueError('Native session resume unsupported by this backend')
     def transport_args(self,args): return list(args)
     def event_selector(self,*,source): return CanonicalEvents(source)
-    def for_job(self,job): return self
+    def for_job(self,job):
+        if 'native_subagents' not in job:return self
+        value=job['native_subagents']
+        if type(value) is not bool:
+            raise ValueError('Frozen native subagent permission must be boolean')
+        if value:
+            raise ValueError('Frozen native subagent permission is unsupported')
+        settings=dict(self.settings,native_options=self.validate_configuration(dict(
+            self.settings.get('native_options') or {},subagents=False)))
+        return Protocol(settings,schema_transport=self.active_schema_transport)
     def apply_home(self,env,home,*,isolated): pass
     def actual_home(self,env,work,home,*,isolated): return home
     def initial_notice(self,namespace_launcher): return dict(status='unavailable',reason='unsupported_backend')

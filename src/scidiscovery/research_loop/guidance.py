@@ -48,6 +48,21 @@ WORKER_FIRST = {
 }
 
 
+# Separately frozen from trigger policies and the historical v3 literals.
+ADVISORY_WORKER_FIRST = {
+    **WORKER_FIRST,
+    'W': WORKER_FIRST['W'].replace(' No auxiliary agents.','')+' If Backend subagents are supported and permitted, prefer them for small extraction/scripts; otherwise do small tasks yourself. Only large/complex independent evidence may warrant E, at your discretion. Judge H/A advice against evidence.',
+    'A': 'Diagnose evidence-backed local lock-in, ignored counterevidence or critical alternatives, goal drift, or serious logic errors. Counts, low scores and elapsed time alone prove none. Ordinary A gives fallible advice to W, without choosing models, depth, folds, bagging, search order or banning broader exploration. W judges the concern and chooses self-correction, H, E, or evidence-based disagreement. No material issue means no new constraints. Final A separately assesses delivery and limits.',
+}
+
+
+def advisory_assessment(job):
+    """The frozen ordinary-advice contract excludes protected/final scopes."""
+    return (job.get('advisory_scope_version') == 1 and job.get('research_strategy_version') == 3
+        and job.get('role') == 'A' and purpose(job) in {'assessment','worker_consultation'}
+        and not any(job.get(key) for key in ('engineering_repair','author_correction','correction_request')))
+
+
 # Current launcher advice is separate from the immutable scientific literal.
 # This plans work only; it never changes H scope or execution admission.
 STAGE_PLANNING = {
@@ -77,6 +92,20 @@ def purpose(job):
 def role_contract(job):
     """One model-facing purpose contract, frozen with each new task."""
     role,scope=job['role'],purpose(job)
+    if (job.get('advisory_scope_version')==1 and role=='W' and scope=='research'
+            and not any(job.get(key) for key in ('engineering_repair','author_correction','correction_request'))):
+        if job.get('native_subagents') is True:
+            return 'Subagents enabled for this W: prefer simple extraction/scripts; W decides whether large/complex independent evidence warrants E. Original permissions and budgets hold.'
+        if job.get('native_subagents') is False:
+            return 'Subagents disabled for this W: do small extraction/script tasks yourself without a handoff. Only large/complex independent evidence may warrant E, at your discretion.'
+        return 'Use subagents only if the Backend and original permissions support them; otherwise do small tasks yourself without a handoff. W decides whether large/complex evidence warrants E.'
+    if advisory_assessment(job):
+        return ('Diagnose only evidence-backed lock-in, ignored counterevidence/critical alternatives, goal drift or serious logic errors. '
+            'No material issue means no new constraints; counts/low scores alone prove none. Do not select methods, depth, folds, bagging or search order, or ban broader exploration. '
+            'W judges advice and chooses self-fix, H for alternatives, E for missing evidence, or evidence-based disagreement. '
+            'Return continue_w with decision_request=null; advice stays in scientific_result, never a binding work order or finalization request. '
+            +('supervision_result=continue_existing means return to W, not endorsement of its current route. ' if job.get('supervision_request') is not None else '')
+            +'Final A remains a separate pre-delivery assessment; preserve original permissions, qualification and formal independence.')
     if job.get('research_strategy_version') in {2,3}:
         if scope=='delivery_review':
             return ('Independently judge readiness before final lock. Availability is not scientific qualification; '

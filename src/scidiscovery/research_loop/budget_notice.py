@@ -36,6 +36,8 @@ WORKER_REFLECTION_TEXT = ('W reflection opportunity: reconcile existing original
     'Save question, clues and evidence; return for independent A. No progress verdict; original permissions hold.')
 WORKER_INVESTMENT_TEXT = ('Repeated calls under this mechanism: inspect retained evidence and choose continuation or H/A. '
     'Counts measure effort, not scientific stagnation. Original permissions and budgets hold.')
+WORKER_CONTEXT_90_TEXT = ('W context >=90%: prepare a safe checkpoint; compaction may continue. '
+    'Handoff only after current post-compaction occupancy >70%. Reconcile originals; never replay.')
 HELPER = '.scid-budget-notice.py'
 EMPTY_CONFIG = '.scid-budget-notice-empty-config.toml'
 VISIBLE = 'scid-budget-hook-visible-v1'
@@ -103,6 +105,11 @@ def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, t
         else:
             text=(risk+' A: deliver, reject all with finish, or request one concrete correction in remaining budgets. '
                 'No grant; permissions hold; unknown usage != 0.')
+    elif (job['role']=='A' and job.get('advisory_scope_version')==1
+            and job.get('research_strategy_version')==3 and not any(job.get(key) for key in
+                ('purpose','final_report','final_only','engineering_repair','author_correction','correction_request'))):
+        text=(risk+' A: return advice with continue_w and decision_request=null. W judges it; no direct work or finalization. '
+            'Shared limits and original permissions hold; unknown usage != 0.')
     elif job['role'] == 'A' and not (job.get('purpose') == 'closeout' or job.get('final_report') or job.get('final_only')):
         if shared_expired or shared_reached or shared_exhausted:
             cause = 'shared'
@@ -146,7 +153,7 @@ def _finite(value):
 
 
 def worker_progress_due(job, intent, *, active_seconds, target_seconds, fragment_enabled=False,
-        author=False, final_return=False, max_context_windows=None, context_observation=None):
+        author=False, final_return=False, max_context_windows=None, context_observation=None, context_handoff_version=None):
     """Use loaded cadence and scope only; never infer scientific progress."""
     if (not fragment_enabled or job.get('role') != 'W' or author or final_return
             or intent.get('continuation_kind') == 'author_closeout'
@@ -155,13 +162,14 @@ def worker_progress_due(job, intent, *, active_seconds, target_seconds, fragment
             or job.get('final_report') or job.get('final_only')):
         return False
     if max_context_windows is not None:
-        return worker_context_reason(max_context_windows, context_observation) is not None
+        return worker_context_reason(max_context_windows, context_observation,version=context_handoff_version) is not None
     return (_finite(active_seconds) and _finite(target_seconds)
         and target_seconds > 0 and active_seconds >= target_seconds)
 
 
-def worker_context_reason(maximum, observation):
+def worker_context_reason(maximum, observation, *, version=None):
     """One initial window plus completed native compactions; no fullness scan."""
+    if version==2:return worker_context_status(maximum,observation,version=version)['reason']
     observation = observation if isinstance(observation, dict) else {}
     windows = observation.get('context_windows') or {}
     started = windows.get('windows_started')
@@ -186,16 +194,17 @@ def worker_progress_notice(job, intent, **facts):
         # condition. Optional telemetry loss must never create a handoff reason.
         eligible = dict(facts, max_context_windows=None, active_seconds=1, target_seconds=1)
         if (not worker_progress_due(job, intent, **eligible)
-                or not worker_context_near(facts.get('max_context_windows'), facts.get('context_observation'))):
+                or not worker_context_near(facts.get('max_context_windows'), facts.get('context_observation'),version=facts.get('context_handoff_version'))):
             return None
-        return dict(cause='node', text=WORKER_CONTEXT_NEAR_TEXT)
-    reason = worker_context_reason(facts['max_context_windows'], facts.get('context_observation')) if facts.get('max_context_windows') is not None else None
+        return dict(cause='node', text=WORKER_CONTEXT_90_TEXT if facts.get('context_handoff_version')==2 else WORKER_CONTEXT_NEAR_TEXT)
+    reason = worker_context_reason(facts['max_context_windows'], facts.get('context_observation'),version=facts.get('context_handoff_version')) if facts.get('max_context_windows') is not None else None
     return dict(cause='node', text=(WORKER_CONTEXT_UNKNOWN_TEXT if reason == 'worker_context_observation_unknown'
         else WORKER_CONTEXT_TEXT if reason else WORKER_PROGRESS_TEXT))
 
 
-def worker_context_near(maximum, observation):
+def worker_context_near(maximum, observation, *, version=None):
     """Optional last-window advice from current native occupancy, never billing."""
+    if version==2:return worker_context_status(maximum,observation,version=version)['near']
     observation = observation if isinstance(observation, dict) else {}
     windows = observation.get('context_windows') or {}
     current = observation.get('context') or {}
@@ -210,6 +219,34 @@ def worker_context_near(maximum, observation):
         and type(used) is int and 0 <= used <= 2 ** 53 - 1
         and type(capacity) is int and 0 < capacity <= 2 ** 53 - 1
         and used * 100 >= capacity * 85)
+
+
+def worker_context_status(maximum, observation, *, version=None):
+    """One pure snapshot fact shared by notices, admission and continuation.
+
+    V2 allows ``maximum`` complete windows plus the next current window up to
+    70% occupancy. A compaction count never supplies missing current occupancy.
+    Native producers own current-window freshness; this consumer never scans.
+    """
+    if version in (None,1):
+        return dict(reason=worker_context_reason(maximum,observation),
+            near=worker_context_near(maximum,observation),ratio=None)
+    if type(version) is not int or version!=2:
+        raise ValueError('Unsupported context handoff version')
+    observation=observation if isinstance(observation,dict) else {}
+    windows=observation.get('context_windows') or {};current=observation.get('context') or {}
+    started=windows.get('windows_started') if isinstance(windows,dict) else None
+    used=current.get('total_tokens') if isinstance(current,dict) else None
+    capacity=current.get('model_context_window') if isinstance(current,dict) else None
+    valid=(type(maximum) is int and maximum>0 and isinstance(windows,dict)
+        and windows.get('coverage')=='live' and type(started) is int and started>0
+        and isinstance(current,dict) and current.get('status')=='last_reported'
+        and current.get('current_window') is True and _finite(current.get('observed_at'))
+        and type(used) is int and 0<=used<=2**53-1
+        and type(capacity) is int and 0<capacity<=2**53-1)
+    return dict(reason='worker_context_review_due' if valid and started>maximum and used*100>capacity*70 else None,
+        near=bool(valid and started<=maximum and used*100>=capacity*90),
+        ratio=used/capacity if valid else None)
 
 
 def worker_direction_notice(review):

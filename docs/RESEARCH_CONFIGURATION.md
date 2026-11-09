@@ -127,13 +127,22 @@ preflight runs under the existing writer lease: current-attempt admission, pause
 host-review and budget gates precede write-once declaration publication. It launches
 no external execution, adds no call investment and grants no execution permission;
 actual acceptance idempotently reuses the exact frozen binding. H expands useful
-explanations, ordinary A reflects on search limitations and may endorse productive
-depth, and W retains methods and allocation. Ordinary A can return to existing work
-with `continue_w` and `decision_request:null`; specific new evidence requests still
-need a concrete question and change criterion. Its `deliver`/`finish` requests
-Final A, which is required before submission. A trigger does not
-prove stagnation, and ordinary A need not invent a problem or prescribe a method.
-With original allowance remaining, v2/v3 W's voluntary `decision` or ordinary A's closeout request enters
+explanations and E supplies bounded evidence. New strategy-3 preparations freeze
+`advisory_scope_version=1` in settings/jobs, independently of supervision policy 3/4.
+Marked ordinary A diagnoses evidence-backed lock-in, ignored counterevidence, goal
+drift or severe reasoning flaws. Findings and possible H/E suggestions belong in
+`scientific_result`; no material issue adds no constraint. W owns model, depth,
+folds, bagging, expansion and ordering, and chooses H/E consultation through
+`stage_intent=revise_h/extract` with a concrete `consultation_question`. The exact
+requester, evidence and materials are frozen; H/E return directly to W through
+the existing Backend continuity contract. Marked ordinary A returns only
+`continue_w` with `decision_request:null`; `supervision_result=continue_existing`
+means return to W, not endorsement or confirmation of its scientific direction.
+The next W task does not promote A's `route_reason` or require the preceding local
+focus. A trigger alone proves no stagnation. Missing scope markers preserve old
+ordinary-A action/evidence/closeout authority on configuration revision, recovery
+and fork. This internal scope marker is not a public supervision-policy bump.
+With original allowance remaining, v2/v3 W's voluntary `decision` or an unmarked ordinary A's closeout request enters
 one pre-delivery Final A before irreversible lock: accept exact `deliver`, reject
 all with `finish` and no recommendation, or ask W for one concrete decision-changing
 correction using that remaining allowance. Correction admits no broader research
@@ -158,7 +167,7 @@ owns the reporting fields, trigger defaults and purpose-specific contract.
 New W-first preparations freeze supervision policy 3 with bounded automatic
 ordinary A reflection: mode=review, consecutive_calls=4, a 20% first-review floor
 and spacing, 30%/65% shared-budget checkpoints and max_automatic_reviews=2.
-The exact W question/clues/evidence are assessed; A may endorse continued work.
+The exact W question/clues/evidence are assessed under the frozen advisory scope.
 Frozen policy 2 retains its automatic-A-off default. Original-call notices and
 enforced reviews are separate settings; exact original calls count once across
 continuation and recovery, without becoming scientific rounds or stagnation verdicts.
@@ -172,11 +181,18 @@ no new scientific classifier, search tree or knowledge database is required.
 数据及评价口径、条件性负结果、失败条件、未解问题和限制，咨询返回和换上下文后仍可回读。可选 `clues` 可在没有候选时记录观察、适用条件、有限负结论和开放问题；须有非空准确证据，有限负结论还须适用条件。
 控制只核结构与准确原件，不判断科学新颖度或授予权限。`--research JSON` 预检在既有 writer lease 内，
 先核对当前 attempt，并通过暂停、宿主评估及预算门槛，再一次性发布不可变声明；不启动外部执行，
-不新增调用投入，也不授执行权限，后续实际接受幂等复用准确冻结绑定。H 打开解释，普通 A 反思搜索局限，
-可支持有效深挖，方法与分配仍由 W 拥有。普通 A 可用 `continue_w` 与 `decision_request:null`
-返回已有工作，确需新证据时仍给出具体问题及改变判断的条件；`deliver/finish` 只请求
-Final A，提交前必须经过最终评估。触发不证明停滞，普通 A 不强行找错或指定方法。
-v2/v3 的 W 自愿 `decision` 或普通 A 请求收口，在原额度可用时先进入一次提交前 Final A，不先不可逆锁死研究：
+不新增调用投入，也不授执行权限，后续实际接受幂等复用准确冻结绑定。H 打开解释，E 提供有界证据。
+新 strategy 3 准备在 settings/job 另冻结 `advisory_scope_version=1`，独立于监督 policy 3/4。
+有标记的普通 A 只诊断有证据的局部锁定、忽略反证、目标偏移或严重推理缺陷，发现及可考虑的
+H/E 建议写入 `scientific_result`，没有实质问题就不新增约束。模型、深度、折分、bagging、
+扩展与先后顺序由 W 自主选择，W 可用 `stage_intent=revise_h/extract` 和具体
+`consultation_question` 咨询 H/E。准确请求者、证据与材料冻结，H/E 答复经既有 Backend 续接
+直接返回 W。有标记的普通 A 只返回 `continue_w`、`decision_request:null`；
+`supervision_result=continue_existing` 只是返回 W 的代码，不认可或确认其科学方向。
+下一 W 主任务不嵌入 A 的 `route_reason` 或要求保持前一局部焦点。触发本身不证明停滞。
+无此职责标记的旧任务在修订、恢复及 fork 后保留原普通 A 动作、证据请求和收口权限；
+这个内部职责标记不增加公开监督策略版本号。
+v2/v3 的 W 自愿 `decision` 或无职责标记的普通 A 请求收口，在原额度可用时先进入一次提交前 Final A，不先不可逆锁死研究：
 同一次 A 可显式 `deliver` 接受准确候选、用 `finish` 且无推荐全部拒绝，或要求 W 在原剩余额度内
 补正一个具体、能改变判断的缺口。补正不扩大研究、不咨询 H/A/E，之后至多一次再评估，不能再补正；
 接受不另加一次 Final A。耗尽后仍只作 protected final-only 报告，不新开 W/E 或实验。
@@ -191,7 +207,7 @@ v2/v3 即使有候选也可全部拒绝，可用性不等于资格；best-effort
 `supervision_result=continue_existing` 与 `continue_w` 放行原工作，不编造新缺口。
 旧冻结策略的 `exploration_rounds`、准确原件计数和 A 覆盖边界由公共账本/控制层维护，与 Agent
 后端无关；报告字段、默认触发策略和按目的区分的统一合同由上述架构维护。
-新 W-first 准备默认冻结监督 policy 3：`review`、连续原调用 4、首次与间隔至少 20% 预算、30%／65% 共享预算检查点、最多两次自动普通 A。A 根据 W 作者问题／线索／证据判断，可认可继续；触发只表示检查机会。旧冻结 policy 2 仍保留自动 A 默认关闭。可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
+新 W-first 准备默认冻结监督 policy 3：`review`、连续原调用 4、首次与间隔至少 20% 预算、30%／65% 共享预算检查点、最多两次自动普通 A。A 根据 W 作者问题／线索／证据按冻结职责判断；触发只表示检查机会。旧冻结 policy 2 仍保留自动 A 默认关闭。可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
 不把投入当科学轮次或停滞判决。旧冻结监督策略保留原节奏。
 自动监督是尚未证明收益的实验性调度启发式，不是停滞判断；直接 API 的
 `supervision_policy=None` 可关闭，不新增科学分类器、搜索树或知识库。
@@ -221,6 +237,67 @@ policy 3 的正数最低投入同时约束首次自动反思与后续间隔，�
 策略随实例冻结，配置修订不重置计数；新实例可用 `mode="off"` 关闭自动反思，直接 API
 也可沿用 `None`。下例保留可显式选择的旧 policy 2 投入提醒语义。
 
+Policy 4 is a provisional experimental opt-in for new preparations. The default
+remains policy 3; `research_strategy_version` stays 3 and frozen policies 1/2/3
+do not change. The ongoing V3 two-automatic-A scientific test keeps its original
+settings and is separate from V4 validation. The draft below uses 25% of each
+finite shared-budget dimension as a soft cumulative automatic ordinary-A ceiling:
+
+policy 4 只供新准备显式选择，设置暂定且科学收益未经验证。默认仍是 policy 3，
+`research_strategy_version` 仍为 3；旧 policy 1/2/3 和正在进行的 V3 两次自动 A
+科学测试保留冻结设置。下例的 25% 是各有限共享预算维度中自动普通 A 累计消费的软准入帽：
+
+```toml
+[policies.supervision]
+version = 4
+mode = "review"
+consecutive_calls = 4
+min_budget_fraction = 0.10
+budget_checkpoints = []
+# max_automatic_reviews is omitted: default None, optional emergency count cap.
+
+[policies.supervision.automatic_budget_fraction]
+tokens = 0.25
+seconds = 0.25
+```
+
+Both automatic budget fractions must be positive and at most 1.
+`min_budget_fraction` must also be positive; it sets the first-review floor and
+the consumption cooldown after the preceding assessment completes. V4 requires
+empty fixed checkpoints. Omit `max_automatic_reviews` in TOML for no count cap
+(direct API: `None`); an explicit nonnegative integer adds an emergency cap.
+Setting `mode="off"` disables automatic A, and `notice` retains advisory behavior.
+
+两个自动 A 预算比例均须为正且不超过 1；`min_budget_fraction` 也须为正，同时控制首次
+消费下限及上次评估完成后的冷却消费。V4 的固定检查点必须为空。TOML 省略
+`max_automatic_reviews` 表示无次数帽（直接 API 为 `None`）；显式非负整数可增加紧急次数帽。
+`mode="off"` 关闭自动 A，`notice` 保留提醒语义。
+
+Changed accepted authored questions or exact original receipts provide control
+opportunities, without classifying new scientific evidence. Consumption can also
+provide an operational check with no new experiment. Each automatic ordinary A
+is charged its actual separately metered tokens and active seconds across all
+attempts, independently of its verdict; normalized fraction differences are not
+costs. An unlimited shared dimension does not gate admission. Unknown or partial
+metering retains unknown coverage and known lower bounds, suppressing only
+additional automatic A pending original-usage reconciliation. The budget/count
+cap also suppresses only extra automatic A: W and original query/collect remain
+available. This soft admission ceiling can be exceeded by in-flight A and adds
+no cancellation. Final A, formal independent review and W proactive consultation
+keep their separate scopes. A merged marked W-to-A consultation retains its
+consultation purpose and exact W return binding; its automatic cost counts once.
+W-requested H/E consultation takes priority and its successor W receives a useful
+live interval under existing call/consumption thresholds before an older pending
+A, without treating unreviewed inputs as covered. Configuration changes and recovery do not reset
+consumed budgets or original identities.
+
+已接受的作者问题或准确原调用收据变化只提供控制检查机会，不判定新科学证据；无新实验时
+也可按消费边界进行运行检查。自动普通 A 按准确任务全部尝试的实际 token／活动秒分别计费，
+与科学结论无关，不能相减归一化占比当作费用。共享预算无上限的维度不限制准入。
+缺测保留未知和已知下界，先核对原用量，只抑制额外自动 A；预算帽或次数帽也只抑制额外
+自动 A，不锁住 W，原 query／collect 仍可用。软准入帽允许在途 A 超出，不新增强杀。
+Final A、正式独审和 W 主动咨询保持各自范围。有标记的 W→A 咨询合并自动请求时，保留咨询目的和准确 W 返回绑定，自动费用只计一次。W→H/E 咨询优先，返回 W 按既有调用/消费阈值获得有用实时工作间隔后再处理旧 pending A，不将未审查输入虚报为已覆盖。修订和恢复不重置消费或原件身份。
+
 The following explicit version 2 policy remains available. `mode="off"` retains
 passive investment facts; `"notice"` sends
 a bounded notice without blocking work; `"review"` requests ordinary A and pauses
@@ -241,6 +318,60 @@ new experiments when due. Review mode also requires a positive
   "max_automatic_reviews": 0
 }
 ```
+
+New preparations that configure `worker_fragment_policy.max_context_windows`
+freeze `context_handoff_version=2` inside that policy (public field:
+`policies.worker_context_handoff_version=2`), independently of A's
+advisory scope. In the last complete window, valid occupancy at or above 90%
+only advises a checkpoint. Completed compaction continues work in the new window;
+handoff requires windows started greater than the frozen maximum and current
+valid occupancy strictly greater than 70%. Max=1 therefore permits one complete
+window plus 70% of its next window; max=2 permits two complete windows plus 70%
+of the next. Count/compaction alone does not hand off, and missing or stale
+occupancy remains unknown. Unversioned policies retain the old 85% notice and
+count-based gate. The public field accepts 1 (legacy) or 2 (new), defaulting to 2
+on new preparation. Export encodes an old private absence as public 1 so reapplying
+the exported declaration preserves legacy meaning; fork retains the private absence.
+A new logical W job after consultation may reuse the same native session;
+logical job numbering alone does not establish context rotation. Backend capability
+and verified continuation outcomes determine whether that session was resumed.
+
+新准备在配置 `worker_fragment_policy.max_context_windows` 时，在该策略内另冻结
+`context_handoff_version=2`（公开字段 `policies.worker_context_handoff_version=2`），独立于 A 职责标记。最后一个可完整使用的窗口占用达到 90%
+只提醒准备 checkpoint；自动压缩后继续工作，只有已启动窗口数超过冻结额度且当前有效窗口
+占用严格大于 70% 时才交新 W。max=1 允许一个完整窗口及下个窗口的 70% 空间，max=2
+允许两个完整窗口及下个窗口的 70%。压缩或计数本身不触发交接，缺失或过期占比保持未知。
+无版本旧策略保留 85% 提醒和按次数交接门禁。公开字段接受 1（旧）或 2（新），新准备默认 2；旧私有缺失导出为公开 1，重应用导出声明仍保持旧语义；fork 保留原私有缺失。
+咨询后新逻辑 W 任务可能续接原生会话，编号变化本身不代表窗口轮换；后端能力与已核验
+continuation outcome 才能证明是否恢复原会话。
+
+Native subagent permission can be declared as a separate boolean in
+`[agent.roles.W]` (or an explicitly selected named Worker profile). Role values
+take priority over explicit `[permissions].subagents`; otherwise new W defaults
+to enabled only when the selected Backend supports native subagents. Explicit
+false remains effective unless the user supplies a distinct explicit role choice.
+Unsupported explicit enablement is refused; unsupported defaults do not create a
+new role override. Other roles retain their original declarations. Job/intent
+freeze `native_subagents` independently of model-only `native_profile`, and export
+retains the role selection. Old settings/jobs lacking this field keep their
+original permission on revision, recovery and fork.
+
+W prefers supported, permitted native subagents for small evidence extraction or
+scripts. Without that capability or permission W does the small work itself,
+without an extra role or W handoff. W considers E independently for large or
+complex evidence work. Native Pi does not support subagents and gains no emulated
+path. Exact main-thread consultation resume does not establish complete child
+authorship or usage: those gaps remain unsupported/unknown, observed tokens remain
+lower bounds, and existing formal-review and execution gates still apply.
+
+原生子代理权限可在 `[agent.roles.W]` 或明确选中的具名 Worker profile 中单独声明 bool。
+角色值优先于显式 `[permissions].subagents`；否则，新 W 只在所选 Backend 支持时默认开启。
+显式 false 保持生效，除非用户另给明确角色值。能力不支持时，显式启用会拒绝，默认不额外创建
+角色 override；其他角色保留原声明。job/intent 以 `native_subagents` 独立冻结权限，模型
+`native_profile` 保持原三字段；导出保留角色选择，旧无字段设置/任务在修订、恢复和 fork 后
+仍保持原权限。支持且允许时简单证据提取、脚本优先子代理；不支持或禁用时 W 自己做小任务，
+不额外交接；规模大或复杂时才自主考虑 E。原生 Pi 不支持子代理，不补造路径。准确主线程续接
+不证明子代理完整作者或费用覆盖；未知保留，观测 token 仍是下界，正式独审及执行门槛不变。
 
 ## Declaration fields / 声明字段
 
@@ -314,10 +445,16 @@ New standard single-command Codex declarations default to
 `policies.worker_context_windows = 1`; only integers 1 and 2 are accepted. This
 freezes `worker_fragment_policy.max_context_windows`. Same-session fragments keep
 one W job and allowance. Window use is one initial window plus completed
-compactions. Fresh current-window occupancy can advise preparing a checkpoint at 85% of the final allowed window; missing or stale occupancy adds no stop. When a completed compaction
-exceeds the allowed count, the next supported observable boundary seals the partial
-result and starts a new W. It does not automatically
-request A. An explicit `handoff` also starts a new W; `revise_h` and `review` request
+compactions. New declarations also freeze `policies.worker_context_handoff_version=2`
+as `worker_fragment_policy.context_handoff_version=2`: 90% occupancy in the last
+complete window only advises a checkpoint; compaction then continues work in the
+next window. Handoff requires windows started above the maximum and fresh current
+occupancy strictly above 70%, so max=1 allows 1 complete window plus 70% of the next,
+and max=2 allows 2 complete windows plus 70% of the next. Missing/stale occupancy
+adds no stop; compaction alone does not hand off. Unversioned frozen declarations
+keep the legacy 85% notice and count gate, exported as explicit public version 1.
+Version 2 is the new default; explicit public 1 preserves legacy meaning. Handoff
+does not automatically request A. An explicit `handoff` also starts a new W; marked W's `extract` requests E evidence consultation, while `revise_h` and `review` request
 serial H and A consultation respectively, returning to a successor W job. New
 policy-3 jobs may retain the original native W session through the selected
 Backend capability and original/successor validation; unsupported or unavailable
@@ -348,9 +485,12 @@ rejects them without migration or settings edits.
 
 新标准单命令 Codex 默认 `policies.worker_context_windows = 1`，仅接受整数 1 或 2，
 冻结为 `worker_fragment_policy.max_context_windows`。同 session fragment 保留同一 W
-任务和额度；窗口门禁只计一个初始窗口加已完成压缩次数。当前窗口新鲜占比可在最后允许窗口的 85% 提前提示准备 checkpoint，缺失或过期占比不新增停止条件。完成压缩后超出
-允许次数，在下一受支持的可观察边界封存部分结果并交新 W，不自动交 A。显式 `handoff` 同样交新 W；`revise_h`
-和 `review` 分别请求串行 H/A 咨询，结束后交后继 W 任务；新 policy 3 的任务可通过统一 `Backend` 校验后续接原生 W 会话，不支持或原连续性不可用时明确新上下文，未确认续接不当成功，也不重放未知提交；策略 v2 用 `decision` 请求提交前 Final A；已冻结 v1
+任务和额度；窗口数为一个初始窗口加已完成压缩次数。新声明另冻结
+`policies.worker_context_handoff_version=2`，对应内部 `context_handoff_version=2`：最后完整窗口
+达到 90% 只提醒收口，压缩后继续工作；已启动窗口数超过冻结额度且当前新鲜占用严格大于 70%
+才交新 W，不自动 A。因此 max=1 为一个完整窗加下个窗 70%，max=2 为两个完整窗加下个窗 70%。
+缺失或过期占比不新增停止条件，压缩本身不交接。旧无版本声明保留 85% 提醒和按次数交接门禁，导出时写公开版本 1；新准备默认版本 2，显式 1 可保留旧语义。显式 `handoff` 同样交新 W；`revise_h`
+和 `review` 分别请求串行 H/A 咨询，有职责标记的 W 还可用 `extract` 咨询 E，结束后交后继 W 任务；新 policy 3 的任务可通过统一 `Backend` 校验后续接原生 W 会话，不支持或原连续性不可用时明确新上下文，未确认续接不当成功，也不重放未知提交；策略 v2 用 `decision` 请求提交前 Final A；已冻结 v1
 直接请求 protected Final A，无策略字段的旧 W 仍请求普通 A 评估。
 咨询不消费正式 A 周期，不改变主线、推荐或资格；正式独审保持精确 subject 和中性输入。
 
@@ -959,11 +1099,12 @@ logical node receives one token-risk and one time-risk notice across resumes, at
 most two risk notices; ordinary W has a separate context-review notice. Token advice
 does not suppress later time advice. Notices arrive
 at the next supported local tool boundary without interrupting the current request.
-For ordinary A, node targets and unexhausted shared risk advise closing only the
+For marked ordinary A, notices close only the diagnosis and return advice to W;
+they do not widen its action set. For unmarked ordinary A, node targets and unexhausted shared risk advise closing only the
 current assessment, retaining unmet goals and choosing the normal `next_action`
 from evidence and shared balance, including `continue_w`, `revise_h` or `extract`
 when justified. A node target does not end research. Only when shared tokens or
-shared time are actually exhausted (remaining <= 0) must ordinary A immediately
+shared time are actually exhausted (remaining <= 0) must unmarked ordinary A immediately
 summarize existing results and `deliver` an eligible existing candidate or `finish`
 with gaps, without new H/W/E. Strategies v1 and v2 request protected Final A through that
 choice; unmarked legacy A retains its original terminal authority. These are advisory thresholds, not new
@@ -982,9 +1123,10 @@ their completion policy; see [architecture](ARCHITECTURE.md).
 严格低于总时限的 10% 时提醒；每逻辑节点的 token、time 风险各一次，跨 resume 去重，最多
 两次风险提醒，普通 W 另有独立的上下文复核提醒。token 提醒不抑制后续 time 提醒；
 在下一受支持本地工具边界生效，不打断当前请求。
-普通 A 遇到节点目标或尚未耗尽的共享风险时，只收口当前评估并保留未达目标，按证据与
+有职责标记的普通 A 只收口诊断并返回 W，提醒不扩大其动作集；以下普通 A 路由说明适用于无职责标记的旧任务。
+旧普通 A 遇到节点目标或尚未耗尽的共享风险时，只收口当前评估并保留未达目标，按证据与
 全局余额选择正常 `next_action`，有依据时仍可 `continue_w`、`revise_h` 或 `extract`；
-节点目标本身不终止研究。仅当共享 token 或共享时间实际耗尽（剩余量 <= 0）时，普通 A
+节点目标本身不终止研究。仅当共享 token 或共享时间实际耗尽（剩余量 <= 0）时，旧无职责标记的普通 A
 才须立即总结已有结果，用已有合格候选 `deliver`，无合适候选则 `finish` 并保留缺口，
 不新开 H/W/E；策略 v1/v2 由此请求 protected Final A，无策略字段的旧 A 保留原终态权限。
 阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知

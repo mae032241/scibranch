@@ -26,6 +26,16 @@ def supervision_fraction(*,initial_tokens,initial_seconds,observed_tokens,active
     return max(ratios) if ratios else None
 
 
+def supervision_budget_facts(basis, observed, limits):
+    """Raw original shared dimensions and coverage; no backend-specific reads."""
+    return dict(tokens=observed.get('accounted_tokens',observed['observed_tokens']),
+        seconds=limits['consumed_seconds'],
+        limits=dict(tokens=basis['max_tokens'],seconds=basis['max_seconds']),
+        complete=dict(tokens=not (observed.get('unknown_step_count') or observed.get('blocking_unknown_count')
+            or observed.get('unknown_steps') or observed.get('blocking_unknown_steps')),
+            seconds=limits['consumed_seconds'] is not None and not limits.get('unmeasured_shutdown_tail')))
+
+
 def clock_stamp():
     return dict(at_unix=time.time(), at_boottime=time.clock_gettime(time.CLOCK_BOOTTIME),
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
@@ -1263,6 +1273,13 @@ def node_limits(root, job, *, settings=None):
     require_settings_format(settings)
     policy = settings.get('node_budget_policy')
     if policy is None:
+        request=job.get('supervision_request') or {}
+        if ((settings.get('supervision_policy') or {}).get('version')==4
+                and job.get('role')=='A' and request.get('automatic') is True
+                and request.get('final') is False):
+            # Reuse the original global ceilings solely as the existing soft
+            # node anchor. No extra allocation or backend target is introduced.
+            return dict(max_observed_tokens=settings['max_tokens'],max_seconds=settings['max_seconds'])
         if job.get('final_only') and job.get('role') == 'A':
             if job.get('purpose') == 'closeout' and settings.get('delivery_policy') is not None:
                 return dict(settings['delivery_policy']['closeout_a'])
@@ -2706,7 +2723,9 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
             'Original finite external-call and resource limits still apply.')
         if context_max is not None:
             from . import native_usage
-            hint['worker_context_windows'] = dict(maximum=context_max, advice_ratio=.85,
+            hint['worker_context_windows'] = dict(maximum=context_max, advice_ratio=(.90 if settings['worker_fragment_policy'].get('context_handoff_version')==2 else .85),
+                **(dict(context_handoff_version=2,handoff_ratio=.70,complete_windows=context_max)
+                    if settings['worker_fragment_policy'].get('context_handoff_version')==2 else {}),
                 **native_usage.context_windows((context_observation or {}).get('context_windows')))
             current_context=native_usage.context((context_observation or {}).get('context'))
             hint['worker_context'] = {key:current_context[key] for key in ('status','total_tokens',
@@ -2719,12 +2738,20 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
                 'Node time/token targets do not set this cadence. Unknown calls never replay. '
                 'Shared budgets and original finite experiment/resource limits hold. '
                 'Soft next-tool/checkpoint boundary: native compaction/requests may overshoot; unknown usage is not zero.')
+    if ordinary and job['role']=='W' and context_max is not None and settings['worker_fragment_policy'].get('context_handoff_version')==2:
+        hint['instruction']=(f'Context policy: allow {context_max} complete native window(s), then use the next current window until occupancy exceeds 70%. '
+            'At 90% within allowed complete windows, prepare a safe checkpoint; automatic compaction alone does not require handoff. '
+            'Only a valid current-window occupancy above 70% after those complete windows requests a fresh W. '
+            'Missing occupancy remains unknown. Reconcile originals; never replay. Shared budgets, independent reflection and original permissions hold.')
     if followup_tokens:
         hint['instruction'] += (' Allow for at least the suggested follow-up token targets '
             +', '.join(f'{role}={tokens}' for role,tokens in followup_tokens.items())
             +'; these are advice, not reserved tokens or authorization.')
     if ordinary and job['role']=='A':
-        if job.get('research_strategy_version') in (1,2,3):
+        if contracts.guidance.advisory_assessment(job):
+            hint['instruction'] += (' Return fallible advice with continue_w and decision_request=null; no material issue adds no constraints. '
+                'W judges the concern and chooses its response. Shared exhaustion is handled by control admission and separate Final A; ordinary advice grants no new work or delivery.')
+        elif job.get('research_strategy_version') in (1,2,3):
             hint['instruction'] += (' Finish the current assessment by evidence/shared balance; node targets do not end research. '
                 'Existing productive work may continue with continue_w and decision_request=null. '
                 'At exhausted shared budgets, summarize existing results and gaps and use finish/deliver to request the protected final A. '
@@ -2764,10 +2791,11 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
         target_seconds=targets['max_seconds'] if targets else None,
         fragment_enabled=fragment_enabled,
         author=author,final_return=final_return is not None,
-        max_context_windows=context_max,context_observation=context_observation)
+        max_context_windows=context_max,context_observation=context_observation,
+        context_handoff_version=(settings.get('worker_fragment_policy') or {}).get('context_handoff_version'))
     if progress_notice is not None:
         notices['progress']=progress_notice
-        hint['target_state']=('near' if progress_notice['text']==budget_notice.WORKER_CONTEXT_NEAR_TEXT
+        hint['target_state']=('near' if progress_notice['text'] in {budget_notice.WORKER_CONTEXT_NEAR_TEXT,budget_notice.WORKER_CONTEXT_90_TEXT}
             and hint['target_state']!='reached' else 'reached')
     if direction_review is not None:
         hint['direction_review']=direction_review
@@ -2884,14 +2912,17 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
                 initial_seconds=basis['max_seconds'],
                 observed_tokens=shared.get('accounted_tokens',shared['observed_tokens']),
                 active_seconds=limits['consumed_seconds']) if basis is not None else None)
+        supervision_facts=supervision_budget_facts(basis,shared,limits) if basis is not None else None
         direction_review=supervision.worker_review(job,intent,summary=current_search,
-            budget_fraction=fraction,
-            selected_policy=settings.get('supervision_policy') if settings.get('search_policy') is not None else None)
+            budget_fraction=fraction,budget_facts=supervision_facts,
+            selected_policy=settings.get('supervision_policy') if settings.get('search_policy') is not None else None,
+            current_work=dict(tokens=consumed,seconds=duration,
+                calls=(facts.get('research_investment') or {}).get('total_calls')))
         investment=None;investment_notice=False
         if job.get('research_strategy_version')==3:
             chosen=supervision.policy(settings['supervision_policy']) if settings.get('supervision_policy') else None
-            if chosen is not None and chosen['version'] in (2,3):
-                status=supervision.due(current_search,budget_fraction=fraction,policy=chosen)
+            if chosen is not None and chosen['version'] in (2,3,4):
+                status=supervision.due(current_search,budget_fraction=fraction,policy=chosen,budget_facts=supervision_facts)
                 state=supervision.observe(current_search,fraction,selected_policy=chosen)
                 counts=state['investment']
                 live_observed=facts.get('research_investment') is not None
@@ -2899,6 +2930,9 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
                     mechanism_ref=counts['mechanism_ref'],mode=chosen['mode'],
                     coverage='live' if live_observed else 'accepted_lower_bound',
                     due=status['due'] if live_observed or status['due'] or chosen['mode']=='off' else None)
+                if chosen['version']==4:
+                    investment['automatic_allowed']=status['automatic_allowed']
+                    investment['suppression_reason']=status['suppression_reason']
                 investment_notice=(chosen['mode']=='notice' and status['due'] and not status['cooldown']
                     and job.get('purpose') is None and not job.get('evidence_return')
                     and not intent.get('output_repair') and not intent.get('work_repair')
@@ -2918,11 +2952,12 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
         progress_due=budget_notice.worker_progress_due(job,intent,active_seconds=duration,
             target_seconds=targets['max_seconds'] if targets else None,
             fragment_enabled=checkpoint.enabled_for_policy(job,settings=settings),
-            max_context_windows=context_max,context_observation=context_observation)
+            max_context_windows=context_max,context_observation=context_observation,
+            context_handoff_version=(settings.get('worker_fragment_policy') or {}).get('context_handoff_version'))
         reason=('shared_usage_unknown' if _usage_unknown(shared, (job['step'],)) else
             'reserve_reached' if budget_limits.reached(available_seconds) or budget_limits.reached(available_tokens) else
             'worker_direction_review_due' if direction_review is not None else
-            budget_notice.worker_context_reason(context_max,context_observation) if context_max is not None and progress_due else
+            budget_notice.worker_context_reason(context_max,context_observation,version=(settings.get('worker_fragment_policy') or {}).get('context_handoff_version')) if context_max is not None and progress_due else
             'worker_progress_review_due' if progress_due else
             'target_time_reached' if context_max is None and targets and duration>=targets['max_seconds'] else
             'target_tokens_reached' if context_max is None and targets and consumed>=targets['max_observed_tokens'] else None)

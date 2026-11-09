@@ -63,6 +63,10 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     from . import storage_policy as storage
     if _existing_settings is not None:
         research_strategy_version = _existing_settings.get('research_strategy_version')
+    if (_existing_settings is not None and 'advisory_scope_version' in _existing_settings
+            and (type(_existing_settings['advisory_scope_version']) is not int
+                or _existing_settings['advisory_scope_version']!=1 or research_strategy_version!=3)):
+        raise ValueError('Unsupported frozen advisory scope')
     if supervision_policy is _DEFAULT_SUPERVISION_POLICY:
         supervision_policy=(supervision.AUTOMATIC_REFLECTION_POLICY if research_strategy_version==3 else supervision.DEFAULT_POLICY)
     if research_strategy_version is not None and (type(research_strategy_version) is not int or research_strategy_version not in (1, 2, 3)):
@@ -144,11 +148,42 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
            for value in (reasoning_effort, service_tier)):
         raise ValueError('Reasoning effort and service tier must be nonempty strings or null')
     from . import profiles, skill_supply
+    if _existing_settings is None:
+        # Resolve only declarations here. Provider-normalized global defaults
+        # cannot masquerade as an explicit user denial of the new W default.
+        from copy import deepcopy
+        if role_profiles is not None and not isinstance(role_profiles,dict):
+            raise ValueError('Role profiles must name only H, W, A or E')
+        declared_roles=deepcopy(role_profiles or {})
+        worker=declared_roles.get('W',{})
+        if not isinstance(worker,dict):raise ValueError('W role profile must be a table')
+        if worker_profiles is not None and not isinstance(worker_profiles,dict):
+            raise ValueError('Named Worker profiles must be a table')
+        name=worker.get('worker')
+        if name is not None and not isinstance(name,str):
+            raise ValueError('Role profile references an unknown named Worker')
+        inherited=(worker_profiles or {}).get(name,{}) if name is not None else {}
+        if 'subagents' not in worker and isinstance(inherited,dict) and 'subagents' in inherited:
+            worker['subagents']=inherited['subagents']
+        capable=agent_backends.selected(backend_settings).subagent_capability().get('status')=='supported'
+        if capable or 'subagents' in worker:
+            if 'subagents' not in worker:
+                worker['subagents']=((native_options or {})['subagents']
+                    if 'subagents' in (native_options or {}) else True)
+            if worker['subagents'] is True and not capable:
+                raise ValueError('The selected Backend does not support W subagents')
+            declared_roles['W']=worker
+            role_profiles=declared_roles
+        elif (native_options or {}).get('subagents') is True:
+            raise ValueError('The selected Backend does not support subagents')
     frozen_skills = skill_supply.prepare(skills, backend=native_backend,
         launcher=launcher, existing=_existing_settings,
         role_profiles=role_profiles, worker_profiles=worker_profiles)
     frozen_profiles = profiles.normalize(role_profiles if role_profiles is not None else {}, dict(model=model, reasoning_effort=reasoning_effort,
         service_tier=service_tier), worker_profiles, (frozen_skills or {}).get('sets', {})) if role_profiles is not None or worker_profiles is not None else None
+    if (frozen_profiles is not None and any(row.get('subagents') is True for row in frozen_profiles.values())
+            and agent_backends.selected(backend_settings).subagent_capability().get('status')!='supported'):
+        raise ValueError('The selected Backend does not support declared role subagents')
     if (not isinstance(launcher, list) or not launcher
             or not all(isinstance(item, str) and item.strip() for item in launcher)):
         raise ValueError("An explicit native launcher argument list is required")
@@ -215,7 +250,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         if _existing_settings is not None:
             role_guidance = _existing_settings.get('role_guidance')
         else:
-            role_guidance = (guidance.WORKER_FIRST if research_strategy_version == 3 else
+            role_guidance = (guidance.ADVISORY_WORKER_FIRST if research_strategy_version == 3 else
                 guidance.WORKER_LED if research_strategy_version in (1, 2) else
                 guidance.OPPORTUNITY if portfolio_limits is not None and portfolio_limits.get('version', 1) == 2
                 else guidance.DEFAULT)
@@ -229,6 +264,12 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     resume_limits = continuation.policy(resume_policy, launcher, backend=native_backend) if resume_policy is not None else None
     fragment_limits = checkpoint.policy(worker_fragment_policy) if worker_fragment_policy is not None else None
     if fragment_limits is not None:
+        if 'max_context_windows' in fragment_limits:
+            previous=(_existing_settings or {}).get('worker_fragment_policy') or {}
+            if _existing_settings is None:
+                fragment_limits.setdefault('context_handoff_version',2)
+            elif 'context_handoff_version' in previous:
+                fragment_limits.setdefault('context_handoff_version',previous['context_handoff_version'])
         if ('max_context_windows' in fragment_limits
                 and agent_backends.selected(backend_settings).observation_capability('compactions').get('status')!='supported'):
             raise ValueError('W context-window observation requires supported native compaction observation')
@@ -273,6 +314,11 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     from .protocol import CURRENT
     if frozen_profiles is not None:
         settings['role_profiles'] = frozen_profiles
+        if _existing_settings is None or 'role_profile_declarations' in _existing_settings:
+            # Preserve inheritance in editable declarations: a role permission
+            # default is not an explicit per-role model selection.
+            from copy import deepcopy
+            settings['role_profile_declarations']=deepcopy(role_profiles or {})
     if worker_profiles is not None:
         settings['worker_profiles'] = worker_profiles
         settings['role_profile_declarations'] = role_profiles or {}
@@ -288,6 +334,10 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     settings['worker_view_version'] = 1
     if research_strategy_version is not None or (_existing_settings is not None and 'research_strategy_version' in _existing_settings):
         settings['research_strategy_version'] = research_strategy_version
+    if _existing_settings is None and research_strategy_version == 3:
+        settings['advisory_scope_version'] = 1
+    elif _existing_settings is not None and 'advisory_scope_version' in _existing_settings:
+        settings['advisory_scope_version'] = _existing_settings['advisory_scope_version']
     settings['experiment_mode'] = experiment_mode
     if frozen_execution is not None:
         settings['execution_config']=frozen_execution
@@ -336,6 +386,9 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 settings[key] = deepcopy(_existing_settings[key])
     elif search_limits is not None and supervision_policy is not None:
         settings['supervision_policy'] = supervision.policy(supervision_policy)
+        if settings['supervision_policy']['version']==4 and (research_strategy_version!=3
+                or max_tokens is None and max_seconds is None):
+            raise ValueError('Adaptive reflection requires W-first strategy and a finite original shared budget')
         settings['supervision_budget_basis'] = dict(max_tokens=max_tokens, max_seconds=max_seconds)
     if correction_limits is not None:
         settings['correction_policy'] = correction_limits
@@ -832,21 +885,28 @@ def _check_job(root, settings, step, role, parents, instruction, evidence_return
 
 def _route(root, step, role, result, job, current_h, current_w):
     instruction = result.get("route_reason", "")
+    if guidance.advisory_assessment(job) and result.get('next_action')!='continue_w':
+        raise ValueError('Ordinary advisory A cannot dispatch scientific work or finalize')
     if job.get('purpose')=='worker_consultation':
         target=job.get('evidence_return')
-        if (role not in {'H','A'} or not isinstance(target,dict) or set(target)!={'role','step'}
+        if (role not in ({'H','A','E'} if job.get('advisory_scope_version')==1 else {'H','A'}) or not isinstance(target,dict) or set(target)!={'role','step'}
                 or target.get('role')!='W' or type(target.get('step')) is not int
                 or not 0<target['step']<step
                 or not any(ref['path']==f'inputs/parents/{target["step"]:03d}/conclusion.json' for ref in job['direct_refs'])):
             raise ValueError('Consultation has no exact W requester')
         requester=handoff_state.read_sealed(root,target['step'])
-        if requester['role']!='W' or requester.get('stage_intent')!=('revise_h' if role=='H' else 'review'):
+        if requester['role']!='W' or requester.get('stage_intent')!={'H':'revise_h','A':'review','E':'extract'}[role]:
             raise ValueError('Consultation requester differs from its authored route')
         if role=='H':current_h=step
-        route=('W',_parents(current_h,target['step'],step),
-            f'Continue the original W work in inputs/parents/{target["step"]:03d}/conclusion.json using the consultation in inputs/parents/{step:03d}/conclusion.json. '
+        instruction=(f'Continue the original W work in inputs/parents/{target["step"]:03d}/conclusion.json using the consultation in inputs/parents/{step:03d}/conclusion.json. '
             + ('Original W question: '+requester['route_reason']+' ' if requester.get('route_reason') else '')+
-            'Retain unfinished questions, candidates, mechanisms, materials and consumed opportunities; assess advice against evidence. Consultation grants no qualification or execution permission.',None)
+            'Retain unfinished questions, candidates, mechanisms, materials and consumed opportunities; assess advice against evidence. Consultation grants no qualification or execution permission.')
+        if job.get('advisory_scope_version')==1:
+            instruction=(f'Resume W research toward the original objective using retained originals in inputs/parents/{target["step"]:03d}/conclusion.json '
+                f'and the fallible consultation in inputs/parents/{step:03d}/conclusion.json. '
+                'Judge the concern against evidence; choose self-correction, H for alternatives, E for missing evidence, or evidence-based disagreement. '
+                'No material issue adds no constraints. W owns direction, methods and allocation; original permissions, materials and consumed budgets persist.')
+        route=('W',_parents(current_h,target['step'],step),instruction,None)
         return (*route,current_h,target['step'])
     bound = delivery_review.binding(job)
     if bound is not None:
@@ -942,15 +1002,15 @@ def _route(root, step, role, result, job, current_h, current_w):
                 f'Continue the retained W research in {source}.{request} '
                 'Preserve original directions, unfinished questions, candidates, materials, mechanisms and consumed opportunities. '
                 'Partial sealing is neither independent A review nor mechanism completion; permissions and global budgets persist.',None)
-        elif intent in {'revise_h','review'}:
+        elif intent in {'revise_h','review'} or intent=='extract' and job.get('advisory_scope_version')==1:
             consultation=result.get('consultation_question') if job.get('research_strategy_version')==3 else None
             if job.get('research_strategy_version')==3 and (not isinstance(consultation,str) or not consultation.strip()):
                 raise ValueError('W consultation requires its explicit decision-changing information question')
-            route=('H' if intent=='revise_h' else 'A',_parents(current_h,step),
+            route=({'revise_h':'H','review':'A','extract':'E'}[intent],_parents(current_h,step),
                 f'Answer the requesting W consultation in {source}.{request} '
                 + ('Requested information: '+consultation+' ' if consultation else '')
                 + 'Use its exact question, retained evidence and limitations. '
-                + ('Assess only core scientific direction, decision-changing evidence and delivery/completion at a high level. ' if intent=='review' else '')
+                + (('Diagnose only evidence-backed lock-in, ignored counterevidence or critical alternatives, goal drift or serious logic errors; W judges fallible advice. ' if job.get('advisory_scope_version')==1 else 'Assess only core scientific direction, decision-changing evidence and delivery/completion at a high level. ') if intent=='review' else '')
                 + ('Return advice to the requesting W work; no formal verdict, global decision or execution grant.'
                     if job.get('worker_continuity_version')==1 else
                     'Return advice for a new W; no formal verdict, global decision or execution grant.'),dict(role='W',step=step))
@@ -962,6 +1022,11 @@ def _route(root, step, role, result, job, current_h, current_w):
         action = result["next_action"]
         parents = _parents(current_h, current_w, step)
         if action == "continue_w":
+            if guidance.advisory_assessment(job):
+                instruction=(f'Resume W research toward the original objective using retained originals and the fallible advice in inputs/parents/{step:03d}/conclusion.json. '
+                    'W judges any concern against evidence and chooses self-correction, H for alternatives, E for missing evidence, or evidence-based disagreement. '
+                    'No material issue adds no constraints. W owns direction, methods and allocation; original permissions, materials and consumed budgets persist.')
+                return ('W',parents,instruction,None,current_h,current_w)
             if job.get('research_strategy_version') in (1, 2, 3) and result.get('decision_request') is None:
                 instruction = (f'Continue the existing W work in inputs/parents/{current_w:03d}/conclusion.json. '
                     if current_w is not None else 'Continue the retained W work. ') + (
@@ -1130,7 +1195,8 @@ def _supervision_facts(root, settings):
         initial_seconds=basis['max_seconds'],
         observed_tokens=observed.get('accounted_tokens', observed['observed_tokens']),
         active_seconds=limits['consumed_seconds'])
-    return dict(summary=head['search'], budget_fraction=fraction, policy=selected)
+    return dict(summary=head['search'], budget_fraction=fraction, policy=selected,
+        budget_facts=budget.supervision_budget_facts(basis,observed,limits))
 
 
 def _supervision_route(step, result, route, *, facts, source_job):
@@ -1139,19 +1205,30 @@ def _supervision_route(step, result, route, *, facts, source_job):
             or (route[3] or {}).get('kind') in delivery_review.KINDS):
         return route, None
     summary, fraction, selected = facts['summary'], facts['budget_fraction'], facts['policy']
-    status = supervision.due(summary, budget_fraction=fraction, policy=selected)
+    status = supervision.due(summary, budget_fraction=fraction, policy=selected,budget_facts=facts.get('budget_facts'))
     if (not status['due'] or summary.get('last_w') is None
             or source_job.get('formal_review') or result.get('next_action')=='formal_review'
             or source_job.get('purpose') in {'closeout','formal_review','engineering_repair'}
             or source_job.get('final_only') or source_job.get('final_report')
             or source_job.get('engineering_repair') or route[6] is not None or route[7] is not None):
         return route, None
+    advisory=source_job.get('advisory_scope_version')==1
+    if advisory and source_job.get('purpose')=='worker_consultation':
+        return route,None
+    if advisory and (route[3] or {}).get('role')=='W':
+        if route[0]!='A' or not status['automatic_allowed']:
+            return route,None
+        request=supervision.request(summary,budget_fraction=fraction,policy=selected,
+            automatic=True,budget_facts=facts.get('budget_facts'))
+        return route,request
     ordinary_a = route[0] == 'A' and route[3] is None
     consultation = (route[0] in {'H','A'} and (route[3] or {}).get('role')=='W')
+    if selected['version']==4 and consultation:
+        return route, None
     if not ordinary_a and (route[0]!='W' and not consultation or not status['automatic_allowed']):
         return route, None
     request = supervision.request(summary, budget_fraction=fraction, policy=selected,
-        automatic=not ordinary_a)
+        automatic=not ordinary_a,budget_facts=facts.get('budget_facts'))
     if ordinary_a:
         return route, request
     _, parents, instruction, _, current_h, current_w, _, _ = route
@@ -1166,6 +1243,11 @@ def _supervision_route(step, result, route, *, facts, source_job):
         instruction += (' Review lock-in, goal drift, repeated or ignored evidence, and whether the current depth remains productive. '
             'Counted work and budget checkpoints trigger reflection; they do not establish stagnation. '
             'Retain the original W question and pending work. Do not force a direction change or prescribe an execution recipe.')
+    if advisory:
+        instruction=('Review the exact retained W question, clues and evidence for evidence-backed lock-in, ignored counterevidence or critical alternatives, goal drift or serious logic errors. '
+            'Counts, low scores and consumption only trigger this opportunity; they establish no scientific failure. '
+            'Give fallible advice or no material issue, then return to W; no method prescriptions, exploration bans, binding new work or finalization. '
+            'W decides self-correction, H, E, or evidence-based disagreement. Original objective and permissions persist.')
     return ('A', _parents(current_h, current_w, *direct_parents, *parents, step), instruction, None,
         current_h, current_w, None, None), request
 
@@ -1585,7 +1667,7 @@ def _run(root, *, continue_wait=None):
             return _finish(root,settings,'role_admission_refused',completed,last,
                 reason=share_stop,next_role=next_role)
         if share_stop is not None and (job.get('purpose')=='worker_consultation'
-                or role=='W' and result.get('stage_intent') in {'handoff','revise_h','review'}
+                or role=='W' and result.get('stage_intent') in {'handoff','revise_h','review','extract'}
                 or role=='W' and next_role=='W'):
             # Retain the refused exact successor; reconstruct its same gates on
             # reentry. No corrective H/W job or saved route can bypass the cap.
@@ -1596,7 +1678,9 @@ def _run(root, *, continue_wait=None):
              next_correction, next_author) = role_share.reconsider(root, step, job,
                 (next_role,next_parents,next_instruction,next_return,current_h,current_w,next_correction,next_author),
                 share_stop)
-        if (next_role!='A' or next_return is not None or next_correction is not None
+        merged_consultation=(job.get('advisory_scope_version')==1 and next_role=='A'
+            and isinstance(next_return,dict) and next_return.get('role')=='W')
+        if (next_role!='A' or next_return is not None and not merged_consultation or next_correction is not None
                 or next_author is not None):
             next_supervision=None
         _save_route(root,completed,(next_role,next_parents,next_instruction,next_return,next_correction,next_author),

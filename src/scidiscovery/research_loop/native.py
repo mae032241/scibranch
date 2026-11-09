@@ -162,6 +162,7 @@ def _complete_reported_tokens(root,step):
         metadata=outcome.get('metering')
         if metadata is None and (record/'usage-observation.json').exists():metadata=c.read(c.regular(record/'usage-observation.json'))
         if not isinstance(metadata,dict) or metadata.get('coverage')!='terminal':return None,'terminal_coverage_unavailable'
+        if metadata.get('subagent_usage_coverage') == 'unknown':return None,'subagent_usage_unreported'
         # Present native session counters explicitly leave delay unmeasured.
         # Do not upgrade that lower bound to a complete sample for a number.
         if metadata.get('reporting_delay_unmeasured') is not False or metadata.get('inflight_usage_unknown') is not False:
@@ -222,7 +223,7 @@ def execute_native(root: Path, step: int, *, final_report=None):
     producer_sources={}
     job = _contracts.read_job(job_path,sources=producer_sources)
     profile_binding = profiles.binding(settings, job)
-    initial_backend=backends.selected(settings)
+    initial_backend=backends.selected(settings).for_job(job)
     initial_backend.project_skills(root,settings,job)
     initial_backend.validate_profile(profile_binding.get('native_profile') or profiles.selected(settings,job['role']))
     node_anchor = control_budget.accept_node(root, job, final_report=final_report)
@@ -852,6 +853,8 @@ def run_native(root: Path, step: int, attempt=0):
             observation.update(coverage='unknown', reason=backend.observation_fault(live_meter) or 'terminal_usage_unreported')
         if terminal_usage_observed and not terminal_usage_missing and not terminal_fault:
             backend.retain_terminal(live_meter,observation,terminal_meter)
+        if observation.get('subagent_usage_coverage') == 'unknown':
+            observation['unreported_usage'] = 'Subagent usage is unmeasured; tokens cover the native main thread only.'
         observation['tokens'] = dict(meter)
         if observed:
             write(record / 'usage.json', meter)
@@ -865,7 +868,7 @@ def run_native(root: Path, step: int, attempt=0):
           native_identity=backend.identity(live_meter, thread_id),
           native_backend=backend.name,
           native_schema_transport=backend.active_schema_transport,
-          native_permissions=backends.permission_summary(settings),
+          native_permissions=backend.permissions(settings),
           budget_notification=notice_channel,
           metering=backend.snapshot_observation(live_meter) if process is None else observation,
           limitation='Observed token metadata only; running requests and reporting delay are unmeasured.')

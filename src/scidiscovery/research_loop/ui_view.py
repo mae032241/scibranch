@@ -555,12 +555,14 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
     elif role == 'A':
         reflection=ui_semantics.reflection(job)
         if reflection is not None:
-            facts.append(dict(label='反思结论',value=reflection_response(payload,line['action_label'])))
+            facts.append(dict(label='诊断回程' if ui_semantics.diagnostic_advice(job) else '反思结论',
+                value=reflection_response(payload,line['action_label'],diagnostic=ui_semantics.diagnostic_advice(job))))
         if line['kind'] == 'formal_review':
             verdict = payload.get('verdict')
             facts.append(dict(label='评审结论', value=clean(str(verdict), 200) if verdict is not None else '未记录'))
         else:
-            facts.append(dict(label='咨询答复' if line['kind']=='consultation' else '决定', value=line['action_label'] if action else '未记录'))
+            facts.append(dict(label='咨询答复' if line['kind']=='consultation' else
+                '建议回程' if ui_semantics.diagnostic_advice(job) else '决定', value=line['action_label'] if action else '未记录'))
         reason = first_sentence(payload.get('route_reason'))
         if reason:
             facts.append(dict(label='理由', value=clean(reason, 400)))
@@ -592,6 +594,8 @@ def role_line(reader, node, clean, *, mechanisms=None, labels=None, references=N
                 line['recommendation'] = identity
                 label = (labels or {}).get(identity)
                 facts.append(dict(label='候选推荐', value='★ ' + clean(label if label else str(value), 300)))
+    elif role == 'E' and line['kind'] == 'consultation' and ui_semantics.advisory_scope(job):
+        facts.append(dict(label='证据答复', value=line['action_label']))
     elif action:
         facts.append(dict(label='行动', value=clean(action, 60)))
     return line
@@ -603,13 +607,22 @@ def reflection_facts(value):
         return []
     reasons = []
     for reason in value.get('due_reasons') or []:
-        if reason == 'consecutive_calls':
+        if value.get('policy_version') == 4 and reason == 'changed_authored_question_or_original_receipt':
+            reasons.append('作者问题或原调用收据的输入边界变化；提供控制侧检查机会')
+        elif value.get('policy_version') == 4 and reason == 'operational_no_new_experiment':
+            reasons.append('运行检查机会：没有新的实验输入；不判定科学停滞')
+        elif reason == 'consecutive_calls':
             reasons.append('连续原调用投入达到冻结阈值')
         elif reason == 'consecutive_rounds':
             reasons.append('已声明轮次达到冻结阈值')
         elif isinstance(reason, str) and reason.startswith('budget_checkpoint:'):
             reasons.append('预算检查点 ' + format(float(reason.split(':', 1)[1]), '.0%'))
     facts = [dict(label='反思范围', value='W 的研究问题、线索与证据；触发事实不判断科学进展或停滞')]
+    if value.get('advisory_scope_version') == 1:
+        facts.append(dict(label='诊断职责', value='有证据的局部锁定、忽视反证、目标偏移或严重推理缺陷；建议交回 W，不认可或确认当前方向'))
+    if value.get('policy_version') == 4:
+        facts.append(dict(label='实验性监督策略', value='policy 4；控制侧检查机会'))
+        facts.append(dict(label='冻结 W 来源', value='W #' + str(value['source_w'])))
     facts.append(dict(label='触发原因', value='；'.join(reasons) if reasons else '冻结请求未记录可显示原因'))
     fraction = value.get('budget_fraction')
     facts.append(dict(label='请求时预算消费', value=format(fraction, '.1%') if fraction is not None else '未记录'))
@@ -618,7 +631,9 @@ def reflection_facts(value):
     return facts
 
 
-def reflection_response(payload, action_label):
+def reflection_response(payload, action_label, *, diagnostic=False):
+    if diagnostic:
+        return '诊断建议已返回 W；continue_existing 仅表示回程，不认可或确认当前方向' if payload.get('supervision_result') == 'continue_existing' else action_label or '未记录'
     if payload.get('supervision_result') == 'continue_existing':
         return '继续现有研究（continue_existing）'
     return action_label or '未记录'
@@ -1527,10 +1542,16 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
     delivery, delivery_label = _delivery_state(closeout, chosen, value, unresolved_reference=resolution_error is not None)
     if ui_semantics.kind(job)=='consultation':
         chosen, candidate = None, None
-        delivery, delivery_label = 'consultation', '研究咨询；不产生正式候选推荐'
+        delivery, delivery_label = 'consultation', ('证据咨询答复返回 W；由 W 判断后续研究'
+            if job.get('role') == 'E' and ui_semantics.advisory_scope(job)
+            else '研究咨询；不产生正式候选推荐')
+    elif ui_semantics.diagnostic_advice(job) and not audit:
+        chosen, candidate = None, None
+        delivery, delivery_label = 'consultation', '诊断建议返回 W；不构成方向认可或交付判断'
     if audit:
         delivery, delivery_label = 'audit', '审计请求'
-    explanation = payload.get('selection_explanation') if isinstance(payload.get('selection_explanation'), dict) else None
+    explanation = (payload.get('selection_explanation') if ui_semantics.assessment(job)
+        and isinstance(payload.get('selection_explanation'), dict) else None)
     reason = first_sentence((explanation or {}).get('criteria'), 400) or first_sentence(payload.get('route_reason'), 400)
     change = (explanation or {}).get('criteria_change') if isinstance((explanation or {}).get('criteria_change'), dict) else None
     criteria_change = None
@@ -1545,11 +1566,12 @@ def result_card(reader, step, *, closeout=None, projection=None, goal_completion
     reflection=ui_semantics.reflection(job)
     reflection_rows=reflection_facts(reflection)
     if reflection is not None:
-        reflection_rows.append(dict(label='反思结论',value=reflection_response(payload,
-            ui_semantics.action(job,payload.get('next_action'),A_OUTCOMES))))
+        reflection_rows.append(dict(label='诊断回程' if ui_semantics.diagnostic_advice(job) else '反思结论',value=reflection_response(payload,
+            ui_semantics.action(job,payload.get('next_action'),A_OUTCOMES),diagnostic=ui_semantics.diagnostic_advice(job))))
     return dict(step=step, role=job['role'], kind=ui_semantics.kind(job),
                 reflection_facts=reflection_rows,
-                assessment_label='自动研究反思' if reflection is not None else None,
+                assessment_label=('自动诊断建议（返回 W）' if ui_semantics.diagnostic_advice(job) else '自动研究反思') if reflection is not None else
+                    '研究诊断建议（返回 W）' if ui_semantics.diagnostic_advice(job) else None,
                 next_action=payload.get('next_action'), decision=ui_semantics.action(job,payload.get('next_action'),A_OUTCOMES),
                 summary=clean(payload['summary'], 1200) if isinstance(payload.get('summary'), str) else '未记录摘要',
                 delivery_state=delivery, delivery_label=delivery_label, chosen=None if audit else candidate,

@@ -21,12 +21,15 @@ NATIVE_ORIGINALS = ('native-intent.json', 'native-outcome.json', 'usage.json',
 
 
 def policy(value):
-    if (not isinstance(value, dict) or set(value) - {'context', 'max_context_windows'} or 'context' not in value
+    if (not isinstance(value, dict) or set(value) - {'context', 'max_context_windows', 'context_handoff_version'} or 'context' not in value
             or value['context'] not in {'same_session', 'new_context'}):
         raise ValueError('W fragments require one explicit same_session or new_context strategy')
     if 'max_context_windows' in value and (type(value['max_context_windows']) is not int
             or value['max_context_windows'] not in (1, 2)):
         raise ValueError('W context windows must be 1 or 2')
+    if 'context_handoff_version' in value and (type(value['context_handoff_version']) is not int
+            or value['context_handoff_version'] not in (1,2) or 'max_context_windows' not in value):
+        raise ValueError('Context handoff version 1/2 requires explicit window count')
     return dict(value)
 
 
@@ -82,7 +85,7 @@ def _science(root, job, originals):
     if not isinstance(receipt, dict) or receipt.get('raw_ref') != dict(path=str(Path(root)/row['path']),size_bytes=row['size_bytes']):
         return dict(status='unverified', diagnostic='unbound_final_output'), None
     try:
-        payload = c.science_payload(root / row['path'], 'W', job['handoff_protocol'])
+        payload = c.science_payload(root / row['path'], 'W', job['handoff_protocol'],**c.response_options(job))
     except OutputRepairRequired as error:
         return dict(status='invalid', diagnostic=error.code), None
     return dict(status='present', diagnostic=None), payload
@@ -324,6 +327,6 @@ def disposition(science, *, review_requested=False):
     if science is None:
         return 'repair'
     intent = science.get('stage_intent')
-    if intent not in {'continue','handoff','revise_h','review','decision'}:
-        raise OutputRepairRequired('stage_intent_invalid', 'Use continue, handoff, revise_h, review or decision for the exact intended route.')
+    if intent not in {'continue','handoff','revise_h','review','extract','decision'}:
+        raise OutputRepairRequired('stage_intent_invalid', 'Use continue, handoff, revise_h, review, extract (when allowed) or decision for the exact intended route.')
     return ('handoff' if review_requested and intent=='continue' else intent)

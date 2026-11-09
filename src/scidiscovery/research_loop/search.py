@@ -496,6 +496,11 @@ def _interpret_from_facts(root,job,payload,*,policy,state,selected_inputs):
     state=copy.deepcopy(state)
     if job.get('purpose')=='formal_review' or job.get('formal_review') or job.get('engineering_repair'):
         return dict(state=state,focus=None,allocation=None,diagnostics=[])
+    if (job['role']=='E' and job.get('advisory_scope_version')==1
+            and job.get('purpose')=='worker_consultation'):
+        # Evidence answers its exact requester. It cannot select a mechanism
+        # or acquire a search_review requirement from the W's pending state.
+        return dict(state=state,focus=state['focus'],allocation=state['order']['allocation'],diagnostics=[])
     if job['role']=='A':
         # A assesses the requested claim; W/H retain their authored direction.
         return dict(state=state,focus=state['focus'],allocation=state['order']['allocation'],diagnostics=[])

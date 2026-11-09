@@ -23,12 +23,19 @@ def _request(job,payload):
 
 def validate_supervision(job,payload):
     """Validate a scoped A direction decision from supplied values, without I/O."""
-    if job['role']!='A' or job.get('supervision_request') is None or c.guidance.purpose(job)!='assessment':
+    if job['role']!='A' or job.get('supervision_request') is None or (c.guidance.purpose(job)!='assessment' and not c.guidance.advisory_assessment(job)):
         return None
     result=c.scientific_field(job,payload,'supervision_result')
     action=payload.get('next_action')
     science=payload.get('scientific_result')
     meaningful=isinstance(science,str) and bool(science.strip())
+    if c.guidance.advisory_assessment(job):
+        if meaningful and result=='continue_existing' and action=='continue_w' and payload.get('decision_request') is None:
+            return result
+        from .output_repair import OutputRepairRequired
+        raise OutputRepairRequired('a_supervision_result_inconsistent',
+            'Return continue_w with supervision_result=continue_existing and decision_request=null. '
+            'Use nonblank scientific_result for the evidence-backed concern or no material issue; W decides how to respond. No binding work or finalization request.')
     if meaningful and result=='continue_existing' and action=='continue_w' and payload.get('decision_request') is None:
         return result
     if meaningful and result=='request_evidence' and action in ACTIONS and _request(job,payload) is not None:
@@ -52,6 +59,17 @@ def require_request(job,payload):
             raise OutputRepairRequired('a_delivery_review_incomplete',
                 'Supply nonblank scientific_result. continue_w requires one concrete decision_request with question and change_criterion; no additional authorization is granted.')
         return _request(job,payload) if payload.get('next_action')=='continue_w' else None
+    if c.guidance.advisory_assessment(job):
+        science=payload.get('scientific_result')
+        if (not isinstance(science,str) or not science.strip()
+                or payload.get('next_action')!='continue_w'
+                or 'decision_request' not in payload or payload['decision_request'] is not None):
+            from .output_repair import OutputRepairRequired
+            raise OutputRepairRequired('a_advisory_scope_inconsistent',
+                'Give nonblank scientific_result diagnosing a material evidence-backed reasoning concern or no material issue. '
+                'Return continue_w with decision_request=null; H/E suggestions are advice for W, never dispatch or finalization. Separate engineering/formal scopes retain their existing gates.')
+        validate_supervision(job,payload)
+        return None
     supervision=validate_supervision(job,payload)
     ordinary=(job['role']=='A' and not job.get('formal_review') and c.guidance.purpose(job)=='assessment')
     if ordinary and job.get('research_strategy_version') in (1,2,3):

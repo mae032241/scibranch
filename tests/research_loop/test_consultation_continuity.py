@@ -152,11 +152,14 @@ def test_legal_provider_revision_binds_only_successor_and_uses_explicit_fresh_co
             value=dict(value,native_profile=PROFILE)
         if Path(path)==root/'native-evidence/001/native-outcome.json':
             value=dict(value,native_backend='protocol',terminal_observed=True,cleanup='observed_group_cleaned')
+        if Path(path)==root/'native-evidence/002/science-output.json':
+            value=dict(value,scientific_result='No material reasoning issue is identified in this synthetic advice; W judges its response.',
+                decision_request=None)
         return original_write(path,value)
     with monkeypatch.context() as authored:
         authored.setattr(c,'write',source_receipts)
         first,_,_=finish(root,1,'W',[],stage_intent='handoff')
-    second,_,_=finish(root,2,'A',[1],action='continue_w')
+        second,_,_=finish(root,2,'A',[1],action='continue_w')
     originals=[root/'settings.json',root/'jobs/001.json',root/'jobs/002.json']
     originals.extend(root/'native-evidence'/f'{step:03d}'/name for step in (1,2)
         for name in ('native-intent.json','native-outcome.json','science-output.json','result-identity.json'))

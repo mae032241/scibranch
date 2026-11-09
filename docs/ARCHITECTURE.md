@@ -84,7 +84,21 @@ CLI original-call recovery -> same-call reconciliation and bounded maintenance
 ```
 
 W owns sustained research direction, mechanisms, experimental design, implementation,
-adaptation and candidate choice. H supplies evidence-grounded, revisable initial
+adaptation and candidate choice. New preparation enables W's native subagents by
+default only when the selected Backend supports them. The effective boolean is
+frozen separately from the model profile in the job/intent as `native_subagents`,
+and the actual Backend applies it for that invocation. An explicit role
+`subagents` value takes priority over an explicit global value; otherwise the
+capability determines the new W default. Other roles retain their declared global
+permissions, and old jobs without the role field retain their original options.
+Unsupported backends, including native Pi, do not acquire an emulated subagent
+path. When enabled, W prefers native subagents for small evidence extraction or
+scripts; when unavailable or disabled W does that small work itself without an
+extra handoff. W independently considers E only for large or complex evidence work.
+Main-thread resume remains separate from complete authorship: enabled subagents
+leave participant completeness unsupported, and observed main-thread token totals
+are lower bounds with child usage unknown. These limits grant no formal-review
+qualification or original-call replay permission. H supplies evidence-grounded, revisable initial
 explanations and distinguishing experiments; W may reject or revise them and consult
 H when an explanatory gap, contradiction or stalled progress warrants it. Routine
 batches, new mechanisms and context renewal do not require A. Breadth is reconsidered
@@ -116,18 +130,26 @@ appropriate to the declared goal. The strategy does not prescribe a search tree,
 method-family coverage or one validation recipe for every scientific question.
 
 H offers distinct explanations, representations or decompositions with their
-evidence and uncertainty. Ordinary A looks for target drift, ignored counterevidence,
-repetition and premature local commitment. It distinguishes productive deepening
-from stagnation and may explicitly support the current route. It identifies the
-important concern and supporting originals, leaving methods and allocation to W;
-it does not manufacture defects, mandatory experiments or proof obligations.
-`continue_w` with `decision_request:null` returns to existing W work. A specific new
-evidence request still requires a concrete question and change criterion; repeated
-completed requests without new originals retain their existing guard.
+evidence and uncertainty. New strategy-3 preparations additionally freeze
+`advisory_scope_version=1` in settings and jobs. Marked ordinary A diagnoses
+evidence-backed local lock-in, ignored counterevidence, goal drift or severe
+reasoning flaws. It states findings and possible H/E consultation suggestions in
+`scientific_result`; no material issue means no new constraint. W owns routine
+strategy, model, depth, folds, bagging, expansion and ordering, and decides whether
+to consult H or E. Calls, low scores and budget points alone are not evidence of
+lock-in. Ordinary A returns only `continue_w` with `decision_request:null`.
+For a frozen automatic request, `supervision_result=continue_existing` is only
+the return-to-W wire code; it does not endorse or confirm the scientific direction.
+The successor W task does not promote A's `route_reason` into its main question
+or require preservation of the preceding local focus. The diagnostic scope is
+independent of trigger policy 3/4 and adds no public policy-version bump.
 
-An ordinary A's `deliver` or `finish` requests Final A; it does not authorize
-submission. With original budget remaining, v2/v3 W's voluntary `decision` or an
-ordinary A's closeout request first
+Settings/jobs without this scope marker keep their original ordinary-A actions,
+including bounded evidence requests and requests for Final A through `deliver`
+or `finish`; they are not upgraded on recovery, configuration revision or fork.
+Final A, formal independent review and engineering repair keep separate authority.
+With original budget remaining, v2/v3 W's voluntary `decision` (or an unmarked
+ordinary A's closeout request) first
 requests one pre-delivery Final A before irreversible final lock. That same A may
 accept exact `deliver`, reject every candidate with `finish` and no recommendation,
 or request one concrete decision-changing W correction. Correction uses only the
@@ -177,7 +199,10 @@ with `worker_fragment_policy.max_context_windows=1`; TOML
 `policies.worker_context_windows` accepts 1 or 2. `stage_intent=continue` keeps the
 same logical W job and cumulative allowance. `handoff` seals the current result
 and starts a new W; `revise_h` asks H for consultation and `review` asks A for
-reflection. Under strategy v2/v3, W uses `decision` for pre-delivery Final A; frozen
+reflection. Marked W can use `extract` to ask E for bounded evidence help. These
+consultations require the authored `consultation_question` and bind exact requester,
+evidence and materials. H/E answer that question and return directly to W, without
+ordinary A selecting the next research step. Under strategy v2/v3, W uses `decision` for pre-delivery Final A; frozen
 strategy v1 requests protected Final A directly, while unmarked legacy W uses it for ordinary A
 assessment. Consultation is a
 serial job with `purpose=worker_consultation` and an exact W return binding. Its
@@ -191,15 +216,25 @@ An uncertain or failed requested resume never triggers a fresh replay. Only the
 verified native outcome reports same_session; planned resume is not success. Ordinary A consultation does not consume an
 assessment cycle, update main-line judgment, recommend a candidate or grant qualification.
 
-Window use is count-only: one initial window plus completed compactions, against
-the frozen allowance of one or two windows. Same-session resume preserves that
-count and deduplicates already accepted compaction events. A completed compaction
-beyond the allowance closes the partial W result at the next supported observable
-boundary and hands it to a new W; this boundary alone does not request A. New calls
-pause while querying, collecting and reconciling original calls remain available.
-Fresh current-thread/turn occupancy is optional early advice: at 85% of the final
-allowed window W is asked to prepare a safe checkpoint. This does not replace the
-completed-compaction gate. Missing or stale occupancy adds no stop. The existing native
+New preparations with `max_context_windows` additionally freeze
+`worker_fragment_policy.context_handoff_version=2` (public declaration:
+`policies.worker_context_handoff_version=2`), independently of the advisory
+scope. One initial window plus accepted completed compactions gives windows started.
+Same-session resume preserves this count and deduplicates compaction events. In
+the final permitted complete window, fresh occupancy at or above 90% only advises
+a safe checkpoint. Compaction then allows useful work in the new window: handoff
+is required only when windows started exceeds `max_context_windows` and valid
+current-window occupancy is strictly greater than 70%. Thus max=1 allows one
+complete window plus 70% of the post-compaction window; max=2 allows two complete
+windows plus 70% of the next window. A compaction/count alone never requests handoff
+under v2. Missing or stale occupancy remains unknown and adds no stop. At the
+supported handoff boundary W seals a partial result for a new W, without automatic
+A; new calls pause while original query/collect/reconciliation remain available.
+Unversioned frozen policies preserve the earlier 85% notice and count-based
+handoff after compaction exceeds the allowance. The public field accepts 1 for
+legacy and 2 for the new rule; new preparation defaults to 2. Export writes 1 for
+a retained private absence, so export/reapply does not silently upgrade it. Fork
+retains the original private marker or absence. The existing native
 helper receives small control facts through required `PostCompact` and
 `PostModelRequest` hooks and bounded assistant text on native stdout. It does not
 observe tool/input/output bodies or scan private rollout files. Required hooks
@@ -247,8 +282,9 @@ independent database or execution permission.
 
 H consultations consume W's concrete question, relevant originals and candidate
 gaps, returning useful alternatives and cheap distinctions, or no useful addition.
-Ordinary A may endorse continuation or report no new issue; extra work must address
-a concrete gap that could change a decision. Final A independently assesses key
+E consultations supply bounded evidence and limitations to that same W owner.
+Marked ordinary A returns a diagnosis or no material issue, leaving the response
+to W. Unmarked A retains its frozen contract. Final A independently assesses key
 delivery claims, reproducibility and limitations under the existing exact authority.
 
 Ordinary H/W/A/E tasks use three reading levels. The byte-bounded `lineage`
@@ -287,8 +323,7 @@ mode, four consecutive original calls as one trigger, shared-budget checkpoints
 at 30% and 65%, a 20% first-review floor and 20% spacing after accepted review
 completion, and at most two automatic ordinary A reviews. These are inspection
 opportunities, not stagnation verdicts. A receives the authored question, clues
-and exact evidence, may endorse continuation, and requires a decision-changing
-gap for new work. A consumption remains in the original shared budget.
+and exact evidence under its frozen advisory scope. A consumption remains in the original shared budget.
 Original-call notices and enforced reviews remain separate settings; each
 original counts once across continuation and recovery. Frozen policy version 2
 keeps its original automatic-A-off default; version 1 retains its own cadence.
@@ -302,7 +337,40 @@ direction supervision; existing instances retain their frozen policy and basis.
 These automatic checkpoints are experimental scheduling heuristics, with no
 measured scientific benefit; they do not classify stagnation. The existing
 `supervision_policy=None` opt-out adds no new classifier, search tree or knowledge database.
-After a macro review, unknown completion consumption cannot prove a positive
+
+Supervision policy 4 is an explicit, provisional opt-in for new preparations;
+the default remains policy 3 and `research_strategy_version` remains 3. The
+ongoing V3 two-automatic-A scientific test retains its frozen policy and cannot
+establish V4's scientific benefit. Policies 1/2/3 keep their existing behavior.
+V4's draft settings use four original calls, positive `min_budget_fraction=0.10`
+for both the first-review floor and consumption since the preceding assessment
+completion, no fixed `budget_checkpoints`, and separate automatic-A budget
+fractions of 0.25 for tokens and 0.25 for active seconds. An optional
+`max_automatic_reviews` is an emergency count cap; its default is `None` (omit
+it in TOML), rather than a fixed two-review limit.
+
+V4 compares the accepted authored question and exact original-receipt frontier;
+a changed input provides a review opportunity, without a host verdict of new
+scientific evidence. Consumption can also provide an operational opportunity
+with no new experiment. Its frozen ordinary-A request carries `policy_version=4`,
+the exact source W, input cutoffs and original shared-budget scope. The UI
+requires the complete marker and displays only allowlisted reasons and scalar
+summaries; raw budget scope, private paths, native threads and authentication
+never enter its reflection projection.
+
+The V4 automatic-A ceiling uses actual separately metered tokens and active
+seconds from every attempt of each automatic ordinary A, independently of its
+scientific result. It compares cumulative cost per finite shared-budget dimension,
+without subtracting normalized fraction maxima. An unlimited dimension does not
+gate admission. Missing or incomplete usage stays unknown, retains known lower
+bounds and suppresses only additional automatic A until original usage is
+reconciled; it cannot lock W or original query/collect. Reaching the budget
+ceiling or emergency count cap likewise suppresses extra automatic A. This is
+a soft admission ceiling: in-flight A can overshoot, with no new cancellation.
+Final A, formal independent review and W's proactive consultations retain their
+separate purposes and budgets.
+
+Under policies 1/2/3, after a macro review, unknown completion consumption cannot prove a positive
 cooldown interval. Explicit zero spacing permits counting without a budget interval.
 During a continuous W invocation the existing advice producer also checks this
 policy against one accepted head and the already owned live usage. A due review
@@ -310,11 +378,20 @@ pauses new-work admission and asks W to reconcile originals, checkpoint and retu
 original query/collect remains available. After W returns, the existing serial
 ordinary A receives the exact accepted cutoff. Call counts, elapsed time and low
 scores do not manufacture scientific rounds or stagnation judgments. This does
-not forcibly interrupt accepted work. Due supervision precedes the
-next research job and cannot be bypassed by ordinary W renewal or consultation.
-Simultaneous triggers merge into one ordinary A, including an already requested
-assessment. Exact saved routes and frozen jobs retain pending requests on recovery;
+not forcibly interrupt accepted work. For marked consultations, automatic A can
+merge with W's A request while retaining `purpose=worker_consultation` and the
+exact W return binding. Its automatic cost is counted once. W-requested H/E help
+has priority; its returned W receives a useful live work interval under the
+existing call/consumption thresholds before an older pending A. That interval
+does not mark the pending supervision boundary as reviewed. Unmarked jobs retain
+their earlier supervision-before-renewal/consultation ordering. Exact saved routes and frozen jobs retain pending requests on recovery;
 only the accepted A covers its frozen ledger boundary. FINAL takes precedence.
+
+The UI labels marked ordinary A as diagnostic advice returned to W, preserves
+automatic trigger facts even for merged consultation, and never displays
+`continue_existing` as scientific endorsement. E evidence consultation returns
+to W; Final A remains explicitly distinct. Only allowlisted public scalars enter
+the reflection view, without private bindings or raw budget scope.
 
 The UI reads one replaceable compact execution view published by the receipt
 owner, so a current W can show accepted/submitted/observed-running/terminal calls
@@ -338,7 +415,7 @@ it is separate from nominations, A recommendations and qualification.
 
 UI role and action labels follow the frozen purpose, strategy and delivery-review
 scope. Consultation does not choose recommendations, decide an assessment round
-or complete research. Under v2/v3, ordinary A's `finish`/`deliver` requests Final A;
+or complete research. Under v2/v3, unmarked ordinary A's `finish`/`deliver` requests Final A;
 the pre-delivery assessment and bounded W correction are shown separately.
 The UI consumes saved facts once and preserves source-aware memo invalidation;
 it does not reconstruct evidence from call directories or native streams. Older
@@ -352,14 +429,14 @@ original finite deadline while observing explicit recovery; cancellation cleans
 exact bound owners under the writer fence, retaining `cleanup_unknown` if proof
 is missing. A technical pause or cancellation is not a scientific conclusion.
 
-A receives `supervision_request` and returns `supervision_result`:
-`continue_existing` retains W's existing work with `continue_w` and no new request;
-`request_evidence` requires the existing bounded `decision_request`; `finalize`
-uses `finish` or `deliver` to request Final A under strategies v1, v2 and v3. The review may
-endorse productive depth: a trigger is a request for reflection, not evidence that
-the direction failed. W chooses whether and how to change methods or consult H.
-Unmarked legacy A tasks retain their direct finalization authority. Scoped decision
-errors use the same original's bounded output repair.
+Marked A receives `supervision_request` and returns advice through
+`supervision_result=continue_existing`, `continue_w` and `decision_request:null`.
+This is a return-to-W code, not an endorsement of the current direction. Unmarked
+A retains frozen `request_evidence` with bounded `decision_request` and `finalize`
+with `finish/deliver`; legacy tasks without a strategy marker retain direct
+finalization authority. Triggers prove no scientific failure. W chooses whether
+and how to adapt or consult H/E. Scoped decision errors use the same original's
+bounded output repair.
 
 Reports and reusable diagnostic scripts belong in `artifacts/`; `work/` is scratch.
 H's `minimal_test` accepts nonempty text, objects or lists. Derived mechanism
@@ -934,7 +1011,7 @@ Collecting or cancelling an already accepted call retains its original authority
 and identity; it grants no new submission and never resubmits the original. These
 operations remain bounded by the original call or an explicit finite maintenance window.
 
-Ordinary A assignments require an assessment of each original objective and authorized
+Final A and unmarked ordinary A assignments require an assessment of each original objective and authorized
 scope requirement. Key claims cite locatable observations and experiment conditions,
 distinguishing measurement, inference and assumption. A separates target metrics from
 proxies and sensitivity checks, compares relevant alternatives by the same goal
@@ -942,13 +1019,13 @@ criteria, and explains conflict, uncertainty and missing inputs. Workflow comple
 audit qualification, exhausted budgets, `finish` and delivery do not establish an
 unmeasured goal; A reports unmet objectives when stopping.
 
-Ordinary-stage planning asks authors to retain a public comparison design and
+For unmarked ordinary-A tasks, ordinary-stage planning asks authors to retain a public comparison design and
 exact evaluator, report and procedure references through the existing input
 selection. Changed conditions limit comparisons; procedure-level evidence must
-not silently become evidence for a different saved artifact. Before ordinary work
+not silently become evidence for a different saved artifact. Before that unmarked ordinary work
 closes, A may request a small affordable comparison of complete procedures using
 shared conditions and useful repetitions. This advice adds no quota, score-based
-default or acceptance gate. Ordinary A assessments and non-protected closeout
+default or acceptance gate. Unmarked ordinary A assessments and non-protected closeout
 may reject all candidates or report missing comparisons with a finite conclusion.
 Protected FINAL uses existing evidence and its frozen response options. Strategy v2
 permits reject-all `finish` even with retained delivery sources; `deliver` requires
@@ -1183,10 +1260,11 @@ Shared active time prompts a notice only when strictly less than 10% of the tota
 time limit remains. Token and time risks each receive one notice per logical node
 across resumes; a token notice does not suppress a later time notice. Ordinary W
 can also receive one independent review-window notice, separate from those two
-risk notices. For ordinary A, node targets or unexhausted shared risk advise closing only
+risk notices. Marked ordinary A closes its diagnosis and returns advice to W without
+expanding its action set. For unmarked ordinary A, node targets or unexhausted shared risk advise closing only
 the current assessment, retaining unmet goals and choosing the normal `next_action`
 from evidence and shared balance; node targets do not end research. Only when
-shared tokens or time are actually exhausted (remaining <= 0) must A immediately
+shared tokens or time are actually exhausted (remaining <= 0) must unmarked ordinary A immediately
 summarize existing results and `deliver` an eligible existing candidate or `finish`
 with gaps, without new H/W/E. Under strategies v1, v2 and v3 this requests protected Final A;
 an unmarked legacy A retains its original terminal authority. These thresholds remain advice,
@@ -1205,7 +1283,7 @@ durable FINAL phase; pending originals retain their waiting mechanism. This
 uses the required frozen final-A completion capability; it does not invent a
 scientific conclusion or execution grant.
 Under strategy v1, ordinary A `finish`/`deliver` enters protected Final A before
-any submission. Strategies v2/v3 use pre-delivery Final A while budget remains and
+any submission. Unmarked ordinary A under strategies v2/v3 uses pre-delivery Final A while budget remains and
 protected Final A when exhausted. Final A
 uses its existing completion policy rather than granting another exploration cycle.
 Missing evidence or authority remains an explicit undelivered result.
@@ -1217,7 +1295,7 @@ that sealed author's exact candidate authorization, with no additional FINAL aut
 A budget cutoff does not reopen an already validly sealed ordinary A `deliver` or
 `finish` as a new scientific FINAL. External delivery remains limited to the
 original identity's finite `submit` and same-operation `confirm`; unknown effects
-require reconciliation of that original call. When selection policy is enabled, the ordinary A
+require reconciliation of that original call. When selection policy is enabled, the unmarked ordinary A
 receives its frozen complete comparison catalogue before authoring its result;
 delivery verifies that same catalogue and all original qualification gates.
 Delivery failure or missing qualification retains the unresolved result without
@@ -1239,9 +1317,9 @@ The ordinary control boundaries remain distinct:
 | --- | --- |
 | H `wait`, no pending/unknown execution | Durable FINAL; `final_unavailable` if its frozen capability is absent. |
 | H `wait`, pending/unknown execution | Preserve waiting and the original call. |
-| Ordinary A `wait` | Stop at that sealed wait; only exact explicit continuation may reopen it. |
+| Unmarked ordinary A `wait` | Stop at that sealed wait; only exact explicit continuation may reopen it. |
 | Strategy v1 ordinary A `finish` / `deliver` | Enter protected Final A; ordinary A supplies no submission authorization. |
-| Strategy v2/v3 ordinary A `finish` / `deliver` | Request pre-delivery Final A when budget remains, protected Final A when exhausted; no ordinary submission authorization. |
+| Strategy v2/v3 unmarked ordinary A `finish` / `deliver` | Request pre-delivery Final A when budget remains, protected Final A when exhausted; no ordinary submission authorization. |
 | Strategy v2/v3 voluntary W `decision`, budget available | Pre-delivery Final A: exact delivery, reject-all finish, or one bounded correction followed by at most one reassessment. |
 | Strategy v2/v3 budget exhausted | Protected Final A from originals only; reject-all finish remains available despite candidate inventory. |
 | Unmarked legacy ordinary A `finish` | Stop without submission or a goal-success assertion. |

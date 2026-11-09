@@ -263,7 +263,19 @@ def authored_excerpt(payload):
 
 
 
-def research_navigation(prior, job, payload, *, node_path, supervision_state=None, memory_facts=None):
+_MEMORY_UNPRODUCED=object()
+
+
+def retained_research_memory(prior, job, payload, *, node_path, memory_facts):
+    from . import research_memory
+    return research_memory.retain(prior,job,payload,
+        source=dict(source_step=job['step'],source_role=job['role'],
+            science='inputs/history/'+node_path+'/science.json',
+            original='inputs/history/'+node_path+'/scientific-original.json'),facts=memory_facts)
+
+
+def research_navigation(prior, job, payload, *, node_path, supervision_state=None, memory_facts=None,
+        retained_memory=_MEMORY_UNPRODUCED,budget_facts=None):
     """Project authored research locators at the existing single-node writer.
 
     The producer supplies the preceding accepted navigation and current original.
@@ -290,7 +302,7 @@ def research_navigation(prior, job, payload, *, node_path, supervision_state=Non
         scope='Derived authored-source navigation only. Excerpts mark omissions; linked originals retain complete text. For complete candidate navigation, inspect candidate entities in the linked node index and follow its previous links. Consultation is not a completed A assessment cycle. Authored navigation and candidate availability grant no qualification. No scientific ranking or confidence is inferred.')
     if supervision_state is not None:
         from . import supervision
-        result['direction_supervision']=supervision.project(supervision_state)
+        result['direction_supervision']=supervision.project(supervision_state,budget_facts=budget_facts)
         previous={row['round_id']:row for row in prior.get('direction_supervision',{}).get('recent_rounds',[])}
         for row in result['direction_supervision']['recent_rounds']:
             if row['source_step']==job['step']:
@@ -298,9 +310,8 @@ def research_navigation(prior, job, payload, *, node_path, supervision_state=Non
             elif row['round_id'] in previous and 'original' in previous[row['round_id']]:
                 row['original']=previous[row['round_id']]['original']
     if job.get('research_strategy_version')==3 or prior.get('candidate_memory') is not None:
-        from . import research_memory
-        memory=research_memory.retain(prior,job,payload,
-            source=dict(source_step=job['step'],source_role=role,science=science,original=original),facts=memory_facts)
+        memory=(retained_research_memory(prior,job,payload,node_path=node_path,memory_facts=memory_facts)
+            if retained_memory is _MEMORY_UNPRODUCED else retained_memory)
         if memory is not None:result['candidate_memory']=memory
         result['unresolved_questions']='Read candidate_memory.question, candidate entries and candidate-independent clues: authored observations, applicability, limited negatives and open questions, then their exact scientific originals. Exploratory candidates, declared lineage and results are distinct; a limited negative does not reject a whole mechanism.'
     return result

@@ -881,7 +881,8 @@ def accept_terminal_from_base(root, step, record, *, base, meter, unknown, meter
         job['reported_tokens'] += 0 if meter is None else meter['input_tokens']+meter['output_tokens']
         complete = (meter is not None and not unknown and isinstance(metering, dict)
             and metering.get('coverage') == 'terminal' and metering.get('reporting_delay_unmeasured') is False
-            and metering.get('inflight_usage_unknown') is False)
+            and metering.get('inflight_usage_unknown') is False
+            and metering.get('subagent_usage_coverage') != 'unknown')
         job['complete'] = job['complete'] and complete
         row = dict(previous_row, status='closed', meter=meter, unknown=bool(unknown))
         job['status'] = 'terminal'
