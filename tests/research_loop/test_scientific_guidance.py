@@ -16,7 +16,7 @@ from execution_fixtures import execution_registry
 from scidiscovery.research_loop.protocol import CURRENT
 
 
-def prepare(tmp_path, advice=guidance.DEFAULT, *, research_strategy_version=None):
+def prepare(tmp_path, advice=guidance.ADVISORY_WORKER_FIRST, *, research_strategy_version=3):
     public=tmp_path/'public';public.mkdir();objective=public/'objective';objective.write_text('Adapt experiments to observed results within the scientific objective.')
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,['fake'],max_tokens=100000,max_seconds=3600,max_steps=8,
@@ -37,23 +37,20 @@ def test_only_current_role_literal_is_delivered_and_retained_bytes_are_stable(tm
         assert 'role_guidance' not in c.result_schema(role,CURRENT)['properties']
         prompt, _, schema = native.render_scientific_request(job, view, {}, backend_name='codex',
             instruction_transport='prompt')
-        if role in {'H', 'W'}:
-            assert prompt.count(guidance.STAGE_PLANNING[role]) == 1
+        assert prompt.count(stored[role]) == 1
         if role == 'H':
-            assert 'H explores revisable high-level scientific methods/directions' in prompt
-            assert 'Keep original task constraints/counts/commitments fixed' in prompt
-            assert 'minimal_test' not in prompt
-            assert 'task acceptance' not in prompt
-            assert 'No downstream budget/call/audit caps' in prompt
+            assert stored['H'] in prompt
+            assert 'alternative mechanisms' in prompt and 'W' in prompt
+            assert job['role_purpose_instruction']==guidance.role_contract(job)
         assert 'scientific_work_unit' not in schema['properties']
         originals={p:p.read_bytes() for p in (root/'jobs'/f'{step:03d}.json',work/'science-task.json',record/'result-identity.json')}
-        monkeypatch.setitem(guidance.DEFAULT,role,'Changed future guidance; not this task')
+        monkeypatch.setitem(guidance.ADVISORY_WORKER_FIRST,role,'Changed future guidance; not this task')
         c.build_job(root,step,role,[step-1] if step>1 else [])
         assert c.validate(work)['summary']=='A contribution'
         assert all(p.read_bytes()==value for p,value in originals.items())
 
 
-def test_old_job_without_guidance_is_not_rewritten(tmp_path):
+def test_explicitly_disabled_current_guidance_keeps_frozen_bytes(tmp_path):
     root=prepare(tmp_path,None);job,work,record=finish(root,1,'H',[])
     original={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',work/'science-task.json',record/'result-identity.json')}
     assert 'role_guidance' not in job and 'role_guidance' not in c.science_view(job,root)
@@ -77,7 +74,7 @@ def test_author_and_formal_review_requests_exclude_ordinary_batch_planning(tmp_p
         task = dict(task, review_instruction='Independently assess the exact retained subject.')
     prompt, instruction, _ = native.render_scientific_request(job, task, intent,
         backend_name=backend_name, instruction_transport='prompt', **options)
-    assert all(text not in prompt + instruction for text in guidance.STAGE_PLANNING.values())
+    assert job['research_strategy_version']==3 and job['advisory_scope_version']==1
     if gate == 'author':
         assert 'Completed originals only' in prompt
         assert 'stage_intent=decision' in prompt
@@ -87,7 +84,7 @@ def test_author_and_formal_review_requests_exclude_ordinary_batch_planning(tmp_p
         assert 'Do not edit the subject' in prompt
 
 
-@pytest.mark.parametrize('bad',[{},dict(guidance.DEFAULT,X='unexpected'),{**guidance.DEFAULT,'H':''},{**guidance.DEFAULT,'H':'机'*1000}])
+@pytest.mark.parametrize('bad',[{},dict(guidance.ADVISORY_WORKER_FIRST,X='unexpected'),{**guidance.ADVISORY_WORKER_FIRST,'H':''},{**guidance.ADVISORY_WORKER_FIRST,'H':'机'*1000}])
 def test_invalid_or_oversized_guidance_does_not_prepare(tmp_path,bad):
     with pytest.raises(ValueError):prepare(tmp_path,bad)
     assert not (tmp_path/'instance').exists()

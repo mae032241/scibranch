@@ -1,5 +1,4 @@
 """Explicit context policy uses current occupancy, without scanning native logs."""
-import copy
 import tomllib
 
 import pytest
@@ -40,7 +39,7 @@ def test_missing_or_stale_current_occupancy_cannot_infer_70_from_window_count(ch
     assert notice.worker_context_reason(1,dict(context_windows=dict(coverage='unknown',windows_started=4)),version=2) is None
 
 
-def context_scene(tmp_path, *, maximum=1, version=None, legacy=False, context='same_session'):
+def context_scene(tmp_path, *, maximum=1, version=None, context='same_session'):
     public=tmp_path/'public';public.mkdir()
     goal=public/'goal.md';goal.write_text('Retain scientific work across native context compaction.')
     root=tmp_path/'instance'
@@ -52,16 +51,6 @@ def context_scene(tmp_path, *, maximum=1, version=None, legacy=False, context='s
         worker_fragment_policy=policy,node_budget_policy={role:dict(max_observed_tokens=10000,max_seconds=600) for role in 'HWAE'},
         resume_policy=dict(max_attempts=1,protocol='codex_exec_resume',usage_scope='turn',output_repair=True,
             output_only=True,native_home=str(tmp_path/'native-home')))
-    if legacy:
-        baseline=tmp_path/'baseline'
-        controller.prepare(baseline,goal,public,[str(launcher)],**options)
-        original=copy.deepcopy(c.settings(baseline))
-        original['worker_fragment_policy'].pop('context_handoff_version',None)
-        original.pop('advisory_scope_version',None)
-        options['_existing_settings']=original
-        # The existing-settings path is used by source-preserving preparation.
-        # No source is declared qualified in this synthetic historical fixture.
-        options['_source_facts_factory']=lambda _root,_globals:[]
     controller.prepare(root,goal,public,[str(launcher)],**options)
     job=c.build_job(root,1,'W',[])
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','context fixture')
@@ -98,7 +87,7 @@ def test_real_hint_and_review_publish_same_context_fact(tmp_path,started,used,re
     assert c.read(budget._review_directory(root,job)/'review.json')['reason']=='reserve_reached'
 
 
-@pytest.mark.parametrize('version',[1,2])
+@pytest.mark.parametrize('version',[2])
 def test_explicit_export_form_roundtrip_preserves_context_version(tmp_path,version):
     root,job,_,_,_=context_scene(tmp_path,version=version)
     selected=c.settings(root)
@@ -110,37 +99,6 @@ def test_explicit_export_form_roundtrip_preserves_context_version(tmp_path,versi
     assert options['worker_fragment_policy']==selected['worker_fragment_policy']
     restored=research_config.validate_update(root,document)
     assert restored['worker_fragment_policy']==selected['worker_fragment_policy']
-
-
-def test_legacy_absence_retains_count_rule_and_exports_explicit_one(tmp_path):
-    root,_,_,_,_=context_scene(tmp_path)
-    selected=c.settings(root);legacy=copy.deepcopy(selected)
-    legacy['worker_fragment_policy'].pop('context_handoff_version')
-    assert notice.worker_context_reason(1,observation(2,100))=='worker_context_review_due'
-    assert notice.worker_context_near(1,observation(1,850))
-    assert notice.worker_context_reason(1,observation(2,100),version=1)=='worker_context_review_due'
-    document=research_config.to_document(root,legacy)
-    assert document['policies']['worker_context_handoff_version']==1
-    assert research_config.from_document(document,base=root)['worker_fragment_policy']['context_handoff_version']==1
-    assert checkpoint.policy(legacy['worker_fragment_policy'])==legacy['worker_fragment_policy']
-
-
-def test_real_legacy_context_fork_preserves_exact_absent_private_version(tmp_path):
-    from scidiscovery.research_loop import fork_runtime, fork_service
-    from test_worker_e_consultation import publish
-    root,job,_,_,_=context_scene(tmp_path,legacy=True)
-    assert 'context_handoff_version' not in c.settings(root)['worker_fragment_policy']
-    publish(root,job,stage_intent='handoff')
-    c.build_job(root,2,'W',[1])
-    child=tmp_path/'child';limits=dict(max_tokens=100_000,max_seconds=120,max_steps=8)
-    preview=fork_service.preview(root,2,child,budget=limits)
-    assert preview['status']=='fork_preview_ready',preview
-    result=fork_service.create(root,2,child,budget=limits,
-        expected_preview_id=preview['preview_id'],operation_id='legacy-context-exact-freeze')
-    assert result['status']=='fork_created',result
-    frozen=fork_runtime.build_selected_job(child,2)
-    assert 'context_handoff_version' not in frozen['worker_fragment_policy']
-    assert frozen['worker_fragment_policy']==job['worker_fragment_policy']
 
 
 @pytest.mark.parametrize('used,allowed',[(700,True),(701,False)])

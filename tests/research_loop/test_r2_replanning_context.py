@@ -1,9 +1,8 @@
 """Synthetic planning advice preserves scientific choices and FINAL limits."""
 import copy
 
-import pytest
 
-from scidiscovery.research_loop import contracts as c, guidance, native, search
+from scidiscovery.research_loop import contracts as c, search
 from scidiscovery.research_loop.scientific_intent import resolve_intent
 
 
@@ -23,18 +22,10 @@ def declared_questions():
 
 def test_processed_initial_queue_keeps_temporarily_deferred_scientific_questions_visible():
     state = declared_questions()
-    assessed = dict(identity=(2, 'synthetic-original'), mechanism_ref='h001.m4', allocation=None,
-        breadth=True, mechanism_refs=['h001.m3', 'h001.m4'])
-    review = dict(dispositions=[dict(mechanism_ref=ref, status=item['status'])
-        for ref, item in state['mechanisms'].items()],
-        next_focus=dict(mechanism_ref='h001.m4', action='improve'))
-    result = resolve_intent(state, dict(role='A', step=3),
-        dict(next_action='continue_w', route_reason='The initial queue is processed; the target question remains.',
-            search_review=review), assessed=assessed)
-    assert not result['unfinished_plan']
+    # The accepted producer already processed the initial queue; presentation
+    # retains deferred questions without inventing a fresh A allocation.
     current = copy.deepcopy(state)
-    current['order'].update(remaining=result['unfinished_plan'],
-        discriminating_work=result['discriminating_work'])
+    current['order']['remaining'] = []
     before = copy.deepcopy(current)
     view = search.planning_view(current)
     assert view['initial_queue'] == dict(remaining_count=0, processed=True)
@@ -119,21 +110,6 @@ def test_normal_bind_and_worker_projection_trim_question_excerpts_but_keep_queue
     assert [row['minimal_test'] for row in original['search_plan']['commitments'][:4]] == questions
 
 
-@pytest.mark.parametrize('action', ['continue_w', 'revise_h', 'finish'])
-def test_method_reconsideration_does_not_force_or_block_a_choice(action):
-    state = declared_questions()
-    before = copy.deepcopy(state)
-    payload = dict(next_action=action, route_reason='Reconsider the method after low information return.',
-        search_review=dict(next_focus=dict(mechanism_ref='h001.m4', action='improve')
-            if action == 'continue_w' else None))
-    result = resolve_intent(state, dict(role='A', step=3), payload)
-    assert not result['diagnostics']
-    assert result['focus'] == (dict(mechanism_ref='h001.m4', action='improve')
-        if action == 'continue_w' else None)
-    assert state == before
-    assert c.actions('A') == (*c.ACTIONS['A'], 'audit')
-
-
 def test_h_may_replan_a_method_while_retaining_the_same_mechanism():
     state = declared_questions()
     result = resolve_intent(state, dict(role='H', step=4),
@@ -143,23 +119,3 @@ def test_h_may_replan_a_method_while_retaining_the_same_mechanism():
                 focus=dict(index=1, action='improve'))))
     assert not result['diagnostics']
     assert result['focus'] == dict(mechanism_ref='h001.m4', action='improve')
-
-
-@pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
-def test_method_replanning_advice_preserves_protected_final_boundary(backend_name):
-    job = dict(role='A', handoff_protocol=c.HANDOFF_PROTOCOL, search={})
-    task = c.response_instructions(job)
-    prompt, instruction, _ = native.render_scientific_request(job, task, {},
-        backend_name=backend_name, instruction_transport='developer')
-    assert 'revise_h: methods/bottlenecks without refuting H' in prompt
-    assert 'Independent W phase/major-choice/stall/delivery review' in prompt
-    assert 'continue_w/revise_h/extract allowed' in prompt
-    assert instruction.count(c.AUTHOR_EVIDENCE_GUIDANCE) == 1
-    final, _, _ = native.render_scientific_request(job, task, {},
-        backend_name=backend_name, instruction_transport='developer', final_return=True)
-    assert guidance.STAGE_PLANNING['A'] not in final
-    assert 'Protected FINAL: conclude now; no new role/audit/experiment.' in final
-    final_only = dict(job, final_only=True)
-    _, _, schema = native.render_scientific_request(final_only, c.response_instructions(final_only), {},
-        backend_name=backend_name, instruction_transport='developer')
-    assert schema['properties']['next_action']['enum'] == ['finish']

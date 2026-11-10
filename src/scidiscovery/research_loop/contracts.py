@@ -47,15 +47,7 @@ IMPLEMENTATION_REUSE = (
     'implementation_selection: null=keep; []=clear; current/history IDs=next-node inputs.')
 
 
-ROLE_INSTRUCTIONS = {
-    'H': guidance.DEFAULT['H'],
-    'W': guidance.DEFAULT['W'],
-    'A': guidance.DEFAULT['A'],
-    'E': 'Answer the exact evidence question from the requesting H or A. Retrieve or extract only needed materials '
-         'using available functional tools. Preserve original sources, locators, conflicts and missing evidence. '
-         'Return to the requester; do not choose the research direction or assert qualification. '
-         'Mechanical candidate copying, packaging, path resolution and submission belong to the delivery adapter.',
-}
+ROLE_INSTRUCTIONS = guidance.ADVISORY_WORKER_FIRST
 
 
 def read(path: Path):
@@ -260,8 +252,8 @@ def response_options(job):
     return dict(formal_review=bool(job.get('formal_review')), review_enabled=not guidance.advisory_assessment(job) and job.get('purpose')!='worker_consultation' and job.get('formal_review_version')==1 and job.get('formal_review_choices',{}).get('launcher_supported',True),
         final_only=job.get('final_only',False), final_delivery=bool((job.get('delivery_sources') or {}).get('items')),
         auxiliary_fields=job.get('scientific_response_fields'),
-        final_decline=job.get('research_strategy_version') in {2,3} and bool(job.get('final_only')),
-        worker_consultation_question=job.get('research_strategy_version')==3,
+        final_decline=bool(job.get('final_only')),
+        worker_consultation_question=True,
         advisory_assessment=guidance.advisory_assessment(job),
         worker_evidence_consultation=(job.get('advisory_scope_version')==1
             and guidance.purpose(job)=='research' and delivery_review.scope(job) is None
@@ -284,8 +276,7 @@ def response_fields(job, policy):
         fields.append('decision_request')
         if job.get('supervision_request') is not None and 'supervision_result' not in fields:fields.append('supervision_result')
     if job['role']=='W':
-        if job.get('research_strategy_version')!=3:fields.append('exploration_rounds')
-        if job.get('research_strategy_version')==3:fields.append('research_memory')
+        fields.append('research_memory')
         from . import worker_delivery
         if worker_delivery.applicable(job):fields.append('mechanism_findings')
         if job.get('candidate_nomination_mechanisms'):fields.append('candidate_nominations')
@@ -294,43 +285,35 @@ def response_fields(job, policy):
 
 def supervision_binding(value, *, step, research_strategy_version=None, supervision_policy_version=None, supervision_budget_basis=None):
     """Copy the public host-frozen direction scope; consume no external facts."""
-    keys={'version','cutoff','due_reasons','budget_fraction','automatic','final'}
-    if isinstance(value,dict) and 'investment_cutoff' in value and research_strategy_version==3:
-        keys.add('investment_cutoff')
-    adaptive=isinstance(value,dict) and bool({'adaptive_cutoff','policy_version','source_w','budget_scope'} & set(value))
-    if adaptive and research_strategy_version==3:
-        keys.update({'adaptive_cutoff','policy_version','source_w','budget_scope',
-            'review_kind','reflection_scope','investment_cutoff'})
-    reflection=isinstance(value,dict) and bool({'review_kind','reflection_scope'} & set(value))
-    if reflection and research_strategy_version==3:
-        keys.update({'review_kind','reflection_scope','investment_cutoff'})
-    if not isinstance(value,dict) or set(value)!=keys or type(value['version']) is not int or value['version']!=1:
-        raise ValueError('Direction supervision request is invalid')
-    if supervision_policy_version==4 and not adaptive or adaptive and supervision_policy_version not in (None,4):
-        raise ValueError('Adaptive reflection request requires its exact frozen policy')
-    if adaptive:
-        if (type(value.get('policy_version')) is not int or value['policy_version']!=4
-                or type(value.get('source_w')) is not int
-                or not 0<value['source_w']<step):
-            raise ValueError('Adaptive reflection requires its exact accepted W source')
-        from . import supervision
-        scope=value['budget_scope']
-        if (not isinstance(scope,dict) or set(scope)!={'tokens','seconds','limits','complete'}
-                or not isinstance(scope['limits'],dict) or set(scope['limits'])!={'tokens','seconds'}
-                or not isinstance(scope['complete'],dict) or set(scope['complete'])!={'tokens','seconds'}
-                or not any(limit is not None for limit in scope['limits'].values())
-                or any(type(scope['complete'][name]) is not bool
-                    or scope[name] is not None and supervision._fraction(scope[name]) is None
-                    or scope['limits'][name] is not None and (supervision._fraction(scope['limits'][name]) is None
-                        or scope['limits'][name]<=0) for name in ('tokens','seconds'))):
-            raise ValueError('Adaptive reflection requires original raw budget dimensions and coverage')
-        if supervision_budget_basis is not None and scope['limits']!=dict(
-                tokens=supervision_budget_basis['max_tokens'],seconds=supervision_budget_basis['max_seconds']):
-            raise ValueError('Adaptive reflection changed its original shared budget limits')
-        adaptive=value['adaptive_cutoff']
-        if (not isinstance(adaptive,dict) or set(adaptive)!={'question_revision','receipts'}
-                or any(type(n) is not int or n<0 for n in adaptive.values())):
-            raise ValueError('Adaptive reflection cutoff is invalid')
+    keys={'version','cutoff','due_reasons','budget_fraction','automatic','final',
+        'adaptive_cutoff','policy_version','source_w','budget_scope','review_kind',
+        'reflection_scope','investment_cutoff'}
+    if (research_strategy_version not in (None,3) or supervision_policy_version not in (None,4)
+            or not isinstance(value,dict) or set(value)!=keys
+            or type(value['version']) is not int or value['version']!=1):
+        raise ValueError('Current adaptive reflection request required')
+    if (type(value.get('policy_version')) is not int or value['policy_version']!=4
+            or type(value.get('source_w')) is not int
+            or not 0<value['source_w']<step):
+        raise ValueError('Adaptive reflection requires its exact accepted W source')
+    from . import supervision
+    scope=value['budget_scope']
+    if (not isinstance(scope,dict) or set(scope)!={'tokens','seconds','limits','complete'}
+            or not isinstance(scope['limits'],dict) or set(scope['limits'])!={'tokens','seconds'}
+            or not isinstance(scope['complete'],dict) or set(scope['complete'])!={'tokens','seconds'}
+            or not any(limit is not None for limit in scope['limits'].values())
+            or any(type(scope['complete'][name]) is not bool
+                or scope[name] is not None and supervision._fraction(scope[name]) is None
+                or scope['limits'][name] is not None and (supervision._fraction(scope['limits'][name]) is None
+                    or scope['limits'][name]<=0) for name in ('tokens','seconds'))):
+        raise ValueError('Adaptive reflection requires original raw budget dimensions and coverage')
+    if supervision_budget_basis is not None and scope['limits']!=dict(
+            tokens=supervision_budget_basis['max_tokens'],seconds=supervision_budget_basis['max_seconds']):
+        raise ValueError('Adaptive reflection changed its original shared budget limits')
+    adaptive=value['adaptive_cutoff']
+    if (not isinstance(adaptive,dict) or set(adaptive)!={'question_revision','receipts'}
+            or any(type(n) is not int or n<0 for n in adaptive.values())):
+        raise ValueError('Adaptive reflection cutoff is invalid')
     cutoff=value['cutoff']
     if (not isinstance(cutoff,dict) or set(cutoff)!={'total_rounds','source_step','round_id'}
             or type(cutoff['total_rounds']) is not int or cutoff['total_rounds']<0
@@ -342,13 +325,12 @@ def supervision_binding(value, *, step, research_strategy_version=None, supervis
                 or not 0<=value['budget_fraction']<float('inf'))
             or any(type(value[key]) is not bool for key in ('automatic','final'))
             or 'investment_cutoff' in value and (type(value['investment_cutoff']) is not int or value['investment_cutoff']<0)
-            or reflection and (value.get('reflection_scope')!='worker_question_clues_evidence'
+            or (value.get('reflection_scope')!='worker_question_clues_evidence'
                 or value.get('review_kind')!=('final_assessment' if value['final'] else 'ordinary_reflection'))
             or not json_field_representable('supervision_request',value)):
         raise ValueError('Direction supervision request is invalid')
     return dict(value,cutoff=dict(cutoff),due_reasons=list(value['due_reasons']),
-        **(dict(adaptive_cutoff=dict(value['adaptive_cutoff']),budget_scope=copy.deepcopy(value['budget_scope']))
-            if 'adaptive_cutoff' in value else {}))
+        adaptive_cutoff=dict(value['adaptive_cutoff']),budget_scope=copy.deepcopy(value['budget_scope']))
 
 
 def result_schema(role: str,protocol=CURRENT,comparison=False,*,formal_review=False,review_enabled=False,final_only=False,final_delivery=False,auxiliary_fields=None,final_decline=False,delivery_review=None,delivery_correction=False,worker_consultation_question=False,advisory_assessment=False,worker_evidence_consultation=False):
@@ -377,68 +359,36 @@ def result_schema(role: str,protocol=CURRENT,comparison=False,*,formal_review=Fa
 
 
 def response_instructions(job):
-    """The actual fixed output instructions shown in the scientific task."""
-    # Ordinary required fields/types are already carried by the Codex renderer
-    # menu or the protocol response_schema. Keep one transport declaration.
+    """The current fixed output instructions shown in the scientific task."""
     fields=dict(implementation_reuse=IMPLEMENTATION_REUSE)
     contract=job.get('role_purpose_instruction',guidance.role_contract(job))
     if contract:fields['role_contract']=contract
     if job.get('formal_review'):
         fields['final_response']=list(result_schema(job['role'],job['handoff_protocol'],
             'selection' in job,**response_options(job))['properties'])
-    if job.get('search') is not None and job['role'] in {'H','W'}:
+    if job.get('search') is not None and job['role']=='H':
         fields['breadth_response']=(
             'search_plan:commitments[{label,existing_ref?}],focus?{index:1-based|null,action:screen|improve}; null=breadth; omissions retain.'
-            +' index:null+screen=breadth; focus:null=keep.'
-            +(' Experiment needs top-level search_plan commitments+focus if none retained.' if job['role']=='H' else ''))
+            ' index:null+screen=breadth; focus:null=keep.'
+            ' Experiment needs top-level search_plan commitments+focus if none retained.')
     if job.get('purpose')=='worker_consultation' or guidance.advisory_assessment(job):
         fields['implementation_reuse']=('The requesting W input materials and implementation selection carry forward unchanged. '
             'Consultation implementation_selection is retained as authored text only; it cannot clear or replace those inputs.')
     if job['role']=='A' and job.get('purpose')!='worker_consultation':
         fields['delivery_selection']='deliver: candidate_recommendation+rationale; output/receipt gaps; partial OK.'
-        if job.get('research_strategy_version') in (1,2,3) and guidance.purpose(job)=='assessment':
-            fields['delivery_selection']='deliver/finish requests final A assessment; candidate_recommendation+rationale if available; retain output/receipt gaps.'
         if job.get('purpose')=='closeout':
             fields['closeout_response']=('FINAL: follow action options; no new work/audit.' if job.get('final_only') else 'Closeout: deliver/audit/finish/wait; no exploration.')
     elif job['role']=='W':
         fields.pop('implementation_reuse')
         context=(job.get('worker_fragment_policy') or {}).get('context')
-        # A fragment continues this logical W job; configured context controls
-        # native thread reuse; the authored intent chooses the next serial job.
-        fields['stage_response']=('stage_intent:continue=same W;handoff=seal partial/revisions/new W;revise_h=H/review=A advice to W;decision=A assessment. '
-            'implementation_selection:null=keep;[]=clear;IDs=next inputs. '
-            'mechanism_findings?:[{mechanism,basis:observed|blocked,finding,call_id?}];'
-            'exploration_rounds?:[{mechanism,question,call_ids:[],finding}];'
-            'candidate_nominations?:{representatives:[{mechanism_ref,candidate}]}. '
-            'Rounds:nonblank question/finding;current W managed IDs;never infer from calls/turns. '
-            'Resume:'+(context if isinstance(context,str) else json.dumps(context,ensure_ascii=False,separators=(',',':'))
-                if job.get('worker_fragment_policy') else 'unavailable')+' needs terminal/session/known usage/authorization.')
-        if job.get('research_strategy_version') in (1,2,3):
-            fields['stage_response']=('stage_intent:continue=W;handoff=seal/revise W;revise_h=H;'
-                'review=ordinary A reflection;decision=ready to close: protected Final A required before delivery. Advice returns W; no grant. '
-                'implementation_selection:null=keep;[]=clear;IDs=inputs. ')
-            enabled=job.get('scientific_response_fields')
-            for name,rule in (
-                ('mechanism_findings','mechanism_findings?:[{mechanism,basis:observed|blocked,finding,call_id?}]. '),
-                ('exploration_rounds','exploration_rounds?:[{mechanism,question,call_ids:[],finding}]; nonblank question/finding, current W managed IDs; never infer rounds. '),
-                ('candidate_nominations','candidate_nominations?:{representatives:[{mechanism_ref,candidate}]}. ')):
-                if enabled is None or name in enabled:fields['stage_response']+=rule
-            fields['stage_response']+=('Continuation:'+(context if isinstance(context,str) else
-                json.dumps(context,ensure_ascii=False,separators=(',',':')) if job.get('worker_fragment_policy')
-                else 'unavailable')+'; session/usage/authorization bind.')
-        if job.get('research_strategy_version')==3:
-            # Live --research admission carries v3 mechanisms and batch purpose.
-            # The frozen H-first search_plan hint and legacy round report are
-            # not this strategy's managed execution/measurement interface.
-            fields.pop('breadth_response',None)
-            fields['stage_response']=('stage_intent:continue=W;handoff=new W;revise_h=H advice;review=A advice;decision=pre-delivery Final A. Advice returns W; no grant. '
-                'revise_h/review require nonblank consultation_question. '
-                'implementation_selection:null=keep;[]=clear;IDs=inputs. '
-                'research_memory?:{question,candidates?:[{candidate,data,evaluation,evidence:[{ref,relation:supports|opposes|unknown,note}],failure_condition,open_question,limitations:[]}],'
-                'clues?:[{observed_fact?,applicability?,limited_negative?,open_question?,evidence:[{ref,relation:supports|opposes|unknown,note}]}]}; '
-                'clue:nonblank statement field+nonempty evidence; limited_negative needs applicability. Exact originals. '
-                'Continuation:'+(context if isinstance(context,str) else json.dumps(context,ensure_ascii=False,separators=(',',':'))
-                    if job.get('worker_fragment_policy') else 'unavailable')+'; session/usage/authorization bind.')
+        fields['stage_response']=('stage_intent:continue=W;handoff=new W;revise_h=H advice;review=A advice;decision=pre-delivery Final A. Advice returns W; no grant. '
+            'revise_h/review require nonblank consultation_question. '
+            'implementation_selection:null=keep;[]=clear;IDs=inputs. '
+            'research_memory?:{question,candidates?:[{candidate,data,evaluation,evidence:[{ref,relation:supports|opposes|unknown,note}],failure_condition,open_question,limitations:[]}],'
+            'clues?:[{observed_fact?,applicability?,limited_negative?,open_question?,evidence:[{ref,relation:supports|opposes|unknown,note}]}]}; '
+            'clue:nonblank statement field+nonempty evidence; limited_negative needs applicability. Exact originals. '
+            'Continuation:'+(context if isinstance(context,str) else json.dumps(context,ensure_ascii=False,separators=(',',':'))
+                if job.get('worker_fragment_policy') else 'unavailable')+'; session/usage/authorization bind.')
     scoped=delivery_review.binding(job)
     if scoped is not None and scoped['kind']=='delivery_review':
         fields['delivery_selection']=('deliver=accept exact existing candidate_recommendation with rationale; finish=decline all with no recommendation and truthful limits. '
@@ -448,13 +398,7 @@ def response_instructions(job):
         fields.pop('breadth_response',None)
         fields['stage_response']=('stage_intent:continue=same bounded correction W;handoff=retain this exact gap in a new W context;decision=one final A reassessment. '
             'Resolve only the requesting A decision_request using existing authorization; W chooses methods. No H/A consultation or new search; search_plan:null/omitted. '
-            'implementation_selection:null=keep;[]=clear;IDs=inputs. exploration_rounds?:[{mechanism,question,call_ids:[],finding}]; current W managed IDs only. Original budgets and unknown-call reconciliation hold.')
-        if job.get('research_strategy_version')==3:
-            fields['stage_response']=fields['stage_response'].replace(
-                'exploration_rounds?:[{mechanism,question,call_ids:[],finding}]; current W managed IDs only. ','')
-    elif job.get('research_strategy_version') in {2,3} and job['role']=='W':
-        fields['stage_response']=fields['stage_response'].replace('decision=ready to close: protected Final A required before delivery.',
-            'decision=one reversible pre-delivery Final A: accept/decline/one bounded correction within original budgets.')
+            'implementation_selection:null=keep;[]=clear;IDs=inputs. Original budgets and unknown-call reconciliation hold.')
     if guidance.advisory_assessment(job):
         fields.pop('delivery_selection',None)
     if response_options(job)['worker_evidence_consultation'] and job['role']=='W':
@@ -823,28 +767,6 @@ def _material_options(materials, *, sources):
     return options
 
 
-def _decision_context(job, *, sources):
-    """Label the exact immediate scientific source; do not parse its prose."""
-    if (job['role'] not in {'W', 'H'} or job.get('purpose') is not None
-            or job.get('author_correction') or job.get('correction_request')):
-        return None
-    previous = job['step'] - 1
-    ref = next((row for row in job['direct_refs'] if row['path'] == f'inputs/parents/{previous:03d}/conclusion.json'), None)
-    if ref is None:
-        return None
-    source_job, source = sources[previous]['job'], sources[previous]['payload']
-    action = 'continue_w' if job['role'] == 'W' else 'revise_h'
-    if (source_job['role'] != 'A' or source.get('next_action') != action
-            or job['instruction'] != source.get('route_reason')):
-        return None  # H directives, E questions/returns and control corrections keep their question.
-    return dict(source_role='A', source_action=action, source_original=ref['path'],
-                original_instruction=job['instruction'],
-                authority='H offers revisable hypotheses/directions; A independently assesses evidence/claims. '
-                'Concrete execution methods are proposals. Original user/task constraints, the frozen dispatch/catalog, '
-                'explicitly assigned focused evidence gaps and execution permissions remain binding. W owns research direction/design/implementation/adaptation '
-                'and may revise mechanisms; seal before a new W freezes revisions for execution.')
-
-
 def _assessment_handoff(job, *, sources, members, policy):
     """Locate the prior decision through the exact W/H route, never recency."""
     if (job['role'] != 'A' or job.get('purpose') is not None or job.get('final_report')
@@ -1027,8 +949,7 @@ def science_view(job, root=None):
 def _validate_worker_consultation(job, requester):
     """Validate the owner's already-loaded exact W question and return scope."""
     target=job.get('evidence_return') or {}
-    enabled=job.get('advisory_scope_version')==1
-    expected={'H':'revise_h','A':'review',**({'E':'extract'} if enabled else {})}.get(job['role'])
+    expected={'H':'revise_h','A':'review','E':'extract'}.get(job['role'])
     source=requester['job'] if requester is not None else {}
     payload=requester['payload'] if requester is not None else {}
     if (expected is None or set(target)!={'role','step'} or target.get('role')!='W'
@@ -1037,23 +958,22 @@ def _validate_worker_consultation(job, requester):
             or payload.get('stage_intent')!=expected
             or not any(ref['path']==f'inputs/parents/{target["step"]:03d}/conclusion.json' for ref in job['direct_refs'])):
         raise ValueError('Worker consultation lost its exact authored requester')
-    if enabled:
-        question=payload.get('consultation_question')
-        if (source.get('advisory_scope_version')!=1 or source.get('research_strategy_version')!=3
-                or not isinstance(question,str) or not question.strip() or job.get('consultation_question')!=question
-                or any(source.get(key) or job.get(key) for key in ('final_only','final_report','formal_review',
-                    'engineering_repair','author_correction','correction_request'))
-                or source.get('purpose') is not None or source.get('evidence_return') is not None):
-            raise ValueError('Worker consultation changed its original question or research scope')
+    question=payload.get('consultation_question')
+    if (source.get('advisory_scope_version')!=1 or source.get('research_strategy_version')!=3
+            or not isinstance(question,str) or not question.strip() or job.get('consultation_question')!=question
+            or any(source.get(key) or job.get(key) for key in ('final_only','final_report','formal_review',
+                'engineering_repair','author_correction','correction_request'))
+            or source.get('purpose') is not None or source.get('evidence_return') is not None):
+        raise ValueError('Worker consultation changed its original question or research scope')
 
 
 def consultation_view(job):
     """Project the existing purpose and exact return binding, without new state."""
     if job.get('purpose')!='worker_consultation':return None
     return dict(purpose='worker_consultation',
-        **(dict(question=job.get('consultation_question',job['instruction'])) if job.get('research_strategy_version')==3 else {}),
+        question=job['consultation_question'],
         requester=f'inputs/parents/{job["evidence_return"]["step"]:03d}/conclusion.json',
-        return_role='W',scope=('Bounded evidence for the exact W question; return to the requesting W with original materials and missing evidence. No scientific decision or execution grant.' if job['role']=='E' else 'Fallible advice on the exact W question; W judges and resumes autonomous research. No formal review verdict or execution grant.' if job.get('advisory_scope_version')==1 else 'High-level advice on the exact W question; returned to a new W. No formal review verdict or execution grant.'))
+        return_role='W',scope=('Bounded evidence for the exact W question; return to the requesting W with original materials and missing evidence. No scientific decision or execution grant.' if job['role']=='E' else 'Fallible advice on the exact W question; W judges and resumes autonomous research. No formal review verdict or execution grant.'))
 
 
 def _science_view(job, root, *, parent_sources, policy, qualified_materials):
@@ -1069,24 +989,10 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials):
         view['role_contract']=job.get('role_purpose_instruction',guidance.role_contract(job))
         return view
     protocol = job['handoff_protocol']
-    context = job.get('decision_context')
     question = job['instruction']
     ordinary = (delivery_review.scope(job) is None and job.get('purpose') is None and not any(job.get(key) for key in
         ('final_report', 'final_only', 'engineering_repair', 'author_correction', 'correction_request')))
-    action = ((job.get('search') or {}).get('focus') or {}).get('action')
-    if context is not None and ordinary:
-        if job['role'] == 'W':
-            question = {
-                'improve': 'Own sustained experiment design, algorithms and adaptation under original user/task constraints and this frozen dispatch/catalog; explore toward unmet goals using observations, residuals and local relations. Propose revisions; seal before a new W freezes them for execution.',
-                'validate': 'Own validation design under original user/task constraints and this frozen dispatch/catalog; resolve the focused evidence gap without a new search. Propose revisions; seal before a new W freezes them for execution.',
-                'screen': 'Own fair comparison of mechanisms relevant to current uncertainty under original user/task constraints and this frozen dispatch/catalog; reuse sufficient evidence. Propose revisions; seal before a new W freezes them for execution.',
-            }.get(action, job['instruction'])
-        else:
-            question = ('Revise high-level scientific methods/directions using direct W observations/counterevidence and A assessment; '
-                'separate provisional H judgments from original constraints, required counts and commitments.')
-    elif ordinary and job['role'] == 'W' and action == 'improve':
-        question += '\nW owns sustained research design/adaptation under original user/task constraints and this frozen dispatch/catalog; use observations/residuals toward unmet goals. Propose revisions; seal before a new W freezes them for execution.'
-    if ordinary and job['role']=='W' and job.get('research_strategy_version')==3:
+    if ordinary and job['role']=='W':
         question=job['instruction']+'\nOwn research and adapt in this W session. Declare/revise stable mechanisms and experiment_question before managed experiments; use retained originals and candidate memory. Initial exploration may have no candidate or mature hypothesis.'
     if job.get('scientific_work_unit'):
         question += '\nWork unit: ' + job['scientific_work_unit']
@@ -1119,16 +1025,13 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials):
             from . import shortlist
             closeout['comparison']={key:value for key,value in shortlist.public_table(root,job['selection']).items() if key!='fields'}
     priorities={
-        'H':('W','A','E','H'), 'W':('H','A','W','E'),
+        'H':('W','A','E','H'), 'W':('W','H','A','E'),
         'A':('W','E','H','A'), 'E':('A','H','W','E')}
     reading={
         'H':'Original constraints/counts/commitments, direct W observations/counterevidence and A judgments, then unresolved H questions. Check prior directions against subsequent W work; revise H scientific judgments from observations.',
-        'W':'Constraints and useful H hypotheses, then prior observations and A judgments.',
+        'W':'Original objective and constraints, retained W candidate memory and unresolved questions, then relevant observations and H/A advice.',
         'A':'The concrete assessment question and latest W changes, then relevant prior A/H evidence and unresolved alternatives. Judge what can change this decision; retain material limitations.',
         'E':'Exact requester question and constraints, then requested original evidence.'}
-    if job.get('research_strategy_version')==3:
-        priorities['W']=('W','H','A','E')
-        reading['W']='Original objective and constraints, retained W candidate memory and unresolved questions, then relevant observations and H/A advice.'
     parents=[_parent_view(job,ref,source=parent_sources[int(Path(ref['path']).parts[2])] if root is not None else None,
         limitation_bytes=1024//max(1,len(job['direct_refs']))) for ref in job['direct_refs']]
     order=priorities[job['role']]
@@ -1166,7 +1069,6 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials):
             candidate_nomination_mechanisms=job['candidate_nomination_mechanisms'])
            if job.get('candidate_nomination_mechanisms') else {}),
 
-        **(dict(decision_context=context) if context is not None else {}),
         **(dict(assessment_handoff=job['assessment_handoff']) if 'assessment_handoff' in job else {}),
         'global': dict(objective='inputs/global/objective.md',
                        updates=[row['path'] for row in job['global_materials'][1:]]),
@@ -1832,7 +1734,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
                     or not supervision.due(head['search'],budget_facts=admission_facts)['automatic_allowed']):
                 raise ValueError('Automatic adaptive reflection is not eligible at its original scope')
     if consultation:
-        if (purpose not in {None,'worker_consultation'} or role not in ({'H','A','E'} if base.get('advisory_scope_version')==1 else {'H','A'})
+        if (purpose not in {None,'worker_consultation'} or role not in {'H','A','E'}
                 or set(evidence_return)!={'role','step'} or type(evidence_return.get('step')) is not int
                 or evidence_return['step'] not in parents or not 0<evidence_return['step']<step
                 or source_cutoff is not None or delivery_sources is not None or final_report is not None
@@ -1859,6 +1761,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     retained=read_job(job_path, base=base) if job_path.exists() else None
     from . import configuration_updates
     revision, policy, head = configuration_updates.bind_new_job_facts(root, step, base=base)
+    from .protocol import require_settings_format
+    require_settings_format(policy)
     events, _ = budget._events_from_state(head)
     protocol=CURRENT
     selection_protocol=1
@@ -2021,15 +1925,13 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     if policy.get('execution_config') is not None:
         job['execution_config_record']=policy['execution_config']
     strategy=retained if retained is not None else policy
-    if 'research_strategy_version' in strategy:
-        job['research_strategy_version']=strategy['research_strategy_version']
-    if 'advisory_scope_version' in strategy:
-        job['advisory_scope_version']=strategy['advisory_scope_version']
+    job['research_strategy_version']=strategy['research_strategy_version']
+    job['advisory_scope_version']=strategy['advisory_scope_version']
     if retained is not None:
         if 'worker_continuity_version' in retained:
             job['worker_continuity_version']=retained['worker_continuity_version']
-    elif policy.get('advisory_scope_version')==1 or (policy.get('supervision_policy') or {}).get('version') in (3,4):
-        # New policy opts in explicitly. Retained jobs keep their exact inputs.
+    else:
+
         job['worker_continuity_version']=1
     advice = retained.get('role_guidance') if retained is not None else policy.get('role_guidance', {}).get(role)
     if advice is not None:
@@ -2038,9 +1940,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
     from . import guidance
     job['native_role_instruction'] = (retained['native_role_instruction'] if retained is not None
                                       else advice if advice is not None else
-                                      (guidance.ADVISORY_WORKER_FIRST if job.get('advisory_scope_version')==1 else
-                                       guidance.WORKER_FIRST if job.get('research_strategy_version')==3 else
-                                       guidance.WORKER_LED if job.get('research_strategy_version') in (1,2) else guidance.OPPORTUNITY)[role])
+                                      guidance.ADVISORY_WORKER_FIRST[role])
     if audit_projection_version == 1:
         job['audit_projection_version'] = 1
     job['selection_protocol'] = selection_protocol
@@ -2187,9 +2087,6 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         worker_continuation=continuation.consultation_binding(root,job,parents=parent_facts)
         if worker_continuation is not None:
             job['worker_continuation']=worker_continuation
-    context = _decision_context(job,sources=parent_facts)
-    if context is not None:
-        job['decision_context'] = context
     if purpose == 'closeout' and delivery_sources.get('catalogue'):
         catalogue_path = work / 'inputs/delivery-candidates.json'
         catalogue = dict(items=delivery_sources['items'], omitted_count=delivery_sources['omitted_count'])
@@ -2238,6 +2135,8 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         job['role_purpose_instruction']=guidance.role_contract(job)
     elif 'role_purpose_instruction' in retained:
         job['role_purpose_instruction']=retained['role_purpose_instruction']
+    from .protocol import require_job_format
+    require_job_format(job)
     with user_guidance.binding_from_base(root,step,role,retained,base=base) as (statements,guidance_current):
         if statements:
             job['user_guidance'] = statements
@@ -2308,16 +2207,16 @@ def validate_original(source, *, _active=None, _memo=None, controls_only=False):
     active = {*active, key}
     from . import handoff_state
     material_sources = {}
-    job = handoff_state.material_inputs(originals.context_root(source), originals.source_job(source),
-        sources=material_sources, source=source)
+    job = originals.source_job(source)
     policy = originals.source_settings(source)
+    from .protocol import require_job_format, require_settings_format
+    require_job_format(job)
+    require_settings_format(policy)
+    job = handoff_state.material_inputs(originals.context_root(source), job,
+        sources=material_sources, source=source)
     if (type(job.get('advisory_scope_version')) is not type(policy.get('advisory_scope_version'))
             or job.get('advisory_scope_version')!=policy.get('advisory_scope_version')):
         raise ValueError('Scientific original changed its frozen advisory scope')
-    if policy.get('handoff_protocol') != CURRENT or job.get('handoff_protocol') != CURRENT:
-        raise ValueError('Fork original requires the current frozen protocol')
-    from .protocol import require_job_format
-    require_job_format(job)
     job_path = originals.resolve_ref(source, dict(path=f'jobs/{source.step:03d}.json'))
     seal = read(originals.source_record(source, 'result-identity.json'))
     if seal['job_ref'] != dict(path=str(Path(source.original_root)/'jobs'/f'{source.step:03d}.json')):
@@ -2506,6 +2405,10 @@ def _validate_inputs(root, work, job, *, _policy=None, _sources=None):
 
 
 def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
+    from .protocol import require_job_format, require_settings_format
+    require_job_format(job)
+    require_settings_format(base)
+    require_settings_format(policy)
     sources = {} if sources is None else sources
     if job.get('fork_source') is not None:
         from . import fork_runtime, fork_sources, formal_review, engineering
@@ -2578,7 +2481,7 @@ def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
         target=job.get('evidence_return') or {}
         requested=sources.get(target.get('step'))
         _validate_worker_consultation(job,requested)
-    if job.get('advisory_scope_version')==1 and job['role']=='W':
+    if job['role']=='W':
         from . import continuation
         if job.get('worker_continuation')!=continuation.consultation_binding(root,job,parents=sources):
             raise ValueError('Worker continuation changed its exact consultation originals')

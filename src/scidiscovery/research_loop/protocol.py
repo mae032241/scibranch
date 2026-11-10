@@ -24,11 +24,51 @@ def _current(value, subject):
         raise UnsupportedProtocol(subject)
 
 
+def require_preparation_behavior(research_strategy_version, *, supervision_policy=None,
+                                 worker_fragment_policy=None):
+    """Validate explicit new declarations before preparation acquires effects."""
+    if type(research_strategy_version) is not int or research_strategy_version != 3:
+        raise UnsupportedProtocol('Research strategy')
+    if supervision_policy is not None:
+        from . import supervision
+        supervision.policy(supervision_policy)
+    if worker_fragment_policy is not None:
+        from . import checkpoint
+        checkpoint.policy(worker_fragment_policy)
+
+
+def require_current_behavior(value, subject='Instance'):
+    """Accept the one frozen scientific behavior without defaulting its markers."""
+    if (not isinstance(value, dict)
+            or type(value.get('research_strategy_version')) is not int
+            or value['research_strategy_version'] != 3
+            or type(value.get('advisory_scope_version')) is not int
+            or value['advisory_scope_version'] != 1):
+        raise UnsupportedProtocol(subject + ' scientific behavior')
+    try:
+        require_preparation_behavior(value['research_strategy_version'],
+            supervision_policy=value.get('supervision_policy'))
+        selected = value.get('supervision_policy')
+        if selected is not None and type(selected.get('require_fresh_input')) is not bool:
+            raise ValueError('Frozen reflection requires an explicit fresh-input choice')
+        if value.get('worker_fragment_policy') is not None:
+            from . import checkpoint
+            checkpoint.policy(value['worker_fragment_policy'], frozen=True)
+        request = value.get('supervision_request')
+        if request is not None and (not isinstance(request, dict)
+                or type(request.get('policy_version')) is not int or request['policy_version'] != 4):
+            raise ValueError('Current adaptive reflection request required')
+    except ValueError as error:
+        raise UnsupportedProtocol(subject + ' scientific behavior') from error
+    return value
+
+
 def require_settings_format(settings):
     """Reject unsupported frozen budgets without supplying missing policies."""
     if not isinstance(settings, dict):
         raise UnsupportedProtocol('Instance')
     _current(settings.get('handoff_protocol'), 'Instance')
+    require_current_behavior(settings)
     policy = settings.get('final_a_completion_policy')
     if (settings.get('node_budget_mode') != 'soft'
             or not isinstance(policy, dict) or set(policy) != {'version'}
@@ -42,6 +82,7 @@ def require_job_format(job):
     if not isinstance(job, dict):
         raise UnsupportedProtocol('Scientific job')
     _current(job.get('handoff_protocol'), 'Scientific job')
+    require_current_behavior(job, 'Scientific job')
     for field in ('worker_view_version', 'lineage_projection_version'):
         if type(job.get(field)) is not int or job[field] != 1:
             raise UnsupportedProtocol('Scientific job view')

@@ -23,7 +23,7 @@ from . import budget_limits, configuration_updates
 from . import budget as control_budget, execution, runtime, search, checkpoint, profiles, backends, native_recovery
 from .output_repair import OutputRepairRequired
 from .native_usage import terminal_attempt_tokens, metadata_stop, transport_diagnostic
-from .guidance import STAGE_PLANNING, role_contract, purpose
+from .guidance import role_contract, purpose
 from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_ref, host_record, read,
                         seal_result, workspace, write, NATIVE_TASK_INSTRUCTION, decode_scientific_output,
                         native_outcome)
@@ -31,7 +31,7 @@ from .contracts import (ACTIONS, actions, ROLE_INSTRUCTIONS, record_ref, file_re
 
 RESUME_INSTRUCTION = 'Same task/scope/permissions/budget; no accepted unknown-call replay.'
 OUTPUT_REPAIR_INSTRUCTION = 'Fix diagnosed JSON/layout only; full JSON; keep science/plans/limits. No work/rerun/resubmit; W grants unchanged; no prior experiment implied: '
-WORK_REPAIR_INSTRUCTION = 'Complete missing assigned work under original authorization; reuse results; never replay accepted unknown calls. Report obstacles/limits. Diagnosis: '
+WORK_REPAIR_INSTRUCTION = 'Fill assigned gaps; original scope/permissions/budget; reuse results; no unknown-call replay; retain obstacles/limits: '
 FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; follow stage_response.'
 OPERATOR_INTERRUPT_VERSION = 1
 
@@ -88,7 +88,7 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         format_rule+=backends.renderer(backend_name).response_guidance(schema)
         # The same developer layer follows the complete frozen scientific literal.
         instruction+='\n'+format_rule
-        prompt=('Read science-task.json/inputs; JSON; declared writes; no wrappers/hashes. '
+        prompt=('Read science-task.json/inputs; JSON only; declared writes. '
             'work/budget-status.json: stale/partial/no grant; unknown!=0; input has cache.')
         if final_return:
             prompt+=(' Protected FINAL: conclude now; no new role/audit/experiment. '
@@ -101,17 +101,10 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
                     and purpose(job) not in {'closeout','worker_consultation','delivery_review','delivery_correction'} and not job.get('final_report') and not job.get('final_only')):
                 prompt+=' Goals remain.'
                 if job['role'] in {'H','W'}:
-                    if job.get('research_strategy_version') not in {1,2,3}:
-                        prompt+=' '+STAGE_PLANNING[job['role']]
-                if job['role'] in {'H','W'}:
                     prompt+=' Follow-up targets advise; no grant/required handoff.'
                 else:
-                    if job.get('research_strategy_version') in {1,2,3}:
-                        prompt+=(' Complete the requested judgment; follow role_contract. Soft targets do not end research. '
-                            'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.')
-                    else:
-                        prompt+=(' Complete the requested judgment; bounded further work needs decision_request. Soft targets do not end research. Shared tokens<=0 or time<=0: '
-                            'deliver eligible candidate or finish with gaps from originals; no new H/W/E/extra FINAL; permissions hold.')
+                    prompt+=(' Complete the requested judgment; follow role_contract. Soft targets do not end research. '
+                        'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.')
                 if job['role']=='W':prompt+=' Wait 10-30s on pending originals within deadlines.'
     if budget_status:
         if any(key in budget_status and budget_status[key] is None for key in (
@@ -122,13 +115,9 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         prompt+='\nExecution: '+json.dumps(dict(command=managed_command,
             lifecycle=execution_interface['capabilities'],result_protocol=execution_interface['result_protocol']),
             ensure_ascii=False,separators=(',',':'))
-        if job.get('research_strategy_version') in {1,2,3}:
-            prompt+=' Read capabilities/describe; exact IDs; capture freezes code/; other outputs/logs.'
-        else:
-            prompt+=(' Capabilities/describe:exact IDs;no unknown-call replay;'
-                'capture freezes code/;outputs/logs elsewhere.')
+        prompt+=' Read capabilities/describe; exact IDs; capture freezes code/; other outputs/logs.'
     if job['role']=='W' and ('managed_execution_wait' in job or execution_interface is not None or intent.get('execution_wake')):
-        prompt+=' handoff.action: finalize_response=JSON; return_control=wait.'
+        prompt+=' handoff.action:finalize_response=JSON;return_control=wait.'
     if job['role']=='W' and not author:
         prompt+=' engineering_check: sample, no training/audit.'
     if remaining is not None:
@@ -137,17 +126,19 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
             prompt+='\n'+RESUME_INSTRUCTION
     if intent.get('output_repair') or intent.get('work_repair'):
         request=intent.get('work_repair') or intent['output_repair']
-        work_repair=('Complete missing assigned work under original authorization; reuse results, no unknown-call replay; report obstacles/limits. Diagnosis: '
-            if job.get('research_strategy_version') in {1,2,3} else WORK_REPAIR_INSTRUCTION)
-        prompt+='\n'+(work_repair if intent.get('work_repair') else OUTPUT_REPAIR_INSTRUCTION)
+        prompt+='\n'+(WORK_REPAIR_INSTRUCTION if intent.get('work_repair') else OUTPUT_REPAIR_INSTRUCTION)
         prompt+=json.dumps({key:request[key] for key in ('code','diagnostic')},ensure_ascii=False,separators=(',',':'))
     if intent.get('execution_wake'):
         prompt+=' Read work/execution-results.json; continue original W work; never replay accepted calls.'
     if intent.get('worker_continuation'):
         continuity=intent['worker_continuation']
-        prompt+=(' Same W session requested; use current task/advice/permissions; no unknown-call replay.'
+        prompt+=(' Same W session requested; use current task/advice/permissions.'
             if continuity['mode']=='resume_requested' else
-            ' New native context; retain W question/evidence; no unknown-call replay.')
+            ' New native context; retain W question/evidence.')
+        # Repair instructions already prohibit rerun/resubmit or unknown-call
+        # replay; ordinary continuation still needs its explicit prohibition.
+        if not intent.get('output_repair') and not intent.get('work_repair'):
+            prompt+=' No unknown-call replay.'
     if intent.get('continuation_kind')=='fragment':prompt+='\n'+FRAGMENT_INSTRUCTION
     if intent.get('continuation_kind')=='operator_resume':
         prompt+=(' Operator explicitly continued this same interrupted task. Preserve prior work, consumed budgets and context history. '
@@ -384,6 +375,22 @@ def _cleanup_code_exports(root, exports, *, launch_started, process, cleanup, br
 def _budget_notice_launch(backend, args, work, attempt, env, view_facts, context, *, diagnostic=None):
     """Compatibility entry point; provider owns notice qualification and launch."""
     return backend.prepare_launch(args,work,attempt,env,view_facts,context,diagnostic=diagnostic)
+
+
+def _stopped_process_failure(*, native_started, process_id, returncode, terminal_observed,
+        native_failure, error, stop, terminal_fault, cleanup, technical_diagnostic):
+    """Project a stopped producer's mechanical exit without native completion.
+
+    Identity and cleanup observations belong to the caller. This pure consumer
+    neither acquires originals nor interprets provider prose or acceptance.
+    """
+    if (native_started is True and process_id is not None and type(returncode) is int
+            and terminal_observed is False and native_failure is None
+            and error is None and stop is None and terminal_fault is None
+            and technical_diagnostic is None and cleanup == 'observed_group_cleaned'):
+        return native_recovery.classify(dict(type='turn.incomplete' if returncode == 0 else 'error',
+            code='native_process_exit'))
+    return None
 
 
 def run_native(root: Path, step: int, attempt=0):
@@ -906,6 +913,17 @@ def run_native(root: Path, step: int, attempt=0):
     native_failure = backend.combine_failures(native_failures, completed_before=completed_before
         if terminal_observed and process is not None and process.returncode == 0
             and cleanup == 'observed_group_cleaned' else None)
+    mechanical_failure = _stopped_process_failure(native_started=process is not None,
+        process_id=process_id, returncode=process.returncode if process is not None else None,
+        terminal_observed=terminal_observed, native_failure=native_failure,
+        error=error, stop=stop, terminal_fault=terminal_fault, cleanup=cleanup,
+        technical_diagnostic=technical_diagnostic)
+    if mechanical_failure is not None:
+        # A stopped real process supplies failure/incompletion even when its
+        # stream reported neither. It proves neither rejection nor completion;
+        # recovery still requires the original session and all shared gates.
+        native_failure = mechanical_failure
+        native_failures.append(native_failure)
     if native_failure is not None:terminal_fault = terminal_fault or 'native_failure_event'
     stop = stop or terminal_fault
     if process is not None:

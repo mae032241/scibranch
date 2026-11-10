@@ -20,16 +20,17 @@ NATIVE_ORIGINALS = ('native-intent.json', 'native-outcome.json', 'usage.json',
                     'science-output.json', 'experiment-config.json', 'work-evidence.json')
 
 
-def policy(value):
+def policy(value, *, frozen=False):
     if (not isinstance(value, dict) or set(value) - {'context', 'max_context_windows', 'context_handoff_version'} or 'context' not in value
             or value['context'] not in {'same_session', 'new_context'}):
         raise ValueError('W fragments require one explicit same_session or new_context strategy')
     if 'max_context_windows' in value and (type(value['max_context_windows']) is not int
             or value['max_context_windows'] not in (1, 2)):
         raise ValueError('W context windows must be 1 or 2')
-    if 'context_handoff_version' in value and (type(value['context_handoff_version']) is not int
-            or value['context_handoff_version'] not in (1,2) or 'max_context_windows' not in value):
-        raise ValueError('Context handoff version 1/2 requires explicit window count')
+    if frozen or 'context_handoff_version' in value:
+        if (type(value.get('context_handoff_version')) is not int
+                or value['context_handoff_version'] != 2):
+            raise ValueError('Current W fragments require context handoff version 2')
     return dict(value)
 
 
@@ -47,7 +48,7 @@ def enabled_for_policy(job,*,settings):
     value = settings.get('worker_fragment_policy')
     if value is None or not ordinary_worker(job):
         return False
-    policy(value)
+    policy(value, frozen=True)
     return True
 
 

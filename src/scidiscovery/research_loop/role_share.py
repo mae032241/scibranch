@@ -8,7 +8,9 @@ correction review and closeout.
 """
 from __future__ import annotations
 
-from . import budget, contracts as c, execution
+from dataclasses import replace
+
+from . import budget, contracts as c, execution, guidance
 
 DEFAULT = dict(version=1, min_w_share=.65, max_thinking_share=.35, thinking_node_target_tokens=250_000)
 THINKING = ('H', 'A')
@@ -71,11 +73,11 @@ def reason(root, step, job, result, role, correction_request=None, *, allow_repe
 
 def effective_route(root, step, result, job, route, *, allow_repeat=False):
     """Preserve required corrections; stop optional thinking without inventing work."""
-    role, parents, instruction, evidence_return, current_h, current_w, correction_request, author = route
+    author = route.author_correction
     # Author corrections are mandatory control repairs, not optional thinking.
     # Their existing finite correction allowance and global budget still apply.
     if author is not None and author['reason'] not in REFUSALS:
-        return (*route, None)
+        return route, None
     # A retained host correction owns the historical refusal. Later budget
     # amendments may change new admission, never that exact job's identity.
     from . import semantic
@@ -85,9 +87,10 @@ def effective_route(root, step, result, job, route, *, allow_repeat=False):
         retained = retained_job.get('author_correction')
         if (retained is not None and retained['reason'] in REFUSALS
                 and retained['source'] == semantic._source(root, step)):
-            return (retained_job['role'], list(dict.fromkeys([*parents, step])), retained_job['instruction'],
-                retained_job.get('evidence_return'), current_h, current_w,
-                retained_job.get('correction_request'), retained, None)
+            return replace(route,role=retained_job['role'],
+                parents=tuple(dict.fromkeys([*route.parents,step])),instruction=retained_job['instruction'],
+                evidence_return=retained_job.get('evidence_return'),
+                correction_request=retained_job.get('correction_request'),author_correction=retained), None
         intent = execution.origin(root, step + 1) / 'native-intent.json'
         from . import accepted_budget
         accepted = accepted_budget.native_attempt(root, step+1, intent.parent)
@@ -96,25 +99,24 @@ def effective_route(root, step, result, job, route, *, allow_repeat=False):
                 raise ValueError('Accepted successor task identity changed')
             # Replay the original accepted route; controller._check_job still
             # verifies it exactly. Today's shares gate only new admission.
-            return (*route, None)
-    code = reason(root, step, job, result, role, correction_request, allow_repeat=allow_repeat,evidence_return=evidence_return)
+            return route, None
+    code = reason(root, step, job, result, route.role, route.correction_request,
+        allow_repeat=allow_repeat,evidence_return=route.evidence_return)
     if code is None:
-        return (*route, None)
+        return route, None
     # Insufficient allocation never authorizes another scientific task.
-    return (*route, code)
+    return route, code
 
 
 def reconsider(root, step, job, route, code):
     """Return one refused optional choice to the existing finite H correction."""
     if code not in REFUSALS:
         raise ValueError('Unknown optional-node admission refusal')
-    _, parents, _, _, current_h, current_w, _, _ = route
     from . import semantic
     source = semantic._source(root, step)
     previous = job.get('author_correction')
     request = dict(root=previous['root'] if previous is not None and previous['reason'] in REFUSALS else source,
         source=source, reason=previous['reason'] if previous is not None and previous['reason'] in REFUSALS else code)
-    instruction = ('Control refused the optional scientific node: ' + code + '. '
-        'Reconsider the scientific route from the retained evidence. Choose a justified alternative; '
-        'no new evidence, budget, execution permission or renewed correction allowance is supplied.')
-    return 'H', list(dict.fromkeys([*parents, step])), instruction, None, current_h, current_w, None, request
+    instruction = guidance.optional_route_reconsideration(code)
+    return replace(route,role='H',parents=tuple(dict.fromkeys([*route.parents,step])),
+        instruction=instruction,evidence_return=None,correction_request=None,author_correction=request)

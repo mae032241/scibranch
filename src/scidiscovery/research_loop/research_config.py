@@ -241,6 +241,10 @@ def from_document(document, *, base):
 def normalize(options, *, frozen_skill_selection=None):
     """Apply defaults; an exact fork retains its already expanded Skill names."""
     result = copy.deepcopy(options)
+    from .protocol import require_preparation_behavior
+    require_preparation_behavior(result.get('research_strategy_version',3),
+        supervision_policy=result.get('supervision_policy'),
+        worker_fragment_policy=result.get('worker_fragment_policy'))
     if result.get('native_options') is None:
         result['native_options'] = {}
     backend_name=result.get('native_backend', backends.DEFAULT_BACKEND)
@@ -332,6 +336,8 @@ def normalize(options, *, frozen_skill_selection=None):
         if result.get('resume_policy') is not None and result.get('node_budget_policy') is None:
             result['node_budget_policy'] = {role: dict(max_observed_tokens=result['max_tokens'],
                 max_seconds=result['max_seconds']) for role in 'HWAE'}
+    if result.get('worker_fragment_policy') is not None:
+        result['worker_fragment_policy'].setdefault('context_handoff_version',2)
     return result
 
 

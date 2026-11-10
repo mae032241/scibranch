@@ -20,24 +20,26 @@ def selected_supervision(tmp_path):
     finish(parent,1,'H',[],action='analyze',search_choice=dict(scope='A bounded target-condition question',
         commitments=[dict(label='Retained fixture mechanism',minimal_test='A target-condition observation',existing_ref=None)],
         focus=dict(index=None,action='screen')))
-    head=accepted_budget.read(parent)
-    frozen=supervision.request(head['search'],budget_fraction=.01,automatic=False)
-    selected=c.build_job(parent,2,'A',[1],instruction='Assess the retained target-condition question.',
+    finish(parent,2,'W',[1],stage_intent='handoff')
+    facts=controller._supervision_facts(parent,c.settings(parent))
+    frozen=supervision.request(facts['summary'],budget_fraction=facts['budget_fraction'],
+        automatic=False,budget_facts=facts['budget_facts'])
+    selected=c.build_job(parent,3,'A',[1,2],instruction='Assess the retained target-condition question.',
         supervision_request=frozen)
     with controller._writer(parent):
         pass
     child=tmp_path/'child'
     allowance=dict(max_tokens=600,max_seconds=40,max_steps=3)
-    preview=fork_service.preview(parent,2,child,budget=allowance)
+    preview=fork_service.preview(parent,3,child,budget=allowance)
     assert preview['status']=='fork_preview_ready',preview
-    fork_service.create(parent,2,child,budget=allowance,
+    fork_service.create(parent,3,child,budget=allowance,
         expected_preview_id=preview['preview_id'],operation_id='selected-supervision')
     return parent,child,selected,frozen
 
 
 def test_selected_scope_survives_copy_bootstrap_and_unaccepted_job_crash_window(selected_supervision,monkeypatch):
     parent,child,selected,frozen=selected_supervision
-    original=(parent/'jobs/002.json').read_bytes()
+    original=(parent/'jobs/003.json').read_bytes()
     boot=fork_runtime.bootstrap(child)
     assert boot['route']['supervision_request']==frozen
     assert fork_sources.selected_task(child)['job']['supervision_request']==frozen
@@ -47,24 +49,24 @@ def test_selected_scope_survives_copy_bootstrap_and_unaccepted_job_crash_window(
     with monkeypatch.context() as patch:
         patch.setattr(accepted_budget,'accept_job_from_facts',crash_before_acceptance)
         with pytest.raises(RuntimeError,match='fixture crash'):
-            fork_runtime.build_selected_job(child,2)
-    assert (child/'jobs/002.json').exists()
+            fork_runtime.build_selected_job(child,3)
+    assert (child/'jobs/003.json').exists()
     assert accepted_budget.read(child)['current_job'] is None
     route=boot['route']
-    checked=controller._check_job(child,c.settings(child),2,route['role'],route['parents'],
+    checked=controller._check_job(child,c.settings(child),3,route['role'],route['parents'],
         route['instruction'],route['evidence_return'],route['correction_request'],
         route['author_correction'],route['supervision_request'])
     assert checked['supervision_request']==frozen and checked['fork_source']
     changed=copy.deepcopy(frozen);changed['automatic']=True
     with pytest.raises(ValueError,match='exact bootstrap route'):
-        controller._check_job(child,c.settings(child),2,route['role'],route['parents'],
+        controller._check_job(child,c.settings(child),3,route['role'],route['parents'],
             route['instruction'],route['evidence_return'],route['correction_request'],
             route['author_correction'],changed)
-    resumed=fork_runtime.build_selected_job(child,2)
+    resumed=fork_runtime.build_selected_job(child,3)
     assert resumed['supervision_request']==frozen
-    assert accepted_budget.read(child)['current_job']['step']==2
-    assert (parent/'jobs/002.json').read_bytes()==original
-    assert not (child/'native-evidence/002/native-intent.json').exists()
+    assert accepted_budget.read(child)['current_job']['step']==3
+    assert (parent/'jobs/003.json').read_bytes()==original
+    assert not (child/'native-evidence/003/native-intent.json').exists()
 
 
 @pytest.mark.parametrize('field',['supervision_policy','supervision_budget_basis'])
@@ -74,11 +76,11 @@ def test_selected_policy_and_initial_budget_basis_cannot_change_before_admission
     assert settings['supervision_budget_basis']==dict(max_tokens=1000,max_seconds=60)
     changed=copy.deepcopy(settings)
     if field=='supervision_policy':
-        changed[field]['consecutive_rounds']=5
+        changed[field]['consecutive_calls']=5
     else:
         changed[field]['max_tokens']=600
     originals={path:path.read_bytes() for path in (child/'settings.json',child/accepted_budget.HEAD)}
     with pytest.raises(ValueError,match='Fork selected task configuration changed: '+field):
-        fork_runtime.preflight_selected_settings(child,changed,step=2)
+        fork_runtime.preflight_selected_settings(child,changed,step=3)
     assert all(path.read_bytes()==value for path,value in originals.items())
-    assert not (child/'jobs/002.json').exists()
+    assert not (child/'jobs/003.json').exists()

@@ -96,179 +96,56 @@ saving a configuration does not recover the clock or reset consumption.
 无法核对未闭合区间，这些操作仍可使用。新节点应用配置、实际预算修订和执行仍须通过
 原有时钟与预算校验；保存配置不会恢复时钟或重置消费。
 
-Current instances use protocol 33. On frozen v1/v2 and unmarked legacy catalog
-routes, an initial H `experiment` without retained, authorized nonwaived focus
-requires a top-level `search_plan` and explicit focus.
-An explicit `search_plan.focus.index` selects the same payload's `commitments` by
-1-based index; `index: null` is only a multi-mechanism shallow `screen`. Omitted or
-null focus preserves an authorized nonwaived focus and allocation. A/W use exact
-stable task references such as `h001.m1`, rather than display labels. H/A worker
-consultations retain the requesting W's selected inputs and materials regardless
-of the consultant's `implementation_selection`, without changing authored raw
-responses. The [architecture](ARCHITECTURE.md#ownership-and-flow) owns these handoff
-rules; see the [CLI examples](ROOTLESS_CLI.zh-CN.md#机制编号与精确引用).
-Repair advice names the exact role, path and expected shape, and distinguishes
-remaining allowance from consumed usage. It does not authorize experiment replay.
-Earlier protocols, including 32, are rejected before scientific interpretation or
-writes; no compatibility reader, migration or settings-version edit is supported.
+### Current scientific policy / 当前科学策略
 
-当前实例采用协议 33。已冻结 v1/v2 及无策略字段的旧目录路线中，H 的 `experiment`
-在没有已保留、获授权且未豁免的 focus 时，必须提供顶层 `search_plan` 及显式 focus；显式选择使用同次 commitments 的 1 起始编号，
-`index:null` 只允许多机制浅筛 screen。遗漏或 null focus 保留原获授权 focus 及分配。
-后续 A/W 使用任务给出的稳定精确引用。H/A 的 W 咨询忽略作者 implementation_selection，
-保留请求 W 的所选输入和材料，作者原始回答不改写；完整规则由[架构](ARCHITECTURE.zh-CN.md#责任与数据流)维护。
-补填诊断指出准确角色、路径和预期形状，并区分剩余额度及既有消费，不授权重跑旧实验。
-包括 32 在内的旧协议在解释科学原件或写入前拒绝，不兼容读取、不迁移、不手改旧实例版本。
+Current instances use protocol 33, scientific strategy 3 and advisory scope 1.
+These are the only supported scientific behavior versions. Worker and lineage
+view 1, final-A completion policy 1 and selection policy 2 remain current format
+markers, not older scientific policies. Earlier protocols, strategies 1/2,
+unmarked scientific settings/jobs, supervision 1/2/3, frozen v4 missing its
+boolean freshness field, and fragment handoff 1 or a missing handoff marker are
+rejected before scientific interpretation or new effects. There is no migration,
+compatibility reader or supported manual settings-version edit. Configuration
+revisions, recovery and fork cannot upgrade retained originals.
 
-New preparations freeze W-first `research_strategy_version=3`: W starts research and may
-begin discovery with no candidate or mature hypothesis. During ordinary research, before
-managed batches W declares a stable mechanism and `experiment_question={question,change_criterion}`
-through `--research JSON`, without a preliminary H or W handoff. Same-session
-revisions, merges, retirement and resume retain exact declaration originals. Optional
-`research_memory` retains selected candidate/evidence references, data/evaluation basis,
-conditional negative findings, failure conditions, open questions and limitations across
-consultation and context changes. Control validates exact references and structure,
-without deciding scientific novelty or granting permissions. Optional candidate-independent
-`clues` retain observations, applicability, limited negatives and open questions
-with nonempty exact evidence; a limited negative requires applicability. `--research JSON`
-preflight runs under the existing writer lease: current-attempt admission, pause,
-host-review and budget gates precede write-once declaration publication. It launches
-no external execution, adds no call investment and grants no execution permission;
-actual acceptance idempotently reuses the exact frozen binding. H expands useful
-explanations and E supplies bounded evidence. New strategy-3 preparations freeze
-`advisory_scope_version=1` in settings/jobs, independently of supervision policy 3/4.
-Marked ordinary A diagnoses evidence-backed lock-in, ignored counterevidence, goal
-drift or severe reasoning flaws. Findings and possible H/E suggestions belong in
-`scientific_result`; no material issue adds no constraint. W owns model, depth,
-folds, bagging, expansion and ordering, and chooses H/E consultation through
-`stage_intent=revise_h/extract` with a concrete `consultation_question`. The exact
-requester, evidence and materials are frozen; H/E return directly to W through
-the existing Backend continuity contract. Marked ordinary A returns only
-`continue_w` with `decision_request:null` and meaningful `scientific_result`.
-Control recognizes that advice was returned without requiring the redundant
-`supervision_result` marker or filling it into the original answer. An explicitly
-conflicting marker or route still requires correction; no scientific endorsement
-or execution permission follows.
-The next W task does not promote A's `route_reason` or require the preceding local
-focus. A trigger alone proves no stagnation. Missing scope markers preserve old
-ordinary-A action/evidence/closeout authority on configuration revision, recovery
-and fork. This internal scope marker is not a public supervision-policy bump.
-With original allowance remaining, v2/v3 W's voluntary `decision` or an unmarked ordinary A's closeout request enters
-one pre-delivery Final A before irreversible lock: accept exact `deliver`, reject
-all with `finish` and no recommendation, or ask W for one concrete decision-changing
-correction using that remaining allowance. Correction admits no broader research
-or H/A/E consultation; it returns for at most one reassessment and no second correction.
-V3 correction freezes only its exact source W subjects' retained active mechanisms
-and uses `--mechanism N`, without new live declarations. An empty catalog still permits
-reading and correcting retained evidence, but refuses managed new execution before preparation.
-Acceptance does not add another Final A. Exhaustion keeps protected final-only
-reporting with no new W/E or experiments; an already accepted pre-delivery A
-concludes from originals under its own exact deliver/finish authority without
-another A. V2/v3 may reject all even with candidates;
-availability is not qualification. Best-effort submission requires explicit original
-task policy and is separate from scientific endorsement. Normal no-delivery is not
-itself a failure metric; engineering tests do not establish scientific benefit.
-Frozen v2 retains its original H-first startup and Final A contract. Frozen v1 retains voluntary `decision` directly entering irreversible protected FINAL.
-Unmarked retained instances keep their original request and terminal contracts
-on configuration updates, exact rebuild or fork. Inspect/export does not modify an
-instance; preparing a new instance from editable TOML uses current defaults rather
-than reproducing every internal frozen setting. Mechanical checks and formal
-independent review keep their separate authority. A frozen macro-supervision request
-permits `supervision_result=continue_existing` without a new evidence request.
-Under frozen earlier strategies, explicit W `exploration_rounds`, exact-original
-counting and A coverage are maintained by the common ledger/controller, independently
-of the agent backend. The architecture
-owns the reporting fields, trigger defaults and purpose-specific contract.
-New W-first preparations freeze supervision policy 4 with
-`require_fresh_input=true`: mode=review, consecutive_calls=4, a 10% consumption
-floor and spacing, no fixed checkpoints and no default review-count cap. Each
-finite shared-budget dimension caps cumulative automatic-A admission at 25%.
-The exact W question/clues/evidence are assessed under the frozen advisory scope.
-Frozen policy 2 retains its automatic-A-off default. Original-call notices and
-enforced reviews are separate settings; exact original calls count once across
-continuation and recovery, without becoming scientific rounds or stagnation verdicts.
-Frozen earlier supervision policies retain their cadence. Automatic supervision is an
-experimental scheduling heuristic, not evidence of stagnation or scientific gain. Direct API `supervision_policy=None` disables it;
-no new scientific classifier, search tree or knowledge database is required.
+当前实例使用协议 33、科学策略 3 与 advisory scope 1，只支持这一科学行为。
+worker／lineage view 1、final-A completion policy 1 和 selection policy 2 仍是当前
+格式标记，不表示旧科学策略。旧协议、策略 1/2、缺科学职责标记的 settings/job、监督 1/2/3、
+冻结 v4 缺布尔 freshness 字段及 fragment handoff 1 或缺 handoff 标记的格式，在科学解释
+或新效果前拒绝。不兼容读取、不迁移、不手改版本；配置修订、恢复和 fork 不升级留存原件。
 
-新准备实例冻结 W 先行策略 `research_strategy_version=3`，从 W 开始，初探可无候选或成熟假设。
-普通研究的受管批次前，通过 `--research JSON` 声明稳定机制身份及
-`experiment_question={question,change_criterion}`，不需先经 H 或换 W；同 session 可修订、
-合并、退役和恢复，保留准确声明原件。可选 `research_memory` 以现有研究导航保存所选候选/证据引用、
-数据及评价口径、条件性负结果、失败条件、未解问题和限制，咨询返回和换上下文后仍可回读。可选 `clues` 可在没有候选时记录观察、适用条件、有限负结论和开放问题；须有非空准确证据，有限负结论还须适用条件。
-控制只核结构与准确原件，不判断科学新颖度或授予权限。`--research JSON` 预检在既有 writer lease 内，
-先核对当前 attempt，并通过暂停、宿主评估及预算门槛，再一次性发布不可变声明；不启动外部执行，
-不新增调用投入，也不授执行权限，后续实际接受幂等复用准确冻结绑定。H 打开解释，E 提供有界证据。
-新 strategy 3 准备在 settings/job 另冻结 `advisory_scope_version=1`，独立于监督 policy 3/4。
-有标记的普通 A 只诊断有证据的局部锁定、忽略反证、目标偏移或严重推理缺陷，发现及可考虑的
-H/E 建议写入 `scientific_result`，没有实质问题就不新增约束。模型、深度、折分、bagging、
-扩展与先后顺序由 W 自主选择，W 可用 `stage_intent=revise_h/extract` 和具体
-`consultation_question` 咨询 H/E。准确请求者、证据与材料冻结，H/E 答复经既有 Backend 续接
-直接返回 W。有标记的普通 A 只返回 `continue_w`、`decision_request:null`；
-并提供有效 `scientific_result`。控制据此识别建议已返回，不再要求冗余的
-`supervision_result` 标记，也不把缺值补写进原回答；显式冲突标记或非法路线仍须补正，
-不由此赋予科学认可或执行权限。
-下一 W 主任务不嵌入 A 的 `route_reason` 或要求保持前一局部焦点。触发本身不证明停滞。
-无此职责标记的旧任务在修订、恢复及 fork 后保留原普通 A 动作、证据请求和收口权限；
-这个内部职责标记不增加公开监督策略版本号。
-v2/v3 的 W 自愿 `decision` 或无职责标记的普通 A 请求收口，在原额度可用时先进入一次提交前 Final A，不先不可逆锁死研究：
-同一次 A 可显式 `deliver` 接受准确候选、用 `finish` 且无推荐全部拒绝，或要求 W 在原剩余额度内
-补正一个具体、能改变判断的缺口。补正不扩大研究、不咨询 H/A/E，之后至多一次再评估，不能再补正；
-v3 补正只冻结准确源 W subjects 已保留的 active 机制，使用 `--mechanism N`，不新增 live 声明。
-目录为空仍可读取既有证据并补正结论，但受管新执行在准备前拒绝。接受不另加一次 Final A。耗尽后仍只作 protected final-only 报告，不新开 W/E 或实验。
-已接受的提交前 A 运行中才耗尽时，同一次 A 按原件及其准确 `deliver/finish` 权限收口，不另加 A。
-v2/v3 即使有候选也可全部拒绝，可用性不等于资格；best-effort 提交须原任务显式政策，不能冒充科学认可。
-正常未交付本身不是失败指标，工程检查不证明科学收益。已冻结 v2 保留原 H 开始及 Final A 合同；
-已冻结 v1 保留自愿 `decision` 直接进入
-不可逆 protected FINAL 的旧义。
-无该字段的已有实例在配置更新、准确重建和 fork 时保留原请求及终态合同，不自动升级。
-检查或导出不修改实例；从可编辑 TOML 新准备实例使用当前默认值，不等于重建全部内部冻结设置。常规机械检查与
-正式独审保留单列权限。带冻结宏观监督请求的 A 可用
-`supervision_result=continue_existing` 与 `continue_w` 放行原工作，不编造新缺口。
-旧冻结策略的 `exploration_rounds`、准确原件计数和 A 覆盖边界由公共账本/控制层维护，与 Agent
-后端无关；报告字段、默认触发策略和按目的区分的统一合同由上述架构维护。
-新 W-first 准备默认冻结监督 policy 4，显式 `require_fresh_input=true`：`review`、连续原调用 4、首次与间隔至少 10% 消费、无固定检查点、默认无次数帽；每个有限共享预算维度以 25% 作为自动 A 累计消费的软准入帽。A 根据 W 作者问题／线索／证据按冻结职责诊断；触发只表示检查机会。旧冻结 policy 2 仍保留自动 A 默认关闭。可选的原调用投入提醒与强制评估分别配置，准确原调用在续接与恢复后只计一次，
-不把投入当科学轮次或停滞判决。旧冻结监督策略保留原节奏。
-自动监督是尚未证明收益的实验性调度启发式，不是停滞判断；直接 API 的
-`supervision_policy=None` 可关闭，不新增科学分类器、搜索树或知识库。
+W starts research autonomously, may explore without a candidate or mature
+hypothesis, and declares exact mechanisms and batch questions through
+`--research JSON_FILE`. H offers explanations, E answers bounded evidence
+questions, and ordinary A returns diagnostic advice to W. W's `decision` requires
+Final A before delivery. Final A may accept an exact candidate, reject all or,
+while original allowance remains, request one bounded W correction followed by
+at most one reassessment. Exhaustion permits final reporting from originals only.
+Formal independent qualification and execution permission remain separate gates.
+Optional research memory, material selection, routing and final-reporting rules
+are maintained in [Research-loop contracts](RESEARCH_LOOP_CONTRACTS.md).
 
-New preparations can declare a supervision policy through `policies.supervision`
-in TOML, or `supervision_policy` in the direct API. The earlier policy 3 remains
-an explicit choice:
+W 自主开始研究，可在尚无候选或成熟假设时探索，通过 `--research JSON_FILE` 声明准确机制
+和批次问题。H 提供解释、E 回答有界证据问题，普通 A 将诊断建议交回 W。
+W 的 `decision` 在交付前请求 Final A。Final A 可接受准确候选、全部拒绝，或在原额度
+可用时要求一次有界 W 补正，之后至多一次再评估；耗尽时只从原件作最终报告。
+正式独立资格与执行权限仍分别核对。可选研究记忆、材料选择、路由及最终报告的准确规则
+由[研究循环合同](RESEARCH_LOOP_CONTRACTS.zh-CN.md)维护。
 
-新准备可用 TOML 的 `policies.supervision` 或直接 API 的 `supervision_policy` 显式声明。
-以下旧 policy 3 仍可选择：
+### Automatic supervision / 自动监督
 
-```toml
-[policies.supervision]
-version = 3
-mode = "review"
-consecutive_calls = 4
-min_budget_fraction = 0.20
-budget_checkpoints = [0.30, 0.65]
-max_automatic_reviews = 2
-```
+Supervision is v4 or `None` (direct API opt-out). New preparations default to the
+following policy. `require_fresh_input` remains tunable: `true` gates automatic
+review on changed accepted authored questions or exact receipt frontiers;
+`false` allows operational opportunities without that gate. Public declarations
+may omit it to use the new default, but frozen v4 settings/jobs must contain the
+explicit boolean. Calls, scores, time and engineering failures alone establish no
+scientific stagnation or benefit.
 
-Version 3 applies the positive minimum to the first automatic review as well as
-later spacing. Missing consumption cannot establish that threshold. This policy
-is frozen for the instance; configuration revisions do not reset its counters.
-For a new instance, `mode="off"` disables automatic reviews; direct API `None`
-also retains its existing opt-out.
-
-policy 3 的正数最低投入同时约束首次自动反思与后续间隔，缺失消费不能证明满足阈值。
-策略随实例冻结，配置修订不重置计数；新实例可用 `mode="off"` 关闭自动反思，直接 API
-也可沿用 `None`。下例保留可显式选择的旧 policy 2 投入提醒语义。
-
-New preparations default to policy 4 with the explicit boolean
-`require_fresh_input=true`; `research_strategy_version` stays 3. Frozen policies
-1/2/3 and explicit older policy 4 without this flag keep their original cadence.
-The ongoing V3 two-automatic-A scientific test keeps its original settings.
-Scientific benefit remains unverified. The declaration below uses 25% of each
-finite shared-budget dimension as a soft cumulative automatic ordinary-A ceiling:
-
-新准备默认 policy 4 并显式声明布尔值 `require_fresh_input=true`，科学收益仍未经验证。
-`research_strategy_version` 仍为 3；旧 policy 1/2/3、未带该字段的旧显式 policy 4 和正在
-进行的 V3 两次自动 A 科学测试保留冻结节奏。下例的 25% 是各有限共享预算维度中自动普通 A 累计消费的软准入帽：
+监督仅支持 v4 或 `None`（直接 API 关闭）。新准备默认如下策略。
+`require_fresh_input` 仍可调：`true` 要求已接受作者问题或准确收据边界变化才自动评估；
+`false` 允许不经过该门槛的运行检查机会。公开声明省略时采用新默认，冻结 v4 settings/job
+则必须显式保存布尔值。调用、分数、时间及工程失败本身不证明科学停滞或收益。
 
 ```toml
 [policies.supervision]
@@ -278,108 +155,55 @@ require_fresh_input = true
 consecutive_calls = 4
 min_budget_fraction = 0.10
 budget_checkpoints = []
-# max_automatic_reviews is omitted: default None, optional emergency count cap.
+# max_automatic_reviews omitted: no count cap; an integer adds an emergency cap.
 
 [policies.supervision.automatic_budget_fraction]
 tokens = 0.25
 seconds = 0.25
 ```
 
-Both automatic budget fractions must be positive and at most 1.
-`min_budget_fraction` must also be positive; it sets the first-review floor and
-the consumption cooldown after the preceding assessment completes. V4 requires
-empty fixed checkpoints. Omit `max_automatic_reviews` in TOML for no count cap
-(direct API: `None`); an explicit nonnegative integer adds an emergency cap.
-Setting `mode="off"` disables automatic A, and `notice` retains advisory behavior.
+`mode="off"` disables automatic A; `notice` retains advisory behavior. Both
+automatic budget fractions must be positive and at most 1; the minimum consumption
+fraction must be positive and applies to the first review and later spacing.
+V4 requires empty fixed checkpoints. An optional nonnegative
+`max_automatic_reviews` adds an emergency count cap. Actual automatic-A cost
+accumulates tokens and active seconds across all attempts, independently of the
+verdict, in each finite shared dimension. Unknown or incomplete metering retains
+known lower bounds and suppresses only additional automatic A. The soft budget
+or count cap also suppresses only additional automatic A, without cancelling
+accepted work or blocking W and original query/collect. Final A, formal review
+and W's proactive consultations keep separate scopes. Identities, consumed budgets,
+review counters and waiting survive configuration changes and recovery.
 
-两个自动 A 预算比例均须为正且不超过 1；`min_budget_fraction` 也须为正，同时控制首次
-消费下限及上次评估完成后的冷却消费。V4 的固定检查点必须为空。TOML 省略
-`max_automatic_reviews` 表示无次数帽（直接 API 为 `None`）；显式非负整数可增加紧急次数帽。
-`mode="off"` 关闭自动 A，`notice` 保留提醒语义。
+`mode="off"` 关闭自动 A，`notice` 保留提醒。两个自动预算比例均须为正且不超过 1；
+最低消费比例须为正，同时约束首次与后续间隔；v4 的固定检查点必须为空。
+可选非负 `max_automatic_reviews` 是紧急次数帽。自动 A 在各有限共享预算维度按全部尝试
+实际 token／活动秒累计费用，与结论无关。缺测保留未知及已知下界，只抑制额外自动 A；
+软预算帽或次数帽也只抑制额外自动 A，不取消已接受工作、不锁住 W 或原 query／collect。
+Final A、正式独审及 W 主动咨询保持各自范围；修订和恢复保留身份、预算消费、评估计数及等待。
 
-Changed accepted authored questions or exact original receipts provide control
-opportunities, without classifying scientific progress. With
-`require_fresh_input=true`, consumption without a new author/receipt input leaves
-an operational notice and cannot force A or block new W experiments. Explicit
-`false`, or an absent flag in an older v4 declaration, retains the earlier
-operational automatic-review opportunity. Live call counts do not yet supply
-author/receipt freshness: the first long W is therefore not interrupted by
-consumption alone. Counts, scores, elapsed time and engineering failures do not
-prove stagnation. Ordinary A distinguishes productive deepening from repeated
-investment lacking new distinguishing evidence and returns fallible advice;
-W chooses the response. Each automatic ordinary A
-is charged its actual separately metered tokens and active seconds across all
-attempts, independently of its verdict; normalized fraction differences are not
-costs. An unlimited shared dimension does not gate admission. Unknown or partial
-metering retains unknown coverage and known lower bounds, suppressing only
-additional automatic A pending original-usage reconciliation. The budget/count
-cap also suppresses only extra automatic A: W and original query/collect remain
-available. This soft admission ceiling can be exceeded by in-flight A and adds
-no cancellation. Final A, formal independent review and W proactive consultation
-keep their separate scopes. A merged marked W-to-A consultation retains its
-consultation purpose and exact W return binding; its automatic cost counts once.
-W-requested H/E consultation takes priority and its successor W receives a useful
-live interval under existing call/consumption thresholds before an older pending
-A, without treating unreviewed inputs as covered. Configuration changes and recovery do not reset
-consumed budgets or original identities.
+### Context handoff / 上下文交接
 
-已接受的作者问题或准确原调用收据变化只提供诊断机会，不判定科研进展。
-`require_fresh_input=true` 时，没有新作者／回执输入的消费只保留运行提醒，不强制 A，
-也不阻塞 W 新实验。旧显式 v4 省略该字段或显式设为 `false` 保留原运行检查机会。
-实时调用数尚不提供作者／回执 freshness，所以首个长 W 不会仅因消费被打断。
-次数、分数、耗时和工程失败不证明科研停滞；普通 A 区分正常深化与重复投入却没有新辨别证据，
-只给可质疑的建议，由 W 决定如何响应。自动普通 A 按准确任务全部尝试的实际 token／活动秒分别计费，
-与科学结论无关，不能相减归一化占比当作费用。共享预算无上限的维度不限制准入。
-缺测保留未知和已知下界，先核对原用量，只抑制额外自动 A；预算帽或次数帽也只抑制额外
-自动 A，不锁住 W，原 query／collect 仍可用。软准入帽允许在途 A 超出，不新增强杀。
-Final A、正式独审和 W 主动咨询保持各自范围。有标记的 W→A 咨询合并自动请求时，保留咨询目的和准确 W 返回绑定，自动费用只计一次。W→H/E 咨询优先，返回 W 按既有调用/消费阈值获得有用实时工作间隔后再处理旧 pending A，不将未审查输入虚报为已覆盖。修订和恢复不重置消费或原件身份。
+Enabled fragments require `context_handoff_version=2` (public field
+`policies.worker_context_handoff_version=2`). The direct API may use
+`worker_fragment_policy=None`. New supported Codex/Pi declarations default to one
+complete window; `policies.worker_context_windows` accepts 1 or 2. Window count is
+one initial window plus accepted completed compactions. In the last complete
+window, occupancy at or above 90% only advises a checkpoint. Handoff requires
+windows started above the maximum and fresh current occupancy strictly above
+70%; compaction/count alone and unavailable occupancy do not stop work. It seals
+a partial result for a new W, without automatic A or resetting original budgets.
+Consultation may create a new logical W job while reusing a verified native
+session; job numbering alone does not prove context rotation. Precise native
+continuity and observation requirements are described below and in the contracts.
 
-The following explicit version 2 policy remains available. `mode="off"` retains
-passive investment facts; `"notice"` sends
-a bounded notice without blocking work; `"review"` requests ordinary A and pauses
-new experiments when due. Review mode also requires a positive
-`max_automatic_reviews`. These are scheduling settings, not scientific verdicts.
-
-新准备时，直接 API 的 `supervision_policy` 可使用下例。`off` 仅保留投入事实，
-`notice` 只提醒，`review` 到期后暂停新实验并转普通 A；强制评估还须配置正数的
-`max_automatic_reviews`。原调用的 query/collect 仍可用，已有冻结实例不升级。
-
-```json
-{
-  "version": 2,
-  "mode": "notice",
-  "consecutive_calls": 4,
-  "min_budget_fraction": 0.1,
-  "budget_checkpoints": [],
-  "max_automatic_reviews": 0
-}
-```
-
-New preparations that configure `worker_fragment_policy.max_context_windows`
-freeze `context_handoff_version=2` inside that policy (public field:
-`policies.worker_context_handoff_version=2`), independently of A's
-advisory scope. In the last complete window, valid occupancy at or above 90%
-only advises a checkpoint. Completed compaction continues work in the new window;
-handoff requires windows started greater than the frozen maximum and current
-valid occupancy strictly greater than 70%. Max=1 therefore permits one complete
-window plus 70% of its next window; max=2 permits two complete windows plus 70%
-of the next. Count/compaction alone does not hand off, and missing or stale
-occupancy remains unknown. Unversioned policies retain the old 85% notice and
-count-based gate. The public field accepts 1 (legacy) or 2 (new), defaulting to 2
-on new preparation. Export encodes an old private absence as public 1 so reapplying
-the exported declaration preserves legacy meaning; fork retains the private absence.
-A new logical W job after consultation may reuse the same native session;
-logical job numbering alone does not establish context rotation. Backend capability
-and verified continuation outcomes determine whether that session was resumed.
-
-新准备在配置 `worker_fragment_policy.max_context_windows` 时，在该策略内另冻结
-`context_handoff_version=2`（公开字段 `policies.worker_context_handoff_version=2`），独立于 A 职责标记。最后一个可完整使用的窗口占用达到 90%
-只提醒准备 checkpoint；自动压缩后继续工作，只有已启动窗口数超过冻结额度且当前有效窗口
-占用严格大于 70% 时才交新 W。max=1 允许一个完整窗口及下个窗口的 70% 空间，max=2
-允许两个完整窗口及下个窗口的 70%。压缩或计数本身不触发交接，缺失或过期占比保持未知。
-无版本旧策略保留 85% 提醒和按次数交接门禁。公开字段接受 1（旧）或 2（新），新准备默认 2；旧私有缺失导出为公开 1，重应用导出声明仍保持旧语义；fork 保留原私有缺失。
-咨询后新逻辑 W 任务可能续接原生会话，编号变化本身不代表窗口轮换；后端能力与已核验
-continuation outcome 才能证明是否恢复原会话。
+启用 fragment 必须使用 `context_handoff_version=2`，公开字段为
+`policies.worker_context_handoff_version=2`；直接 API 可用 `worker_fragment_policy=None`。
+新受支持 Codex／Pi 声明默认一个完整窗口，`policies.worker_context_windows` 接受 1 或 2。
+窗口数为一个初始窗口加已接受完成压缩次数。最后完整窗口占用达到 90% 只提醒 checkpoint；
+只有窗口数超额且当前新鲜占用严格大于 70% 才交接。压缩／计数本身或占用未知不停止工作。
+交接封存部分结果并交新 W，不自动 A，也不重置原预算。咨询后新逻辑 W 任务可能续接经验证
+的原生 session，编号变化本身不证明窗口轮换；准确续接与观测条件见下文及研究循环合同。
 
 Native subagent permission can be declared as a separate boolean in
 `[agent.roles.W]` (or an explicitly selected named Worker profile). Role values
@@ -444,7 +268,7 @@ argv elements are literal native arguments, so use absolute paths for their inpu
 | `executor` | `mode` (`local` or `external`), `config` (existing `executor`/`configuration` object), `resource_policy` (existing cumulative allowance contract) |
 | `delivery` | Existing frozen delivery-policy object; optional adapter paths `adapter.adapter`, `adapter.source_roots` and path-like `adapter.launcher_argv[0]` resolve relative to TOML / 既有交付策略对象，上述路径相对 TOML |
 | `policies` | Boolean / 布尔值: `formal_review`, `execution_authority`, `candidate_audit`, `decision_contract`; existing contract objects / 既有合同对象: `selection`, `resume`, `history_observer`; `worker_context`: `same_session` or `new_context`; `worker_context_windows`: integer 1 or 2 / 整数 1 或 2 |
-| `policies.resume.automatic_recovery` | Independent bounded standard-Codex recovery policy; fields and defaults below. / 独立的标准 Codex 有界自动接续策略，字段及默认值见下文。 |
+| `policies.resume.automatic_recovery` | Shared bounded recovery for capable Backends, including standard Codex and Pi; fields and defaults below. / 按 Backend 能力提供的共用有界自动接续策略，支持标准 Codex 与 Pi，字段及默认值见下文。 |
 | `ui` | `port` (0–65535; default 0), `open_browser` (default false), `approval_secret_file` (host-private path reference / 宿主私有路径引用) |
 
 `budget.max_output_item_bytes` and `budget.max_output_total_bytes` retain their
@@ -492,22 +316,16 @@ complete window only advises a checkpoint; compaction then continues work in the
 next window. Handoff requires windows started above the maximum and fresh current
 occupancy strictly above 70%, so max=1 allows 1 complete window plus 70% of the next,
 and max=2 allows 2 complete windows plus 70% of the next. Missing/stale occupancy
-adds no stop; compaction alone does not hand off. Unversioned frozen declarations
-keep the legacy 85% notice and count gate, exported as explicit public version 1.
-Version 2 is the new default; explicit public 1 preserves legacy meaning. Handoff
+adds no stop; compaction alone does not hand off. Only version 2 is supported; version 1 and a missing frozen marker are rejected. Handoff
 does not automatically request A. An explicit `handoff` also starts a new W; marked W's `extract` requests E evidence consultation, while `revise_h` and `review` request
 serial H and A consultation respectively. These H/A/E routes require a concrete
-nonblank `consultation_question` and return to a successor W job. Jobs with the
-new advisory scope or reflection policy 3/4 may retain the original native W session through the selected
+nonblank `consultation_question` and return to a successor W job. Current jobs may retain the original native W session through the selected
 Backend capability and original/successor validation; unsupported or unavailable
 continuity explicitly uses a new context. Requested resume is never reported as
 observed success, and unknown submission is not replayed. Pi currently does not
 support `consultation_resume`: H/A/E consultation returns explicitly use
 `new_context`, while same-logical-task fragment/repair/wake can append to the
-original Pi session under their own gates. Strategy v2/v3 W uses
-`decision` for pre-delivery Final A; frozen v1 uses
-`decision` when ready to close research and directly request protected Final A;
-an unmarked legacy W requests ordinary A assessment. Ordinary consultation grants no assessment cycle,
+original Pi session under their own gates. W uses `decision` for pre-delivery Final A. Ordinary consultation grants no assessment cycle,
 main-line change, recommendation or qualification. Formal independent review
 retains its exact-subject contract and neutral inputs.
 
@@ -534,9 +352,8 @@ rejects them without migration or settings edits.
 `policies.worker_context_handoff_version=2`，对应内部 `context_handoff_version=2`：最后完整窗口
 达到 90% 只提醒收口，压缩后继续工作；已启动窗口数超过冻结额度且当前新鲜占用严格大于 70%
 才交新 W，不自动 A。因此 max=1 为一个完整窗加下个窗 70%，max=2 为两个完整窗加下个窗 70%。
-缺失或过期占比不新增停止条件，压缩本身不交接。旧无版本声明保留 85% 提醒和按次数交接门禁，导出时写公开版本 1；新准备默认版本 2，显式 1 可保留旧语义。显式 `handoff` 同样交新 W；`revise_h`
-和 `review` 分别请求串行 H/A 咨询，有职责标记的 W 还可用 `extract` 咨询 E，三条路线均须具体非空 `consultation_question`，结束后交后继 W 任务；有新 advisory 职责标记或 reflection policy 3/4 的任务可通过统一 `Backend` 校验后续接原生 W 会话，不支持或原连续性不可用时明确新上下文，未确认续接不当成功，也不重放未知提交。Pi 当前不支持 `consultation_resume`，H/A/E 咨询返回明确使用 `new_context`；同一逻辑任务 fragment／补填／唤醒仍可按各自门槛追加原 Pi session。策略 v2/v3 用 `decision` 请求提交前 Final A；已冻结 v1
-直接请求 protected Final A，无策略字段的旧 W 仍请求普通 A 评估。
+缺失或过期占比不新增停止条件，压缩本身不交接。仅支持版本 2；版本 1 或缺冻结标记时拒绝。显式 `handoff` 同样交新 W；`revise_h`
+和 `review` 分别请求串行 H/A 咨询，有职责标记的 W 还可用 `extract` 咨询 E，三条路线均须具体非空 `consultation_question`，结束后交后继 W 任务；当前任务可通过统一 `Backend` 校验后续接原生 W 会话，不支持或原连续性不可用时明确新上下文，未确认续接不当成功，也不重放未知提交。Pi 当前不支持 `consultation_resume`，H/A/E 咨询返回明确使用 `new_context`；同一逻辑任务 fragment／补填／唤醒仍可按各自门槛追加原 Pi session。W 用 `decision` 请求提交前 Final A。
 咨询不消费正式 A 周期，不改变主线、推荐或资格；正式独审保持精确 subject 和中性输入。
 
 `policies.worker_context` 仍选择 `same_session` 或 `new_context`。同 session 续接保留
@@ -549,35 +366,12 @@ rejects them without migration or settings edits.
 有效。直接 API `worker_fragment_policy=None` 仍可禁用；下一新节点配置修订保留已接受
 任务。协议 29、30、31、32 实例保留匹配旧 runtime；新版拒绝读取，不迁移、不手改版本。
 
-On frozen v1/v2 and unmarked legacy catalog routes, W may declare new mechanisms
-through its existing `search_plan` when sealing a result. The current W executes only
-the frozen catalog; a new W freezes the new catalog before executing those mechanisms
-under the original admission rules. V3 ordinary research instead declares or revises
-mechanisms through `--research JSON` in the same session, without a W handoff.
-Bounded delivery correction retains its frozen catalog and permits no new live declarations.
-During ordinary research, H/A consultation is optional, not a prerequisite for W
-mechanism registration. V2/v3 `decision` requests pre-delivery Final A; frozen v1 enters protected Final A
-directly; unmarked legacy W requests ordinary A assessment. Final judgment remains independent.
+Ordinary research declares or revises mechanisms through `--research JSON_FILE`
+within the current W session. Bounded delivery correction keeps only its frozen
+source catalog and uses `--mechanism N`; it cannot introduce live declarations.
 
-已冻结 v1/v2 及无策略字段的旧目录路线中，W 可在封存时用既有 `search_plan` 声明新机制；
-当前 W 只执行其冻结目录，新机制须由新 W 冻结新目录后按原准入执行。v3 普通研究则通过
-`--research JSON` 在同一 session 声明或修订机制，不要求换 W。有界交付补正保留冻结目录，
-不新增 live 声明。普通研究中 H/A 咨询可选，不是 W 登记机制的前置条件；v2/v3 的 `decision` 请求
-提交前 Final A，已冻结 v1 直接进入 protected Final A，无策略字段的旧 W 请求普通 A 评估。
-最终裁决保留独立 A 边界。
-
-Shared research navigation reuses sealed scientific originals and the accepted
-prefix. `indexes.research` links current authored understanding, competing H
-explanations, ordinary A assessments, separate consultations and existing candidate
-and work indexes. Excerpts disclose omissions; complete summary, scientific_result
-and limitations remain readable. It adds no required scientific fields, scientific
-ranking or editable ledger database. Scientific data retain the existing exact
-original reference contract, without a new hashing system.
-
-共享研究导航复用封存科学原件及 accepted prefix；`indexes.research` 链接当前作者理解、
-H 竞争解释、普通 A 评估、单列咨询与既有候选/工作目录。摘录标明遗漏，完整 summary、
-scientific_result、limitations 保持可读，不增加必填科学字段、科学排名或可改 ledger 库。
-科学数据沿用既有精确原件引用，不新增 hash 系统；候选可用不等于有科学资格。
+普通研究通过 `--research JSON_FILE` 在同一 W session 声明或修订机制。
+有限交付补正只使用冻结来源目录及 `--mechanism N`，不新增 live 声明。
 
 ## Experimental Pi — common research path / 实验性 Pi：公共研究路径
 
@@ -988,69 +782,76 @@ protected FINAL 与 closeout 仅可协商同一任务的这一格式失败，保
 
 ## Automatic recovery / 自动接续
 
-The standard single-executable Codex preparation path supplies
-`resume_policy.automatic_recovery` through the same defaults used by TOML, CLI
-and the webpage. TOML declares it as `[policies.resume.automatic_recovery]`;
+New preparations for capable Backends, including standard single-executable Codex
+and Pi, supply `resume_policy.automatic_recovery` through the same defaults used
+by TOML, CLI and the webpage. TOML declares it as `[policies.resume.automatic_recovery]`;
 the existing CLI `--worker-resume-policy /absolute/resume.json` accepts it inside
 the complete resume object. In the webpage, use More research settings → independent
-review and original-call recovery → original-call recovery policy. The controls
-retain the distinction between output repair and recovery of unfinished work.
+review and original-call recovery → retry settings. The visible retry count controls
+the total automatic recovery cap; advanced settings retain the per-action limits.
+Saved changes affect future nodes, preserving the current accepted task and its receipts.
+Output repair and recovery of unfinished work remain separate permissions.
 
-启动命令仅含一个标准 Codex 可执行程序时，准备入口通过 TOML、CLI、网页共用的默认引擎提供
+支持自动恢复的 Backend（包括标准单可执行程序 Codex 和 Pi）新准备入口通过 TOML、CLI、网页共用的默认引擎提供
 `resume_policy.automatic_recovery`。TOML 对应 `[policies.resume.automatic_recovery]`；
 CLI 的既有 `--worker-resume-policy /absolute/resume.json` 在完整恢复对象内接受该字段。
-网页入口为“更多研究配置 → 独立复核与原调用恢复 → 原调用恢复策略”，使用专用类型控件，
-区分输出补填与未完成任务接续。
+网页入口为“更多研究配置 → 独立复核与原调用恢复 → 重试设置”，可见的最大重试次数绑定
+自动恢复总次数，高级字段保留分动作上限。运行中保存仅影响未来节点，不改写当前任务与原回执；
+输出补填与未完成任务接续仍是不同许可。
 
 | Field / 字段 | Default / 默认 | Meaning / 含义 |
 | --- | --- | --- |
 | `enabled` | `true` | Independent recovery permission; boolean. / 独立自动接续许可，布尔值。 |
-| `max_continues` | `2` | Cumulative same-task early-stop or incomplete-W continuations; integer 0–100. / 同一任务提前停止或 W 交付不足的累计接续次数，整数 0–100。 |
-| `max_retries` | `3` | Cumulative same-task service retries, including at most one format fallback; integer 0–100. / 同一任务服务重试累计次数，含至多一次格式降级，整数 0–100。 |
-| `initial_backoff_seconds` | `30` | Initial finite nonnegative service backoff. / 首次有限非负服务退避秒数。 |
+| `max_attempts` | `8` for new defaults / 新默认为 `8` | Total automatic retries plus continues across native failures, work completion and format fallback; null or integer 0–100. Existing nonempty explicit policies omitting it retain null. / 原生失败、工作补填与格式降级共用的自动 retry 与 continue 总次数；null 或整数 0–100。显式非空旧策略省略时保留 null。 |
+| `max_continues` | `8` | Cumulative same-task early-stop or incomplete-W continuations; integer 0–100. / 同一任务提前停止或 W 交付不足的累计接续次数，整数 0–100。 |
+| `max_retries` | `8` | Cumulative same-task service retries, including at most one format fallback; integer 0–100. / 同一任务服务重试累计次数，含至多一次格式降级，整数 0–100。 |
+| `initial_backoff_seconds` | `5` | Initial finite nonnegative service backoff. / 首次有限非负服务退避秒数。 |
 | `max_backoff_seconds` | `300` | Finite nonnegative per-backoff limit. / 每次退避的有限非负秒数上限。 |
-| `jitter_fraction` | `0.1` | Jitter fraction, 0–1. / 退避抖动比例，0–1。 |
+| `jitter_fraction` | `0` | Jitter fraction, 0–1. / 退避抖动比例，0–1。 |
 | `max_wait_seconds` | `1800` | Cumulative actual service-wait limit, finite and nonnegative. / 实际累计服务等待的有限非负秒数上限。 |
 
 The time values must satisfy `initial_backoff_seconds <= max_backoff_seconds <=
 max_wait_seconds`. Zero attempts disable the corresponding recovery action.
-An explicitly supplied automatic-recovery table defaults its omitted fields;
-`enabled = false` disables it. An explicit older resume policy that omits this
+Fresh defaults cap the combined automatic retries and continues at eight, including
+native failures, work completion and format fallback. Zero disables all automatic modes
+without changing their admission scopes. With the total cap
+active, the combined consumed count also advances backoff: 5, 10, 20, 40, 80, 160,
+300 and 300 seconds, totaling 915 seconds without provider hints. Hints may extend
+this schedule within the single-wait and cumulative bounds. An explicitly supplied
+nonempty automatic-recovery table that omits `max_attempts` retains null and the
+historical independent action counters and backoff cadence; other omitted fields default.
+`enabled = false` disables recovery. An explicit older resume policy that omits this
 table gains no automatic-recovery permission. `output_only` still grants only
 output repair; it does not grant scientific work recovery. Custom/multi-argument
-launchers and the protocol backend do not gain this recovery capability. Original
+Codex launchers and the protocol backend do not gain this recovery capability. Original
 model profiles, permissions, native home and authentication remain unchanged;
 authentication is neither copied nor redirected.
 
-时间参数须满足上述大小关系；次数为 0 禁用对应动作。显式提供自动接续表时，其省略字段
-采用表中默认值；`enabled = false` 禁用策略。显式旧 resume 策略未声明此表时不新增自动
-接续许可。`output_only` 仍只授权输出补填，不授权科学工作接续。自定义、多参数 launcher
-及 protocol 后端不因此获得该恢复能力。原模型 profile、权限、native home 和认证来源保持，
+时间参数须满足上述大小关系；分动作次数为 0 禁用对应动作。新默认的自动 retry 与 continue
+合计最多八次，原生失败、工作补填和格式降级共用此额度；总次数为 0 禁用所有自动模式，不改变其准入范围。
+总次数也推进退避顺序，正常八次等待合计 915 秒；服务商提示可延长等待，但不绕过单次或累计上限。
+显式非空旧自动策略省略 `max_attempts` 时保留 null、分动作计数与退避节奏；其他省略字段采用表中默认值。
+`enabled = false` 禁用策略。显式旧 resume 策略未声明此表时不新增自动
+接续许可。`output_only` 仍只授权输出补填，不授权科学工作接续。自定义、多参数
+Codex launcher 及 protocol 后端不因此获得该恢复能力。原模型 profile、权限、native home 和认证来源保持，
 不复制或重定向认证。
 
-Recovery uses structured native failure fields and narrowly matched native failure
-envelopes: a qualified unfinished turn may continue its original session; a qualified temporary rate/capacity/connection or
-service failure may retry that session. A startup retry requires explicit native
-evidence that the original request was not accepted. Missing session identity is
-insufficient. Permanent auth/quota/configuration errors and unclassified failures
-stop. Native failure messages support the exact observed 429 retry-limit and quota
-texts, plus the anchored 503 HTTP envelope with a bounded single-line body and URL.
-These translations were checked using the installed Codex CLI against synthetic
-loopback HTTP responses. Their full JSON streams show `thread.started` and
-`turn.started` before the failures. For temporary 429/503, exact-ID `exec resume`
-in that same empty Codex home reuses the original thread and reaches the loopback
-provider again without Authorization; permanent quota is not resumed. Existing-session
-retry does not require a `not_accepted` field. That evidence is not successful
-real-provider reasoning recovery, usage coverage or native permission qualification;
-a missing-session startup retry still requires explicit non-acceptance evidence.
-Qualified native `error` and `turn.failed` messages may also contain a complete
-JSON error envelope. The bounded decoder reads recognized error codes and HTTP
-statuses from it; an `invalid_json_schema`/400 rejection is a permanent configuration
-failure for ordinary retry. Only the separately verified format negotiation above
-may downgrade transport. Decoded acceptance flags do not grant startup-replay
-permission. Other unstructured message-only errors and unrecognized CLI formats remain unknown; ordinary
-agent/tool text is never classified for retry. Permanent quota evidence takes
-precedence over a generic 429 or capacity signal.
+Recovery retains the native diagnostic category: temporary, incomplete, permanent
+or unknown. When the original session is safely available, each category may use
+bounded backoff under the same task; permanent or unknown classification alone
+does not force an immediate stop. This does not repair authentication, quota or
+configuration. Native structured codes and bounded error envelopes remain diagnostic
+facts; permanent quota evidence still takes precedence over generic capacity signals.
+The Pi adapter recognizes exact `fetch failed` at native failure boundaries as a
+connection error. Ordinary agent/tool text never supplies failure classification.
+A startup retry without an original session still requires explicit native temporary
+failure and non-acceptance evidence; missing identity or decoded acceptance prose
+is insufficient. Existing-session retry requires no `not_accepted` claim.
+Unknown external executions require reconciliation of the exact original call and
+are never automatically resubmitted. Cleanup, immutable identity, permissions,
+pause and shared budgets remain mandatory gates. Known completion is not reopened
+as a native failure. Only the separately verified format negotiation above may
+downgrade transport; recovery never supplies scientific qualification or extra permissions.
 Known completed turns with missing or invalid required output use existing finite
 output repair; legal fragments retain their existing continuation semantics.
 A completed W screen return with valid required JSON may separately continue the
@@ -1060,33 +861,26 @@ outcome and evidence bindings, and shares `max_continues` with early-stop recove
 Required-format and conditional breadth omissions use output repair; that permission alone
 does not authorize scientific work. A repaired valid response can independently
 qualify for work continuation. Valid partial findings and explicit blocks keep
-their declared stage intent; strategy v2/v3 `decision` requests pre-delivery Final A,
-while frozen v1 requests protected Final A directly
-and unmarked legacy W requests ordinary A assessment. Complete or inapplicable delivery adds no
+their declared stage intent; `decision` requests pre-delivery Final A. Complete or inapplicable delivery adds no
 recovery action. An enforced host review keeps its existing priority. Exhausting the
 automatic continue cap or the original budget records a verified partial exit rather
 than inventing completed findings or refunding consumption.
 
-恢复依据原生结构化失败字段及窄匹配的原生失败信封：明确未完成的提前停止可续接原 session，
-明确临时限流、容量、连接或服务故障可重试原 session。启动重试必须有原生证据明确证明原请求未被接受，不能凭
-缺 session 身份推断。永久认证、配额、配置错误及无法分类的失败明确停止；原生失败 message
-只额外支持已观察到的 429 retry-limit 与 quota 完整文本，以及具有有界单行正文和 URL 的
-锚定 503 HTTP 信封。这些翻译已用本机安装的 Codex CLI 连接合成 loopback HTTP 响应核对，
-完整 JSON 显示失败前已有 `thread.started`、`turn.started`；临时 429/503 在同一空
-Codex home 用精确 ID 执行 `exec resume`，仍沿用原 thread 并再次到达 loopback provider，
-全部请求均无 Authorization；永久 quota 不续接。既有 session 重试不要求 `not_accepted`
-字段；这未证明真实服务商推理恢复、用量覆盖或原生权限资格，无 session 启动重试仍须
-明确未接受证据。原生 `error`、`turn.failed` 的 message 若为完整 JSON 错误信封，
-有界解析器会读取其中已识别的错误码和 HTTP 状态；`invalid_json_schema`/400 对普通重试属于永久配置错误，
-仅上述单独核对的格式协商可降级传输，解析出的 acceptance 字段也不授予启动重放许可。
-其他非结构化 message-only 错误及未知 CLI 格式保持 unknown，不扫描
-普通 agent/tool 正文来决定重试；永久 quota 证据优先于泛化的 429 或容量信号。
+恢复保留 temporary、incomplete、permanent 或 unknown 原生诊断。若原 session 可安全续接，
+各类失败均可在同一任务内有限退避恢复，不仅凭 permanent/unknown 分类立即停止；等待本身
+不能修复认证、配额或配置。结构化错误码与有界错误信封保留诊断意义，永久 quota 证据仍优先
+于泛化容量信号。Pi 适配器仅把原生失败边界的精确 `fetch failed` 识别为连接故障，
+不扫描普通 agent/tool 正文。既有 session 重试不要求 `not_accepted`；无 session 启动重试
+仍须原生临时故障与明确未接受证据，不能凭缺身份或解码出的 acceptance 正文授予重放。
+未知外部执行必须先对账原调用，绝不自动重提。清理、不可变身份、权限、暂停和共享预算门槛
+保持，已知完成不因失败恢复重新执行；仅上述单独核验的格式协商可降级传输。
+自动接续不构成科学资格或额外执行许可。
 已知完成 turn 缺少或给出无效必需输出时，走既有有限输出补填；合法 fragment 保持既有阶段接续语义。
 已完成 W screen 返回的必需 JSON 合法，但精确 `work-evidence.json` 判定仍为 `incomplete` 时，
 可依靠独立自动许可续接原 W 完整任务；沿用原 session，绑定原返回、outcome 和证据快照，
 与提前停止共用 `max_continues`。必需格式和条件广度声明缺失走输出补填，该许可本身不授权科学续工；
 补成合法返回后可另行符合独立续工条件。有效 partial 和明确障碍保留作者的 stage_intent；
-策略 v2/v3 的 `decision` 请求提交前 Final A，已冻结 v1 直接请求 protected Final A；无策略字段的旧 W 仍交普通 A 评估，
+`decision` 请求提交前 Final A，
 其他交接或咨询沿其明确路线。完整或不适用的交付判定
 不追加恢复动作。宿主强制边界仍优先于科学续工，不把上下文续接变成自动 A。continue 次数或原预算耗尽记录可核验的 partial 出口，
 不虚构已完成 finding，不退还已用预算。
@@ -1423,8 +1217,7 @@ boundary before another new task, retaining all consumption, reservations and un
 usage. `accepted` is a queued request, not an applied ceiling. Execution-resource
 amendments remain separate and grant no exact-call permission. Soft node/W targets
 request a bounded conclusion without forcing A or rejecting a new managed experiment
-solely for reaching the target. W's context-window gate or saved legacy time review
-cadence remains separate. Notices start at 80% of the advisory node token or
+solely for reaching the target. W's enabled context-window gate remains separate. Notices start at 80% of the advisory node token or
 time target, at token balance no higher than the existing W+A advice for H or A
 advice for W, or at strictly less than 10% of shared active time remaining. Each
 logical node receives one token-risk and one time-risk notice across resumes, at
@@ -1432,14 +1225,8 @@ most two risk notices; ordinary W has a separate context-review notice. Token ad
 does not suppress later time advice. Notices arrive
 at the next supported local tool boundary without interrupting the current request.
 For marked ordinary A, notices close only the diagnosis and return advice to W;
-they do not widen its action set. For unmarked ordinary A, node targets and unexhausted shared risk advise closing only the
-current assessment, retaining unmet goals and choosing the normal `next_action`
-from evidence and shared balance, including `continue_w`, `revise_h` or `extract`
-when justified. A node target does not end research. Only when shared tokens or
-shared time are actually exhausted (remaining <= 0) must unmarked ordinary A immediately
-summarize existing results and `deliver` an eligible existing candidate or `finish`
-with gaps, without new H/W/E. Strategies v1/v2/v3 request protected Final A through that
-choice; unmarked legacy A retains its original terminal authority. These are advisory thresholds, not new
+they do not widen its action set. Final A concludes from existing originals when shared allowance is exhausted,
+with no new H/W/E research. These are advisory thresholds, not new
 quotas, reservations, authorization or defaults. Missing billing coverage alone
 does not block advancement; reported lower bounds and unknown gaps remain, without
 refund, zero replacement or replay. Unknown execution still requires original-call
@@ -1449,19 +1236,13 @@ their completion policy; see [architecture](ARCHITECTURE.md).
 
 科学预算修订先收取持久 operation ID，在下一新任务前的安全边界应用，保留全部消费、
 预留和未知用量。accepted 仅表示排队；执行资源修订另行办理且不授精确调用权限。
-节点/W 软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A；W 的上下文窗口门禁或
-旧冻结时间复核节奏另行保留。节点建议 token 或时间目标
+节点/W 软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A；W 启用的上下文窗口门禁另行保留。节点建议 token 或时间目标
 达到 80%、token 余额不高于 H 后续 W+A 或 W 后续 A 的既有建议量、或共享剩余 active time
 严格低于总时限的 10% 时提醒；每逻辑节点的 token、time 风险各一次，跨 resume 去重，最多
 两次风险提醒，普通 W 另有独立的上下文复核提醒。token 提醒不抑制后续 time 提醒；
 在下一受支持本地工具边界生效，不打断当前请求。
-有职责标记的普通 A 只收口诊断并返回 W，提醒不扩大其动作集；以下普通 A 路由说明适用于无职责标记的旧任务。
-旧普通 A 遇到节点目标或尚未耗尽的共享风险时，只收口当前评估并保留未达目标，按证据与
-全局余额选择正常 `next_action`，有依据时仍可 `continue_w`、`revise_h` 或 `extract`；
-节点目标本身不终止研究。仅当共享 token 或共享时间实际耗尽（剩余量 <= 0）时，旧无职责标记的普通 A
-才须立即总结已有结果，用已有合格候选 `deliver`，无合适候选则 `finish` 并保留缺口，
-不新开 H/W/E；策略 v1/v2/v3 由此请求 protected Final A，无策略字段的旧 A 保留原终态权限。
-阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
+普通 A 只收口诊断并返回 W，提醒不扩大动作集。共享额度耗尽时，Final A 从原件给出结论，
+不新开 H/W/E 研究。阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
 不阻断推进，已报下界与未知缺口保留，不补零、不退款、不授重放；真实执行未知仍须按原调用
 核对。共享准入、单次有限执行及 protected FINAL 原策略继续有效。
 
@@ -1541,7 +1322,7 @@ webpage also exposes queued budget changes, guidance, operation receipts, detach
 start/resume and bounded progress. CLI commands remain available independently.
 These implemented surfaces have no implied live-browser or backend qualification.
 UI intent replay, display caching and translation limits are defined in the
-[architecture](ARCHITECTURE.md#instance-ui-control-and-display); the
+[research-loop contracts](RESEARCH_LOOP_CONTRACTS.md#instance-ui-control-and-display); the
 [CLI guide](ROOTLESS_CLI.zh-CN.md) describes their user controls.
 
 `serve-ui` 可重复 `--instance-root` 添加明确实例；管理页也可按精确已有根打开，不扫描
@@ -1550,7 +1331,7 @@ UI intent replay, display caching and translation limits are defined in the
 相同 API 检查和准备实例；TOML 为可选导入、导出及明确保存格式。导入文件目录决定其相对路径基准，
 导出与另存保留路径含义；新建声明编辑不修改已有实例。网页还提供预算排队、
 用户方向、操作回执、后台启动/恢复和有界进度。这些入口不额外授予真实浏览器或后端资格。
-UI 意图重试、显示缓存及翻译限制由[架构](ARCHITECTURE.zh-CN.md#实例-ui-的控制与显示)
+UI 意图重试、显示缓存及翻译限制由[研究循环合同](RESEARCH_LOOP_CONTRACTS.zh-CN.md#实例-ui-的控制与显示)
 定义，具体操作见 [CLI 指南](ROOTLESS_CLI.zh-CN.md)。
 
 Cov execution is provided by the optional `scidiscovery-cov-execution` distribution

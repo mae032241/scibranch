@@ -9,63 +9,38 @@ from __future__ import annotations
 import copy
 import math
 
-DEFAULT_POLICY = dict(version=1, consecutive_rounds=4, min_budget_fraction=0.10,
-    budget_checkpoints=[0.30, 0.65], max_automatic_reviews=2)
-WORKER_FIRST_POLICY = dict(version=2, mode='off', consecutive_calls=4,
-    min_budget_fraction=0.10, budget_checkpoints=[], max_automatic_reviews=0)
-# Opt-in frozen policy for new W-first preparations. Historical policies retain
-# their original defaults and counters; consumption triggers an opportunity,
-# never a host judgment that scientific progress has stalled.
-AUTOMATIC_REFLECTION_POLICY = dict(version=3, mode='review', consecutive_calls=4,
-    min_budget_fraction=0.20, budget_checkpoints=[0.30, 0.65], max_automatic_reviews=2)
-# Historical opt-in v4 admission settings; retain their operational cadence.
 ADAPTIVE_REFLECTION_POLICY = dict(version=4, mode='review', consecutive_calls=4,
     min_budget_fraction=0.10, budget_checkpoints=[], max_automatic_reviews=None,
     automatic_budget_fraction=dict(tokens=0.25, seconds=0.25))
-# New preparations require an actual new author/receipt input. An explicit old
-# v4 policy without this optional flag keeps its original operational cadence.
 DEFAULT_WORKER_FIRST_REFLECTION_POLICY = dict(ADAPTIVE_REFLECTION_POLICY,
     require_fresh_input=True)
+DEFAULT_POLICY = DEFAULT_WORKER_FIRST_REFLECTION_POLICY
 _UNOBSERVED = object()
 
 
 def policy(value=None):
     value = copy.deepcopy(DEFAULT_POLICY if value is None else value)
-    if not isinstance(value, dict):
+    if (not isinstance(value, dict) or type(value.get('version')) is not int
+            or value['version'] != 4):
+        raise ValueError('Current scientific supervision policy version 4 required')
+    value.setdefault('max_automatic_reviews',None)
+    value.setdefault('require_fresh_input',True)
+    if set(value) != set(DEFAULT_POLICY):
         raise ValueError('Exact scientific supervision policy required')
-    if value.get('version')==4:
-        value.setdefault('max_automatic_reviews',None)
-    modern=type(value.get('version')) is int and value['version'] in (2,3,4)
-    expected=set(ADAPTIVE_REFLECTION_POLICY if value.get('version')==4 else WORKER_FIRST_POLICY if modern else DEFAULT_POLICY)
-    if value.get('version')==4 and 'require_fresh_input' in value:
-        if type(value['require_fresh_input']) is not bool:
-            raise ValueError('Adaptive reflection fresh-input requirement must be boolean')
-        expected.add('require_fresh_input')
-    if set(value) != expected:
-        raise ValueError('Exact scientific supervision policy required')
-    if type(value['version']) is not int or value['version'] not in (1,2,3,4):
-        raise ValueError('Unsupported scientific supervision policy')
-    if modern and value['mode'] not in {'off','notice','review'}:
+    if type(value['require_fresh_input']) is not bool:
+        raise ValueError('Adaptive reflection fresh-input requirement must be boolean')
+    if value['mode'] not in {'off','notice','review'}:
         raise ValueError('Explicit investment supervision mode required')
-    counter='consecutive_calls' if modern else 'consecutive_rounds'
-    if value['version']==4:
-        fractions=value['automatic_budget_fraction']
-        if (not isinstance(fractions,dict) or set(fractions)!={'tokens','seconds'}
-                or any(_fraction(v) is None or not 0<v<=1 for v in fractions.values())
-                or _fraction(value['min_budget_fraction']) is None
-                or not 0<value['min_budget_fraction']<=1
-                or value['budget_checkpoints']!=[]):
-            raise ValueError('Positive finite adaptive reflection budget fractions required')
-    for field in (counter, 'max_automatic_reviews'):
-        if value['version']==4 and field=='max_automatic_reviews' and value[field] is None:continue
-        if type(value[field]) is not int or value[field] < (1 if field == counter else 0):
+    fractions=value['automatic_budget_fraction']
+    if (not isinstance(fractions,dict) or set(fractions)!={'tokens','seconds'}
+            or any(_fraction(v) is None or not 0<v<=1 for v in fractions.values())
+            or _fraction(value['min_budget_fraction']) is None
+            or not 0<value['min_budget_fraction']<=1 or value['budget_checkpoints']!=[]):
+        raise ValueError('Positive finite adaptive reflection budget fractions required')
+    for field in ('consecutive_calls', 'max_automatic_reviews'):
+        if field=='max_automatic_reviews' and value[field] is None:continue
+        if type(value[field]) is not int or value[field] < (1 if field == 'consecutive_calls' else 0):
             raise ValueError('Finite scientific supervision counts required')
-    fraction = _fraction(value['min_budget_fraction'])
-    points = value['budget_checkpoints']
-    if (fraction is None or fraction > 1 or not isinstance(points, list)
-            or any(_fraction(point) is None or not 0 < point <= 1 for point in points)
-            or points != sorted(set(points))):
-        raise ValueError('Ordered finite scientific supervision fractions required')
     return value
 
 
@@ -81,18 +56,15 @@ def _fraction(value):
 
 def empty(value=None):
     selected=policy(value)
-    result=dict(version=1, policy=selected, direction=None, consecutive_rounds=0,
+    return dict(version=1, policy=selected, direction=None, consecutive_rounds=0,
         total_rounds=0, covered_rounds=0, last_round=None, last_covered_cutoff=None,
         automatic_reviews=0, last_review_fraction=None, max_budget_fraction=None,
-        covered_checkpoints=[], pending_due=[], count_due_round=None, recent_rounds=[], diagnostics=[])
-    if selected['version'] in (2,3,4):
-        result.update(investment=dict(originals={},total_calls=0,consecutive_calls=0,
-            mechanism_ref=None,covered_calls=0,count_due_call=None,lineage={}))
-    if selected['version']==4:
-        result['adaptive']=dict(question_revision=0,receipts=0,covered_question_revision=0,
+        covered_checkpoints=[], pending_due=[], count_due_round=None, recent_rounds=[], diagnostics=[],
+        investment=dict(originals={},total_calls=0,consecutive_calls=0,
+            mechanism_ref=None,covered_calls=0,count_due_call=None,lineage={}),
+        adaptive=dict(question_revision=0,receipts=0,covered_question_revision=0,
             covered_receipts=0,last_completion=None,automatic_cost=dict(tokens=0,seconds=0.),
-            cost_known=dict(tokens=True,seconds=True))
-    return result
+            cost_known=dict(tokens=True,seconds=True)))
 
 
 def _state(value, selected_policy=None):
@@ -108,6 +80,7 @@ def _state(value, selected_policy=None):
         raise ValueError('Accepted scientific supervision state required')
     result = copy.deepcopy(value)
     frozen = policy(result['policy'])
+    result['policy'] = frozen
     if selected_policy is not None and policy(selected_policy) != frozen:
         if initial:
             return empty(selected_policy)
@@ -130,52 +103,22 @@ def observe(value, budget_fraction=None, *, selected_policy=None):
     if fraction is not None:
         previous = state['max_budget_fraction']
         state['max_budget_fraction'] = fraction if previous is None else max(previous, fraction)
-    maximum = state['max_budget_fraction']
-    pending = state['pending_due']
-    if chosen['version'] in (2,3,4):
-        if chosen['mode']=='off':return state
-        investment=state['investment']
-        if investment['consecutive_calls']>=chosen['consecutive_calls'] and 'consecutive_calls' not in pending:
-            pending.append('consecutive_calls');investment['count_due_call']=investment['total_calls']
-    elif state['consecutive_rounds'] >= chosen['consecutive_rounds']:
-        if 'consecutive_rounds' not in pending:
-            pending.append('consecutive_rounds')
-            state['count_due_round'] = state['total_rounds']
-    if maximum is not None:
-        for point in chosen['budget_checkpoints']:
-            reason = 'budget_checkpoint:' + repr(point)
-            if maximum >= point and point not in state['covered_checkpoints'] and reason not in pending:
-                pending.append(reason)
+    if chosen['mode']=='off':return state
+    investment=state['investment']
+    if investment['consecutive_calls']>=chosen['consecutive_calls'] and 'consecutive_calls' not in state['pending_due']:
+        state['pending_due'].append('consecutive_calls')
+        investment['count_due_call']=investment['total_calls']
     return state
 
 
 def due(value, budget_fraction=None, policy=None, *, budget_facts=None):
     state = observe(value, budget_fraction, selected_policy=policy)
-    if state['policy']['version']==4:
-        return _adaptive_due(state,budget_facts,budget_fraction)
-    fraction = state['max_budget_fraction']
-    last = state['last_review_fraction']
-    spacing=state['policy']['min_budget_fraction']
-    reviewed=state['last_covered_cutoff'] is not None
-    cooldown = reviewed and spacing>0 and (last is None or fraction is None
-        or fraction - last < spacing - 1e-12)
-    # New W-first instances get an exploration floor even when a handful of
-    # cheap originals has crossed the investment trigger. Unknown consumption
-    # cannot stand in for reaching that floor. Frozen v1/v2 behavior is intact.
-    minimum_met=(state['policy']['version']!=3 or fraction is not None
-        and fraction>=spacing-1e-12)
-    allowed = (state['automatic_reviews'] < state['policy']['max_automatic_reviews']
-        and (state['policy']['version']==1 or state['policy']['mode']=='review'))
-    return dict(due=bool(state['pending_due']), reasons=copy.deepcopy(state['pending_due']),
-        cutoff=cutoff(state), automatic_allowed=bool(state['pending_due']) and allowed and not cooldown and minimum_met,
-        cooldown=cooldown, automatic_reviews=state['automatic_reviews'], budget_fraction=fraction,
-        current_budget_fraction=_fraction(budget_fraction))
+    return _adaptive_due(state,budget_facts,budget_fraction)
 
 
 def add_investment(value,fact):
     """Count exact original calls once, without inventing scientific rounds."""
     state=_state(value)
-    if state['policy']['version'] not in (2,3,4):return state
     state=declare_investment(state,fact)
     original=fact['original_call_id'];ref=fact['mechanism_ref']
     if not isinstance(original,str) or not original or not isinstance(ref,str) or not ref:
@@ -185,7 +128,7 @@ def add_investment(value,fact):
         if known!=ref:raise ValueError('Original investment changed its declared identity')
         return state
     investment['originals'][original]=ref
-    if state['policy']['version']==4 and fact.get('completed_receipt') is True:
+    if fact.get('completed_receipt') is True:
         state['adaptive']['receipts']+=1
     investment['total_calls']+=1
     related=_investment_ancestry(ref,investment['lineage'])
@@ -198,7 +141,6 @@ def add_investment(value,fact):
 def declare_investment(value,fact):
     """Retain declared ancestry for original-call unions, including no-call merges."""
     state=_state(value)
-    if state['policy']['version'] not in (2,3,4):return state
     ref=fact['mechanism_ref'];predecessors=fact.get('predecessors',[])
     if (not isinstance(ref,str) or not ref or not isinstance(predecessors,list)
             or any(not isinstance(parent,str) or not parent or parent==ref for parent in predecessors)):
@@ -211,7 +153,6 @@ def declare_investment(value,fact):
 def investment_counts(value):
     """Per-identity investments are original-call set unions, never summed receipts."""
     state=_state(value)
-    if state['policy']['version'] not in (2,3,4):return {}
     investment=state['investment'];lineage=investment['lineage']
     refs=set(lineage)|set(investment['originals'].values())|set(investment.get('live_calls',{}))
     result={}
@@ -234,7 +175,7 @@ def _investment_ancestry(ref,lineage):
 def with_live_investment(value,live,*,scope):
     """Merge one current task projection with accepted history, without reads."""
     state=_state(value)
-    if state['policy']['version'] not in (2,3,4) or live is None:return state
+    if live is None:return state
     if (not isinstance(live,dict) or live.get('version')!=1 or live.get('scope')!=scope
             or type(live.get('total_calls')) is not int or live['total_calls']<0
             or type(live.get('consecutive_calls')) is not int
@@ -269,14 +210,13 @@ def with_live_investment(value,live,*,scope):
 def request(value, *, budget_fraction=None, policy=None, automatic=False, final=False, budget_facts=None):
     state = observe(value, budget_fraction, selected_policy=policy)
     status = due(state, budget_fraction,budget_facts=budget_facts)
-    return dict(**(dict(policy_version=4,source_w=value.get('last_w') if isinstance(value,dict) else None,
-            budget_scope=copy.deepcopy(budget_facts),
-            adaptive_cutoff=dict(question_revision=state['adaptive']['question_revision'],
-            receipts=state['adaptive']['receipts'])) if state['policy']['version']==4 else {}),
-        **(dict(investment_cutoff=state['investment']['total_calls'])
-        if state['policy']['version'] in (2,3,4) else {}),
-        **(dict(review_kind='final_assessment' if final else 'ordinary_reflection',
-            reflection_scope='worker_question_clues_evidence') if state['policy']['version'] in (3,4) else {}),
+    return dict(policy_version=4,source_w=value.get('last_w') if isinstance(value,dict) else None,
+        budget_scope=copy.deepcopy(budget_facts),
+        adaptive_cutoff=dict(question_revision=state['adaptive']['question_revision'],
+            receipts=state['adaptive']['receipts']),
+        investment_cutoff=state['investment']['total_calls'],
+        review_kind='final_assessment' if final else 'ordinary_reflection',
+        reflection_scope='worker_question_clues_evidence',
         version=1, cutoff=status['cutoff'], due_reasons=status['reasons'],
         budget_fraction=status['budget_fraction'], automatic=bool(automatic), final=bool(final))
 
@@ -315,7 +255,7 @@ def worker_review(job, intent, *, summary, budget_fraction, selected_policy, bud
     status = due(summary, budget_fraction=budget_fraction, policy=selected_policy,budget_facts=budget_facts)
     if not status['automatic_allowed']:
         return None
-    return dict(**(dict(review_kind='ordinary_reflection') if selected_policy['version'] in (3,4) else {}),
+    return dict(review_kind='ordinary_reflection',
         reasons=status['reasons'], cutoff=status['cutoff'],
         budget_fraction=status['budget_fraction'])
 
@@ -357,26 +297,22 @@ def cover(value, frozen, *, source_step, completion_fraction=_UNOBSERVED, budget
         for point in state['policy']['budget_checkpoints']:
             if fraction >= point and point not in state['covered_checkpoints']:
                 state['covered_checkpoints'].append(point)
-    if state['policy']['version']!=4:
-        state['automatic_reviews'] += int(frozen.get('automatic') is True)
-    if state['policy']['version']==4:
-        adaptive=state['adaptive'];cut=frozen['adaptive_cutoff']
-        for field in ('question_revision','receipts'):
-            if not adaptive['covered_'+field]<=cut[field]<=adaptive[field]:
-                raise ValueError('Adaptive reflection cutoff moved outside accepted originals')
-            adaptive['covered_'+field]=cut[field]
-        adaptive['last_completion']=copy.deepcopy(budget_facts)
-    if state['policy']['version'] in (2,3,4):
-        investment=state['investment']
-        # The immutable request carries its exact call cut, separate from rounds.
-        boundary=frozen.get('investment_cutoff',investment['covered_calls'])
-        if type(boundary) is not int or not investment['covered_calls']<=boundary<=investment['total_calls']:
-            raise ValueError('Investment supervision cutoff moved outside accepted originals')
-        investment['covered_calls']=boundary
-        investment['consecutive_calls']=min(investment['consecutive_calls'],investment['total_calls']-boundary)
-        if investment['count_due_call'] is not None and investment['count_due_call']<=boundary:
-            investment['count_due_call']=None
-            state['pending_due']=[reason for reason in state['pending_due'] if reason!='consecutive_calls']
+    adaptive=state['adaptive'];cut=frozen['adaptive_cutoff']
+    for field in ('question_revision','receipts'):
+        if not adaptive['covered_'+field]<=cut[field]<=adaptive[field]:
+            raise ValueError('Adaptive reflection cutoff moved outside accepted originals')
+        adaptive['covered_'+field]=cut[field]
+    adaptive['last_completion']=copy.deepcopy(budget_facts)
+    investment=state['investment']
+    # The immutable request carries its exact call cut, separate from rounds.
+    boundary=frozen.get('investment_cutoff',investment['covered_calls'])
+    if type(boundary) is not int or not investment['covered_calls']<=boundary<=investment['total_calls']:
+        raise ValueError('Investment supervision cutoff moved outside accepted originals')
+    investment['covered_calls']=boundary
+    investment['consecutive_calls']=min(investment['consecutive_calls'],investment['total_calls']-boundary)
+    if investment['count_due_call'] is not None and investment['count_due_call']<=boundary:
+        investment['count_due_call']=None
+        state['pending_due']=[reason for reason in state['pending_due'] if reason!='consecutive_calls']
     count_covered = state['count_due_round'] is not None and state['count_due_round'] <= boundary
     if count_covered:
         state['count_due_round'] = None
@@ -390,14 +326,12 @@ def project(value, *, budget_fraction=None, budget_facts=None):
     """Read-only scientific fields; private paths, bindings and tokens stay host-side."""
     state = observe(value, budget_fraction)
     status = due(state, budget_fraction,budget_facts=budget_facts)
-    return dict(**(dict(adaptive_review={key:copy.deepcopy(status[key]) for key in
+    return dict(adaptive_review={key:copy.deepcopy(status[key]) for key in
             ('automatic_allowed','suppression_reason','fresh_input','operational_due')},
-            automatic_cost=copy.deepcopy(state['adaptive']['automatic_cost']),
-            automatic_cost_known=copy.deepcopy(state['adaptive']['cost_known']))
-            if state['policy']['version']==4 else {}),
-        **(dict(investment={key:item for key,item in state['investment'].items() if key not in {'originals','lineage','live_calls'}},
-        mechanism_investments=investment_counts(state),
-        mode=state['policy']['mode']) if state['policy']['version'] in (2,3,4) else {}),
+        automatic_cost=copy.deepcopy(state['adaptive']['automatic_cost']),
+        automatic_cost_known=copy.deepcopy(state['adaptive']['cost_known']),
+        investment={key:item for key,item in state['investment'].items() if key not in {'originals','lineage','live_calls'}},
+        mechanism_investments=investment_counts(state), mode=state['policy']['mode'],
         version=1, direction=state['direction'], consecutive_rounds=state['consecutive_rounds'],
         total_rounds=state['total_rounds'], covered_rounds=state['covered_rounds'],
         cutoff=cutoff(state), last_covered_cutoff=copy.deepcopy(state['last_covered_cutoff']),
@@ -406,20 +340,19 @@ def project(value, *, budget_fraction=None, budget_facts=None):
         rounds_omitted_count=max(0, state['total_rounds'] - len(state['recent_rounds'])),
         diagnostics=copy.deepcopy(state['diagnostics'][:4]),
         diagnostics_omitted_count=state.get('diagnostics_omitted_count',0)+max(0, len(state['diagnostics']) - 4),
-        **(dict(review_kind='ordinary_reflection',
-            trigger_scope='consumption_and_original_call_investment',
-            automatic_allowed=status['automatic_allowed'],cooldown=status['cooldown'],
-            max_automatic_reviews=state['policy']['max_automatic_reviews'],
-            min_budget_fraction=state['policy']['min_budget_fraction'],
-            budget_fraction=status['budget_fraction']) if state['policy']['version'] in (3,4) else {}),
-        scope=('W-authored question, clues and evidence; consumption and original-call investment trigger reflection opportunities, never scientific progress verdicts.'
-            if state['policy']['version'] in (3,4) else 'Explicit W scientific experiment batches with new exact managed originals; counts grant no scientific qualification.'))
+        review_kind='ordinary_reflection',
+        trigger_scope='consumption_and_original_call_investment',
+        automatic_allowed=status['automatic_allowed'],cooldown=status['cooldown'],
+        max_automatic_reviews=state['policy']['max_automatic_reviews'],
+        min_budget_fraction=state['policy']['min_budget_fraction'],
+        budget_fraction=status['budget_fraction'],
+        scope='W-authored question, clues and evidence; consumption and original-call investment trigger reflection opportunities, never scientific progress verdicts.')
 
 
 def authored_question_revision(value, changed):
     """Consume the publisher's exact full owner-fact comparison, never a digest."""
     state=_state(value)
-    if state['policy']['version']==4 and changed is True:
+    if changed is True:
         state['adaptive']['question_revision']+=1
     return state
 
@@ -431,7 +364,7 @@ def charge_automatic(value, request, *, cost, budget_facts=None, job=None, job_r
     never clears known lower bounds and blocks subsequent automatic admission.
     """
     state=_state(value)
-    if state['policy']['version']!=4 or not isinstance(request,dict) or not request.get('automatic') or request.get('final'):
+    if not isinstance(request,dict) or not request.get('automatic') or request.get('final'):
         return state
     if (not isinstance(job,dict) or job.get('role')!='A' or job.get('supervision_request')!=request
             or request.get('policy_version')!=4 or not isinstance(cost,dict)
@@ -501,10 +434,6 @@ def validate_adaptive_request(value, request, *, job, budget_facts, source_w, ad
     """Validate frozen policy, exact accepted input frontier and raw budget scope."""
     from . import contracts
     state=_state(value)
-    if state['policy']['version']!=4:
-        if isinstance(request,dict) and request.get('policy_version')==4:
-            raise ValueError('Adaptive request changed its frozen policy')
-        return
     if request is None:return
     contracts.supervision_binding(request,step=job['step'],research_strategy_version=3,supervision_policy_version=4)
     if (request['source_w']!=source_w or request['source_w']>=job['step']

@@ -306,8 +306,8 @@ def test_v4_toml_export_roundtrip_omits_only_unset_emergency_count_cap(tmp_path)
     decoded=research_config.from_document(tomllib.loads(exported),base=root)
     assert supervision.policy(decoded['supervision_policy'])==POLICY
     assert selected['supervision_policy']['max_automatic_reviews'] is None
-    historical=dict(selected,supervision_policy=supervision.AUTOMATIC_REFLECTION_POLICY)
-    assert research_config.to_document(root,historical)['policies']['supervision']['max_automatic_reviews']==2
+    capped=dict(selected,supervision_policy=dict(POLICY,max_automatic_reviews=2))
+    assert research_config.to_document(root,capped)['policies']['supervision']['max_automatic_reviews']==2
 
 
 def test_public_unknown_head_cannot_schedule_a_with_forged_complete_coverage(tmp_path):

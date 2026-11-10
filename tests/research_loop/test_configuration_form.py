@@ -342,11 +342,17 @@ def test_automatic_recovery_controls_retain_omission_false_and_finite_limits(tmp
         fields = Controls(html).fields
         assert (parse(fields)['document'] if edit else form.declaration(parse(fields))) == draft['document']
     assert fields['cfg.policies.resume.automatic_recovery.enabled'] == 'false'
+    assert html.count('name="cfg.policies.resume.automatic_recovery.max_attempts"') == 1
+    assert 'id="recovery-settings"' in html and '最大重试次数（retry + continue 总计）' in html
+    assert html.index('id="recovery-settings"') < html.index('<details class="advanced-settings">')
+    assert '保存后从下一个新节点生效' in html and '不会清零' in html
+    assert fields['cfg.policies.resume.automatic_recovery.max_attempts'] == str(automatic['max_attempts'])
     assert '累计服务等待上限（秒）' in html
     assert '此授权仅允许输出补填' in html
     fields['cfg.policies.resume.automatic_recovery.max_retries'] = '4'
+    fields['cfg.policies.resume.automatic_recovery.max_attempts'] = '6'
     parsed = parse(fields)
-    assert parsed['document']['policies']['resume']['automatic_recovery'] == dict(automatic, max_retries=4)
+    assert parsed['document']['policies']['resume']['automatic_recovery'] == dict(automatic, max_retries=4, max_attempts=6)
     exported = research_config.tomllib.loads(form.export_toml(parsed))
     assert exported['policies']['resume'] == parsed['document']['policies']['resume']
     fields['cfg.policies.resume.automatic_recovery.max_retries'] = '1.5'
@@ -357,14 +363,15 @@ def test_automatic_recovery_controls_retain_omission_false_and_finite_limits(tmp
     assert retained['cfg.policies.resume.automatic_recovery.initial_backoff_seconds'] == '0.25'
 
 
-def test_automatic_recovery_dedicated_fields_reject_duplicate_extension_values(tmp_path):
+@pytest.mark.parametrize('leaf',['max_retries','max_attempts'])
+def test_automatic_recovery_dedicated_fields_reject_duplicate_extension_values(tmp_path,leaf):
     draft = complete(tmp_path)
-    draft['document']['policies'] = dict(resume=dict(automatic_recovery=dict(enabled=False, max_retries=2)))
+    draft['document']['policies'] = dict(resume=dict(automatic_recovery=dict(enabled=False, **{leaf:2})))
     # A retained extension tree cannot supply the same dedicated leaf again.
     fields = submitted(draft)
     fields.update({'node.1900.kind': 'table', 'node.1900.parent': '@policies.resume',
         'node.1900.key': 'automatic_recovery', 'node.1901.kind': 'integer',
-        'node.1901.parent': '1900', 'node.1901.key': 'max_retries', 'node.1901.value': '4'})
+        'node.1901.parent': '1900', 'node.1901.key': leaf, 'node.1901.value': '4'})
     with pytest.raises(ValueError, match='专用字段与扩展字段重复'):
         form.parse(fields, base=tmp_path)
 
@@ -517,13 +524,17 @@ def test_advanced_standard_controls_keep_closed_category_disclosures_and_roundtr
     for path in ('agent.backend', 'agent.native.features.fast_mode', 'budget.breadth.initial_calls',
                  'budget.correction.pause_after', 'budget.candidate_extra_slots',
                  'budget.role_shares.min_w_share', 'executor.mode', 'executor.config.executor',
-                 'policies.formal_review', 'policies.resume.output_only', 'policies.resume.native_home'):
+                 'policies.formal_review'):
         assert controls['cfg.'+path] == (('advanced-settings', None, False),
             ('advanced-category', path.split('.')[0], False))
         assert html.count('name="cfg.'+path+'"') == 1
     assert '<details class="advanced-category" data-config-group="budget"><summary>' in html
     assert '<fieldset class="structured-setting known-settings" data-config-path="budget.role_shares"' in html
-    assert '<fieldset class="structured-setting known-settings" data-config-path="policies.resume"' in html
+    assert '<fieldset class="structured-setting known-settings" id="recovery-settings" data-config-path="policies.resume"' in html
+    for path in ('policies.resume.output_only','policies.resume.native_home'):
+        assert controls['cfg.'+path] == (('recovery-advanced', None, False),)
+        assert html.count('name="cfg.'+path+'"') == 1
+    assert controls['cfg.policies.resume.automatic_recovery.max_attempts'] == ()
     assert '<label class="config-node-key">键名 ' in html
     assert '<label class="config-node-type">类型 ' in html
     fields = Controls(html).fields

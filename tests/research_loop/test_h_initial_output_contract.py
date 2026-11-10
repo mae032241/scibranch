@@ -2,7 +2,7 @@
 import copy
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, execution, native, search
+from scidiscovery.research_loop import contracts as c, execution, search
 from scidiscovery.research_loop.scientific_intent import resolve_intent
 from scidiscovery.research_loop.output_repair import OutputRepairRequired
 from test_decision_value_guidance import prepare
@@ -47,63 +47,7 @@ def test_actual_seal_names_implementation_selection_and_exact_shape(tmp_path):
     assert not (execution.origin(root,1)/'result-identity.json').exists()
 
 
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('initial', ['artifact_only','null_focus','focused'])
-def test_controller_h_repairs_missing_initial_choice_once_before_next_w(tmp_path,monkeypatch,initial):
-    """The real controller, native transport, seal and finite repair reach W admission."""
-    import test_default_cli_output_repair as transport
-    injection='''
-if role=='H':
- plan=dict(commitments=[dict(label='Revisable explanation'),dict(label='Competing explanation')],focus=dict(index=1,action='improve'))
- payload.update(next_action='experiment',route_reason='W owns the next scientific design and may revise these explanations.')
- payload.pop('search_plan',None)
- (work/'artifacts/scientific_direction.json').write_text(json.dumps(dict(search_plan=dict(plan,focus=None))))
- if INITIAL=='focused':payload['search_plan']=plan
- elif INITIAL=='null_focus':payload['search_plan']=dict(plan,focus=None)
- if resume:
-  assert 'H output search_plan.focus' in prompt
-  assert 'top-level search_plan' in prompt and 'commitments' in prompt
-  assert 'index:null requires screen' in prompt
-  assert 'W scientific task' not in prompt
-  (work/'work/repair-prompt.txt').write_text(prompt)
-  payload['search_plan']=plan
-'''.replace('INITIAL',repr(initial))
-    marker="if not (config['fault']=='completed-missing-output' and role=='W' and not resume):"
-    monkeypatch.setattr(transport,'NATIVE',transport.NATIVE.replace(marker,injection+'\n'+marker))
-    root,_,env=transport.prepare_cli(tmp_path,fault='incomplete_w')
-    for key in ('CODEX_HOME','PATH','PYTHONPATH'):monkeypatch.setenv(key,env[key])
-    original=native.execute_native
-    class WorkerReached(BaseException):
-        pass
-    def execute(root,step,*args,**kwargs):
-        job=c.read(root/'jobs'/f'{step:03d}.json')
-        if job['role']=='W':
-            assert search.launch_reason(root,job) is None
-            raise WorkerReached
-        return original(root,step,*args,**kwargs)
-    monkeypatch.setattr(native,'execute_native',execute)
-    with pytest.raises(WorkerReached):controller.run(root)
-    origin=execution.origin(root,1);records=execution.records(root,1)
-    assert len(records)==(1 if initial=='focused' else 2)
-    first=c.read(origin/'science-output.json');accepted=c.validate(c.workspace(root,1))
-    assert accepted['search_plan']==declaration()
-    for field in ('summary','scientific_result','route_reason','limitations'):
-        assert accepted[field]==first[field]
-    if initial!='focused':
-        if initial=='artifact_only':assert 'search_plan' not in first
-        else:assert first['search_plan']['focus'] is None
-        repaired=c.read(records[1]/'native-intent.json')
-        assert repaired['continuation_kind']=='repair'
-        assert repaired['output_repair']['code']=='science_task_action_required'
-        assert repaired['budget_slice']['previous_tokens']==14
-        assert repaired['task_ref']==c.read(origin/'native-intent.json')['task_ref']
-        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
-    worker=c.read(root/'jobs/002.json')
-    assert worker['search']['focus']==dict(mechanism_ref='h001.m1',action='improve')
-    assert worker['role']=='W'
-
-
-@pytest.mark.parametrize('role,action',[('H','experiment'),('H','analyze'),('A','continue_w'),('A','revise_h')])
+@pytest.mark.parametrize('role,action',[('H','experiment'),('H','analyze')])
 @pytest.mark.parametrize('choice',[None,{}])
 def test_omitted_focus_retains_authorized_focus_and_remaining_allocation(role,action,choice):
     allocation=dict(mechanism_ref='h001.m1',planned_step=1)
@@ -117,27 +61,6 @@ def test_omitted_focus_retains_authorized_focus_and_remaining_allocation(role,ac
     assert state==original
 
 
-def test_a_retained_focus_does_not_resurrect_consumed_allocation():
-    allocation=dict(mechanism_ref='h001.m1',planned_step=1)
-    focus=dict(mechanism_ref='h001.m1',action='improve')
-    state=dict(mechanisms={'h001.m1':dict(status='pending')},authorized={'h001.m1'},focus=focus,
-        order=dict(remaining=[],seen_w={'original-w'},allocation=None))
-    result=resolve_intent(state,dict(role='A',step=3),dict(next_action='continue_w'),
-        assessed=dict(identity='original-w',mechanism_ref='h001.m1',allocation=allocation,breadth=False))
-    assert result['focus']==focus and result['allocation'] is None and result['unfinished_plan']==[]
-
-
-def test_a_omitted_same_repair_retains_unconsumed_allocation():
-    allocation=dict(mechanism_ref='h001.m1',planned_step=1)
-    focus=dict(mechanism_ref='h001.m1',action='repair')
-    state=dict(mechanisms={'h001.m1':dict(status='pending')},authorized={'h001.m1'},focus=focus,
-        order=dict(remaining=[allocation],seen_w=set(),allocation=allocation))
-    result=resolve_intent(state,dict(role='A',step=3),dict(next_action='continue_w'),
-        assessed=dict(identity='original-w',mechanism_ref='h001.m1',allocation=allocation,breadth=False))
-    assert result['focus']==focus and result['allocation']==allocation
-    assert result['unfinished_plan']==[allocation] and result['seen_w']==set()
-
-
 @pytest.mark.parametrize('authorized,status',[(False,'pending'),(True,'waived')])
 def test_omission_does_not_reauthorize_ineligible_focus(authorized,status):
     state=dict(mechanisms={'h001.m1':dict(status=status)},authorized={'h001.m1'} if authorized else set(),
@@ -148,7 +71,7 @@ def test_omission_does_not_reauthorize_ineligible_focus(authorized,status):
     assert result['diagnostics'][0]['subject']=='search_plan.focus'
 
 
-@pytest.mark.parametrize('role,action',[('H','analyze'),('A','revise_h')])
+@pytest.mark.parametrize('role,action',[('H','analyze')])
 def test_advice_omission_retains_focus_through_real_seal_and_accepted_fold(tmp_path,role,action):
     root=prepare(tmp_path,None,search_policy=search.DEFAULT_POLICY)
     finish(root,1,'H',[],action='experiment',search_choice=declaration())
@@ -168,13 +91,16 @@ def test_conditional_choice_and_repair_rules_fit_rendered_budget(tmp_path,backen
     from scidiscovery.research_loop import backends,decision,guidance
     from scidiscovery.research_loop.output_repair import OutputRepairRequired
     from scidiscovery.research_loop.scientific_intent import focus_diagnostic
-    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,search={},
-        native_role_instruction=max((guidance.OPPORTUNITY[role],c.ROLE_INSTRUCTIONS[role]),key=lambda value:len(value.encode())))
-    if role=='A':job['scientific_response_fields']=c.response_fields(job,{})
+    job=dict(role=role,step=2,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,search={},
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST[role])
+    if role=='A':
+        from scidiscovery.research_loop import delivery_review
+        job['evidence_return']=delivery_review.make('delivery_review',1,0)
+        job['scientific_response_fields']=c.response_fields(job,{})
     task=c.response_instructions(job)
     if role=='A':
         assert 'breadth_response' not in task
-        assert 'decision_request{decision:candidate|mechanism|compliance,question,change_criterion}' in task['role_contract']
+        assert 'one bounded decision-changing gap' in task['delivery_selection']
         with pytest.raises(OutputRepairRequired) as refused:
             decision.require_request(job,dict(next_action='continue_w'))
         repair=refused.value.request()
@@ -197,9 +123,9 @@ def test_conditional_choice_and_repair_rules_fit_rendered_budget(tmp_path,backen
 def test_retained_prior_response_rules_fit_current_rendered_budget(tmp_path,backend_name,role,branch):
     """Current resumes retain old task bytes and append the current response rules."""
     from scidiscovery.research_loop import backends,guidance
-    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,search={},formal_review_version=1,
+    job=dict(role=role,step=2,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,search={},formal_review_version=1,
         scientific_response_fields=['portfolio_review','final_coverage'],
-        native_role_instruction=max((guidance.OPPORTUNITY[role],c.ROLE_INSTRUCTIONS[role]),key=lambda value:len(value.encode())))
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST[role])
     if role=='A':job['scientific_response_fields']=c.response_fields(job,{})
     task=c.response_instructions(job)
     if role=='H':
@@ -215,8 +141,8 @@ def test_retained_prior_response_rules_fit_current_rendered_budget(tmp_path,back
         remaining={} if branch=='repair' else None,
         budget_status=dict(shared_seconds_remaining=None,shared_observed_tokens_remaining=None))
     assert task==frozen
-    assert 'Append task rules:' in prompt+instruction
+    assert 'Current response rules; scope binds:' in prompt+instruction or 'Append task rules:' in prompt+instruction
     if role=='A':
-        assert 'decision_request{decision:candidate|mechanism|compliance,question,change_criterion}' in prompt+instruction
+        assert 'Return continue_w with decision_request=null' in prompt+instruction
         assert 'continue_w needs focus' not in prompt+instruction
     assert size<=c.MAX_FIXED_RESPONSE_BYTES==3072,(role,backend_name,branch,size)

@@ -1,9 +1,11 @@
 """Replayed scientific-control outcomes and finite author clarification."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pathlib import Path
 
-from . import execution
+from . import execution, guidance
 
 from . import contracts as c, history, search
 
@@ -250,7 +252,9 @@ def closeout_errors(root, before_step):
 
 def effective_route(root, step, result, job, route):
     """Refuse dependent W admission before creating its immutable task."""
-    role, parents, instruction, evidence_return, current_h, current_w, correction_request = route
+    role, parents = route.role, route.parents
+    instruction, evidence_return = route.instruction, route.evidence_return
+    correction_request = route.correction_request
     request = None
     previous = job.get('author_correction')
     # Historical review-only corrections do not constrain ordinary science.
@@ -267,9 +271,8 @@ def effective_route(root, step, result, job, route):
         source = _source(root, step)
         request = dict(root=previous['root'] if previous else source, source=source,
                        reason=previous['reason'] if previous else decision_code)
-        role, parents = 'A', list(dict.fromkeys([*parents, step]))
-        instruction = ('Clarify the scientific decision, concrete question and result that would change it. '
-                       'The original science is retained; no dependent research is authorized: ' + decision_code + '.')
+        role, parents = 'A', tuple(dict.fromkeys([*parents, step]))
+        instruction = guidance.decision_clarification(decision_code)
         evidence_return, correction_request = None, None
     elif role == 'W':
         from . import engineering
@@ -294,14 +297,13 @@ def effective_route(root, step, result, job, route):
                 correction_request = None
             elif job['role'] == 'H':
                 correction_request = job.get('correction_request')
-            parents = list(dict.fromkeys([*parents, step]))
-            instruction = ('Correct this unresolved scientific control choice: ' + code + '. '
-                'The original science is retained; no dependent experiment is authorized. '
-                'Declare only the needed scientific change, or choose a justified alternative route.')
+            parents = tuple(dict.fromkeys([*parents, step]))
+            instruction = guidance.author_control_correction(code)
             evidence_return = None
     elif previous is not None and role in {'H', 'A', 'E'}:
         # Extraction may gather science, but it does not renew author retries.
         request = dict(previous, source=_source(root, step))
         if step not in parents:
             parents = [*parents, step]
-    return role, parents, instruction, evidence_return, current_h, current_w, correction_request, request
+    return replace(route,role=role,parents=parents,instruction=instruction,evidence_return=evidence_return,
+        correction_request=correction_request,author_correction=request)

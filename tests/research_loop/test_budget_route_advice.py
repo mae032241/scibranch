@@ -45,26 +45,24 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
         instruction_transport=transport,budget_status=status)
     assert job['research_strategy_version']==3
     if role=='W':assert job['step']==1 and job['direct_refs']==[]
-    assert c.settings(root)['role_guidance']==guidance.WORKER_FIRST
+    assert c.settings(root)['role_guidance']==guidance.ADVISORY_WORKER_FIRST
     assert 'Goals remain.' in prompt
-    assert all(advice not in prompt for advice in guidance.STAGE_PLANNING.values())
     assert ('work/budget-status.json: stale/partial/no grant; unknown!=0; input has cache. '
         'Targets soft; limits/permissions bind.') in prompt
     assert instruction.startswith(job['native_role_instruction']+'\n')
     if role=='W':
         # guidance.role_contract and contracts.response_instructions deliberately
         # carry v3 W authority once in stage_response, not a second role banner.
-        assert guidance.role_contract(job)=='' and 'role_contract' not in task
+        assert task['role_contract']==guidance.role_contract(job)
         assert task['stage_response']==c.response_instructions(job)['stage_response']
-        assert job['native_role_instruction']==guidance.WORKER_FIRST['W']
-        assert 'Reconcile unknown calls; never replay.' in instruction
+        assert job['native_role_instruction']==guidance.ADVISORY_WORKER_FIRST['W']
+        assert 'No unknown-call replay' in instruction
     else:
         assert task['role_contract']==guidance.role_contract(job)
     if role=='A':
         assert ('Complete the requested judgment; follow role_contract. Soft targets do not end research. '
             'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.') in prompt
-        assert c.response_instructions(job)['delivery_selection']==(
-            'deliver/finish requests final A assessment; candidate_recommendation+rationale if available; retain output/receipt gaps.')
+        assert 'delivery_selection' not in c.response_instructions(job)
         assert 'deliver eligible candidate or finish with gaps from originals' not in prompt
     else:
         assert 'Follow-up targets advise; no grant/required handoff.' in prompt
@@ -96,12 +94,11 @@ def test_a_delta_reading_advice_reaches_actual_backend_without_changing_frozen_i
     schema_path=work/'response.schema.json';c.write(schema_path,schema)
     packet=backend.request(prompt,schema=schema_path,profile={},work=work,response_schema=schema)
     delivered=packet.decode() if backend_name=='codex' else json.loads(packet)['prompt']
-    assert guidance.STAGE_PLANNING['A'] not in delivered
     assert ('Complete the requested judgment; follow role_contract. Soft targets do not end research. '
         'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.') in delivered
     assert 'Local tools; discover missing names only' not in delivered
     assert instruction.startswith(job['native_role_instruction']+'\n')
-    assert job['native_role_instruction']==guidance.WORKER_FIRST['A']
+    assert job['native_role_instruction']==guidance.ADVISORY_WORKER_FIRST['A']
     assert task['role_contract']==guidance.role_contract(job)
     assert 'decision_request' in job['scientific_response_fields']
     assert set(schema['required'])=={'summary','scientific_result','limitations','next_action','route_reason'}
@@ -136,7 +133,6 @@ def test_a_delta_reading_does_not_expand_restricted_returns(tmp_path,variant,bac
         native_launcher_argv=['codex'] if backend_name=='codex' else ['independent']))
     prompt,instruction,schema=native.render_scientific_request(job,task,intent,backend_name=backend.name,
         instruction_transport=backend.instruction_transport,**options)
-    assert guidance.STAGE_PLANNING['A'] not in prompt
     assert 'Local tools; discover missing names only' not in prompt
     assert 'Follow-up targets advise' not in prompt and 'Goals remain.' not in prompt
     assert 'Wait 10-30s' not in prompt
@@ -166,7 +162,6 @@ def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant,
     assert 'Budget own work' not in prompt
     assert 'Wait 10-30s' not in prompt
     assert 'Follow-up targets advise' not in prompt and 'Goals remain.' not in prompt
-    assert all(advice not in prompt for advice in guidance.STAGE_PLANNING.values())
     if variant in {'output_repair','output_only_repair'}:
         assert 'No work/rerun/resubmit; W grants unchanged; no prior experiment implied:' in prompt
     assert schema==c.result_schema(job['role'],job['handoff_protocol'],'selection' in job,**c.response_options(job))
@@ -176,7 +171,7 @@ def test_restricted_returns_do_not_suggest_new_budget_planning(tmp_path,variant,
 
 def test_custom_frozen_instruction_is_retained_with_launcher_level_budget_advice(tmp_path):
     custom={**guidance.DEFAULT,'H':'Retain all 25 required runs and the final eight unimproved audits. This finite stage permits exactly two calls.'}
-    root,job,task,_=request_scene(tmp_path,'H',advice=custom,strategy=None)
+    root,job,task,_=request_scene(tmp_path,'H',advice=custom,strategy=3)
     prompt,instruction,_=native.render_scientific_request(job,task,{},backend_name='codex',
         instruction_transport='prompt')
     assert instruction.startswith(custom['H']+'\n') and prompt.startswith(custom['H']+'\n')
@@ -186,16 +181,15 @@ def test_custom_frozen_instruction_is_retained_with_launcher_level_budget_advice
     assert instruction.encode().startswith((custom['H']+'\n').encode())
     assert 'Targets soft; limits/permissions bind.' in prompt
     assert 'Follow-up targets advise; no grant/required handoff.' in prompt
-    assert prompt.count(guidance.STAGE_PLANNING['H'])==1
 
 
 @pytest.mark.parametrize('unit',['screen','improve','validate','repair'])
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
 def test_work_unit_task_retains_exact_requirements_with_decision_led_improvement(tmp_path,unit,backend_name):
-    # Work-unit recipes deliberately exercise the legacy stage contract.
-    root,job,_,work=request_scene(tmp_path,'W',strategy=None,
+    # Explicit work-unit recipes retain their scientific requirements.
+    root,job,_,work=request_scene(tmp_path,'W',strategy=3,
         instruction='Keep five required comparisons and the exact validation split.')
-    assert job.get('research_strategy_version') is None
+    assert job['research_strategy_version']==3 and job['advisory_scope_version']==1
     assert job['instruction']=='Keep five required comparisons and the exact validation split.'
     assert c.read(root/'jobs'/f"{job['step']:03d}.json")['instruction']==job['instruction']
     # Quantitative scientific requirements remain binding even when ordinary
@@ -214,13 +208,14 @@ def test_work_unit_task_retains_exact_requirements_with_decision_led_improvement
     schema_path=work/'response.schema.json';c.write(schema_path,schema)
     packet=backend.request(prompt,schema=schema_path,profile={},work=work,response_schema=schema)
     assert packet and schema==c.result_schema('W',job['handoff_protocol'],**c.response_options(job))
-    assert task['question']==job['instruction']+'\nWork unit: '+guidance.WORK_UNITS[unit]
-    assert prompt.count(guidance.STAGE_PLANNING['W'])==1
+    assert task['question'].startswith(job['instruction']+'\n')
+    assert task['question'].endswith('\nWork unit: '+guidance.WORK_UNITS[unit])
     assert instruction.startswith(job['native_role_instruction']+'\n')
-    assert 'Honor checks and frozen --mechanism N.' in instruction
-    assert 'Reconcile unknown calls; never replay.' in instruction
+    assert 'Own research/methods' in instruction
+    assert 'No unknown-call replay' in instruction
     assert task['question'].encode()==requirement_bytes
-    assert requirement_bytes==(job['instruction']+'\nWork unit: '+guidance.WORK_UNITS[unit]).encode()
+    assert job['instruction'].encode() in requirement_bytes
+    assert guidance.WORK_UNITS[unit].encode() in requirement_bytes
     assert 'Targets soft; limits/permissions bind.' in prompt
     assert 'Follow-up targets advise; no grant/required handoff.' in prompt
     if unit=='improve':
@@ -254,7 +249,7 @@ def test_worker_handoff_distinguishes_final_scientific_response_from_pending_wai
     else:options=dict(execution_interface=dict(capabilities={},result_protocol={}),managed_command=['original-tool'])
     prompt,instruction,schema=native.render_scientific_request(job,task,intent,backend_name='codex',
         instruction_transport=transport,**options)
-    assert prompt.count('handoff.action: finalize_response=JSON; return_control=wait.')==1
+    assert prompt.count('handoff.action:finalize_response=JSON;return_control=wait.')==1
     assert 'poll pending originals' not in prompt
     assert 'finalize_response=JSON' in prompt and 'return_control=wait' in prompt
     assert prompt.count('Wait 10-30s on pending originals within deadlines.')==1
@@ -299,20 +294,20 @@ def test_output_only_wake_requires_independent_frozen_opt_in(tmp_path,monkeypatc
 @pytest.mark.parametrize('role','HWAE')
 @pytest.mark.parametrize('repair',[False,True])
 @pytest.mark.parametrize('backend',['codex','protocol'])
-@pytest.mark.parametrize('strategy',[None,3])
+@pytest.mark.parametrize('strategy',[3])
 def test_default_fixed_contract_retains_room_for_full_repair_diagnostic(role,repair,backend,strategy):
     # Include the applicable breadth/portfolio/final-coverage rules, rather
     # than measuring a small no-search task. Goal/data, concrete command and
     # budget observations are variable inputs outside this fixed contract.
     # Bound both official defaults, including jobs using the built-in fallback.
-    instruction=(guidance.WORKER_FIRST.get(role,c.ROLE_INSTRUCTIONS[role]) if strategy==3 else
+    instruction=(guidance.ADVISORY_WORKER_FIRST.get(role,c.ROLE_INSTRUCTIONS[role]) if strategy==3 else
         max((guidance.DEFAULT[role],c.ROLE_INSTRUCTIONS[role]),key=lambda text:len(text.encode())))
-    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=strategy,
+    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=strategy,advisory_scope_version=1,
         native_role_instruction=instruction,formal_review_version=1,
         scientific_response_fields=['portfolio_review','final_coverage'] if role=='A' else [])
     if role in 'HA':job['search']={}
     if role=='A':job.update(portfolio_context={},final_coverage_mechanisms=[{}])
-    if role=='W':job['worker_fragment_policy']=dict(context='new_context')
+    if role=='W':job['worker_fragment_policy']=dict(version=2,context='new_context')
     rules=c.response_instructions(job)
     intent=dict(output_repair=dict(code='output_layout_invalid',diagnostic='x'*512)) if repair else {}
     options={}

@@ -414,6 +414,21 @@ const binding = ''' + json.dumps(binding, ensure_ascii=True, separators=(',', ':
 export default function (pi) {
   let baselineCount = 0, baselineLeaf = null, user = null, promptHash = null;
   let compactCount = null, compactCursor = null;
+  let unavailable = false;
+  const on = (name, handler) => pi.on(name, (event, ctx) => {
+    if (unavailable) return;
+    try { return handler(event, ctx); }
+    catch {
+      unavailable = true;
+      // Required context/identity admission must finish before native work can
+      // cross another boundary. Optional observation failure only loses facts;
+      // throwing would become extension_error and erase a valid native final.
+      if (binding.required) {
+        ctx.abort();
+        throw new Error("Native metadata delivery failed");
+      }
+    }
+  });
   // Private observer capture time: epoch seconds with process-monotonic order,
   // not adjustable Date.now(), a provider timestamp, or an execution grant.
   // Each new attempt has its own observer baseline; spent budgets do not reset.
@@ -430,29 +445,21 @@ export default function (pi) {
       baseline_leaf: baselineLeaf, baseline_count: baselineCount,
       compaction_id: null, pre_cursor: null, assistant_id: null, status: null,
       context: ctx.getContextUsage() ?? null, observed_at: observedAt(), ...extra };
-    try {
-      invoke(["--delivery-path", binding.metadata, "--nonce", binding.nonce], JSON.stringify(value));
-    } catch {
-      // The SDK reports handler exceptions but otherwise keeps running. Abort
-      // this unacknowledged native run so failed delivery cannot admit another
-      // tool/model boundary while CONTROL is still publishing its review.
-      ctx.abort();
-      throw new Error("Native metadata delivery failed");
-    }
+    invoke(["--delivery-path", binding.metadata, "--nonce", binding.nonce], JSON.stringify(value));
   };
   pi.registerCommand(binding.command, { description: binding.description, handler: async () => {} });
-  pi.on("session_start", (_event, ctx) => {
+  on("session_start", (_event, ctx) => {
     const sm = ctx.sessionManager;
     // Use the supported RPC UI frame; Pi reserves/guards raw stdout.
     ctx.ui.notify(JSON.stringify({ type: "pi_observer_start", nonce: binding.nonce,
       path: sm.getSessionFile(), workspace: ctx.cwd, session_id: sm.getSessionId() }), "info");
   });
-  pi.on("before_agent_start", (_event, ctx) => {
+  on("before_agent_start", (_event, ctx) => {
     if (user !== null) return;
     const entries = ctx.sessionManager.getEntries();
     baselineCount = entries.length; baselineLeaf = ctx.sessionManager.getLeafId();
   });
-  pi.on("context", (_event, ctx) => {
+  on("context", (_event, ctx) => {
     if (user === null) {
       const sm = ctx.sessionManager;
       const entries = sm.getEntries().slice(baselineCount);
@@ -465,15 +472,15 @@ export default function (pi) {
     }
     send("context", ctx);
   });
-  pi.on("turn_end", (event, ctx) => send("turn_end", ctx, {
+  on("turn_end", (event, ctx) => send("turn_end", ctx, {
     assistant_id: event.messageEntryId,
     status: event.outcome === "aborted" ? "cancelled" : event.outcome === "error" ? "failed" : "completed" }));
-  pi.on("session_before_compact", (_event, ctx) => {
+  on("session_before_compact", (_event, ctx) => {
     const entries = ctx.sessionManager.getEntries();
     compactCount = entries.length; compactCursor = entries.at(-1)?.id ?? null;
     send("compact_start", ctx, { context: null });
   });
-  pi.on("session_compact", (_event, ctx) => {
+  on("session_compact", (_event, ctx) => {
     // SDK event.compactionEntry can be OLD when two summaries are identical.
     // Only a unique new append on the active branch establishes this boundary.
     if (compactCount === null) throw new Error("Compaction cursor missing");
@@ -486,13 +493,13 @@ export default function (pi) {
     send("compact", ctx, { compaction_id: delta[0].id, pre_cursor: compactCursor, context: null });
     compactCount = null;
   });
-  pi.on("session_compact_failed", (_event, ctx) => {
+  on("session_compact_failed", (_event, ctx) => {
     send("compact_failed", ctx, { context: null }); compactCount = null;
   });
-  pi.on("agent_settled", (_event, ctx) => send("terminal", ctx));
-  pi.on("tool_result", (event, ctx) => {
+  on("agent_settled", (_event, ctx) => send("terminal", ctx));
+  on("tool_result", (event, ctx) => {
     if (event.parentToolCallId !== undefined || !Array.isArray(event.content)) return;
-    send("tool_result", ctx); // Metadata failure is NOT an optional advice error.
+    send("tool_result", ctx);
     try {
       const value = JSON.parse(invoke([])), output = value.hookSpecificOutput;
       if (Object.keys(value).length !== 1 || !output || Object.keys(output).length !== 2 ||

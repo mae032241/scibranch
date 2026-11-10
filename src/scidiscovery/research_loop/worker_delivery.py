@@ -484,16 +484,25 @@ def authorize_exit(root,job,record,reason):
     value=dict(reason=reason,job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
         source_attempt=number,outcome_ref=c.record_ref(c.regular(record/'native-outcome.json')))
     policy=configuration_updates.for_job(root, job).get('resume_policy')
-    repairs=sum(c.read(path/'native-intent.json').get('continuation_kind','repair')=='repair' for path in paths[1:number+1])
+    intents=[c.read(path/'native-intent.json') for path in paths[:number+1]]
+    repairs=sum(intent.get('continuation_kind','repair')=='repair' for intent in intents[1:])
     if (reason=='worker_resume_unsupported' and policy is None
             or reason=='worker_resume_output_only' and policy is not None and policy.get('output_only') is True):
         return dict(value,kind='resume_policy',settings_ref=c.record_ref(root/'settings.json'))
     if reason=='worker_resume_limit' and policy is not None and repairs>=policy['max_attempts']:
         return dict(value,kind='repair_cap',max_attempts=policy['max_attempts'])
+    if reason=='automatic_recovery_attempt_limit' and policy is not None:
+        from . import native_recovery
+        supplied=policy.get('automatic_recovery')
+        limits=native_recovery.policy(supplied or {})
+        used=native_recovery.counters(intents)
+        if (supplied is not None and limits['enabled'] and limits.get('max_attempts') is not None
+                and used['retries']+used['continues']>=limits['max_attempts']):
+            return dict(value,kind='automatic_attempt_cap',max_attempts=limits['max_attempts'],counters=used)
     if reason=='automatic_recovery_continue_limit' and policy is not None:
         from . import native_recovery
         limits=native_recovery.policy(policy.get('automatic_recovery') or {})
-        used=native_recovery.counters(c.read(path/'native-intent.json') for path in paths[:number+1])
+        used=native_recovery.counters(intents)
         if policy.get('automatic_recovery') is not None and limits['enabled'] and used['continues']>=limits['max_continues']:
             return dict(value,kind='automatic_continue_cap',max_continues=limits['max_continues'],counters=used)
     if reason in {'worker_resume_unsupported_backend','worker_resume_thread_unavailable','worker_resume_session_unavailable'}:
@@ -554,6 +563,18 @@ def validate_exit(root,job,record,value):
                 or value.get('max_continues')!=limits['max_continues'] or value.get('counters')!=used
                 or used['continues']<limits['max_continues']):
             raise history.ObserverIntegrityError('Worker exit has no exhausted original automatic continue cap')
+    elif kind=='automatic_attempt_cap':
+        from . import native_recovery
+        supplied=(policy or {}).get('automatic_recovery')
+        if supplied is None:raise history.ObserverIntegrityError('Worker exit has no automatic recovery authorization')
+        limits=native_recovery.policy(supplied)
+        paths=execution.records(root,job['step'])[:number+1]
+        used=native_recovery.counters(c.read(path/'native-intent.json') for path in paths)
+        cap=limits.get('max_attempts')
+        if (reason!='automatic_recovery_attempt_limit' or not limits['enabled'] or cap is None
+                or value.get('max_attempts')!=cap or value.get('counters')!=used
+                or used['retries']+used['continues']<cap):
+            raise history.ObserverIntegrityError('Worker exit has no exhausted original automatic attempt cap')
     elif kind=='session':
         from . import continuation
         history._validate_proof(root,value['native_jsonl'])

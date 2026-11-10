@@ -8,18 +8,24 @@ from test_scientific_guidance import prepare
 
 
 def test_worker_first_literals_and_final_contract_are_versioned():
-    assert guidance.policy(guidance.WORKER_FIRST)==guidance.WORKER_FIRST
-    assert 'Start and own research' in guidance.WORKER_FIRST['W']
-    assert '--research JSON' in guidance.WORKER_FIRST['W']
-    assert '--mechanism' not in guidance.WORKER_FIRST['W']
-    assert 'exploration_rounds' not in c.response_fields(dict(role='W',research_strategy_version=3),{})
-    assert 'exploration_rounds' in c.response_fields(dict(role='W',research_strategy_version=2),{})
-    assert 'cheap observations' in guidance.WORKER_FIRST['H']
-    assert 'say no new issue' in guidance.WORKER_FIRST['A']
-    v2=dict(role='A',research_strategy_version=2,final_only=True)
-    v3=dict(v2,research_strategy_version=3)
-    assert guidance.role_contract(v3)==guidance.role_contract(v2)
-    assert c.response_options(v3)['final_decline'] is True
+    current=guidance.ADVISORY_WORKER_FIRST
+    assert guidance.DEFAULT is current
+    assert c.ROLE_INSTRUCTIONS is current
+    assert guidance.policy(current)==current
+    assert 'Own research/methods' in current['W']
+    assert '--research JSON' in current['W']
+    assert '--mechanism' not in current['W']
+    worker=dict(role='W',research_strategy_version=3,advisory_scope_version=1)
+    fields=c.response_fields(worker,{})
+    assert 'exploration_rounds' not in fields and 'research_memory' in fields
+    assert 'cheap observations' in current['H']
+    assert 'No material issue means no new constraints' in current['A']
+    ordinary=dict(role='A',research_strategy_version=3,advisory_scope_version=1)
+    assert c.result_schema('A',**c.response_options(ordinary))['properties']['next_action']['enum']==['continue_w']
+    final=dict(ordinary,final_only=True,delivery_sources=dict(items=[{}]))
+    assert 'reject all' in guidance.role_contract(final)
+    assert c.response_options(final)['final_decline'] is True
+    assert c.result_schema('A',**c.response_options(final))['properties']['next_action']['enum']==['deliver','finish']
 
 
 def test_v3_consultation_requires_the_requesting_workers_concrete_question(tmp_path):
@@ -83,26 +89,42 @@ def test_h_consultation_advice_names_the_existing_no_plan_return_action():
 
 
 def test_v3_clue_guidance_preserves_scoped_claims_and_reflection_information_value():
-    assert 'optionally update research_memory' in guidance.WORKER_FIRST['W']
-    assert 'limited negatives do not reject whole mechanisms' in guidance.WORKER_FIRST['W']
-    assert 'exploratory candidates, lineage and results' in guidance.WORKER_FIRST['W']
-    assert 'low information value' in guidance.WORKER_FIRST['A']
-    ordinary=dict(role='A',research_strategy_version=3)
-    marked=dict(ordinary,supervision_request=dict(review_kind='ordinary_reflection'))
-    assert 'Reflect on W question/clues/evidence' in guidance.role_contract(marked)
-    assert 'no new issue is valid' in guidance.role_contract(marked)
-    assert 'Reflect on W question/clues/evidence' not in guidance.role_contract(ordinary)
-    assert 'Reflect on W question/clues/evidence' not in guidance.role_contract(dict(marked,research_strategy_version=2))
+    from scidiscovery.research_loop import protocol
+    assert 'Scope negatives' in guidance.ADVISORY_WORKER_FIRST['W']
+    assert 'separate candidates/lineage/results and adaptive/final evidence' in guidance.ADVISORY_WORKER_FIRST['W']
+    worker=dict(role='W',research_strategy_version=3,advisory_scope_version=1)
+    stage=c.response_instructions(worker)['stage_response']
+    assert 'research_memory' in stage
+    assert 'nonblank statement field+nonempty evidence' in stage
+    assert 'limited_negative needs applicability' in stage
+    ordinary=dict(role='A',research_strategy_version=3,advisory_scope_version=1)
+    marked=dict(ordinary,supervision_request=dict(policy_version=4,review_kind='ordinary_reflection'))
+    contract=guidance.role_contract(ordinary)
+    assert 'ignored counterevidence/critical alternatives' in contract
+    assert 'Distinguish productive deepening' in contract
+    assert 'No material issue means no new constraints' in contract
+    assert 'Return continue_w with decision_request=null' in contract
+    assert guidance.role_contract(marked)==contract
+    with pytest.raises(protocol.UnsupportedProtocol):
+        protocol.require_current_behavior(dict(marked,research_strategy_version=2))
 
 
 @pytest.mark.parametrize('version',[None,1,2])
-def test_rebuilding_older_tasks_preserves_frozen_literals(tmp_path,version):
-    root=prepare(tmp_path,None,research_strategy_version=version)
+def test_rebuilding_current_tasks_preserves_literals_and_refuses_old_strategy(tmp_path,monkeypatch,version):
+    from scidiscovery.research_loop import protocol
+    root=prepare(tmp_path,None,research_strategy_version=3)
     job=c.build_job(root,1,'W',[])
-    frozen=(root/'jobs/001.json').read_bytes()
-    assert job['native_role_instruction']!=(guidance.WORKER_FIRST['W'])
+    paths=(root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json')
+    frozen={path:path.read_bytes() for path in paths}
+    assert job['native_role_instruction']==guidance.ADVISORY_WORKER_FIRST['W']
+    purpose_instruction=job['role_purpose_instruction']
+    monkeypatch.setitem(guidance.ADVISORY_WORKER_FIRST,'W','Changed future guidance; preserve the original task.')
+    monkeypatch.setattr(guidance,'role_contract',lambda job:'Changed future purpose; preserve the original task.')
     assert c.build_job(root,1,'W',[])==job
-    assert (root/'jobs/001.json').read_bytes()==frozen
+    assert c.read(c.workspace(root,1)/'science-task.json')['role_contract']==purpose_instruction
+    with pytest.raises(protocol.UnsupportedProtocol):
+        protocol.require_settings_format(dict(c.settings(root),research_strategy_version=version))
+    assert all(path.read_bytes()==data for path,data in frozen.items())
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
@@ -116,10 +138,11 @@ def test_rebuilding_older_tasks_preserves_frozen_literals(tmp_path,version):
 ])
 def test_worker_first_actual_fixed_wire_contract_fits(tmp_path,backend_name,role,scope,branch):
     job=dict(role=role,step=3,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,
-        native_role_instruction=guidance.WORKER_FIRST[role],formal_review_version=1)
+        advisory_scope_version=1,worker_view_version=1,native_subagents=backend_name=='codex',
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST[role],formal_review_version=1)
     if role in {'H','W'}:job['search']={}
     if role=='W':
-        job.update(worker_fragment_policy=dict(context='same_session'),
+        job.update(worker_fragment_policy=dict(context='same_session',context_handoff_version=2),
             scientific_work_unit=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode())))
     if scope=='consultation':job['purpose']='worker_consultation'
     elif scope=='correction':

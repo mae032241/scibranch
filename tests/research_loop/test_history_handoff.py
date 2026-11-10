@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import contracts, controller, native
+from scidiscovery.research_loop import contracts, controller, guidance, native
 
 
 @pytest.fixture
@@ -26,6 +26,8 @@ def selection_explanation(criteria='Compare the declared fixture observations wi
         changes=None,evidence=None,accepted_tradeoffs=None))
 
 
+DEFAULT_ACTION = object()
+DEFAULT_CONSULTATION = object()
 AUTO_PORTFOLIO = object()
 OMIT_PORTFOLIO = object()
 AUTO_COVERAGE = object()
@@ -81,12 +83,15 @@ def fixture_final_coverage(root, job, payload, value=AUTO_COVERAGE):
     payload['final_coverage'] = value
 
 
-def finish(root, step, role, parents, text='A bounded scientific finding', action='wait', files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE, stage_intent='decision'):
+def finish(root, step, role, parents, text='A bounded scientific finding', action=DEFAULT_ACTION, files=None, summary='A contribution', limitations=None, recommendation=None, search_choice=None, progress=None, selection=None, mechanism_findings=None, candidate_nominations=None, preserve_native_intent=False, portfolio_review=AUTO_PORTFOLIO, final_coverage=AUTO_COVERAGE, stage_intent='decision', consultation_question=DEFAULT_CONSULTATION):
     # These route fixtures request ordinary A assessment; review is W consultation.
+    parents=list(parents)
     path = root / 'jobs' / f'{step:03d}.json'
     previous = contracts.read(path) if path.exists() else {}
     job = contracts.build_job(root, step, role, parents, previous.get('instruction', ''),
                               previous.get('evidence_return'), previous.get('correction_request'), previous.get('author_correction'))
+    if action is DEFAULT_ACTION:
+        action = 'continue_w' if role == 'A' else 'wait'
     work = contracts.workspace(root, step)
     record = contracts.host_record(work)
     payload = dict(summary=summary, scientific_result=text, limitations=limitations if limitations is not None else ['Fixture only'])
@@ -100,6 +105,10 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
     if job.get('handoff_protocol', 1) >= 6 and role == 'A':
         payload['progress_assessment'] = progress
     if role=='W':
+        if consultation_question is DEFAULT_CONSULTATION:
+            consultation_question = ('Which retained counterevidence changes the unfinished fixture question?'
+                if stage_intent in {'review','revise_h','extract'} else None)
+        payload['consultation_question'] = consultation_question
         if candidate_nominations is None and job.get('candidate_nomination_mechanisms'):
             candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
                 reason='Fixture declares no scientific candidate suitability; the retained pool remains available to A.')
@@ -109,7 +118,8 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
         payload.update(decision_request=(dict(decision='mechanism',
             question='Does the retained fixture evidence address the original scientific question?',
             change_criterion='A relevant retained observation resolving the stated evidence gap changes the assessment.')
-            if action in {'continue_w','revise_h','extract'} and job.get('purpose') is None else None),portfolio_review=None)
+            if action in {'continue_w','revise_h','extract'} and job.get('purpose') is None
+            and not guidance.advisory_assessment(job) else None),portfolio_review=None)
     if role in {'H', 'A'}:
         payload.update(next_action=action, route_reason='Exact scientific question')
     fixture_portfolio_review(root, job, payload, portfolio_review)
@@ -146,47 +156,43 @@ def test_real_scientific_route_reuses_only_selected_file_without_ancestry(scene,
     from test_direct_input_bindings import stopped_seals
     from scidiscovery.research_loop import originals
     stopped_seals(monkeypatch)
+    retained='inputs/parents/001/artifacts/candidate.py'
+    calls=[]
     def execute(root, step):
-        role = ('H', 'W', 'A', 'H', 'W', 'A')[step - 1]
-        job = contracts.read_job(root / 'jobs' / f'{step:03d}.json')
-        action = 'experiment' if role == 'H' else 'revise_h' if step == 3 else 'finish'
-        text = MARKED if step == 4 else f'Ordinary [citation]({REUSED})' if step == 3 else 'Bounded finding'
-        files = {'candidate.py': 'def predict(): return 42\n', 'unused.txt': 'Private to old direct handoff'} if step == 2 else None
-        if step == 5:
-            work = contracts.workspace(root, step)
-            declared=[row for row in job['direct_materials'] if row['path']==REUSED]
+        job=contracts.read_job(root/'jobs'/f'{step:03d}.json')
+        role=job['role'];calls.append(role)
+        parents=[int(Path(ref['path']).parts[2]) for ref in job['direct_refs']]
+        if step==4:
+            work=contracts.workspace(root,step)
+            declared=[row for row in job['direct_materials'] if row['path']==retained]
             assert len(declared)==1
-            assert originals.material_path(root,declared[0]).read_text() == 'def predict(): return 42\n'
-            assert not (work / REUSED).exists()
-            assert not (work / Path(REUSED).parent / 'unused.txt').exists()
-            assert [ref['path'] for ref in job['direct_refs']] == ['inputs/parents/004/conclusion.json']
-            view = contracts.read(work / 'science-task.json')
-            assert view['reused_implementations'] == [dict(label='W002-I001', path=REUSED)]
+            assert originals.material_path(root,declared[0]).read_text()=='def predict(): return 42\n'
+            assert not (work/retained).exists()
+            assert not (work/Path(retained).parent/'unused.txt').exists()
+            assert [ref['path'] for ref in job['direct_refs']]==[
+                'inputs/parents/003/conclusion.json','inputs/parents/002/conclusion.json']
+            view=contracts.read(work/'science-task.json')
+            assert view['reused_implementations']==[dict(label='W001-I001',path=retained)]
             assert 'sha256' not in json.dumps(view) and 'origin_result' not in json.dumps(view)
-        # build_job is idempotent for an identical request; use the actual route.
-        parents = [int(Path(ref['path']).parts[2]) for ref in job['direct_refs']]
-        finish(root, step, role, parents, text, action, files, selection=['W002-I001'] if step == 4 else [] if step == 5 else None)
-    errors = []
-    def observed_execute(root, step):
-        try:
-            return execute(root, step)
-        except Exception as error:
-            errors.append(repr(error))
-            raise
-    monkeypatch.setattr(native, 'execute_native', observed_execute)
-    result = controller.run(scene)
-    assert result['status'] == 'finish' and result['completed_steps'] == 6, (result, errors)
-    final = contracts.workspace(scene, 6)
-    assert not (final / REUSED).exists()  # Retained H4 must not re-send to A6.
-    assert contracts.read(contracts.host_record(final) / 'result-identity.json').get('selected_inputs', []) == []
-    assert controller.run(scene)['status'] == 'finish'
+        finish(root,step,role,parents,text=f'[retained implementation]({retained}#reuse-implementation)' if step==3 else 'Bounded retained finding',
+            action='wait' if role=='H' else 'finish' if role=='A' else DEFAULT_ACTION,
+            stage_intent={1:'handoff',2:'revise_h',4:'decision'}.get(step,'decision'),
+            files={'candidate.py':'def predict(): return 42\n','unused.txt':'Do not forward me'} if step==1 else None,
+            selection=['W001-I001'] if step==2 else [] if step==4 else None)
+    monkeypatch.setattr(native,'execute_native',execute)
+    result=controller.run(scene)
+    assert result['status']=='finish' and calls==['W','W','H','W','A'],result
+    final=contracts.workspace(scene,5)
+    assert not (final/retained).exists()
+    assert contracts.read(contracts.host_record(final)/'result-identity.json').get('selected_inputs',[])==[]
+    assert controller.run(scene)['status']=='finish'
 
 
 def test_structured_selection_inherits_and_deduplicates_without_ancestry(scene,monkeypatch):
     from test_direct_input_bindings import stopped_seals
     stopped_seals(monkeypatch)
     source(scene)
-    finish(scene, 3, 'A', [2], text=MARKED + ' ' + MARKED, selection=['W002-I001', 'W002-I001'])
+    finish(scene, 3, 'W', [2], stage_intent='handoff', text=MARKED + ' ' + MARKED, selection=['W002-I001', 'W002-I001'])
     job, work, _ = finish(scene, 4, 'H', [3], text=MARKED)
     from scidiscovery.research_loop import originals
     assert len(job['selected_inputs']) == 1
@@ -229,7 +235,7 @@ def test_ordinary_citation_leaves_the_null_material_relay_unchanged(scene):
 @pytest.mark.parametrize('changed', ['original', 'receipt'])
 def test_changed_bound_reuse_is_rejected(scene, changed):
     source(scene)
-    _, work, record = finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
+    _, work, record = finish(scene, 3, 'W', [2], stage_intent='handoff', text=MARKED, selection=['W002-I001'])
     if changed == 'receipt':
         seal = contracts.read(record / 'result-identity.json')
         seal['selected_inputs'][0]['material_ref']['list_ref']['path'] = str(scene.parent / 'foreign/result-identity.json')
@@ -245,7 +251,7 @@ def test_changed_bound_reuse_is_rejected(scene, changed):
 def test_worker_created_alias_does_not_replace_selected_original(scene):
     from scidiscovery.research_loop import originals
     source(scene)
-    _, work, _ = finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
+    _, work, _ = finish(scene, 3, 'W', [2], stage_intent='handoff', text=MARKED, selection=['W002-I001'])
     alias = work / REUSED
     assert not alias.exists()
     alias.parent.mkdir(parents=True, exist_ok=True)
@@ -259,7 +265,7 @@ def test_worker_created_alias_does_not_replace_selected_original(scene):
 
 def test_structured_selection_counts_all_unique_files_beyond_one_page(scene):
     source(scene, {f'file{i}.py': 'x' for i in range(17)})
-    finish(scene, 3, 'A', [2], selection=[f'W002-I{index:03d}' for index in range(1, 18)])
+    finish(scene, 3, 'W', [2], stage_intent='handoff', selection=[f'W002-I{index:03d}' for index in range(1, 18)])
     job = contracts.build_job(scene, 4, 'H', [3])
     assert len(job['selected_inputs']) == len(job['direct_materials']) == 17
     assert sum(row['size_bytes'] for row in job['direct_materials']) == 17
@@ -267,7 +273,7 @@ def test_structured_selection_counts_all_unique_files_beyond_one_page(scene):
 
 def test_input_view_publication_rejects_destination_directory_link(scene, tmp_path):
     source(scene)
-    finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
+    finish(scene, 3, 'W', [2], stage_intent='handoff', text=MARKED, selection=['W002-I001'])
     work = contracts.workspace(scene, 4)
     work.mkdir()
     outside = tmp_path / 'outside'
@@ -279,18 +285,29 @@ def test_input_view_publication_rejects_destination_directory_link(scene, tmp_pa
 
 
 def test_final_input_bound_includes_new_outputs_and_selected_old_files(scene):
+    from scidiscovery.research_loop import originals
     source(scene, {'candidate.py': 'x' * 48})
-    finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
-    finish(scene, 4, 'H', [3], text=MARKED, files={'revision.txt': 'y' * 64})
-    with pytest.raises(ValueError, match='Combined input materials'):
-        contracts.build_job(scene, 5, 'W', [4])
-    assert not (scene / 'jobs/005.json').exists()
-    assert not (contracts.workspace(scene, 5) / REUSED).exists()
+    finish(scene,3,'W',[2],stage_intent='handoff',text=MARKED,
+        selection=['W002-I001'],files={'revision.txt':'y'*64})
+    paths={REUSED:contracts.workspace(scene,2)/'artifacts/candidate.py',
+        'inputs/parents/003/artifacts/revision.txt':contracts.workspace(scene,3)/'artifacts/revision.txt'}
+    before={path:(contracts.file_ref(path),path.read_bytes()) for path in paths.values()}
+    job=contracts.build_job(scene,4,'H',[3])
+    assert {row['path']:row['size_bytes'] for row in job['direct_materials']}=={
+        REUSED:48,'inputs/parents/003/artifacts/revision.txt':64}
+    assert sum(row['size_bytes'] for row in job['direct_materials'])==112
+    assert [row['material']['path'] for row in job['selected_inputs']]==[REUSED]
+    for row in job['direct_materials']:
+        path=originals.material_path(scene,row)
+        assert path==paths[row['path']]
+        reference,data=before[path]
+        assert contracts.file_ref(path)==reference and path.read_bytes()==data
+    assert not (contracts.workspace(scene,4)/REUSED).exists()
 
 
 def test_final_input_bound_deduplicates_direct_and_reused_original(scene):
     source(scene, {'candidate.py': 'x' * 64})
-    finish(scene, 3, 'A', [2], text=MARKED, selection=['W002-I001'])
+    finish(scene, 3, 'W', [2], stage_intent='handoff', text=MARKED, selection=['W002-I001'])
     job = contracts.build_job(scene, 4, 'H', [2, 3])
     assert len(job['direct_materials']) == 1
     assert job['direct_materials'][0]['size_bytes'] == 64
@@ -315,7 +332,7 @@ def test_current_prepared_packets_are_idempotent_and_old_write_schema_is_rejecte
 def test_selected_original_requires_same_instance_and_preceding_node(scene, origin):
     from scidiscovery.research_loop import originals
     source(scene)
-    finish(scene, 3, 'A', [2], selection=['W002-I001'])
+    finish(scene, 3, 'W', [2], stage_intent='handoff', selection=['W002-I001'])
     job = contracts.build_job(scene, 4, 'H', [3])
     row = dict(job['selected_inputs'][0]['material'])
     row['source'] = (str(scene.parent / 'foreign/project/nodes/002/artifacts/candidate.py')

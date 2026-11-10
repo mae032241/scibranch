@@ -161,6 +161,22 @@ def test_isolated_session_home_never_changes_inherited_home_or_pi_auth():
     assert backend.actual_home(env, Path('/workspace'), Path('/private/framework/session-home'), isolated=True) == Path('/private/framework/session-home')
 
 
+def test_new_pi_default_resume_grants_shared_finite_recovery_without_changing_frozen_policy(monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, 'which', lambda executable: '/explicit/native/pi')
+    selected = adapter().default_resume_policy()
+    assert selected['launcher'] == ['/explicit/native/pi']
+    expected = dict(pi.DEFAULT_RESUME_POLICY, automatic_recovery=native_recovery.policy({}))
+    assert selected['policy'] == expected
+    assert selected['policy']['automatic_recovery']['max_retries'] == 8
+    assert selected['policy']['automatic_recovery']['max_attempts'] == 8
+    pi.validate_resume_policy(selected['policy'])
+    assert 'native_home' not in selected['policy']
+    frozen = dict(RESUME)
+    pi.validate_resume_policy(frozen)
+    assert frozen == RESUME and 'automatic_recovery' not in frozen
+
+
 def test_observed_session_identity_and_session_event_are_exact_pure_projections(tmp_path, monkeypatch):
     backend = adapter(); home, work = tmp_path/'home', tmp_path/'workspace'
     backend.bind_attempt(home, work); backend.launch(PROFILE, work, None, None, 'scope')
@@ -205,6 +221,72 @@ def test_prelaunch_identity_is_not_a_planned_session_original(tmp_path):
         assert backend.recovery_capability(kind)['status'] == 'supported'
     for kind in ('format_fallback', 'arbitrary_replay'):
         assert backend.recovery_capability(kind)['status'] == 'unsupported'
+
+
+def failed_controlled_exit(tmp_path, *, diagnostic='fetch failed'):
+    """One settled failed native turn and its exact pure lifecycle receipt."""
+    from scidiscovery.research_loop import pi_observation
+    backend = adapter(); home, work = tmp_path/'home', tmp_path/'workspace'
+    backend.bind_attempt(home, work)
+    args = backend.launch(PROFILE, work, None, None, 'Original scope')
+    meter = backend.meter(home, work)
+    meter.observation.prompt_hash = 'b' * 64
+    proof = backend._observation_proof
+    policy = pi_transport.resource_policy()
+    argv = [*args[4:], '--extension', proof['extension']]
+    backend._launch_evidence = dict(kind='pi_cli_closed_resources_v1', launcher=argv[0],
+        resource_policy=policy, resources=[], observer=dict(proof), source_readonly=True,
+        observer_source=dict(version=1, path=proof['extension'], sha256='a'*64, size_bytes=1))
+    backend.event(dict(type='session', version=3, id='exact-session', timestamp=STAMP, cwd=str(work)))
+    failure = backend.event(dict(type='message_end', message=dict(message(reason='error'),
+        errorMessage=diagnostic)))['failure']
+    assert backend.event(dict(type='agent_settled', aborted=False)) == dict(failed=True)
+    start = dict(type=pi_observation.BOUND, nonce=proof['nonce'], path=proof['path'],
+        workspace=proof['workspace'], session_id='exact-session')
+    receipt = dict(type=pi_transport.CONTROLLED_EXIT, version=1, argv=argv,
+        session_id='exact-session', path=proof['path'], workspace=str(work), profile=dict(PROFILE),
+        resource_policy=policy, resources=[], observer_start=start,
+        observer_command=pi_observation.command_proof(proof['extension']),
+        prompt_sha256=meter.observation.prompt_hash, disposition='started',
+        settled=dict(type='agent_settled', aborted=False), idle=True, stdin_closed=True,
+        stdout_eof=True, drained=True, pending_commands=0, returncode=0)
+    return backend, meter, receipt, failure
+
+
+@pytest.mark.parametrize('diagnostic,category', [('fetch failed', 'temporary'),
+    ('401: {"type":"invalid_api_key"}', 'permanent'), ('unqualified native diagnostic', 'unknown')])
+def test_settled_failed_controlled_exit_keeps_failure_without_completion_or_authorship(
+        tmp_path, monkeypatch, diagnostic, category):
+    backend, meter, receipt, failure = failed_controlled_exit(tmp_path, diagnostic=diagnostic)
+    original = copy.deepcopy(receipt)
+    def forbidden(*args, **kwargs): pytest.fail('Lifecycle consumer reacquired originals or launched work')
+    monkeypatch.setattr(Path, 'open', forbidden)
+    monkeypatch.setattr(Path, 'stat', forbidden)
+    monkeypatch.setattr(subprocess, 'Popen', forbidden)
+    assert backend.event(receipt) == {}
+    assert backend._controlled_exit == original and receipt == original
+    assert meter.observation.fault is None
+    assert backend.engine.final is None and backend.engine.failures == [failure]
+    assert backend.combine_failures([failure])['category'] == category
+    assert backend.identity(meter, 'exact-session')['participant_scope'] == 'unsupported'
+
+
+@pytest.mark.parametrize('change', [dict(returncode=1), dict(prompt_sha256='c'*64),
+    dict(session_id='different'), dict(profile=dict(PROFILE, model='fixture/different')),
+    dict(drained=False), dict(settled=dict(type='agent_settled', aborted=True))])
+def test_failed_controlled_exit_still_rejects_changed_identity_or_unverified_lifecycle(tmp_path, change):
+    backend, meter, receipt, _ = failed_controlled_exit(tmp_path)
+    event = backend.event(dict(receipt, **change))
+    assert event['failed'] and event['failure']['category'] == 'unknown'
+    assert meter.observation.fault == 'pi_authorship_exit_invalid'
+    assert backend._controlled_exit is None and 'completed' not in event
+
+
+def test_failed_controlled_exit_cannot_be_accepted_twice(tmp_path):
+    backend, meter, receipt, _ = failed_controlled_exit(tmp_path)
+    assert backend.event(receipt) == {}
+    assert backend.event(receipt)['failure']['category'] == 'unknown'
+    assert meter.observation.fault == 'pi_authorship_exit_invalid'
 
 
 @pytest.mark.parametrize('content', ['Original task', [dict(type='text', text='Original task')]])
@@ -512,10 +594,17 @@ def test_resume_post_start_setup_enforces_finite_read_and_entry_limits(tmp_path,
     tail = (json.dumps(dict(type='model_change', id='setup', parentId='msg',
         timestamp=STAMP, provider='fixture', modelId='exact-model'))+'\n').encode()
     with path.open('ab') as stream:stream.write(tail)
-    if limit == 'line':monkeypatch.setattr(pi_sessions, 'LINE_BYTES', len(tail)-1)
-    elif limit == 'snapshot':monkeypatch.setattr(pi_sessions, 'RESUME_BYTES', path.stat().st_size-1)
+    if limit == 'line':
+        # Compact control-header bounds do not limit native setup records.
+        monkeypatch.setattr(pi_sessions, 'LINE_BYTES', len(tail)-1)
+    elif limit == 'snapshot':
+        # A finite acquisition chunk does not limit the full original snapshot.
+        monkeypatch.setattr(pi_sessions, 'READ_BYTES', len(tail)-1)
+        assert path.stat().st_size > pi_sessions.READ_BYTES
     else:monkeypatch.setattr(pi_sessions, 'MAX_ENTRIES', len(loaded['seen']))
-    with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded, phase='native_setup')
+    if limit == 'entries':
+        with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded, phase='native_setup')
+    else:pi_sessions.recheck_prefix(loaded, phase='native_setup')
     assert loaded['info'].st_size == session['size_bytes']
 
 
@@ -567,7 +656,8 @@ def test_resume_transport_refuses_wrong_original_before_spawning_or_prompting(tm
                 thinkingLevel='high')
         with path.open('ab') as stream:stream.write((json.dumps(row)+'\n').encode())
     else:path.write_bytes(path.read_bytes().replace(b'Original task', b'Changed! task'))
-    argv = ['--resume-proof', json.dumps(session), '--', 'never-spawn', '--mode', 'rpc',
+    argv = ['--resource-policy', json.dumps(pi_transport.resource_policy()),
+        '--resume-proof', json.dumps(session), '--', 'never-spawn', '--mode', 'rpc',
         *pi.RESOURCE_FLAGS, '--tools', 'read,bash,edit,write,grep,find,ls',
         '--session', str(path), '--session-dir', str(path.parent), '--provider', 'fixture',
         '--model', 'exact-model', '--thinking', 'high']
@@ -787,6 +877,70 @@ def test_accepted_output_repair_continues_exact_private_session_scope_and_tail_o
     assert (root/'jobs/001.json').read_bytes() == original_job
     for number in (1, 2):assert c.read(agent/f'commands-{number}.json').count('prompt') == 1
     assert (first/'result-identity.json').is_file()
+
+
+@pytest.mark.process_e2e
+def test_failed_pi_rpc_settlement_resumes_original_session_and_retains_consumed_budget(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import pi_observation
+    peer = RESUME_RPC.replace(
+        "thinkingLevel='high',content=[dict(type='text',text=final)],stopReason='stop',usage=usage)",
+        "thinkingLevel='high',content=[dict(type='text',text=final)] if resumed else [],"
+        "stopReason='stop' if resumed else 'error',usage=usage,"
+        "**({} if resumed else dict(errorMessage='fetch failed')))")
+    command = pi_observation.command_proof('__fixture_extension__')
+    peer = peer.replace('  inventory=[]',
+        '  inventory=[' + repr(command) + ']\n'
+        "  inventory[0]['sourceInfo']['path']=option('--extension')")
+    startup = """extension=pathlib.Path(option('--extension'))
+nonce=extension.name[len('.scid-pi-observation-'):-len('.ts')]
+assert len(nonce)==64
+start=dict(type='pi_observer_start',nonce=nonce,path=str(path),workspace=str(work),session_id='exact-session')
+emit(dict(type='extension_ui_request',id='fixture-observer-start',method='notify',message=json.dumps(start),notifyType='info'))
+"""
+    peer = peer.replace('for line in sys.stdin.buffer:', startup + 'for line in sys.stdin.buffer:')
+    root, agent = prepare_resumable(tmp_path, monkeypatch, peer, automatic=True)
+    originals = {path: path.read_bytes() for path in (root/'settings.json', root/'jobs/001.json')}
+    collector = """import json,sys
+from pathlib import Path
+from scidiscovery.research_loop import controller
+root=Path(sys.argv[1])
+with controller._writer(root), controller._inactive_on_error(root):
+ result=controller._native_call(root,1,launch=True)
+print(json.dumps(result))
+"""
+    monkeypatch.setattr(sys.modules[collect_separately.__module__], 'COLLECTOR', collector)
+    result = collect_separately(root)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')
+    first = execution.origin(root, 1); second = first/'continuations/001'
+    assert execution.records(root, 1) == [first, second]
+    stopped, completed = c.read(first/'native-outcome.json'), c.read(second/'native-outcome.json')
+    assert stopped['returncode'] == 0 and stopped['terminal_observed'] is False
+    assert stopped['cleanup'] == 'observed_group_cleaned' and stopped['stop_reason'] == 'native_failure_event'
+    assert stopped['native_failure']['category'] == 'temporary'
+    assert stopped['native_failure']['codes'] == ['connection_error']
+    assert stopped['native_failure']['not_accepted'] is False
+    assert stopped['native_identity']['participant_scope'] == 'unsupported'
+    assert 'pi_authorship_exit_invalid' not in json.dumps(stopped['metering'])
+    stream = [json.loads(line) for line in (first/'native.jsonl').read_text().splitlines()]
+    assert stream[-1]['type'] == pi_transport.CONTROLLED_EXIT
+    assert stream[-1]['settled'] == dict(type='agent_settled', aborted=False)
+    assert any(row['type'] == 'message_end' and row['message'].get('errorMessage') == 'fetch failed'
+        and row['message']['content'] == [] for row in stream)
+    assert not (first/'science-output.json').exists() and not (first/'result.pending.json').exists()
+    resumed = c.read(second/'native-intent.json')
+    assert resumed['continuation_kind'] == 'automatic_recovery'
+    assert resumed['automatic_recovery']['action'] == 'retry'
+    assert resumed['automatic_recovery']['counters'] == dict(continues=0, retries=0, wait_seconds=0.)
+    assert resumed['session'] == stopped['native_identity']['session']
+    assert resumed['previous'] == execution.proof(first)
+    assert resumed['budget_slice']['previous_tokens'] == TOKENS['input_tokens'] + TOKENS['output_tokens']
+    assert c.read(first/'usage.json') == c.read(second/'usage.json') == TOKENS
+    assert completed['thread_id'] == stopped['thread_id'] == 'exact-session'
+    assert completed['terminal_observed'] is True and completed['stop_reason'] is None
+    assert (second/'science-output.json').read_bytes() == FINAL.encode()
+    assert (agent/'session-2.bin').read_bytes().startswith((agent/'session-1.bin').read_bytes())
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    for number in (1, 2):assert c.read(agent/f'commands-{number}.json').count('prompt') == 1
 
 
 @pytest.mark.process_e2e

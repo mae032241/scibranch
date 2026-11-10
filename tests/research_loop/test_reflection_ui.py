@@ -15,17 +15,16 @@ def clean(value, limit=16384):
 def request(**updates):
     return dict(dict(version=1, review_kind='ordinary_reflection',
         reflection_scope='worker_question_clues_evidence', automatic=True, final=False,
-        due_reasons=['consecutive_calls', 'budget_checkpoint:0.3'],
-        budget_fraction=0.35, investment_cutoff=4), **updates)
-
-
-def adaptive_request(**updates):
-    return request(**dict(dict(policy_version=4, source_w=1,
+        budget_fraction=.35, investment_cutoff=4, policy_version=4, source_w=1,
         cutoff=dict(total_rounds=0, source_step=None, round_id=None),
         due_reasons=['changed_authored_question_or_original_receipt'],
         adaptive_cutoff=dict(question_revision=2, receipts=4),
         budget_scope=dict(tokens=350, seconds=35, limits=dict(tokens=1000, seconds=100),
-            complete=dict(tokens=True, seconds=True))), **updates))
+            complete=dict(tokens=True, seconds=True))), **updates)
+
+
+def adaptive_request(**updates):
+    return request(**updates)
 
 
 @pytest.mark.parametrize('reason,text', [
@@ -35,26 +34,25 @@ def adaptive_request(**updates):
 def test_adaptive_reflection_renders_control_opportunity_with_safe_scalar_scope(reason, text):
     frozen=adaptive_request(due_reasons=[reason, '/private/thread/auth', 'consecutive_calls'],
         cutoff=dict(total_rounds=0, source_step=None, round_id='/private/source'))
-    job=dict(step=2, role='A', research_strategy_version=3, supervision_request=frozen)
+    job=dict(step=2, role='A', research_strategy_version=3, advisory_scope_version=1, supervision_request=frozen)
     before=copy.deepcopy(job)
     projection=ui_semantics.reflection(job)
-    assert projection==dict(policy_version=4, source_w=1, question_revision=2, receipt_cutoff=4,
+    assert projection==dict(advisory_scope_version=1,policy_version=4, source_w=1, question_revision=2, receipt_cutoff=4,
         due_reasons=[reason], budget_fraction=0.35, investment_cutoff=4)
     assert 'budget_scope' not in projection and '/private' not in json.dumps(projection)
     node=sealed(2, 'A', dict(summary='Question', next_action='continue_w',
-        supervision_result='continue_existing'), research_strategy_version=3, supervision_request=frozen)
+        supervision_result='continue_existing'), research_strategy_version=3, advisory_scope_version=1, supervision_request=frozen)
     reader=FakeReader({2:node})
     line=ui_view.role_line(reader, dict(step=2, role='A', state='seal_present_unverified'), clean)
     markup=ui_components.role_line(line)+ui_components.result_card(ui_view.result_card(reader,2,clean=clean))
     assert text in markup and 'policy 4；控制侧检查机会' in markup and 'W #1' in markup
-    assert '触发事实不判断科学进展或停滞' in markup and 'continue_existing' in markup
+    assert '不认可或确认当前方向' in markup and 'continue_existing' in markup
     assert '/private' not in markup and 'budget_scope' not in markup
     assert '连续原调用投入达到冻结阈值' not in markup and job==before
-    assert ui_semantics.action(job,'finish',ui_view.A_OUTCOMES)=='请求提交前最终评估'
 
 
 def test_adaptive_reflection_requires_complete_typed_frozen_marker_and_ordinary_a_scope():
-    job=dict(step=2, role='A', research_strategy_version=3, supervision_request=adaptive_request())
+    job=dict(step=2, role='A', research_strategy_version=3, advisory_scope_version=1, supervision_request=adaptive_request())
     for field in ('policy_version', 'source_w', 'adaptive_cutoff', 'budget_scope', 'cutoff', 'investment_cutoff'):
         partial=copy.deepcopy(job['supervision_request'])
         partial.pop(field)
@@ -68,12 +66,12 @@ def test_adaptive_reflection_requires_complete_typed_frozen_marker_and_ordinary_
     for changes in (dict(role='W'),dict(purpose='closeout'),dict(purpose='worker_consultation'),
             dict(formal_review=True),dict(research_strategy_version=2),dict(research_strategy_version=3.0)):
         assert ui_semantics.reflection(dict(job,**changes)) is None
-    assert ui_semantics.reflection(dict(job,supervision_request=request()))==dict(
-        due_reasons=['consecutive_calls','budget_checkpoint:0.3'],budget_fraction=0.35,investment_cutoff=4)
+    obsolete=request();obsolete.pop('policy_version')
+    assert ui_semantics.reflection(dict(job,supervision_request=obsolete)) is None
 
 
 def test_adaptive_reflection_preserves_missing_consumption_without_displaying_raw_budget():
-    job=dict(step=2,role='A',research_strategy_version=3,supervision_request=adaptive_request(
+    job=dict(step=2,role='A',research_strategy_version=3,advisory_scope_version=1,supervision_request=adaptive_request(
         budget_fraction=None,budget_scope=dict(tokens=None,seconds=None,
             limits=dict(tokens=1000,seconds=None),complete=dict(tokens=False,seconds=False))))
     projection=ui_semantics.reflection(job)
@@ -87,28 +85,15 @@ def test_saved_adaptive_status_projects_frozen_scope_without_raw_budget_or_priva
     from scidiscovery.research_loop import continuation
     (tmp_path/'native-evidence'/'002').mkdir(parents=True)
     monkeypatch.setattr(continuation,'technical_stop_from_facts',lambda *args,**kwargs:None)
-    active=ui_saved_status._node(tmp_path,2,dict(step=2,role='A',research_strategy_version=3,
+    active=ui_saved_status._node(tmp_path,2,dict(step=2,role='A',research_strategy_version=3,advisory_scope_version=1,
         supervision_request=adaptive_request(due_reasons=['operational_no_new_experiment','/private/auth'])))
-    assert active['state']=='prepared' and active['role_label']=='A · 自动研究反思'
+    assert active['state']=='prepared' and '自动诊断建议' in active['role_label']
     line=ui_view.role_line(FakeReader({2:None}),active,clean)
     markup=ui_components.role_line(line)
     assert '运行检查机会：没有新的实验输入' in markup and 'policy 4' in markup
     assert 'budget_scope' not in json.dumps(active) and '/private' not in json.dumps(active)
 
 
-def test_only_explicit_ordinary_automatic_marker_changes_label_and_preserves_authority():
-    job=dict(step=2, role='A', research_strategy_version=3, supervision_request=request())
-    assert ui_semantics.role_label(job)=='A · 自动研究反思'
-    assert ui_semantics.kind(job)=='ordinary' and ui_semantics.assessment(job)
-    assert ui_semantics.action(job,'finish',ui_view.A_OUTCOMES)=='请求提交前最终评估'
-    for changes in (dict(automatic=False), dict(final=True), dict(review_kind='final_assessment'),
-            dict(reflection_scope='other'), dict(version=True)):
-        assert ui_semantics.role_label(dict(job,supervision_request=request(**changes))) is None
-    for category in (dict(purpose='closeout'), dict(formal_review=True)):
-        assert '自动研究反思' not in ui_semantics.role_label(dict(job,**category))
-    legacy=dict(job,supervision_request={})
-    assert ui_semantics.role_label(dict(legacy,purpose='worker_consultation'))=='A · W 研究咨询'
-    assert ui_semantics.role_label(dict(job,purpose='worker_consultation'))=='A · W 研究咨询'
 
 
 @pytest.mark.parametrize('merged', [False, True])
@@ -211,27 +196,6 @@ def test_diagnostic_advice_cannot_display_selection_criteria_as_authorized_chang
     assert final_card['reason']=='A selected criteria'
 
 
-def test_reflection_projection_keeps_known_consumption_facts_and_actual_author_action():
-    job=dict(step=2,role='A',research_strategy_version=3,supervision_request=request(
-        due_reasons=['consecutive_calls','budget_checkpoint:0.3','/private/session',{},'budget_checkpoint:nan']))
-    before=copy.deepcopy(job)
-    projection=ui_semantics.reflection(job)
-    assert projection['due_reasons']==['consecutive_calls','budget_checkpoint:0.3']
-    assert '/private' not in json.dumps(projection)
-    assert ui_semantics.kind(job)=='ordinary' and ui_semantics.assessment(job)
-    for action in ('continue_existing','wait'):
-        payload=dict(summary='W question',next_action='continue_w' if action=='continue_existing' else action)
-        if action=='continue_existing':payload['supervision_result']='continue_existing'
-        node=sealed(2,'A',payload,research_strategy_version=3,supervision_request=job['supervision_request'])
-        reader=FakeReader({2:node})
-        line=ui_view.role_line(reader,dict(step=2,role='A',state='seal_present_unverified'),clean)
-        markup=ui_components.role_line(line)
-        assert '自动研究反思' in markup and '预算检查点 30%' in markup and '35.0%' in markup
-        assert ('continue_existing' if action=='continue_existing' else '等待条件') in markup
-        assert not any(row['label']=='候选推荐' for row in line['facts'])
-        card=ui_view.result_card(reader,2,clean=clean)
-        assert '自动研究反思' in ui_components.result_card(card)
-    assert job==before
 
 
 def test_clues_without_candidates_keep_scope_exact_evidence_and_source_pointer():
@@ -322,9 +286,12 @@ def test_saved_status_projects_loaded_outcome_once_without_private_fields(tmp_pa
     assert len(calls)==1 and node['worker_continuation']['mode']=='new_context'
     assert node['worker_continuation']['fallback_reason'] is None
     assert '/private' not in json.dumps(node) and 'secret' not in json.dumps(node)
-    active=ui_saved_status._node(tmp_path,2,dict(step=2,role='A',supervision_request=request(
-        private_ref='/private/request')))
-    assert len(calls)==2 and active['role_label']=='A · 自动研究反思'
+    active=ui_saved_status._node(tmp_path,2,dict(step=2,role='A',research_strategy_version=3,
+        advisory_scope_version=1,supervision_request=request(private_ref='/private/request')))
+    assert len(calls)==2 and '研究诊断建议' in active['role_label']
+    assert '返回 W' in active['role_label']
     assert '/private' not in json.dumps(active)
     line=ui_view.role_line(FakeReader({2:None}),active,clean)
-    assert '预算检查点 30%' in ui_components.role_line(line)
+    markup=ui_components.role_line(line)
+    assert '研究诊断建议' in markup and '返回 W' in markup
+    assert '/private' not in markup and 'secret' not in markup

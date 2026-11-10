@@ -2,14 +2,15 @@
 import pytest
 
 from scidiscovery.research_loop import accepted_budget, budget, budget_notice, contracts as c, controller, protocol, search, supervision
+from current_strategy_fixtures import current_policy
 
 
 def scene(tmp_path,mode,*,policy=None):
     public=tmp_path/'public';public.mkdir()
     goal=public/'goal.md';goal.write_text('Explore the public observations and retain uncertainties.')
     root=tmp_path/'instance'
-    chosen=(dict(supervision.WORKER_FIRST_POLICY,mode=mode,max_automatic_reviews=1)
-        if policy is None else dict(policy))
+    chosen=(current_policy(mode=mode,max_automatic_reviews=1)
+        if policy is None else supervision.policy(policy))
     controller.prepare(root,goal,public,['never-launched'],native_backend='protocol',
         model='fixture',reasoning_effort='high',max_tokens=100_000,max_seconds=120,max_steps=6,
         supervision_policy=chosen)
@@ -43,7 +44,7 @@ def publish(root,job,intent,limits,facts):
 
 
 @pytest.mark.parametrize('mode',['off','notice','review'])
-def test_live_call_modes_reach_real_publishers_without_scientific_rounds(tmp_path,mode):
+def test_live_call_modes_project_effort_without_authorizing_early_reflection(tmp_path,mode):
     root,job,intent,limits,facts,live=scene(tmp_path,mode)
     facts['research_investment']=live
     work,hint=publish(root,job,intent,limits,facts)
@@ -51,26 +52,8 @@ def test_live_call_modes_reach_real_publishers_without_scientific_rounds(tmp_pat
     assert hint['research_investment']['coverage']=='live'
     assert hint['research_investment']['mode']==mode
     review=c.read(budget._review_directory(root,job)/'review.json')
-    assert review['pending'] is (mode=='review')
-    # The advice contract itself distinguishes a notification from a handoff.
-    if mode=='off':
-        assert hint['research_investment']['due'] is False
-        assert 'direction_review' not in hint
-        assert 'investment' not in hint.get('closeout_notices',{})
-    elif mode=='notice':
-        assert hint['research_investment']['due'] is True
-        assert 'direction_review' not in hint
-        assert hint['target_state']=='within'
-        output=budget_notice.hook_output(work,0)
-        assert output['hookSpecificOutput']['additionalContext']==budget_notice.WORKER_INVESTMENT_TEXT
-        assert len(output['hookSpecificOutput']['additionalContext'].encode())<=200
-        assert budget_notice.hook_output(work,1) is None
-        assert budget_notice.hook_output(work,0) is None
-    else:
-        assert hint['direction_review']['reasons']==['consecutive_calls']
-        assert hint['target_state']=='reached'
-        output=budget_notice.hook_output(work,0)
-        assert output['hookSpecificOutput']['additionalContext']==budget_notice.WORKER_DIRECTION_TEXT
+    assert review['pending'] is False
+    assert 'direction_review' not in hint
     assert facts['head']['search']['supervision']['investment']['total_calls']==0
     assert live['total_calls']==4
 
@@ -85,9 +68,9 @@ def test_missing_live_projection_is_an_explicit_lower_bound_not_zero_progress(tm
     assert budget_notice.hook_output(work,0) is None
 
 
-def test_new_reflection_policy_reaches_existing_safe_gate_on_first_long_worker(tmp_path):
+def test_explicit_operational_review_reaches_existing_safe_gate_on_long_worker(tmp_path):
     root,job,intent,limits,facts,live=scene(tmp_path,'review',
-        policy=supervision.AUTOMATIC_REFLECTION_POLICY)
+        policy=current_policy(require_fresh_input=False))
     # Producer-owned shared consumption reaches the checkpoint before a managed
     # call has completed. Missing live call data stays an explicit lower bound.
     facts['shared']=dict(observed_tokens=30_000,accounted_tokens=30_000,unknown_steps=[])
@@ -97,7 +80,7 @@ def test_new_reflection_policy_reaches_existing_safe_gate_on_first_long_worker(t
     assert review['pending'] and review['reason']=='worker_direction_review_due'
     assert review['direction_review']==hint['direction_review']
     assert hint['direction_review']['review_kind']=='ordinary_reflection'
-    assert hint['direction_review']['reasons']==['budget_checkpoint:0.3']
+    assert hint['direction_review']['reasons']==['operational_no_new_experiment']
     assert hint['direction_review']['budget_fraction']==.3
     assert hint['research_investment']['total_calls']==0
     assert hint['research_investment']['coverage']=='accepted_lower_bound'
@@ -106,18 +89,19 @@ def test_new_reflection_policy_reaches_existing_safe_gate_on_first_long_worker(t
     assert budget_notice.hook_output(work,1) is None
 
 
-def test_new_reflection_policy_does_not_interrupt_for_four_cheap_originals(tmp_path):
+def test_default_fresh_input_rule_does_not_treat_live_calls_as_completed_receipts(tmp_path):
     root,job,intent,limits,facts,live=scene(tmp_path,'review',
-        policy=supervision.AUTOMATIC_REFLECTION_POLICY)
+        policy=current_policy())
     facts['shared']=dict(observed_tokens=100,accounted_tokens=100,unknown_steps=[])
     facts['research_investment']=live
     work,hint=publish(root,job,intent,limits,facts)
     assert hint['research_investment']['total_calls']==4
-    assert hint['research_investment']['due'] is True
+    assert hint['research_investment']['due'] is False
+    assert hint['research_investment']['suppression_reason']=='no_new_review_input'
     assert 'direction_review' not in hint
     review=c.read(budget._review_directory(root,job)/'review.json')
     assert review['pending'] is False
     facts['shared']=dict(observed_tokens=20_000,accounted_tokens=20_000,unknown_steps=[])
     work,hint=publish(root,job,intent,limits,facts)
-    assert hint['direction_review']['reasons']==['consecutive_calls']
-    assert hint['direction_review']['budget_fraction']==.2
+    assert 'direction_review' not in hint
+    assert c.read(budget._review_directory(root,job)/'review.json')['pending'] is False

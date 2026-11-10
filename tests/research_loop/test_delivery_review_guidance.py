@@ -1,4 +1,4 @@
-"""Frozen v2 readiness authority reaches real task packets and compact notices."""
+"""Frozen current readiness authority reaches real task packets and compact notices."""
 import json
 import subprocess
 import sys
@@ -43,30 +43,29 @@ def correction_return(root, job):
 
 @pytest.mark.parametrize('role',['H','W','A','E'])
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
-def test_prepared_v2_preserves_worker_led_roles(tmp_path,role,backend_name):
-    root=prepare(tmp_path,None,research_strategy_version=2)
+def test_prepared_current_preserves_worker_led_roles(tmp_path,role,backend_name):
+    root=prepare(tmp_path,None,research_strategy_version=3)
     job=c.build_job(root,1,role,[])
     task=c.read(c.workspace(root,1)/'science-task.json')
     prompt,instruction,_=native.render_scientific_request(job,task,{},backend_name=backend_name,
         instruction_transport='prompt')
-    assert job['research_strategy_version']==c.settings(root)['research_strategy_version']==2
-    assert job['native_role_instruction']==guidance.WORKER_LED[role]
-    assert prompt.count(guidance.WORKER_LED[role])==1
-    if role in {'H','W'}:assert guidance.STAGE_PLANNING[role] not in prompt+instruction
+    assert job['research_strategy_version']==c.settings(root)['research_strategy_version']==3
+    assert job['native_role_instruction']==guidance.ADVISORY_WORKER_FIRST[role]
+    assert prompt.count(guidance.ADVISORY_WORKER_FIRST[role])==1
     if role=='A':
         assert 'continue_w with decision_request=null' in task['role_contract']
-        assert 'productive deepening' in prompt
+        assert 'productive deepening' in task['role_contract']
         assert 'deliver eligible candidate or finish' not in prompt
     if role=='W':
         assert 'pre-delivery' in task['stage_response']
-        assert 'call_ids:[]' in task['stage_response']
+        assert 'consultation_question' in task['stage_response']
         assert 'engineering_check: sample, no training/audit.' in prompt
-    assert guidance.policy(guidance.WORKER_LED)==guidance.WORKER_LED
+    assert guidance.policy(guidance.ADVISORY_WORKER_FIRST)==guidance.ADVISORY_WORKER_FIRST
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
 def test_prepared_readiness_then_one_correction_and_reassessment(tmp_path,backend_name):
-    root=prepare(tmp_path,None,research_strategy_version=2)
+    root=prepare(tmp_path,None,research_strategy_version=3)
     finish(root,1,'W',[],stage_intent='decision')
     first=reviewed(root,2,1,0)
     task=c.read(c.workspace(root,2)/'science-task.json')
@@ -92,7 +91,7 @@ def test_prepared_readiness_then_one_correction_and_reassessment(tmp_path,backen
     assert set(schema['properties']['stage_intent']['enum'])=={'continue','handoff','decision'}
     assert schema['properties']['search_plan']==dict(type='null')
     assert 'original remaining budgets' in task['role_contract']
-    assert 'no broader research or consultation' in task['role_contract']
+    assert 'broader research or consultation' in task['role_contract']
     assert 'Goals remain.' not in prompt+instruction and 'revise_h=H' not in task['stage_response']
     correction_return(root,correction)
     final=reviewed(root,4,3,1)
@@ -105,10 +104,10 @@ def test_prepared_readiness_then_one_correction_and_reassessment(tmp_path,backen
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
-def test_protected_v2_can_reject_nonempty_inventory_without_new_work(tmp_path,backend_name):
-    job=dict(role='A',step=3,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=2,
+def test_protected_current_can_reject_nonempty_inventory_without_new_work(tmp_path,backend_name):
+    job=dict(role='A',step=3,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,
         purpose='closeout',final_only=True,delivery_sources=dict(items=[dict(candidate='retained')]),
-        native_role_instruction=guidance.WORKER_LED['A'])
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST['A'])
     task=c.response_instructions(job)
     prompt,instruction,schema=native.render_scientific_request(job,task,{},backend_name=backend_name,
         instruction_transport='prompt',final_return=True)
@@ -128,15 +127,15 @@ def test_protected_v2_can_reject_nonempty_inventory_without_new_work(tmp_path,ba
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
 @pytest.mark.parametrize('scope',['ordinary','review','reassessment','correction','protected'])
 @pytest.mark.parametrize('repair',[False,True])
-def test_v2_fixed_contract_with_enabled_fields_keeps_existing_bound(tmp_path,backend_name,scope,repair):
+def test_current_fixed_contract_with_enabled_fields_keeps_existing_bound(tmp_path,backend_name,scope,repair):
     role='W' if scope=='correction' else 'A'
-    job=dict(role=role,step=3,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=2,
-        native_role_instruction=guidance.WORKER_LED[role],formal_review_version=1)
+    job=dict(role=role,step=3,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST[role],formal_review_version=1)
     if scope in {'review','reassessment','correction'}:
         job['evidence_return']=delivery_review.make('delivery_correction' if role=='W' else 'delivery_review',
             2,0 if scope=='review' else 1)
     if scope=='protected':job.update(purpose='closeout',final_only=True,delivery_sources=dict(items=[{}]))
-    if role=='W':job.update(search={},worker_fragment_policy=dict(context='same_session'),
+    if role=='W':job.update(search={},worker_fragment_policy=dict(version=2,context='same_session'),
         scientific_work_unit=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode())))
     job['scientific_response_fields']=c.response_fields(job,{})
     if role=='W':job['scientific_response_fields']+=['mechanism_findings','candidate_nominations']
@@ -159,14 +158,13 @@ def test_v2_fixed_contract_with_enabled_fields_keeps_existing_bound(tmp_path,bac
     assert size<=c.MAX_FIXED_RESPONSE_BYTES==3072
 
 
-@pytest.mark.parametrize('version',[None,1,2])
-def test_exhausted_ordinary_a_notice_matches_frozen_final_authority(version):
-    job=dict(role='A',research_strategy_version=version)
+@pytest.mark.parametrize('version',[3])
+def test_exhausted_ordinary_a_notice_returns_advice_to_worker(version):
+    job=dict(role='A',research_strategy_version=version,advisory_scope_version=1)
     text=budget_notice.closeout_notice(job,{},dimension='token',target_reached=False,
         shared_reached=True,shared_exhausted=True)['text']
-    if version in {1,2}:
-        assert 'requests protected Final A' in text and 'extra FINAL' not in text
-    else:assert 'No H/W/E/extra FINAL' in text
+    assert 'return advice with continue_w and decision_request=null' in text
+    assert 'W judges it; no direct work or finalization' in text
     assert len(text.encode())<=200
 
 
@@ -175,7 +173,7 @@ def test_exhausted_ordinary_a_notice_matches_frozen_final_authority(version):
     ('delivery_review',0,False),('delivery_review',1,False),
     ('delivery_review',0,True),('delivery_correction',1,False),('delivery_correction',1,True)])
 def test_scoped_notice_survives_actual_staged_stdlib_hook(tmp_path,scope,used,exhausted):
-    job=dict(role='A' if scope=='delivery_review' else 'W',step=3,research_strategy_version=2,
+    job=dict(role='A' if scope=='delivery_review' else 'W',step=3,research_strategy_version=3,advisory_scope_version=1,
         evidence_return=delivery_review.make(scope,2,used))
     alert=budget_notice.closeout_notice(job,{},dimension='token',target_reached=True,
         shared_reached=exhausted,shared_exhausted=exhausted)
@@ -199,7 +197,7 @@ def test_scoped_notice_survives_actual_staged_stdlib_hook(tmp_path,scope,used,ex
 
 
 def test_active_final_notice_never_requests_another_final():
-    text=budget_notice.closeout_notice(dict(role='A',research_strategy_version=2),{},
+    text=budget_notice.closeout_notice(dict(role='A',research_strategy_version=3),{},
         dimension='time',target_reached=True,shared_reached=True,final_return=True)['text']
     assert 'accepted final return' in text and 'No extra FINAL/new work' in text
     assert 'requests protected Final A' not in text

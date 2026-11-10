@@ -25,22 +25,9 @@ def test_new_common_prepare_freezes_reflection_without_a_codex_default(tmp_path)
     assert c.settings_for_job(root,job,base=selected,head=head)['native_backend']=='protocol'
 
 
-def test_existing_worker_first_off_policy_is_not_upgraded_by_configuration_validation(tmp_path):
-    # Freeze a legacy strategy without the independent new advisory contract.
-    root,options=prepare(tmp_path,research_strategy_version=2,
-        supervision_policy=supervision.WORKER_FIRST_POLICY)
-    before=(root/'settings.json').read_bytes();original=c.settings(root)
-    changed=dict(options,model='another-explicit-model',validate_only=True,_existing_settings=original)
-    changed.pop('supervision_policy')
-    revised=controller.prepare(**changed)
-    assert revised['supervision_policy']==supervision.WORKER_FIRST_POLICY
-    assert (root/'settings.json').read_bytes()==before
-    assert 'worker_continuity_version' not in c.build_job(root,1,'W',[])
-
-
 def test_toml_configuration_explicitly_disables_new_automatic_reviews(tmp_path):
     (tmp_path/'public').mkdir()
-    off=dict(supervision.AUTOMATIC_REFLECTION_POLICY,mode='off',max_automatic_reviews=0)
+    off=dict(supervision.DEFAULT_WORKER_FIRST_REFLECTION_POLICY,mode='off',max_automatic_reviews=0)
     document=dict(version=1,research=dict(root='instance',public_root='public',
         objective_text='Keep scientific work autonomous with this explicit opt-out.'),
         agent=dict(backend='protocol',launcher=['never-launched'],model='explicit-provider-model',reasoning_effort='high'),

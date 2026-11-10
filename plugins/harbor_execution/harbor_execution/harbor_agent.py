@@ -325,16 +325,15 @@ def finished_without_delivery(status, report, *, instance):
 
 
 def technical_pause_hold(status, terminal, *, instance):
-    """Only the owner's actionable, clean prelaunch stop can retain this trial."""
+    """Only the owner's actionable, clean original stop can retain this trial."""
     if (not isinstance(terminal,dict) or terminal.get('cleanup_confirmed') is not True
             or terminal.get('reason') != 'exited' or type(terminal.get('returncode')) is not int or terminal['returncode'] != 2
             or not isinstance(status,dict) or status.get('instance') != instance
             or not isinstance(status.get('goal_id'),str) or not status['goal_id']):
         return False
     stopped=status.get('technical_stop')
-    if (not isinstance(stopped,dict) or stopped.get('phase') != 'native_prelaunch'
+    if (not isinstance(stopped,dict) or stopped.get('phase') not in {'native_prelaunch','native_failure'}
             or stopped.get('stage') != 'technical_pause'
-            or stopped.get('reason') not in {'native_metadata_unsupported','shared_input_view_unsupported'}
             or stopped.get('repair_scope') != 'worker_attempt'
             or stopped.get('recovery_available') is not True
             or stopped.get('recheck_required') is not True
@@ -342,20 +341,35 @@ def technical_pause_hold(status, terminal, *, instance):
             or type(stopped.get('pending_step')) is not int or stopped['pending_step'] <= 0
             or type(stopped.get('expected_attempt')) is not int or stopped['expected_attempt'] < 0):
         return False
+    failure=stopped['phase']=='native_failure'
+    if failure:
+        number=stopped['expected_attempt']
+        record=Path(instance)/'native-evidence'/f'{stopped["pending_step"]:03d}'
+        if number:record=record/'continuations'/f'{number:03d}'
+        if (stopped.get('native_intent_ref')!=dict(path=str(record/'native-intent.json'))
+                or stopped.get('after_interrupt') is not True or stopped.get('new_context') is not False):
+            return False
+    elif stopped.get('reason') not in {'native_metadata_unsupported','shared_input_view_unsupported'}:
+        return False
     nodes=status.get('nodes')
     if not isinstance(nodes,list) or not nodes:return False
     current=nodes[-1]
     return (isinstance(current,dict) and current.get('step') == stopped['pending_step']
         and current.get('role') == stopped.get('pending_role')
-        and current.get('state') == 'native_not_submitted'
+        and (current.get('state') in {'native_outcome_unsealed','automatic_recovery_stopped','automatic_recovery_paused'}
+            if failure else current.get('state') == 'native_not_submitted')
         and current.get('technical_stop') == stopped)
 
 
 def _recovery_action(operation, stopped, *, instance):
-    """An explicit accepted operation names this exact prelaunch source."""
+    """An explicit accepted operation names this exact retained source."""
     action=operation.get('action') or {}
     expected=action.get('expected_attempt',0)
-    return (operation.get('kind') == 'controller'
+    source=(stopped.get('phase')!='native_failure' or (
+        action.get('after_interrupt') is True
+        and action.get('native_intent_ref')==stopped.get('native_intent_ref')
+        and action.get('new_context',False) is False))
+    return (source and operation.get('kind') == 'controller'
         and action.get('kind') == 'worker_resume'
         and type(action.get('step')) is int and type(expected) is int
         and action.get('step') == stopped['pending_step']
@@ -595,7 +609,7 @@ class SciDiscoveryHarborAgent(BaseAgent):
                 if nodes and nodes[-1].get('state') in {'running','prepared','waiting'}:
                     continue  # A later explicit accepted owner can race these reads.
                 stopped=status.get('technical_stop')
-                if isinstance(stopped,dict) and stopped.get('phase') == 'native_prelaunch':
+                if isinstance(stopped,dict) and stopped.get('phase') in {'native_prelaunch','native_failure'}:
                     if not technical_pause_hold(status,dict(reason='exited',returncode=2,
                             cleanup_confirmed=True),instance=instance):
                         raise RuntimeError('technical recovery is unavailable under current original gates')

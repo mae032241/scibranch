@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from scidiscovery.research_loop import (
-    accepted_prefix, candidate_refs, contracts as c, controller, fork_runtime,
+    accepted_prefix, candidate_refs, contracts as c, controller, delivery_review, fork_runtime,
     fork_service, handoff_state, history, native, originals, search,
     shared_input_views,
 )
@@ -51,7 +51,7 @@ def blocked():
     return [dict(mechanism='h001.m1', basis='blocked', finding=MISSING)]
 
 
-def prepare(tmp_path, monkeypatch):
+def prepare(tmp_path, monkeypatch, *, final=False):
     public = tmp_path / 'public'
     public.mkdir()
     objective = public / 'objective.md'
@@ -87,20 +87,20 @@ def prepare(tmp_path, monkeypatch):
         history_observer=dict(adapter=str(adapter), config={}))
     stopped_seals(monkeypatch)
     finish(root, 1, 'H', [], action='experiment', search_choice=plan(), limitations=[MISSING])
-    finish(root, 2, 'W', [1], files=FILES, mechanism_findings=blocked(),
+    finish(root, 2, 'W', [1], stage_intent='decision' if final else 'handoff', files=FILES, mechanism_findings=blocked(),
         candidate_nominations=nominations('retained-process'), limitations=[MISSING])
     expected = {name: (c.workspace(root, 2) / 'artifacts' / name).read_bytes() for name in FILES}
     assert expected['retained-flow.json'] != expected['rival-flow.json']
     return root, expected, future
 
 
-def build(root, step, role, parents, monkeypatch):
+def build(root, step, role, parents, monkeypatch, **options):
     def replay(*_args, **_kwargs):
         pytest.fail('Current exact-reference handoff replayed historical science')
     with monkeypatch.context() as patch:
         patch.setattr(history, 'source_sequence', replay)
         patch.setattr(history, 'rebuild', replay)
-        return c.build_job(root, step, role, parents)
+        return c.build_job(root, step, role, parents, **options)
 
 
 def assert_request(root, job, expected):
@@ -148,8 +148,8 @@ def test_selected_comparison_originals_survive_h_revision_latest_preview_and_lon
         tmp_path, monkeypatch, extra_seals):
     root, expected, _ = prepare(tmp_path, monkeypatch)
     with handoff_state.scope(root):
-        finish(root, 3, 'A', [1, 2], action='revise_h', selection=SELECTED,
-            recommendation='retained-process', limitations=[MISSING])
+        finish(root, 3, 'W', [1, 2], stage_intent='handoff', selection=SELECTED,
+            mechanism_findings=blocked(), limitations=[MISSING])
         hjob = build(root, 4, 'H', [1, 2, 3], monkeypatch)
         assert_request(root, hjob, expected)
         finish(root, 4, 'H', [1, 2, 3], action='experiment', search_choice=plan(revised=True),
@@ -164,8 +164,7 @@ def test_selected_comparison_originals_survive_h_revision_latest_preview_and_lon
         assert_request(root, ajob, expected)
         preview = c.read(accepted_prefix.visibility(root, ajob['history']['prefix']) / 'breadth-table.json')['nominations']
         assert [row['candidate_id'] for row in preview['representatives']] == ['rival-process']
-        finish(root, 6, 'A', [4, 5], action='revise_h', selection=SELECTED,
-            recommendation='retained-process', limitations=[MISSING])
+        finish(root, 6, 'A', [4, 5], action='continue_w', limitations=[MISSING])
         for step in range(7, 8 + extra_seals):
             build(root, step, 'H', [step - 1], monkeypatch)
             finish(root, step, 'H', [step - 1], action='experiment',
@@ -175,20 +174,19 @@ def test_selected_comparison_originals_survive_h_revision_latest_preview_and_lon
         assert_request(root, following, expected)
     seal = c.read(c.host_record(c.workspace(root, 6)) / 'result-identity.json')
     assert seal['control_outcome']['diagnostics'] == []
-    assert c.read(c.host_record(c.workspace(root, 6)) / 'science-output.json')['candidate_recommendation'] == 'retained-process'
+    assert c.read(c.host_record(c.workspace(root, 6)) / 'science-output.json')['next_action'] == 'continue_w'
 
 
 def test_fork_exact_cut_keeps_selected_driver_and_both_candidates_without_future_source_choice(tmp_path, monkeypatch):
     root, expected, future = prepare(tmp_path, monkeypatch)
-    finish(root, 3, 'A', [1, 2], action='revise_h', selection=SELECTED,
-        recommendation='retained-process', limitations=[MISSING])
+    finish(root, 3, 'W', [1, 2], stage_intent='handoff', selection=SELECTED,
+        mechanism_findings=blocked(), limitations=[MISSING])
     source, _, _ = finish(root, 4, 'H', [1, 2, 3], action='experiment',
         search_choice=plan(revised=True), limitations=[MISSING])
     future[str(root), 5] = True
     finish(root, 5, 'W', [4], files={'future-flow.json': '{"training":"source future only"}\n'},
         mechanism_findings=blocked(), candidate_nominations=nominations('rival-process'), limitations=[MISSING])
-    latest, _, _ = finish(root, 6, 'A', [4, 5], action='revise_h',
-        recommendation='future-process', limitations=[MISSING])
+    latest, _, _ = finish(root, 6, 'A', [4, 5], action='continue_w', limitations=[MISSING])
     assert candidate_refs.is_available(root, latest, 'future-process')
     for step in range(1, 7):
         (c.host_record(c.workspace(root, step)) / 'runner.lock').touch(exist_ok=True)
@@ -215,8 +213,9 @@ def test_fork_exact_cut_keeps_selected_driver_and_both_candidates_without_future
 
 
 def test_all_candidates_rejected_and_missing_evaluation_input_allow_finite_final_response(tmp_path, monkeypatch):
-    root, _, _ = prepare(tmp_path, monkeypatch)
-    job = build(root, 3, 'A', [1, 2], monkeypatch)
+    root, _, _ = prepare(tmp_path, monkeypatch, final=True)
+    scope=delivery_review.make('delivery_review',2,0)
+    job = build(root, 3, 'A', [1, 2], monkeypatch,evidence_return=scope)
     assert not job.get('selected_inputs')  # Availability never selects a default comparator.
     _, work, record = finish(root, 3, 'A', [1, 2], action='finish', selection=[],
         recommendation=None, text='Both complete procedures are rejected for this bounded result; ' + MISSING,
@@ -227,5 +226,5 @@ def test_all_candidates_rejected_and_missing_evaluation_input_allow_finite_final
     prompt, _, _ = native.render_scientific_request(job, c.read(work / 'science-task.json'), {},
         backend_name='codex', instruction_transport='prompt', final_return=True)
     assert 'Protected FINAL: conclude now; no new role/audit/experiment.' in prompt
-    assert native.STAGE_PLANNING['A'] not in prompt
+    assert 'Goals remain.' not in prompt
     assert not (root / 'jobs/004.json').exists()

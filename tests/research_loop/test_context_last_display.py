@@ -3,6 +3,8 @@ import copy
 from pathlib import Path
 import threading
 
+import pytest
+
 from scidiscovery.research_loop import instance_ui, ui_components, ui_view
 
 
@@ -36,6 +38,97 @@ def test_valid_then_unavailable_keeps_only_display_history(monkeypatch):
     assert values['更新时间'] == '1970-01-01 00:02:20 UTC'
     assert current == untouched and original['status'] == 'last_reported'
     assert 'token-feature' in ui_components.token_monitor(rows)
+
+
+def test_valid_time_survives_timestampless_current_then_unavailable(monkeypatch):
+    monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
+    host = viewer()
+    original = sample(observed_at=140)
+    current = sample(tokens=50)
+    unavailable = dict(status='unavailable', step=2, attempt=0)
+    originals = copy.deepcopy((original, current, unavailable))
+    host._context_display_value(original, 1)
+    shown = host._context_display_value(current, 2)
+    assert shown == dict(status='current', last_updated_at=140)
+    assert 'observed_at' not in host.context_display['sample']
+    assert 'reported_at' not in host.context_display['sample']
+    for context, shown in ((current, shown),
+                           (unavailable, host._context_display_value(unavailable, 3))):
+        values = {row['label']: row['value'] for row in
+                  ui_view.token_details({}, context, context_display=shown)}
+        assert values['上下文'] == '50 / 100 · 50.0%'
+        assert values['更新时间'] == '1970-01-01 00:02:20 UTC'
+    assert (original, current, unavailable) == originals
+    shown['sample']['total_tokens'] = 99
+    assert host.context_display['sample']['total_tokens'] == 50
+
+
+@pytest.mark.parametrize('invalid', [160, float('inf'), float('-inf'), float('nan'), 'invalid', True, -1])
+def test_retained_time_uses_valid_reported_fallback(monkeypatch, invalid):
+    monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
+    host = viewer()
+    host._context_display_value(sample(observed_at=140), 1)
+    current = sample(tokens=50, observed_at=invalid, reported_at=145)
+    shown = host._context_display_value(current, 2)
+    assert shown == dict(status='current', last_updated_at=145)
+    assert host.context_display['sample']['total_tokens'] == 50
+    values = {row['label']: row['value'] for row in
+              ui_view.token_details({}, current, context_display=shown)}
+    assert values['更新时间'] == '1970-01-01 00:02:25 UTC'
+
+
+def test_invalid_times_never_erase_or_manufacture_last_valid_time(monkeypatch):
+    monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
+    host = viewer()
+    current = sample(observed_at=160, reported_at=float('inf'))
+    shown = host._context_display_value(current, 1)
+    assert shown == dict(status='current', last_updated_at=None)
+    # A timestamp rejected at observation does not become history as time passes.
+    monkeypatch.setattr(ui_view.time, 'time', lambda: 200)
+    unavailable = dict(status='unavailable', step=2, attempt=0)
+    historical = host._context_display_value(unavailable, 2)
+    values = {row['label']: row['value'] for row in
+              ui_view.token_details({}, unavailable, context_display=historical)}
+    assert values['更新时间'] == '未知'
+    host._context_display_value(sample(observed_at=140), 3)
+    shown = host._context_display_value(sample(tokens=50, observed_at=float('nan')), 4)
+    assert shown == dict(status='current', last_updated_at=140)
+    assert host.context_display['sample']['total_tokens'] == 50
+
+
+def test_timestampless_sample_preserves_source_order_watermark(monkeypatch):
+    monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
+    host = viewer()
+    host._context_display_value(sample(observed_at=140), 20)
+    host._context_display_value(sample(tokens=50), 30)
+    older_source = host._context_display_value(sample(tokens=20, observed_at=130), 40)
+    assert older_source['status'] == 'historical'
+    assert older_source['sample']['total_tokens'] == 50
+    assert older_source['last_updated_at'] == 140
+    older_read = host._context_display_value(sample(tokens=60, observed_at=145), 25)
+    assert older_read['sample']['total_tokens'] == 50
+    assert older_read['last_updated_at'] == 140
+    assert host._context_display_value(sample(tokens=70, observed_at=145), 50) == dict(
+        status='current', last_updated_at=145)
+
+
+def test_scope_advance_clears_retained_time(monkeypatch):
+    monkeypatch.setattr(ui_view.time, 'time', lambda: 150)
+    host = viewer()
+    host._context_display_value(sample(observed_at=140), 1)
+    current = sample(attempt=1, tokens=50)
+    shown = host._context_display_value(current, 2)
+    assert shown == dict(status='current', last_updated_at=None)
+    host._context_display_value(sample(observed_at=145), 3)
+    assert host.context_display['scope'] == ('/explicit-instance', 2, 1)
+    values = {row['label']: row['value'] for row in
+              ui_view.token_details({}, current, context_display=shown)}
+    assert values['更新时间'] == '未知'
+    assert host._context_display_value(dict(status='unavailable', step=3, attempt=0), 4,
+                                       producer_scope=True) == dict(status='unavailable')
+    assert host.context_display['last_updated_at'] is None
+    other = viewer('/other-instance')
+    assert other._context_display_value(current, 5)['last_updated_at'] is None
 
 
 def test_never_valid_and_missing_scope_do_not_invent_history():

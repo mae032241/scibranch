@@ -42,8 +42,8 @@ def publish(root, job, *, tokens=30, files=None, **authored):
 
 
 def next_job(root, route, step, *, supervision_request=None):
-    return c.build_job(root,step,route[0],route[1],instruction=route[2],
-        evidence_return=route[3],supervision_request=supervision_request)
+    return c.build_job(root,step,route.role,list(route.parents),instruction=route.instruction,
+        evidence_return=route.evidence_return,supervision_request=supervision_request)
 
 
 @pytest.mark.parametrize('missing',[False,True])
@@ -54,7 +54,7 @@ def test_real_worker_evidence_return_keeps_question_materials_budget_and_continu
         files={'candidate.py':'retained runnable candidate','residual.txt':'exact conflicting residual'})
     original=(root/'native-evidence/001/science-output.json').read_bytes()
     proposed=controller._route(root,1,'W',request,worker,None,None)
-    assert proposed[0]=='E' and proposed[3]==dict(role='W',step=1)
+    assert proposed.role=='E' and proposed.evidence_return==dict(role='W',step=1)
     extractor=next_job(root,proposed,2)
     assert extractor['purpose']=='worker_consultation' and extractor['consultation_question']==QUESTION
     view=c.read(c.workspace(root,2)/'science-task.json')
@@ -63,8 +63,8 @@ def test_real_worker_evidence_return_keeps_question_materials_budget_and_continu
     returned=publish(root,extractor,scientific_result='Missing original source; no value inferred.' if missing else 'The exact retained evidence answers the bounded question.',
         limitations=['Requested source missing'] if missing else ['Synthetic exact-source fixture'],
         implementation_selection=[],files={} if missing else {'evidence.txt':'bounded extracted source'})
-    result=controller._route(root,2,'E',returned,extractor,*proposed[4:6])
-    assert result[0]=='W' and result[1]==[1,2] and result[3] is None
+    result=controller._route(root,2,'E',returned,extractor,proposed.current_h,proposed.current_w)
+    assert result.role=='W' and result.parents==(1,2) and result.evidence_return is None
     successor=next_job(root,result,3)
     actual={row['path']:row for row in successor['direct_materials']}
     assert all(actual[row['path']]==row for row in before)
@@ -76,7 +76,7 @@ def test_real_worker_evidence_return_keeps_question_materials_budget_and_continu
     plan=continuation.consultation_launch(root,successor,settings=policy,
         backend=backends.selected(policy),profile={})
     assert plan['worker_continuation']['fallback_reason']=='consultation_resume_unsupported_backend'
-    assert c.build_job(root,3,'W',result[1],instruction=result[2])==successor
+    assert c.build_job(root,3,'W',list(result.parents),instruction=result.instruction)==successor
     assert c.validate(c.workspace(root,2))['role']=='E'
 
 
@@ -115,7 +115,7 @@ def test_hypothesis_consultation_still_returns_same_requesting_worker(tmp_path):
     route=controller._route(root,1,'W',request,worker,None,None)
     consultant=next_job(root,route,2)
     advice=publish(root,consultant,next_action='wait',search_plan=None)
-    returned=controller._route(root,2,'H',advice,consultant,*route[4:6])
+    returned=controller._route(root,2,'H',advice,consultant,route.current_h,route.current_w)
     successor=next_job(root,returned,3)
     assert successor['worker_continuation']['requester_step']==1
     assert 'original objective' in successor['instruction']

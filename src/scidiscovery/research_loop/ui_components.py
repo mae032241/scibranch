@@ -268,31 +268,50 @@ def understanding(items):
 
 
 def hero(header, status, *, primary=None, attention=(), notices=(), stage_note=None):
-    """Header with status badge, headline and one primary action slot."""
+    """Status only; control forms live in the separate actions component."""
     tone = {'completed': 'ok', 'active': 'active', 'waiting': 'warn', 'unknown': 'warn', 'budget_exhausted': 'bad',
             'final': 'warn', 'error': 'bad', 'service_error': 'bad', 'pause_requested': 'warn', 'paused': 'neutral'}.get(status.get('state'), 'neutral')
     body = '<section class="hero overview-head"><div class="head-main">'
     if header and 'error' in header:
         body += error_inline(header, what='研究标题')
-    body += '<p class="head-status">' + badge(status['badge'], tone) + ' <span class="headline">' + esc(status['headline']) + '</span></p>'
+    headline=status['headline']
+    brief=headline if len(headline)<=180 else headline[:180]+'…'
+    body += '<p class="head-status">' + badge(status['badge'], tone) + ' <span class="headline">' + esc(brief) + '</span></p>'
     if status.get('stage'):
         body += '<p class="note stage-line">当前：' + esc(status['stage']) + '</p>'
     if stage_note:
         body += esc(stage_note)
-    for notice in notices:
-        body += '<p class="note">' + esc(notice) + '</p>'
-    body += '</div><div class="head-action">' + (esc(primary) if primary else '') + '</div></section>'
+    body += '</div></section>'
+    context=([headline] if brief!=headline else [])+list(notices)
+    if context:
+        body+='<details class="status-context" data-details-key="overview-status-context"><summary>完整状态说明</summary>'
+        body+=''.join('<p class="note">'+esc(notice)+'</p>' for notice in context)+'</details>'
+    if primary or attention:
+        body+=actions(primary=primary,attention=attention)
+    return Safe(body)
+
+
+def actions(*, primary=None, attention=(), settings_href=None, notices=()):
+    """One wrapping action row, with existing exact control forms untouched."""
+    body='<section class="research-actions" aria-label="研究操作"><div class="research-action-controls">'
+    if primary:
+        body+=esc(primary)
+    if settings_href:
+        body+=link('重试设置',settings_href,cls='secondary-link')
     if attention:
-        body += '<section class="attention" aria-labelledby="attention-title"><h2 id="attention-title">需要你处理</h2><ul>'
         for item in attention:
-            body += '<li><p>' + esc(item['text']) + '</p>'
             if item.get('href'):
-                body += link(item.get('action', '查看'), item['href'])
+                body += link(item.get('action', '查看'), item['href'],cls='secondary-link')
             if item.get('form'):
                 body += esc(item['form'])
-            body += '</li>'
-        body += '</ul></section>'
-    return Safe(body)
+    body+='</div>'
+    if notices:
+        body+='<details class="status-context" data-details-key="overview-status-context"><summary>完整状态说明</summary>'
+        body+=''.join('<p class="note">'+esc(notice)+'</p>' for notice in notices)+'</details>'
+    if attention:
+        body+='<details class="action-guidance" data-details-key="overview-action-guidance"><summary>处理建议</summary>'
+        body+=''.join('<p>'+esc(item['text'])+'</p>' for item in attention)+'</details>'
+    return Safe(body+'</section>')
 
 
 def activity(value):

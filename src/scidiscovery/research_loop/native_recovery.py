@@ -1,4 +1,4 @@
-"""Finite standard-Codex recovery decisions from native transport facts only."""
+"""Finite backend-independent recovery from native transport facts only."""
 from __future__ import annotations
 
 import json
@@ -6,20 +6,26 @@ import math
 import re
 
 
-DEFAULT_POLICY = dict(enabled=True, max_continues=2, max_retries=3,
-    initial_backoff_seconds=30, max_backoff_seconds=300,
-    jitter_fraction=0.1, max_wait_seconds=1800)
+DEFAULT_POLICY = dict(enabled=True, max_attempts=8, max_continues=8, max_retries=8,
+    initial_backoff_seconds=5, max_backoff_seconds=300,
+    jitter_fraction=0, max_wait_seconds=1800)
 
 
 def policy(value):
     if not isinstance(value, dict) or set(value) - set(DEFAULT_POLICY):
         raise ValueError('Unsupported automatic recovery policy')
     result = dict(DEFAULT_POLICY, **value)
+    # Explicit historical policies retain their independent action limits.
+    # Fresh defaults opt into one shared cap across native failure categories.
+    if value and 'max_attempts' not in value:result['max_attempts'] = None
     if type(result['enabled']) is not bool:
         raise ValueError('Automatic recovery enabled must be boolean')
     for key in ('max_continues', 'max_retries'):
         if type(result[key]) is not int or not 0 <= result[key] <= 100:
             raise ValueError('Automatic recovery attempts must be finite integers from 0 to 100')
+    if result['max_attempts'] is not None and (type(result['max_attempts']) is not int
+            or not 0 <= result['max_attempts'] <= 100):
+        raise ValueError('Automatic recovery total attempts must be null or a finite integer from 0 to 100')
     for key in ('initial_backoff_seconds', 'max_backoff_seconds', 'max_wait_seconds', 'jitter_fraction'):
         if type(result[key]) not in (int, float) or not math.isfinite(result[key]) or result[key] < 0:
             raise ValueError('Automatic recovery waits must be finite nonnegative numbers')
@@ -193,10 +199,17 @@ def format_rejection(event):
     return False
 
 
+def _attempt_limit_reached(limits, used):
+    """One declared recovery allowance across all existing automatic modes."""
+    return (limits.get('max_attempts') is not None
+        and used['retries'] + used['continues'] >= limits['max_attempts'])
+
+
 def format_decision(limits, used, *, session_available, already_fallback=False):
     """Negotiate once, charging the same original retry authorization."""
     result = dict(action='stop', reason='automatic_recovery_format_fallback_limit', counters=dict(used))
     if not limits['enabled']:return dict(result, action='none', reason='automatic_recovery_disabled')
+    if _attempt_limit_reached(limits, used):return dict(result, reason='automatic_recovery_attempt_limit')
     if already_fallback:return result
     if used['retries'] >= limits['max_retries']:
         return dict(result, reason='automatic_recovery_retry_limit')
@@ -242,7 +255,7 @@ def recoverable_source(outcome):
     diagnostic=transport_diagnostic(outcome.get('technical_diagnostic')) if isinstance(outcome,dict) else None
     if diagnostic is not None and diagnostic['original_call_state']=='unknown':return False
     return (isinstance(outcome, dict) and outcome.get('terminal_observed') is False
-        and (outcome.get('native_failure') or {}).get('category') in {'temporary','incomplete'}
+        and (outcome.get('native_failure') or {}).get('category') in {'temporary','incomplete','permanent','unknown'}
         and outcome.get('stop_reason') in {None,'native_failure_event'}
         and outcome.get('cleanup') == 'observed_group_cleaned')
 
@@ -283,6 +296,7 @@ def work_decision(limits, used, *, session_available):
     """A verified delivery failure spends the same original continue budget."""
     result = dict(action='stop', reason='automatic_recovery_continue_limit', counters=dict(used))
     if not limits['enabled']:return dict(result, action='none', reason='automatic_recovery_disabled')
+    if _attempt_limit_reached(limits, used):return dict(result, reason='automatic_recovery_attempt_limit')
     if used['continues'] >= limits['max_continues']:return result
     if not session_available:return dict(result, reason='automatic_recovery_session_unavailable')
     return dict(result, action='continue', reason='worker_delivery_incomplete', startup_retry=False,
@@ -302,23 +316,28 @@ def decision(outcome, limits, used, *, session_available, activity_observed=Fals
         return dict(result, reason='automatic_recovery_original_call_unknown')
     if not isinstance(failure, dict):return result
     category = failure.get('category')
-    if category not in {'temporary', 'incomplete'}:
-        return dict(result, reason='automatic_recovery_' + ('permanent_failure' if category == 'permanent' else 'unknown_failure'))
-    action = 'retry' if category == 'temporary' else 'continue'
+    if category not in {'temporary', 'incomplete', 'permanent', 'unknown'}:return result
+    if _attempt_limit_reached(limits, used):
+        return dict(result, reason='automatic_recovery_attempt_limit')
+    # Diagnosis does not revoke the finite same-session recovery grant. A new
+    # submission still needs the existing positive temporary rejection proof.
+    if category in {'permanent', 'unknown'} and not session_available:
+        return dict(result, reason='automatic_recovery_' + category + '_failure')
+    action = 'continue' if category == 'incomplete' else 'retry'
     key = 'retries' if action == 'retry' else 'continues'
     cap = limits['max_retries' if action == 'retry' else 'max_continues']
     if used[key] >= cap:return dict(result, reason='automatic_recovery_' + action + '_limit')
     startup = not session_available
-    if startup and (action != 'retry' or failure.get('not_accepted') is not True or activity_observed
+    if startup and (category != 'temporary' or failure.get('not_accepted') is not True or activity_observed
                     or outcome.get('thread_id') is not None):
         return dict(result, reason='automatic_recovery_session_unavailable')
-    delay = 0.
-    if action == 'retry':
-        delay = min(limits['max_backoff_seconds'], limits['initial_backoff_seconds'] * 2 ** used['retries'])
-        delay = min(limits['max_backoff_seconds'], max(0., delay * (1 + limits['jitter_fraction'] * max(-1., min(1., jitter)))))
-        delay = max(delay, failure.get('retry_after_seconds') or 0.)
-        if delay > limits['max_backoff_seconds']:
-            return dict(result, reason='automatic_recovery_retry_after_limit')
+    backoff_index = (used['retries'] + used['continues']
+        if limits.get('max_attempts') is not None else used[key])
+    delay = min(limits['max_backoff_seconds'], limits['initial_backoff_seconds'] * 2 ** backoff_index)
+    delay = min(limits['max_backoff_seconds'], max(0., delay * (1 + limits['jitter_fraction'] * max(-1., min(1., jitter)))))
+    delay = max(delay, failure.get('retry_after_seconds') or 0.)
+    if delay > limits['max_backoff_seconds']:
+        return dict(result, reason='automatic_recovery_retry_after_limit')
     if used['wait_seconds'] + delay > limits['max_wait_seconds']:
         return dict(result, reason='automatic_recovery_wait_limit')
     return dict(result, action=action, reason='native_' + category, delay_seconds=delay,

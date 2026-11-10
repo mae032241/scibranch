@@ -200,7 +200,10 @@ def _node(root, step, job, memo=None):
         statuses=[status for status in failure.get('statuses', []) if type(status) is int and 100 <= status <= 599]) if failure else None
     from . import continuation
     technical_stop=continuation.technical_stop_from_facts(job,outcome,attempt=len(records)-1,
-        blocked_reason='technical_restart_recheck_required')
+        blocked_reason='technical_restart_recheck_required',intent=intent,
+        native_intent_ref=dict(path=str(record/'native-intent.json')),
+        recovery_reason=(recovery or {}).get('limitation') or (recovery or {}).get('reason'))
+    if (recovery or {}).get('status') in {'waiting','ready'}:technical_stop=None
     technical_diagnostic=native_usage.actionable_stop(outcome)
     from . import ui_semantics
     reflection=ui_semantics.reflection(job)

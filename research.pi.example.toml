@@ -82,8 +82,14 @@ max_steps = 32
 # above AND [executor] mode = "external". It is not tool-less auxiliary read-only.
 
 # policies omitted: current finite Pi RPC turn-scoped output-only repair + execution
-# wake, and common same_session W cadence with max_context_windows=1. Do not copy
-# Codex resume protocol IDs or add its automatic_recovery policy as a Pi default.
+# wake, shared automatic_recovery, and same_session W cadence with max_context_windows=1.
+# New automatic defaults: max_attempts=8 total retries+continues across native failures,
+# work completion and format fallback (0 disables all automatic modes), each action cap=8,
+# initial_backoff_seconds=5, max_backoff_seconds=300, jitter_fraction=0,
+# max_wait_seconds=1800. Normal waits total 915s; provider hints remain bounded.
+# Existing explicit nonempty recovery policies omitting max_attempts retain no total cap.
+# Web 重试设置 updates apply to future nodes; original calls and spent budgets persist.
+# Do not copy Codex resume protocol IDs or redirect Pi native home/authentication.
 # Policy declarations, chat and transport success grant no review/execution approval.
 # New supported closed preparations retain controlled single-native-session authorship proof.
 # Configured freezes complete native authorship false; extension calls/participants

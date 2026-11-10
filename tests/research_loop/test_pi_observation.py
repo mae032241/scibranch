@@ -337,9 +337,17 @@ def test_required_callback_publication_is_synchronous_and_precedes_ack(tmp_path)
     assert len(published) == 1  # Polling an acknowledgement is not another acceptance.
 
 
-def test_v3_investment_hint_publication_precedes_pi_metadata_ack(tmp_path):
+def test_v4_reflection_hint_publication_precedes_pi_metadata_ack(tmp_path):
+    from scidiscovery.research_loop import supervision
     from test_worker_first_investment import scene
-    root, job, intent, limits, facts, live = scene(tmp_path, 'notice')
+    # This publication-order fixture opts into operational reflection without
+    # fabricating a newly accepted question or original experiment receipt.
+    policy = dict(supervision.DEFAULT_WORKER_FIRST_REFLECTION_POLICY, require_fresh_input=False)
+    assert policy['version'] == 4
+    root, job, intent, limits, facts, live = scene(tmp_path, 'review',
+        policy=policy)
+    facts['shared'] = dict(facts['shared'], observed_tokens=30_000,
+        accounted_tokens=30_000, unknown_steps=[])
     work = c.workspace(root, 1)
     backend = adapter(); home = root/'native-homes/001'
     backend.bind_attempt(home, work); backend.launch(PROFILE, work, None, None, 'Original scope')
@@ -361,8 +369,10 @@ def test_v3_investment_hint_publication_precedes_pi_metadata_ack(tmp_path):
         hint = c.read(work/'work/budget-status.json')
         assert hint['research_investment']['coverage'] == 'live'
         assert hint['research_investment']['total_calls'] == 4
+        assert hint['direction_review']['review_kind'] == 'ordinary_reflection'
+        assert hint['direction_review']['reasons'] == ['operational_no_new_experiment']
         output = budget_notice.hook_output(work, 0)
-        assert output['hookSpecificOutput']['additionalContext'] == budget_notice.WORKER_INVESTMENT_TEXT
+        assert output['hookSpecificOutput']['additionalContext'] == budget_notice.WORKER_REFLECTION_TEXT
         assert len(output['hookSpecificOutput']['additionalContext'].encode()) <= 200
         assert budget_notice.read_metadata(observer.path) == before
         published.append(output)

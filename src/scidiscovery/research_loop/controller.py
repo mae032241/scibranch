@@ -1,6 +1,7 @@
 """Bounded local control over immutable scientific role handoffs."""
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from contextlib import contextmanager
 from contextvars import ContextVar
 import fcntl
@@ -15,6 +16,7 @@ import uuid
 
 from . import budget, contracts, history, native, runtime, search, correction, semantic, execution, continuation, guidance, checkpoint, role_share, shortlist, engineering, worker_delivery
 from .output_repair import OutputRepairRequired
+from .routing import Route
 from . import managed_wait, configuration_updates, handoff_state, budget_limits, supervision, delivery_review
 
 _DEFAULT_ROLE_GUIDANCE = object()
@@ -59,6 +61,13 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             _user_update_texts: list[str] | None = None,
             _source_facts_factory=None, _on_created=None, _fork_search_seed=None) -> dict:
     """Freeze an explicit goal, global ceilings and finite node budgets."""
+    from .protocol import require_preparation_behavior, require_settings_format
+    if _existing_settings is not None:
+        require_settings_format(_existing_settings)
+        research_strategy_version=_existing_settings['research_strategy_version']
+    require_preparation_behavior(research_strategy_version,
+        supervision_policy=None if supervision_policy is _DEFAULT_SUPERVISION_POLICY else supervision_policy,
+        worker_fragment_policy=worker_fragment_policy)
     from . import backends as agent_backends
     agent_backends.provider(native_backend).validate_declaration(dict(
         model=model, reasoning_effort=reasoning_effort, service_tier=service_tier,
@@ -71,16 +80,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         delivery_policy=delivery_policy, selection_policy=selection_policy, history_observer=history_observer))
     from . import candidate_nominations
     from . import storage_policy as storage
-    if _existing_settings is not None:
-        research_strategy_version = _existing_settings.get('research_strategy_version')
-    if (_existing_settings is not None and 'advisory_scope_version' in _existing_settings
-            and (type(_existing_settings['advisory_scope_version']) is not int
-                or _existing_settings['advisory_scope_version']!=1 or research_strategy_version!=3)):
-        raise ValueError('Unsupported frozen advisory scope')
     if supervision_policy is _DEFAULT_SUPERVISION_POLICY:
-        supervision_policy=(supervision.DEFAULT_WORKER_FIRST_REFLECTION_POLICY if research_strategy_version==3 else supervision.DEFAULT_POLICY)
-    if research_strategy_version is not None and (type(research_strategy_version) is not int or research_strategy_version not in (1, 2, 3)):
-        raise ValueError('Unsupported research strategy version')
+        supervision_policy=supervision.DEFAULT_WORKER_FIRST_REFLECTION_POLICY
     storage_limits = storage.configuration(storage_policy)
     nomination_limits=candidate_nominations.configuration(candidate_extra_slots)
     portfolio_limits = search.portfolio_policy(portfolio_policy) if portfolio_policy is not None else None
@@ -259,10 +260,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         if _existing_settings is not None:
             role_guidance = _existing_settings.get('role_guidance')
         else:
-            role_guidance = (guidance.ADVISORY_WORKER_FIRST if research_strategy_version == 3 else
-                guidance.WORKER_LED if research_strategy_version in (1, 2) else
-                guidance.OPPORTUNITY if portfolio_limits is not None and portfolio_limits.get('version', 1) == 2
-                else guidance.DEFAULT)
+            role_guidance = guidance.ADVISORY_WORKER_FIRST
     literal_guidance = role_guidance
     advice = guidance.policy(literal_guidance) if literal_guidance is not None else None
     search_limits = search.policy(search_policy) if search_policy is not None else None
@@ -273,12 +271,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     resume_limits = continuation.policy(resume_policy, launcher, backend=native_backend) if resume_policy is not None else None
     fragment_limits = checkpoint.policy(worker_fragment_policy) if worker_fragment_policy is not None else None
     if fragment_limits is not None:
-        if 'max_context_windows' in fragment_limits:
-            previous=(_existing_settings or {}).get('worker_fragment_policy') or {}
-            if _existing_settings is None:
-                fragment_limits.setdefault('context_handoff_version',2)
-            elif 'context_handoff_version' in previous:
-                fragment_limits.setdefault('context_handoff_version',previous['context_handoff_version'])
+        fragment_limits.setdefault('context_handoff_version',2)
         if ('max_context_windows' in fragment_limits
                 and agent_backends.selected(backend_settings).observation_capability('compactions').get('status')!='supported'):
             raise ValueError('W context-window observation requires supported native compaction observation')
@@ -341,12 +334,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
     settings['experiment_interface_version'] = 1
     settings['managed_admission_version'] = 1
     settings['worker_view_version'] = 1
-    if research_strategy_version is not None or (_existing_settings is not None and 'research_strategy_version' in _existing_settings):
-        settings['research_strategy_version'] = research_strategy_version
-    if _existing_settings is None and research_strategy_version == 3:
-        settings['advisory_scope_version'] = 1
-    elif _existing_settings is not None and 'advisory_scope_version' in _existing_settings:
-        settings['advisory_scope_version'] = _existing_settings['advisory_scope_version']
+    settings['research_strategy_version'] = 3
+    settings['advisory_scope_version'] = 1
     settings['experiment_mode'] = experiment_mode
     if frozen_execution is not None:
         settings['execution_config']=frozen_execution
@@ -395,8 +384,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
                 settings[key] = deepcopy(_existing_settings[key])
     elif search_limits is not None and supervision_policy is not None:
         settings['supervision_policy'] = supervision.policy(supervision_policy)
-        if settings['supervision_policy']['version']==4 and (research_strategy_version!=3
-                or max_tokens is None and max_seconds is None):
+        if max_tokens is None and max_seconds is None:
             raise ValueError('Adaptive reflection requires W-first strategy and a finite original shared budget')
         settings['supervision_budget_basis'] = dict(max_tokens=max_tokens, max_seconds=max_seconds)
     if correction_limits is not None:
@@ -407,6 +395,8 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         settings['execution_authority_policy'] = dict(authority_policy)
     # The operation owner passes the complete normalized declarations before
     # publishing originals/control state, including for direct prepare callers.
+    from .protocol import require_current_behavior
+    require_current_behavior(settings)
     agent_backends.selected(backend_settings).validate_preparation(settings)
     if validate_only:
         if _existing_settings is not None:
@@ -480,7 +470,7 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
             from . import accepted_search
             search_seed=accepted_search.empty() if _fork_search_seed is None else _fork_search_seed
             if _fork_search_seed is None:
-                if research_strategy_version==3 and settings.get('supervision_policy') is not None:
+                if settings.get('supervision_policy') is not None:
                     search_seed['supervision']=supervision.empty(settings['supervision_policy'])
                 prefix_seed,search_rows=None,None
             else:
@@ -775,11 +765,13 @@ def _native_call(root, step, *, launch=False, operation=None):
         except (OutputRepairRequired, budget.NodeBudgetUnavailable):
             raise
         except Exception as error:
-            # Permanent/unknown failures remain failures. Save only the exact
-            # arbiter's stop reason so the UI can explain why no retry occurs.
+            # Native collection can fail before seal_or_repair raises its typed
+            # recovery request. The same arbiter still owns eligibility and
+            # finite scheduling; an exception must not bypass that decision.
             stopped = None
+            decision = None
             try:
-                decision = continuation.automatic_decision(root, step,inventory=None)
+                decision = continuation.automatic_decision(root, step,inventory=inventory)
                 if decision.get('action') == 'stop' and decision.get('source_record'):
                     path, saved = _recovery_state(root, step, decision)
                     paused = (root / 'pause.request').exists()
@@ -792,6 +784,11 @@ def _native_call(root, step, *, launch=False, operation=None):
             # exception even when a separate recovery decision also says stop.
             if stopped is not None and not isinstance(error, ValueError):
                 raise stopped
+            if (not isinstance(error, ValueError) and decision is not None
+                    and decision.get('action') in {'retry', 'continue'}):
+                _wait_automatic_recovery(root, step, decision, inventory=inventory)
+                call = partial(native.wait_native, _reentry_started=True)
+                continue
             raise
 
 
@@ -850,8 +847,10 @@ def _technical_pause_result(root, settings, completed, last, *, job, record, out
     """Project an original transport stop without granting replay permission."""
     from .native_usage import actionable_stop
     diagnostic=actionable_stop(outcome)
-    stopped=continuation.technical_stop(root,job,record,outcome)
-    if diagnostic is not None:
+    stopped,source_facts=continuation.technical_stop_facts(root,job,record,outcome)
+    if diagnostic is not None and stopped is not None:
+        stopped=dict(stopped,technical_diagnostic=diagnostic)
+    elif diagnostic is not None:
         stopped=dict(reason=diagnostic['code'],stage=diagnostic['phase'],
             repair_scope='original_native_call',supported_actions=[],
             technical_diagnostic=diagnostic,
@@ -859,6 +858,10 @@ def _technical_pause_result(root, settings, completed, last, *, job, record, out
                 if diagnostic['original_call_state']=='unknown' else
                 'Inspect the exact retained native outcome before selecting an existing supported recovery action.'))
     if stopped is None:return None
+    if (diagnostic is None and stopped.get('phase')=='native_failure'
+            and _unavailable_consultation_route(root,settings,completed,last,
+                job=job,record=record,outcome=outcome,source_facts=source_facts,reason=stopped['reason'])):
+        return _run(root)
     result=_finish(root,settings,'technical_pause',completed,last,
         reason=stopped['reason'],next_role=job['role'])
     result.update(technical_stop=stopped,stage=stopped['stage'],
@@ -866,6 +869,77 @@ def _technical_pause_result(root, settings, completed, last, *, job, record, out
         supported_actions=stopped['supported_actions'])
     if diagnostic is not None:result['technical_diagnostic']=diagnostic
     return result
+
+
+def _automatic_pause_result(root, settings, completed, last, *, job, error):
+    record=execution.record(root,job['step'])
+    if (record/'native-outcome.json').exists():
+        pause=_technical_pause_result(root,settings,completed,last,job=job,record=record,
+            outcome=contracts.native_outcome(record))
+        if pause is not None:return pause
+    return _finish(root,settings,_recovery_status(error),completed,last,
+        reason=str(error),next_role=job['role'])
+
+
+def _unavailable_consultation_route(root, settings, completed, last, *, job, record, outcome, source_facts, reason):
+    """A finite optional-advice failure returns only existing W science."""
+    exhausted={'automatic_recovery_attempt_limit','automatic_recovery_retry_limit',
+        'automatic_recovery_continue_limit','automatic_recovery_wait_limit'}
+    target=job.get('evidence_return') or {}
+    if (reason not in exhausted or job.get('purpose')!='worker_consultation'
+            or job.get('role') not in {'H','A','E'}
+            or target!={'role':'W','step':completed} or not isinstance(last,dict)
+            or last.get('role')!='W'
+            or last.get('stage_intent')!={'H':'revise_h','A':'review','E':'extract'}[job['role']]
+            or not any(ref['path']==f'inputs/parents/{completed:03d}/conclusion.json' for ref in job['direct_refs'])):
+        return False
+    from . import accepted_budget
+    head=source_facts['head']
+    retained=accepted_budget.unavailable_consultation(root,head=head)
+    if retained is not None:
+        if (retained['job_ref']!=contracts.record_ref(root/'jobs'/f'{job["step"]:03d}.json')
+                or retained['native_intent_ref']!=contracts.record_ref(record/'native-intent.json')
+                or retained['reason']!=reason):
+            return False
+        contracts.write(root/'host-history/controller-route.json',retained['route'])
+        return True
+    schedule=source_facts['schedule']
+    if (not source_facts['source_verified'] or schedule.get('status') not in {'stopped','paused'}
+            or (schedule.get('limitation') or schedule.get('reason'))!=reason
+            or schedule.get('source_attempt')!=source_facts['attempt']
+            or schedule.get('source_intent_ref')!=contracts.record_ref(record/'native-intent.json')
+            or schedule.get('task_ref')!=contracts.record_ref(root/'jobs'/f'{job["step"]:03d}.json')):
+        return False
+    if (head['closeout'] is not None or head['final_return'] is not None
+            or head['active_audit'] is not None or head['unresolved_actions']
+            or head['delivery_preparation']['unresolved_ref'] is not None
+            or budget.execution_blocked(root)):
+        return False
+    original=source_facts['intent']
+    if not continuation._native_failure_scope(job,original,outcome):return False
+    stopped_writer=source_facts['stopped_writer']
+    if stopped_writer is None:return False
+    current_h=head['search']['last_h']
+    parents=_parents(current_h,completed)
+    instruction=guidance.unavailable_advice(completed,role=job['role'],advice_step=job['step'])
+    route=dict(version=1,goal_id=settings['goal_id'],
+        source=dict(step=completed,seal_ref=contracts.record_ref(execution.origin(root,completed)/'result-identity.json')),
+        completed=completed,current_h=current_h,current_w=completed,
+        resume_seq=(head['resume'] or {}).get('seq'),next_step=job['step']+1,
+        unavailable_ref=dict(path=str(record/'consultation-unavailable.json')),
+        route=dict(role='W',parents=parents,instruction=instruction,evidence_return=None,
+            correction_request=None,author_correction=None),supervision_request=None)
+    receipt=dict(version=1,step=job['step'],job_ref=contracts.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
+        native_intent_ref=contracts.record_ref(record/'native-intent.json'),
+        outcome_ref=contracts.file_ref(record/'native-outcome.json'),
+        requester_step=completed,requester_seal_ref=route['source']['seal_ref'],reason=reason,
+        counters=dict(retries=schedule['retry_count'],continues=schedule['continue_count'],
+            wait_seconds=schedule['service_wait_seconds']),stopped_writer=stopped_writer,failed_outcome={key:outcome.get(key) for key in
+            ('native_started','terminal_observed','cleanup','stop_reason')},route=route)
+    accepted_budget.close_unavailable_consultation(root,base=head.base,job=job,record=record,
+        intent=original,outcome=outcome,stopped_writer=stopped_writer,receipt=receipt)
+    contracts.write(root/'host-history/controller-route.json',route)
+    return True
 
 
 def _check_job(root, settings, step, role, parents, instruction, evidence_return, correction_request=None,
@@ -900,188 +974,138 @@ def _check_job(root, settings, step, role, parents, instruction, evidence_return
 
 
 def _route(root, step, role, result, job, current_h, current_w):
-    instruction = result.get("route_reason", "")
-    if guidance.advisory_assessment(job) and result.get('next_action')!='continue_w':
+    instruction = result.get('route_reason', '')
+    if guidance.advisory_assessment(job) and result.get('next_action') != 'continue_w':
         raise ValueError('Ordinary advisory A cannot dispatch scientific work or finalize')
-    if job.get('purpose')=='worker_consultation':
-        target=job.get('evidence_return')
-        if (role not in ({'H','A','E'} if job.get('advisory_scope_version')==1 else {'H','A'}) or not isinstance(target,dict) or set(target)!={'role','step'}
+    if job.get('purpose') == 'worker_consultation':
+        target = job.get('evidence_return')
+        if (role not in {'H','A','E'} or not isinstance(target,dict) or set(target)!={'role','step'}
                 or target.get('role')!='W' or type(target.get('step')) is not int
                 or not 0<target['step']<step
                 or not any(ref['path']==f'inputs/parents/{target["step"]:03d}/conclusion.json' for ref in job['direct_refs'])):
             raise ValueError('Consultation has no exact W requester')
-        requester=handoff_state.read_sealed(root,target['step'])
+        requester = handoff_state.read_sealed(root,target['step'])
         if requester['role']!='W' or requester.get('stage_intent')!={'H':'revise_h','A':'review','E':'extract'}[role]:
             raise ValueError('Consultation requester differs from its authored route')
-        if role=='H':current_h=step
-        instruction=(f'Continue the original W work in inputs/parents/{target["step"]:03d}/conclusion.json using the consultation in inputs/parents/{step:03d}/conclusion.json. '
-            + ('Original W question: '+requester['route_reason']+' ' if requester.get('route_reason') else '')+
-            'Retain unfinished questions, candidates, mechanisms, materials and consumed opportunities; assess advice against evidence. Consultation grants no qualification or execution permission.')
-        if job.get('advisory_scope_version')==1:
-            instruction=(f'Resume W research toward the original objective using retained originals in inputs/parents/{target["step"]:03d}/conclusion.json '
-                f'and the fallible consultation in inputs/parents/{step:03d}/conclusion.json. '
-                'Judge the concern against evidence; choose self-correction, H for alternatives, E for missing evidence, or evidence-based disagreement. '
-                'No material issue adds no constraints. W owns direction, methods and allocation; original permissions, materials and consumed budgets persist.')
-        route=('W',_parents(current_h,target['step'],step),instruction,None)
-        return (*route,current_h,target['step'])
+        return Route(role='W',parents=_parents(step if role=='H' else current_h,target['step'],step),
+            instruction=guidance.consultation_return(target['step'],step),
+            current_h=step if role=='H' else current_h,current_w=target['step'])
     bound = delivery_review.binding(job)
     if bound is not None:
-        parents = _parents(current_h, current_w, step)
-        if bound['kind'] == 'delivery_review':
-            if result['next_action'] == 'continue_w':
-                if bound['corrections_used'] != 0:
+        parents = _parents(current_h,current_w,step)
+        if bound['kind']=='delivery_review':
+            if result['next_action']=='continue_w':
+                if bound['corrections_used']!=0:
                     raise ValueError('Delivery correction allowance is consumed')
-                if job.get('research_strategy_version')==3:
-                    parents=_parents(*parents,bound['step'],
-                        *[int(Path(ref['path']).parts[2]) for ref in job.get('direct_refs',[])])
-                request=result['decision_request']
-                instruction=(f'Resolve only the decision-changing gap from A in inputs/parents/{step:03d}/conclusion.json. '
-                    'Question: '+request['question']+' Change criterion: '+request['change_criterion']+'. '
-                    'Choose your methods within the original remaining authorization. '+instruction)
-                return ('W', parents, instruction, delivery_review.make('delivery_correction', step, 1), current_h, current_w)
-            return (None, [], '', None, current_h, current_w)
-        current_w = step
+                parents=_parents(*parents,bound['step'],
+                    *[int(Path(ref['path']).parts[2]) for ref in job.get('direct_refs',[])])
+                return Route(role='W',parents=parents,
+                    instruction=guidance.delivery_correction(step,result['decision_request'],instruction),
+                    evidence_return=delivery_review.make('delivery_correction',step,1),
+                    current_h=current_h,current_w=current_w)
+            return Route(role=None,current_h=current_h,current_w=current_w)
+        current_w=step
         instruction=job.get('instruction','')+(' Latest W handoff: '+instruction if instruction else '')
-        context_handoff = False
+        context_handoff=False
         if result['stage_intent']=='continue':
             record=execution.record(root,step)
             ended=checkpoint.stage_end(root,job,record) if (record/'stage-end.json').exists() else None
             context_handoff=ended is not None and ended['reason'] in {
                 'worker_context_review_due','worker_context_observation_unknown','worker_progress_review_due'}
-        if result['stage_intent'] == 'handoff' or context_handoff:
-            return ('W', _parents(current_h, step), instruction,
-                delivery_review.make('delivery_correction', step, 1), current_h, current_w)
-        return ('A', _parents(current_h, step),
-            'Reassess the single corrected delivery gap from exact retained originals. No further correction is authorized. '+instruction,
-            delivery_review.make('delivery_review', step, 1), current_h, current_w)
-    if (role == 'A' and job.get('research_strategy_version') in (2, 3)
-            and _worker_led_final_required(job) and result.get('next_action') in {'finish','deliver'}):
-        subjects=([int(Path(ref['path']).parts[2]) for ref in job.get('direct_refs',[])]
-            if job.get('research_strategy_version')==3 else [])
-        return ('A', _parents(current_h, current_w, step,*subjects),
-            'Independent pre-delivery assessment of the ordinary assessment request. Accept an exact candidate with deliver, '
-            'decline with finish, or request one bounded decision-changing correction with continue_w and decision_request. '+instruction,
-            delivery_review.make('delivery_review', step, 0), current_h, current_w)
-    if (role == 'W' and job.get('research_strategy_version') in (2, 3)
-            and result.get('stage_intent') == 'decision'):
-        return ('A', _parents(current_h, step),
-            'Independent pre-delivery assessment: accept an exact existing candidate with deliver, decline with finish, '
-            'or request one bounded decision-changing correction with continue_w and a concrete decision_request. '
-            'No new authorization or budget is granted. '+instruction,
-            delivery_review.make('delivery_review', step, 0), current_h, step)
+        if result['stage_intent']=='handoff' or context_handoff:
+            return Route(role='W',parents=_parents(current_h,step),instruction=instruction,
+                evidence_return=delivery_review.make('delivery_correction',step,1),
+                current_h=current_h,current_w=current_w)
+        return Route(role='A',parents=_parents(current_h,step),
+            instruction=guidance.delivery_reassessment(instruction),
+            evidence_return=delivery_review.make('delivery_review',step,1),current_h=current_h,current_w=current_w)
+    if role=='A' and _worker_led_final_required(job) and result.get('next_action') in {'finish','deliver'}:
+        subjects=[int(Path(ref['path']).parts[2]) for ref in job.get('direct_refs',[])]
+        return Route(role='A',parents=_parents(current_h,current_w,step,*subjects),
+            instruction=guidance.pre_delivery_assessment(instruction,ordinary_request=True),
+            evidence_return=delivery_review.make('delivery_review',step,0),current_h=current_h,current_w=current_w)
+    if role=='W' and result.get('stage_intent')=='decision':
+        return Route(role='A',parents=_parents(current_h,step),
+            instruction=guidance.pre_delivery_assessment(instruction),
+            evidence_return=delivery_review.make('delivery_review',step,0),current_h=current_h,current_w=step)
     if role=='A' and (job.get('formal_review') or result.get('next_action')=='formal_review'):
         from . import formal_review
         parents=_parents(current_h,current_w,step)
-        route=(formal_review.return_route(root,job,parents) if job.get('formal_review') else
-               formal_review.request_route(root,job,result,parents))
-        return (*route,current_h,current_w)
-    if role == "H":
-        current_h = step
-        action = result["next_action"]
-        if action == "experiment":
-            route = ("W", [step], instruction, None)
-        elif action == "analyze":
-            route = ("A", _parents(current_h, current_w), instruction, None)
-        elif action == "extract":
-            route = ("E", _parents(current_h, current_w), instruction,
-                     dict(role="H", step=step))
-        elif action == "wait":
-            route = (None, [], "", None)
-        else:
-            raise ValueError("Invalid sealed H route")
-    elif role == "W":
-        current_w = step
-        record = execution.record(root, step)
-        ended = checkpoint.stage_end(root, job, record) if (record / 'stage-end.json').exists() else None
-        source = f'inputs/parents/{step:03d}/conclusion.json'
-        request = (' Authored W request: ' + instruction) if instruction else ''
-        question = (f'Answer the W request in {source}.{request} '
-            'Assess core scientific direction, decision-changing evidence and delivery/completion claims at a high level. '
-            'Use the exact retained originals and stated limitations; this handoff grants no qualification or execution permission.')
-        if ended:
-            question += ' Control ended this stage for ' + ended['reason'] + '; this ending does not establish scientific completion.'
-        outcome = contracts.read(_record(root,step)/'result-identity.json')['control_outcome']
-        delivery = outcome.get('worker_delivery') or {}
-        if delivery.get('status') == 'partial':
-            question += ' Retained work has partial coverage (' + delivery['reason'] + ').'
-            if delivery.get('missing'):
-                question += ' Missing assigned observations: ' + ', '.join(delivery['missing']) + '.'
-            if delivery.get('blocked'):
-                question += ' Authored blocked mechanisms: ' + ', '.join(delivery['blocked']) + '.'
-        elif not ended and outcome.get('stage_end_reason')=='continuation_unavailable':
-            question += ' Frozen context continuation was unavailable; this ending does not establish scientific completion.'
+        next_role,parents,instruction,evidence_return=(formal_review.return_route(root,job,parents)
+            if job.get('formal_review') else formal_review.request_route(root,job,result,parents))
+        return Route(role=next_role,parents=parents,instruction=instruction,evidence_return=evidence_return,
+            current_h=current_h,current_w=current_w)
+    if role=='H':
+        current_h=step
+        action=result['next_action']
+        if action=='experiment':
+            return Route(role='W',parents=[step],instruction=instruction,current_h=current_h,current_w=current_w)
+        if action=='analyze':
+            return Route(role='A',parents=_parents(current_h,current_w),instruction=instruction,
+                current_h=current_h,current_w=current_w)
+        if action=='extract':
+            return Route(role='E',parents=_parents(current_h,current_w),instruction=instruction,
+                evidence_return=dict(role='H',step=step),current_h=current_h,current_w=current_w)
+        if action=='wait':
+            return Route(role=None,current_h=current_h,current_w=current_w)
+        raise ValueError('Invalid sealed H route')
+    if role=='W':
+        current_w=step
+        record=execution.record(root,step)
+        ended=checkpoint.stage_end(root,job,record) if (record/'stage-end.json').exists() else None
+        outcome=contracts.read(_record(root,step)/'result-identity.json')['control_outcome']
         intent=result['stage_intent']
-        context_handoff=(ended is not None and ended['reason'] in {
-            'worker_context_review_due','worker_context_observation_unknown','worker_progress_review_due'})
+        context_handoff=ended is not None and ended['reason'] in {
+            'worker_context_review_due','worker_context_observation_unknown','worker_progress_review_due'}
         if intent=='handoff' or intent=='continue' and context_handoff:
-            route=('W',_parents(current_h,step),
-                f'Continue the retained W research in {source}.{request} '
-                'Preserve original directions, unfinished questions, candidates, materials, mechanisms and consumed opportunities. '
-                'Partial sealing is neither independent A review nor mechanism completion; permissions and global budgets persist.',None)
-        elif intent in {'revise_h','review'} or intent=='extract' and job.get('advisory_scope_version')==1:
-            consultation=result.get('consultation_question') if job.get('research_strategy_version')==3 else None
-            if job.get('research_strategy_version')==3 and (not isinstance(consultation,str) or not consultation.strip()):
+            return Route(role='W',parents=_parents(current_h,step),instruction=guidance.worker_handoff(step,instruction),
+                current_h=current_h,current_w=current_w)
+        if intent in {'revise_h','review','extract'}:
+            consultation=result.get('consultation_question')
+            if not isinstance(consultation,str) or not consultation.strip():
                 raise ValueError('W consultation requires its explicit decision-changing information question')
-            route=({'revise_h':'H','review':'A','extract':'E'}[intent],_parents(current_h,step),
-                f'Answer the requesting W consultation in {source}.{request} '
-                + ('Requested information: '+consultation+' ' if consultation else '')
-                + 'Use its exact question, retained evidence and limitations. '
-                + (('Diagnose only evidence-backed lock-in, ignored counterevidence or critical alternatives, goal drift or serious logic errors; W judges fallible advice. ' if job.get('advisory_scope_version')==1 else 'Assess only core scientific direction, decision-changing evidence and delivery/completion at a high level. ') if intent=='review' else '')
-                + ('Return advice to the requesting W work; no formal verdict, global decision or execution grant.'
-                    if job.get('worker_continuity_version')==1 else
-                    'Return advice for a new W; no formal verdict, global decision or execution grant.'),dict(role='W',step=step))
-        elif intent in {'decision','continue'}:
-            route=("A",_parents(current_h,step),question,None)
-        else:
-            raise ValueError('Invalid sealed W route')
-    elif role == "A":
-        action = result["next_action"]
-        parents = _parents(current_h, current_w, step)
-        if action == "continue_w":
-            if guidance.advisory_assessment(job):
-                instruction=(f'Resume W research toward the original objective using retained originals and the fallible advice in inputs/parents/{step:03d}/conclusion.json. '
-                    'W judges any concern against evidence and chooses self-correction, H for alternatives, E for missing evidence, or evidence-based disagreement. '
-                    'No material issue adds no constraints. W owns direction, methods and allocation; original permissions, materials and consumed budgets persist.')
-                return ('W',parents,instruction,None,current_h,current_w)
-            if job.get('research_strategy_version') in (1, 2, 3) and result.get('decision_request') is None:
-                instruction = (f'Continue the existing W work in inputs/parents/{current_w:03d}/conclusion.json. '
-                    if current_w is not None else 'Continue the retained W work. ') + (
-                    'Preserve its original question, focus and unfinished work. The assessment endorses continuing this work; '
-                    'it does not require a new evidence task or direction change. ' + instruction)
-            route = ("W", parents, instruction, None)
-        elif action == "revise_h":
-            route = ("H", parents, instruction, None)
-        elif action == "audit":
-            from . import engineering
+            return Route(role={'revise_h':'H','review':'A','extract':'E'}[intent],parents=_parents(current_h,step),
+                instruction=guidance.worker_consultation(step,instruction,question=consultation,intent=intent,
+                    same_session=job.get('worker_continuity_version')==1),
+                evidence_return=dict(role='W',step=step),current_h=current_h,current_w=current_w)
+        if intent=='continue':
+            return Route(role='A',parents=_parents(current_h,step),
+                instruction=guidance.worker_assessment(step,instruction,ending=ended,control_outcome=outcome),
+                current_h=current_h,current_w=current_w)
+        raise ValueError('Invalid sealed W route')
+    if role=='A':
+        action=result['next_action']
+        parents=_parents(current_h,current_w,step)
+        if action=='continue_w':
+            return Route(role='W',parents=parents,
+                instruction=guidance.advisory_return(step) if guidance.advisory_assessment(job) else instruction,
+                current_h=current_h,current_w=current_w)
+        if action=='revise_h':
+            return Route(role='H',parents=parents,instruction=instruction,current_h=current_h,current_w=current_w)
+        if action=='audit':
             repair=engineering.request(root,step)
             if repair is not None:
                 engineering.admit(root,repair,step+1)
-                route=('W',sorted(set([*parents,repair['source']['step']])),engineering.public(repair)['scope'],None)
-            else:
-                route = ("A", parents, instruction, None)
-        elif action == "extract":
-            route = ("E", parents, instruction, dict(role="A", step=step))
-        elif action in {"finish", "deliver", "wait"}:
-            route = (None, [], "", None)
-        else:
-            raise ValueError("Invalid sealed A route")
-    elif role == "E":
-        target = job["evidence_return"]
-        if (not isinstance(target, dict) or target.get("role") not in {"H", "A"}
-                or type(target.get("step")) is not int or not 0 < target["step"] < step):
-            raise ValueError("Extraction has no exact scientific requester")
-        requester = handoff_state.read_sealed(root, target["step"])
-        if requester["role"] != target["role"] or requester["next_action"] != "extract":
-            raise ValueError("Extraction requester identity differs")
-        # The request remains a parent; the returned evidence needs a new decision.
-        route = (target["role"], _parents(current_h, current_w, target["step"], step),
-                 f'Evaluate the returned extraction in inputs/parents/{step:03d}/conclusion.json '
-                 f'against your request in inputs/parents/{target["step"]:03d}/conclusion.json. '
-                 'Account for missing evidence and limitations, then choose the next scientific route.', None)
-    else:
-        raise ValueError("Unknown scientific role")
-    return (*route, current_h, current_w)
-
+                return Route(role='W',parents=sorted(set([*parents,repair['source']['step']])),
+                    instruction=engineering.public(repair)['scope'],current_h=current_h,current_w=current_w)
+            return Route(role='A',parents=parents,instruction=instruction,current_h=current_h,current_w=current_w)
+        if action=='extract':
+            return Route(role='E',parents=parents,instruction=instruction,evidence_return=dict(role='A',step=step),
+                current_h=current_h,current_w=current_w)
+        if action in {'finish','deliver','wait'}:
+            return Route(role=None,current_h=current_h,current_w=current_w)
+        raise ValueError('Invalid sealed A route')
+    if role=='E':
+        target=job['evidence_return']
+        if (not isinstance(target,dict) or target.get('role') not in {'H','A'}
+                or type(target.get('step')) is not int or not 0<target['step']<step):
+            raise ValueError('Extraction has no exact scientific requester')
+        requester=handoff_state.read_sealed(root,target['step'])
+        if requester['role']!=target['role'] or requester['next_action']!='extract':
+            raise ValueError('Extraction requester identity differs')
+        return Route(role=target['role'],parents=_parents(current_h,current_w,target['step'],step),
+            instruction=guidance.extraction_return(step,target['step']),current_h=current_h,current_w=current_w)
+    raise ValueError('Unknown scientific role')
 
 def _terminal_success(root, record):
     """Known terminal turn, including diagnosed missing output, never unknown work."""
@@ -1167,18 +1191,30 @@ def _continue_wait(root, step, job, result, next_role, target):
     return True
 
 
-def _save_route(root, completed, route, current_h, current_w, *, resumed, supervision_request=None):
+def _route_payload(route):
+    """Encode the existing durable route schema without adding routing authority."""
+    return dict(role=route.role,parents=list(route.parents),instruction=route.instruction,
+        evidence_return=route.evidence_return,correction_request=route.correction_request,
+        author_correction=route.author_correction)
+
+
+def _route_from_payload(payload, *, current_h, current_w):
+    return Route(role=payload['role'],parents=payload['parents'],instruction=payload['instruction'],
+        evidence_return=payload['evidence_return'],current_h=current_h,current_w=current_w,
+        correction_request=payload['correction_request'],author_correction=payload['author_correction'])
+
+
+def _save_route(root, completed, route, *, resumed, supervision_request=None):
     """Publish accepted routing facts once; cold loading never renews the gates."""
     contracts.write(Path(root) / 'host-history/controller-route.json', dict(
         version=1, goal_id=contracts.settings(root)['goal_id'],
         source=dict(step=completed, seal_ref=dict(path=str(Path(root)/'native-evidence'/f'{completed:03d}'/'result-identity.json'))),
-        completed=completed, current_h=current_h, current_w=current_w,
-        resume_seq=(resumed or {}).get('seq'),
-        route=dict(zip(('role', 'parents', 'instruction', 'evidence_return',
-            'correction_request', 'author_correction'), route)), supervision_request=supervision_request))
+        completed=completed, current_h=route.current_h, current_w=route.current_w,
+        resume_seq=(resumed or {}).get('seq'),route=_route_payload(route),
+        supervision_request=supervision_request))
 
 
-def _saved_route(root, *, first_step, resumed):
+def _saved_route(root, *, first_step, resumed, head):
     path=Path(root) / 'host-history/controller-route.json'
     if not path.exists():return None
     value=contracts.read(contracts.regular(path))
@@ -1191,6 +1227,17 @@ def _saved_route(root, *, first_step, resumed):
                 Path(root)/'native-evidence'/f'{completed:03d}'/'result-identity.json')))):
         raise ValueError('Saved controller route lost its exact instance or source seal')
     if completed<first_step:return None
+    if 'next_step' in value:
+        following=value['next_step']
+        if type(following) is not int or following<=completed+1:
+            raise ValueError('Unavailable consultation route changed its successor')
+        closed=head.row(f'job/{following-1:03d}')
+        if (closed is None or closed.get('status')!='unavailable'
+                or closed.get('unavailable_ref')!=value.get('unavailable_ref')):
+            raise ValueError('Unavailable consultation route has no accepted control owner')
+        receipt=head.control_file(closed['native_record']+'/consultation-unavailable.json')
+        if receipt is None or receipt.get('route')!=value:
+            raise ValueError('Unavailable consultation route differs from its accepted receipt')
     # Only the latest accepted seal is read. Its predecessor's originals and
     # scientific gates remain closed, including when source files are absent.
     handoff_state.read_sealed(root,value['completed'])
@@ -1217,8 +1264,8 @@ def _supervision_facts(root, settings):
 
 def _supervision_route(step, result, route, *, facts, source_job):
     """Replace only a prospective route, preserving its exact scientific inputs."""
-    if (facts is None or route[0] is None or delivery_review.scope(source_job) is not None
-            or (route[3] or {}).get('kind') in delivery_review.KINDS):
+    if (facts is None or route.role is None or delivery_review.scope(source_job) is not None
+            or (route.evidence_return or {}).get('kind') in delivery_review.KINDS):
         return route, None
     summary, fraction, selected = facts['summary'], facts['budget_fraction'], facts['policy']
     status = supervision.due(summary, budget_fraction=fraction, policy=selected,budget_facts=facts.get('budget_facts'))
@@ -1226,62 +1273,36 @@ def _supervision_route(step, result, route, *, facts, source_job):
             or source_job.get('formal_review') or result.get('next_action')=='formal_review'
             or source_job.get('purpose') in {'closeout','formal_review','engineering_repair'}
             or source_job.get('final_only') or source_job.get('final_report')
-            or source_job.get('engineering_repair') or route[6] is not None or route[7] is not None):
+            or source_job.get('engineering_repair') or route.correction_request is not None or route.author_correction is not None):
         return route, None
-    advisory=source_job.get('advisory_scope_version')==1
-    if advisory and source_job.get('purpose')=='worker_consultation':
+    if source_job.get('purpose')=='worker_consultation':
         return route,None
-    if advisory and (route[3] or {}).get('role')=='W':
-        if route[0]!='A' or not status['automatic_allowed']:
+    if (route.evidence_return or {}).get('role')=='W':
+        if route.role!='A' or not status['automatic_allowed']:
             return route,None
         request=supervision.request(summary,budget_fraction=fraction,policy=selected,
             automatic=True,budget_facts=facts.get('budget_facts'))
         return route,request
-    ordinary_a = route[0] == 'A' and route[3] is None
-    consultation = (route[0] in {'H','A'} and (route[3] or {}).get('role')=='W')
-    if selected['version']==4 and consultation:
-        return route, None
-    if not ordinary_a and (route[0]!='W' and not consultation or not status['automatic_allowed']):
+    ordinary_a = route.role == 'A' and route.evidence_return is None
+    if not ordinary_a and (route.role!='W' or not status['automatic_allowed']):
         return route, None
     request = supervision.request(summary, budget_fraction=fraction, policy=selected,
         automatic=not ordinary_a,budget_facts=facts.get('budget_facts'))
     if ordinary_a:
         return route, request
-    _, parents, instruction, _, current_h, current_w, _, _ = route
     direct_parents=[int(Path(ref['path']).parts[2]) for ref in source_job.get('direct_refs',[])]
-    question = result.get('route_reason') if result.get('role') == 'W' else None
-    instruction = (instruction+' Independent A direction supervision is due. '
-        + ('Original W question: '+question+' ' if question else '')
-        + 'Assess the retained main direction, decision-changing evidence and finalization scope at a high level. '
-        'Choose continue_existing without inventing an evidence gap, request_evidence with a bounded concrete question, '
-        'or finalize from existing evidence. This assessment grants no scientific qualification or execution permission.')
-    if source_job.get('research_strategy_version') in (1,2,3):
-        instruction += (' Review lock-in, goal drift, repeated or ignored evidence, and whether the current depth remains productive. '
-            'Counted work and budget checkpoints trigger reflection; they do not establish stagnation. '
-            'Retain the original W question and pending work. Do not force a direction change or prescribe an execution recipe.')
-    if advisory:
-        instruction=('Review the exact retained W question, clues and evidence for evidence-backed lock-in, ignored counterevidence or critical alternatives, goal drift or serious logic errors. '
-            'Counts, low scores and consumption only trigger this opportunity; they establish no scientific failure. '
-            'Give fallible advice or no material issue, then return to W; no method prescriptions, exploration bans, binding new work or finalization. '
-            'W decides self-correction, H, E, or evidence-based disagreement. Original objective and permissions persist.')
-    return ('A', _parents(current_h, current_w, *direct_parents, *parents, step), instruction, None,
-        current_h, current_w, None, None), request
+    instruction=guidance.direction_reflection()
+    return replace(route,role='A',
+        parents=_parents(route.current_h,route.current_w,*direct_parents,*route.parents,step),
+        instruction=instruction,evidence_return=None,correction_request=None,author_correction=None), request
 
 
 def _worker_led_final_required(job):
     """The frozen ordinary A can request finalization, never authorize delivery."""
-    return (job.get('research_strategy_version') in (1, 2, 3) and job.get('role') == 'A'
+    return (job.get('role') == 'A'
         and delivery_review.scope(job) != 'delivery_review'
         and not job.get('formal_review') and not job.get('final_only') and not job.get('final_report')
         and job.get('purpose') not in {'closeout', 'formal_review', 'worker_consultation'})
-
-
-def _worker_led_requests_final(job, result):
-    """A W's explicit final-decision request closes its ordinary work phase."""
-    return (job.get('research_strategy_version') == 1 and job.get('role') == 'W'
-        and result.get('stage_intent') == 'decision' and not job.get('formal_review')
-        and not job.get('engineering_repair') and not job.get('final_only') and not job.get('final_report')
-        and job.get('purpose') not in {'closeout', 'formal_review', 'engineering_repair', 'worker_consultation'})
 
 
 def _terminal_route(root, settings, step, result, role, *, source_job=None):
@@ -1299,6 +1320,118 @@ def _terminal_route(root, settings, step, result, role, *, source_job=None):
     action = 'finish' if result.get('next_action') == 'deliver' else result['next_action']
     return _finish(root, settings, action, step, result,
         reason='Scientific role suggestion; overall goal success is not asserted')
+
+
+@dataclass(frozen=True)
+class _RunCursor:
+    route: Route
+    completed: int
+    first_step: int
+    last: dict | None
+    supervision_request: dict | None
+    source_job: dict | None = None
+
+
+def _recover_cursor(root, *, fork, resumed, head, events):
+    """Load retained routing facts once; new admission belongs to advancement."""
+    from . import accepted_budget, fork_runtime
+    route=Route(role='W')
+    completed,first_step,last=0,1,None
+    supervision_request=None
+    if fork is not None:
+        def source_number(ref):
+            return int(Path(ref['path']).stem) if ref is not None else None
+        route=_route_from_payload(fork['route'],current_h=source_number(fork['current_h']),
+            current_w=source_number(fork['current_w']))
+        supervision_request=fork['route'].get('supervision_request')
+        completed=max((source_number(ref) for ref in fork['completed_source_refs']),default=0)
+        first_step=fork['next_step']
+    if resumed is not None:
+        payload=budget.resume_cursor(root,resumed,events=events)
+        source_steps=[ref['step'] for ref in payload['source_refs']]
+        current_h,current_w=route.current_h,route.current_w
+        for number in source_steps:
+            source_role=fork_runtime.source_job(root,number)['role']
+            if source_role=='H':current_h=number
+            if source_role=='W':current_w=number
+        route=_route_from_payload(payload,current_h=current_h,current_w=current_w)
+        supervision_request=payload.get('supervision_request')
+        completed=max(source_steps,default=0)
+        last=handoff_state.read_sealed(root,completed) if completed else None
+        first_step=resumed['first_step']
+    unavailable=accepted_budget.unavailable_consultation(root,head=head)
+    saved=(unavailable['route'] if unavailable is not None else
+        _saved_route(root,first_step=first_step,resumed=resumed,head=head))
+    if unavailable is not None:
+        # Accepted closure survives a crash before its disposable route cache.
+        contracts.write(root/'host-history/controller-route.json',saved)
+    if saved is None:
+        slot=head['current_job']
+        if slot is not None and slot['step']>=first_step:
+            job=contracts.read(contracts.regular(root/'jobs'/f'{slot["step"]:03d}.json'))
+            route=Route(role=job['role'],
+                parents=[int(Path(ref['path']).parts[2]) for ref in job['direct_refs']],
+                instruction=job.get('instruction',''),evidence_return=job.get('evidence_return'),
+                correction_request=job.get('correction_request'),author_correction=job.get('author_correction'),
+                current_h=head['search']['last_h'],current_w=head['search']['last_w'])
+            supervision_request=job.get('supervision_request')
+            completed=head['prefix']['tip']['step'] if head['prefix']['tip'] is not None else 0
+            last=handoff_state.read_sealed(root,completed) if completed else None
+            first_step=slot['step']
+        return _RunCursor(route,completed,first_step,last,supervision_request)
+    completed=saved['completed']
+    route=_route_from_payload(saved['route'],current_h=saved['current_h'],current_w=saved['current_w'])
+    last=handoff_state.read_sealed(root,completed)
+    job=contracts.read(root/'jobs'/f'{completed:03d}.json')
+    return _RunCursor(route,completed,saved.get('next_step',completed+1),last,
+        saved.get('supervision_request'),job)
+
+
+@dataclass(frozen=True)
+class _StepAdvance:
+    route: Route
+    supervision_request: dict | None
+    outcome: dict | None = None
+
+
+def _advance_step(root, settings, step, result, job, route, *, continue_wait):
+    """Apply prospective admission gates to one accepted seal, in owner order."""
+    scoped=delivery_review.scope(job) is not None
+    original=_route(root,step,route.role,result,job,route.current_h,route.current_w)
+    scoped=scoped or (original.evidence_return or {}).get('kind') in delivery_review.KINDS
+    correction.publish(root,step)
+    following=correction.effective_route(root,step,result,job,original)
+    following=semantic.effective_route(root,step,result,job,following)
+    if scoped and following!=original:
+        raise semantic.ScientificAdmissionRefused('delivery_review_scope_unavailable',next_role=original.role)
+    wait_continued=_continue_wait(root,step,job,result,following.role,continue_wait)
+    if wait_continued:
+        following=replace(following,role='A',parents=_parents(following.current_h,following.current_w,step),
+            instruction=guidance.continue_wait())
+    following,request=_supervision_route(step,result,following,
+        facts=_supervision_facts(root,settings),source_job=job)
+    following,refusal=role_share.effective_route(root,step,result,job,following,allow_repeat=wait_continued)
+    author_reason=(following.author_correction or {}).get('reason')
+    admission_refusal=refusal or (author_reason if author_reason in role_share.REFUSALS else None)
+    if admission_refusal is not None and budget.execution_blocked(root):
+        return _StepAdvance(following,None,_finish(root,settings,'waiting_execution',step,result,
+            reason='Original execution remains live or unknown; optional admission refused: '+admission_refusal,
+            next_role='H'))
+    preserve_refusal=(scoped or job.get('purpose')=='worker_consultation'
+        or route.role=='W' and result.get('stage_intent') in {'handoff','revise_h','review','extract'}
+        or route.role=='W' and following.role=='W')
+    if refusal is not None and preserve_refusal:
+        # Preserve this exact successor; no corrective route may bypass its cap.
+        return _StepAdvance(following,None,_finish(root,settings,'role_admission_refused',step,result,
+            reason=refusal,next_role=following.role))
+    if refusal is not None:
+        following=role_share.reconsider(root,step,job,following,refusal)
+    merged_consultation=(following.role=='A'
+        and isinstance(following.evidence_return,dict) and following.evidence_return.get('role')=='W')
+    if (following.role!='A' or following.evidence_return is not None and not merged_consultation
+            or following.correction_request is not None or following.author_correction is not None):
+        request=None
+    return _StepAdvance(following,request)
 
 
 def _run(root, *, continue_wait=None):
@@ -1327,97 +1460,55 @@ def _run(root, *, continue_wait=None):
     final = budget.final_a_barrier(root)
     if final is not None:
         return _collect_final_a(root, final)
-    role, parents, instruction, evidence_return, correction_request = (
-        "W" if settings.get('research_strategy_version') == 3 else "H"), [], "", None, None
-    author_correction = None
-    supervision_request = None
-    current_h = current_w = last = None
-    completed, first_step = 0, 1
-    if fork is not None:
-        first_step = fork['next_step']
-        route = fork['route']
-        role, parents, instruction, evidence_return, correction_request, author_correction = (
-            route[key] for key in ('role', 'parents', 'instruction', 'evidence_return', 'correction_request', 'author_correction'))
-        supervision_request = route.get('supervision_request')
-        def source_number(ref):
-            return int(Path(ref['path']).stem) if ref is not None else None
-        current_h, current_w = source_number(fork['current_h']), source_number(fork['current_w'])
-        completed = max((source_number(ref) for ref in fork['completed_source_refs']), default=0)
-    resumed = budget.normal_resume(root)
-    if resumed is not None:
-        cursor = budget.resume_cursor(root,resumed)
-        role,parents,instruction,evidence_return,correction_request,author_correction = (
-            cursor[key] for key in ('role','parents','instruction','evidence_return','correction_request','author_correction'))
-        supervision_request = cursor.get('supervision_request')
-        source_steps = [ref['step'] for ref in cursor['source_refs']]
-        completed = max(source_steps,default=0)
-        last = handoff_state.read_sealed(root, completed) if completed else None
-        for number in source_steps:
-            source_role = fork_runtime.source_job(root, number)['role']
-            if source_role == 'H': current_h = number
-            if source_role == 'W': current_w = number
-        first_step = resumed['first_step']
-    saved = _saved_route(root, first_step=first_step, resumed=resumed)
-    if saved is None:
-        from . import accepted_budget
-        head=accepted_budget.read(root)
-        slot=head['current_job']
-        if slot is not None and slot['step']>=first_step:
-            job=contracts.read(contracts.regular(root/'jobs'/f'{slot["step"]:03d}.json'))
-            role=job['role']
-            parents=[int(Path(ref['path']).parts[2]) for ref in job['direct_refs']]
-            instruction=job.get('instruction','')
-            evidence_return=job.get('evidence_return')
-            correction_request=job.get('correction_request')
-            author_correction=job.get('author_correction')
-            supervision_request=job.get('supervision_request')
-            current_h=head['search']['last_h']
-            current_w=head['search']['last_w']
-            completed=head['prefix']['tip']['step'] if head['prefix']['tip'] is not None else 0
-            last=handoff_state.read_sealed(root,completed) if completed else None
-            first_step=slot['step']
-    if saved is not None:
-        completed=saved['completed'];current_h=saved['current_h'];current_w=saved['current_w']
-        last=handoff_state.read_sealed(root,completed)
-        cursor=saved['route']
-        role,parents,instruction,evidence_return,correction_request,author_correction = (
-            cursor[key] for key in ('role','parents','instruction','evidence_return','correction_request','author_correction'))
-        supervision_request=saved.get('supervision_request')
-        first_step=completed+1
-        job=contracts.read(root/'jobs'/f'{completed:03d}.json')
-        if (_worker_led_requests_final(job,last)
-                and not (root/'jobs'/f'{first_step:03d}.json').exists()):
-            return _start_budget_closeout(root,completed,first_step,'A','worker_final_decision')
+    from . import accepted_budget
+    head=accepted_budget.read(root)
+    events,_=budget._events_from_state(head)
+    resumed=budget.normal_resume(root,events=events)
+    cursor=_recover_cursor(root,fork=fork,resumed=resumed,head=head,events=events)
+    route=cursor.route
+    completed,first_step,last=cursor.completed,cursor.first_step,cursor.last
+    role,parents,instruction=route.role,route.parents,route.instruction
+    evidence_return,correction_request=route.evidence_return,route.correction_request
+    author_correction=route.author_correction
+    current_h,current_w=route.current_h,route.current_w
+    supervision_request=cursor.supervision_request
+    if cursor.source_job is not None:
+        job=cursor.source_job
         if role is None:
             if _continue_wait(root,completed,job,last,None,continue_wait):
                 role='A';parents=_parents(current_h,current_w,completed)
-                instruction='The operator explicitly requested continuation from the retained wait. Reassess the original goal, evidence and remaining limitations before choosing the next scientific route.'
+                instruction=guidance.continue_wait()
                 # This explicit continuation is a new admission boundary. The
                 # saved terminal route stays closed; only its proposed new A
                 # spends today's role allowance, with the repeat waiver.
-                admitted=role_share.effective_route(root,completed,last,job,
-                    (role,parents,instruction,evidence_return,current_h,current_w,correction_request,author_correction),
+                route,share_stop=role_share.effective_route(root,completed,last,job,
+                    Route(role=role,parents=parents,instruction=instruction,evidence_return=evidence_return,
+                        current_h=current_h,current_w=current_w,
+                        correction_request=correction_request,author_correction=author_correction),
                     allow_repeat=True)
-                route,share_stop=admitted[:-1],admitted[-1]
                 if share_stop is not None:
                     if budget.execution_blocked(root):
                         return _finish(root,settings,'waiting_execution',completed,last,
                             reason='Original execution remains live or unknown; optional admission refused: '+share_stop,
                             next_role='H')
                     route=role_share.reconsider(root,completed,job,route,share_stop)
-                role,parents,instruction,evidence_return,current_h,current_w,correction_request,author_correction=route
+                role, parents = route.role, route.parents
+                instruction, evidence_return = route.instruction, route.evidence_return
+                current_h, current_w = route.current_h, route.current_w
+                correction_request, author_correction = route.correction_request, route.author_correction
                 _,supervision_request=_supervision_route(completed,last,route,
                     facts=_supervision_facts(root,settings),source_job=job)
-                _save_route(root,completed,(role,parents,instruction,evidence_return,correction_request,author_correction),
-                    current_h,current_w,resumed=resumed,supervision_request=supervision_request)
+                _save_route(root,completed,route,resumed=resumed,supervision_request=supervision_request)
             else:
                 return _terminal_route(root,settings,completed,last,job['role'],source_job=job)
-    def start_final(cutoff, step, blocked_role, reason, *, pending=None):
-        route = pending if pending is not None else (role,parents,instruction,evidence_return,correction_request,author_correction)
+    def start_final(cutoff, step, blocked_role, reason):
+        route = Route(role=role,parents=parents,instruction=instruction,
+            evidence_return=evidence_return,current_h=current_h,current_w=current_w,
+            correction_request=correction_request,author_correction=author_correction)
         cursor = sources = None
-        if route[0] is not None:
+        if route.role is not None:
             sources = history.source_sequence(root,cutoff+1)
-            cursor = dict(zip(('role','parents','instruction','evidence_return','correction_request','author_correction'),route))
+            cursor = _route_payload(route)
             if supervision_request is not None:
                 cursor['supervision_request'] = supervision_request
             cursor['source_refs'] = [dict(step=job['step'],seal_ref=seal_sha) for job,_,_,seal_sha in sources]
@@ -1445,8 +1536,10 @@ def _run(root, *, continue_wait=None):
             correction_request=successor.get('correction_request')
             author_correction=successor.get('author_correction')
             supervision_request=successor.get('supervision_request')
-            _save_route(root,completed,(role,parents,instruction,evidence_return,correction_request,author_correction),
-                current_h,current_w,resumed=resumed,supervision_request=supervision_request)
+            _save_route(root,completed,
+                Route(role=role,parents=parents,instruction=instruction,evidence_return=evidence_return,
+                    current_h=current_h,current_w=current_w,correction_request=correction_request,
+                    author_correction=author_correction),resumed=resumed,supervision_request=supervision_request)
             continue
         if not identity.exists():
             retained = any(path.exists() for path in (record / "native-intent.json",
@@ -1464,6 +1557,8 @@ def _run(root, *, continue_wait=None):
                         _native_call(root, step)
                     except managed_wait.ExecutionWaiting as error:
                         return _finish(root,settings,'waiting_execution',completed,last,reason=error.reason,next_role=role)
+                    except _AutomaticRecoveryUnavailable as error:
+                        return _automatic_pause_result(root,settings,completed,last,job=retained_job,error=error)
                     except continuation.ResumeUnavailable as error:
                         return _finish(root, settings, _recovery_status(error), completed, last, reason=str(error), next_role=role)
                     except OutputRepairRequired as error:
@@ -1487,6 +1582,11 @@ def _run(root, *, continue_wait=None):
                             reason=f"Native turn completed; host sealing requires repair: {_seal_reason(error)}",
                             next_role=role)
                 if not _terminal_success(root, execution.record(root, step)):
+                    current=execution.record(root,step)
+                    if (current/'native-outcome.json').exists():
+                        pause=_technical_pause_result(root,settings,completed,last,job=retained_job,
+                            record=current,outcome=contracts.native_outcome(current))
+                        if pause is not None:return pause
                     return _finish(root, settings, "native_outcome_unsealed", completed, last,
                         reason="Retain the original native work; its terminal scientific output is unverified",
                         next_role=role)
@@ -1552,7 +1652,7 @@ def _run(root, *, continue_wait=None):
                 if fork is not None and step == fork['next_step']:
                     job = fork_runtime.build_selected_job(root, step)
                 else:
-                    job = contracts.build_job(root, step, role, parents, instruction=instruction,
+                    job = contracts.build_job(root, step, role, list(parents), instruction=instruction,
                         evidence_return=evidence_return, correction_request=correction_request,
                         supervision_request=supervision_request,
                         **(dict(author_correction=author_correction) if author_correction is not None else {}))
@@ -1576,6 +1676,8 @@ def _run(root, *, continue_wait=None):
                 if _budget_denied(error.reason):
                     return start_final(completed, step, role, error.reason)
                 return _finish(root, settings, error.reason, completed, last, next_role=role)
+            except _AutomaticRecoveryUnavailable as error:
+                return _automatic_pause_result(root,settings,completed,last,job=job,error=error)
             except continuation.ResumeUnavailable as error:
                 return _finish(root, settings, _recovery_status(error), completed, last, reason=str(error), next_role=role)
             except OutputRepairRequired as error:
@@ -1623,8 +1725,6 @@ def _run(root, *, continue_wait=None):
             final = _final_a_result(root, job, result)
             if final is not None:
                 return final
-            if _worker_led_requests_final(job,result):
-                return _start_budget_closeout(root,step,step+1,'A','worker_final_decision')
             if role == 'A' and job.get('purpose')!='worker_consultation' and result.get('next_action') == 'audit':
                 from . import candidate_audit
                 audit_status = candidate_audit.execute(root, job, result)
@@ -1642,69 +1742,30 @@ def _run(root, *, continue_wait=None):
                     try:engineering.admit(root,repair,step+1)
                     except engineering.RepairUnavailable as error:
                         return _finish(root,settings,str(error),step,result)
-            scoped_route = delivery_review.scope(job) is not None
-            original_route = _route(root,step,role,result,job,current_h,current_w)
-            scoped_route = scoped_route or (original_route[3] or {}).get('kind') in delivery_review.KINDS
-            correction.publish(root, step)
-            next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction = correction.effective_route(
-                root, step, result, job, original_route)
-            next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction, next_author = semantic.effective_route(
-                root, step, result, job, (next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction))
-            if scoped_route:
-                expected = original_route
-                if ((next_role,next_parents,next_instruction,next_return) != expected[:4]
-                        or next_correction is not None or next_author is not None):
-                    raise semantic.ScientificAdmissionRefused('delivery_review_scope_unavailable',next_role=expected[0])
-            wait_continued = _continue_wait(root, step, job, result, next_role, continue_wait)
-            if wait_continued:
-                next_role, next_parents = 'A', _parents(current_h, current_w, step)
-                next_instruction = 'The operator explicitly requested continuation from the retained wait. Reassess the original goal, evidence and remaining limitations before choosing the next scientific route.'
-            supervision_route, next_supervision = _supervision_route(step,result,
-                (next_role,next_parents,next_instruction,next_return,current_h,current_w,next_correction,next_author),
-                facts=_supervision_facts(root,settings),source_job=job)
-            next_role,next_parents,next_instruction,next_return,current_h,current_w,next_correction,next_author=supervision_route
-            (next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction, next_author,
-             share_stop) = role_share.effective_route(root, step, result, job,
-                (next_role, next_parents, next_instruction, next_return, current_h, current_w, next_correction, next_author),
-                allow_repeat=wait_continued)
+            advance=_advance_step(root,settings,step,result,job,
+                Route(role=role,parents=parents,instruction=instruction,evidence_return=evidence_return,
+                    current_h=current_h,current_w=current_w,correction_request=correction_request,
+                    author_correction=author_correction),continue_wait=continue_wait)
         except semantic.ScientificAdmissionRefused as error:
             return _finish(root,settings,'role_admission_refused',step,result,
                 reason=error.reason,next_role=error.next_role)
         except (KeyError, ValueError, OSError, TypeError) as error:
             return _finish(root, settings, "sealed_node_invalid", completed, last,
                 reason=f"Retained node is not eligible for routing ({type(error).__name__})", next_role=role)
-        completed, last = step, result
-        admission_refusal = share_stop or ((next_author or {}).get('reason') if (next_author or {}).get('reason') in role_share.REFUSALS else None)
-        if admission_refusal is not None and budget.execution_blocked(root):
-            return _finish(root, settings, 'waiting_execution', completed, last,
-                reason='Original execution remains live or unknown; optional admission refused: ' + admission_refusal,
-                next_role='H')
-        if scoped_route and share_stop is not None:
-            return _finish(root,settings,'role_admission_refused',completed,last,
-                reason=share_stop,next_role=next_role)
-        if share_stop is not None and (job.get('purpose')=='worker_consultation'
-                or role=='W' and result.get('stage_intent') in {'handoff','revise_h','review','extract'}
-                or role=='W' and next_role=='W'):
-            # Retain the refused exact successor; reconstruct its same gates on
-            # reentry. No corrective H/W job or saved route can bypass the cap.
-            return _finish(root,settings,'role_admission_refused',completed,last,
-                reason=share_stop,next_role=next_role)
-        if share_stop is not None:
-            (next_role, next_parents, next_instruction, next_return, current_h, current_w,
-             next_correction, next_author) = role_share.reconsider(root, step, job,
-                (next_role,next_parents,next_instruction,next_return,current_h,current_w,next_correction,next_author),
-                share_stop)
-        merged_consultation=(job.get('advisory_scope_version')==1 and next_role=='A'
-            and isinstance(next_return,dict) and next_return.get('role')=='W')
-        if (next_role!='A' or next_return is not None and not merged_consultation or next_correction is not None
-                or next_author is not None):
-            next_supervision=None
-        _save_route(root,completed,(next_role,next_parents,next_instruction,next_return,next_correction,next_author),
-            current_h,current_w,resumed=resumed,supervision_request=next_supervision)
-        if next_role is None:
+        if advance.outcome is not None:
+            return advance.outcome
+        completed,last=step,result
+        next_route,next_supervision=advance.route,advance.supervision_request
+        _save_route(root,completed,next_route,resumed=resumed,supervision_request=next_supervision)
+        if next_route.role is None:
             return _terminal_route(root,settings,completed,last,role,source_job=job)
-        role, parents, instruction, evidence_return, correction_request = next_role, next_parents, next_instruction, next_return, next_correction
-        author_correction = next_author
+        role = next_route.role
+        parents = next_route.parents
+        instruction = next_route.instruction
+        evidence_return = next_route.evidence_return
+        correction_request = next_route.correction_request
+        author_correction = next_route.author_correction
+        current_h, current_w = next_route.current_h, next_route.current_w
         supervision_request = next_supervision
     return start_final(completed, completed + 1, role, 'bounded_steps_exhausted')
 
@@ -2595,6 +2656,8 @@ def _worker_resume_locked(root, step, *, expected_attempt=None, after_interrupt=
         _native_call(root, step, operation=partial(continuation.start,**options))
         return _run(root)
     except (continuation.ResumeUnavailable, budget.NodeBudgetUnavailable) as error:
+        if isinstance(error,_AutomaticRecoveryUnavailable):
+            return _run(root)
         if not after_interrupt and isinstance(error, budget.NodeBudgetUnavailable) and error.reason == 'worker_resume_budget_unavailable':
             return _run(root)
         budget.inactive(root, 'worker_resume_unavailable')

@@ -31,8 +31,8 @@ def test_advice_has_no_foreground_task_or_material_selection_authority(tmp_path)
         progress_assessment=dict(verdict='no_progress'),
         scientific_result='No material reasoning issue was found; the advice imposes no new constraints.')
     route=controller._route(root,2,'A',answer,assessor,None,1)
-    assert route[0]=='W' and 'BAN BROAD' not in route[2]
-    assert 'focus' not in route[2] and 'original objective' in route[2]
+    assert route.role=='W' and 'BAN BROAD' not in route.instruction
+    assert 'focus' not in route.instruction and 'original objective' in route.instruction
     successor=next_job(root,route,3)
     assert all(row in successor['direct_materials'] for row in retained)
     assert correction.project(root)['counters']==dict(no_progress=0,unknown=0)
@@ -40,43 +40,32 @@ def test_advice_has_no_foreground_task_or_material_selection_authority(tmp_path)
     assert c.result_schema('A',**c.response_options(assessor))['properties']['next_action']['enum']==['continue_w']
 
 
-@pytest.mark.parametrize('version',[3,4])
-def test_automatic_review_merges_exact_w_consultation_and_charges_once(tmp_path,version):
-    chosen=dict(supervision.AUTOMATIC_REFLECTION_POLICY if version==3 else supervision.ADAPTIVE_REFLECTION_POLICY,
-        min_budget_fraction=.10,**(dict(budget_checkpoints=[.10]) if version==3 else {}))
+def test_explicit_operational_review_merges_exact_w_consultation_and_charges_once(tmp_path):
+    chosen=dict(supervision.DEFAULT_POLICY,require_fresh_input=False)
     root=_prepare_publication_instance(tmp_path,supervision_policy=chosen)
     worker=c.build_job(root,1,'W',[])
     request=publish(root,worker,tokens=1100,stage_intent='review',consultation_question=QUESTION)
     route=controller._route(root,1,'W',request,worker,None,None)
     facts=controller._supervision_facts(root,c.settings(root))
-    selected,frozen=controller._supervision_route(1,request,(*route,None,None),facts=facts,source_job=worker)
-    assert selected==(*route,None,None) and frozen['automatic']
-    assert selected[3]==dict(role='W',step=1)
+    selected,frozen=controller._supervision_route(1,request,route,facts=facts,source_job=worker)
+    assert selected==route and frozen['automatic']
+    assert selected.evidence_return==dict(role='W',step=1)
     assessor=next_job(root,selected,2,supervision_request=frozen)
     assert assessor['purpose']=='worker_consultation' and assessor['supervision_request']==frozen
     assert 'supervision_result' in assessor['scientific_response_fields']
     response=publish(root,assessor,tokens=30,supervision_result='continue_existing')
     head=accepted_budget.read(root);state=copy.deepcopy(head['search']['supervision'])
     assert state['automatic_reviews']==1 and state['last_covered_cutoff']['assessment_step']==2
-    if version==4:
-        assert state['adaptive']['automatic_cost']['tokens']==30
-        assert state['adaptive']['covered_question_revision']==frozen['adaptive_cutoff']['question_revision']
-    assert c.build_job(root,2,'A',selected[1],instruction=selected[2],evidence_return=selected[3],supervision_request=frozen)==assessor
+    assert state['adaptive']['automatic_cost']['tokens']==30
+    assert state['adaptive']['covered_question_revision']==frozen['adaptive_cutoff']['question_revision']
+    assert c.build_job(root,2,'A',list(selected.parents),instruction=selected.instruction,evidence_return=selected.evidence_return,supervision_request=frozen)==assessor
     assert accepted_budget.read(root)['search']['supervision']==state
     resumed=controller._route(root,2,'A',response,assessor,None,1)
-    assert resumed[0]=='W' and 'original objective' in resumed[2]
-    assert controller._supervision_route(2,response,(*resumed,None,None),facts=controller._supervision_facts(root,c.settings(root)),source_job=assessor)[0]==(*resumed,None,None)
+    assert resumed.role=='W' and 'original objective' in resumed.instruction
+    assert controller._supervision_route(2,response,resumed,facts=controller._supervision_facts(root,c.settings(root)),source_job=assessor)[0]==resumed
 
 
-def test_frozen_legacy_and_separate_final_contracts_keep_their_actions(tmp_path):
-    root=instance(tmp_path)
-    selected=c.settings(root);legacy=dict(selected);legacy.pop('advisory_scope_version')
-    restored=controller.prepare(tmp_path/'restored',tmp_path/'public/objective.md',tmp_path/'public',['fixture-never-launch'],
-        max_tokens=10000,max_seconds=600,max_steps=20,model='fixture',reasoning_effort='high',
-        search_policy=None,validate_only=True,_existing_settings=legacy)
-    assert 'advisory_scope_version' not in restored
-    ordinary=dict(role='A',research_strategy_version=3)
-    assert 'extract' in c.result_schema('A',**c.response_options(ordinary))['properties']['next_action']['enum']
+def test_separate_current_final_contract_keeps_its_actions(tmp_path):
     final=dict(role='A',step=2,research_strategy_version=3,advisory_scope_version=1,
         evidence_return=delivery_review.make('delivery_review',1,0))
     assert not guidance.advisory_assessment(final)
@@ -87,17 +76,17 @@ def test_frozen_legacy_and_separate_final_contracts_keep_their_actions(tmp_path)
 @pytest.mark.parametrize('role,intent',[('H','revise_h'),('E','extract')])
 def test_h_e_consultation_returns_w_with_pending_cut_and_real_useful_live_interval(tmp_path,role,intent):
     from scidiscovery.research_loop import protocol, search
-    chosen=dict(supervision.AUTOMATIC_REFLECTION_POLICY,min_budget_fraction=.10,budget_checkpoints=[.10])
+    chosen=dict(supervision.DEFAULT_POLICY,require_fresh_input=False)
     root=_prepare_publication_instance(tmp_path,supervision_policy=chosen)
     worker=c.build_job(root,1,'W',[])
     request=publish(root,worker,tokens=1100,stage_intent=intent,consultation_question=QUESTION)
     route=controller._route(root,1,'W',request,worker,None,None)
-    selected,frozen=controller._supervision_route(1,request,(*route,None,None),
+    selected,frozen=controller._supervision_route(1,request,route,
         facts=controller._supervision_facts(root,c.settings(root)),source_job=worker)
-    assert selected==(*route,None,None) and frozen is None
+    assert selected==route and frozen is None
     consultant=next_job(root,route,2)
     advice=publish(root,consultant,**(dict(next_action='wait',search_plan=None) if role=='H' else {}))
-    returned=controller._route(root,2,role,advice,consultant,*route[4:6])
+    returned=controller._route(root,2,role,advice,consultant,route.current_h,route.current_w)
     successor=next_job(root,returned,3)
     head=accepted_budget.read(root);before=copy.deepcopy(head['search']['supervision'])
     assert before['last_covered_cutoff'] is None and before['automatic_reviews']==0

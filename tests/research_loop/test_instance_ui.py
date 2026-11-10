@@ -141,7 +141,8 @@ def test_execution_descriptions_and_validated_metrics_reach_collapsed_panel(tmp_
     pending=saved._live_executions(tmp_path,job)
     pending_markup=InstanceUI._execution_activity(pending)
     assert '声明结果尚未提供' in pending_markup and 'unvalidated metric' not in pending_markup
-    public_result=dict(result=dict(status='available',metrics=[dict(name='error <mean>',value=.25,unit='a.u.')]))
+    public_result=dict(result=dict(status='available',metrics=[dict(name='error <mean>',value=.25,unit='a.u.'),
+        dict(name='reported zero',value=0,unit='count')]))
     # Only the observation owner passes its already-validated public projection.
     owner.live_status('random-original-id','known_success',accepted=accepted,public_result=public_result)
     value=saved._live_executions(tmp_path,job)
@@ -152,10 +153,18 @@ def test_execution_descriptions_and_validated_metrics_reach_collapsed_panel(tmp_
     assert ' open' not in markup
     assert 'experiments/check.py' in markup and 'compare &lt;baseline&gt;' in markup
     assert '机制：response &lt;model&gt;' in markup and 'error &lt;mean&gt; = 0.25 a.u.' in markup
+    assert '<article class="execution-card">' in markup and '<table>' not in markup
+    foreground=markup.split('<details class="execution-original"',1)[0]
+    assert '<span class="badge">执行成功</span>' in foreground
+    assert 'error &lt;mean&gt; = 0.25 a.u.' in foreground and 'reported zero = 0 count' in foreground
+    assert 'random-original-id' not in foreground and 'response &lt;model&gt;' not in foreground
     assert '/private/host' not in markup and '<baseline>' not in markup
     assert '/home/private' not in markup and r'\\server\share\file' not in markup
     details=markup.split('<summary>原调用详情</summary>',1)[1]
     assert 'random-original-id' in details and 'attempt：3' in details
+    assert 'data-details-key="w-execution-2-random-original-id"' in markup
+    assert '</article>' in markup.split('<summary>调用统计</summary>',1)[0]
+    assert 'data-details-key="w-execution-statistics-2"' in markup
     assert '不表示科学认可' in markup
     assert (directory/'completed.json').read_bytes()==original
     owner.live_status('random-original-id','running')
@@ -215,6 +224,7 @@ def test_execution_display_utf8_budget_and_malformed_optional_metadata(tmp_path)
     markup=InstanceUI._execution_activity(value)
     assert '目的：未提供' in markup and '声明结果不可用' in markup and '/private' not in markup
     assert '仅显示部分指标' in markup and '...' in markup
+    assert len(markup.encode('utf-8'))<=65536
     invalid_text='\ud800'
     malformed=dict(native_attempt=dict(number=0),code_version=dict(entry='fallback.py'),
         change_intent=invalid_text)
@@ -238,6 +248,31 @@ def test_execution_display_utf8_budget_and_malformed_optional_metadata(tmp_path)
     markup=InstanceUI._execution_activity(value)
     assert '实验名称未提供' in markup and '目的：未提供' in markup
     assert invalid_text not in markup
+
+
+def test_execution_cards_keep_long_metadata_folded_and_missing_results_explicit():
+    purpose='比较已声明的响应。'*30
+    value=dict(step=2,coverage='partial',limitation='本地观察不表示科学认可',counts=dict(unknown=1),
+        calls=[dict(call_id='original-<id>',attempt=None,state='unknown',updated_at=1.,
+            display=dict(entry='check<response>.py',purpose=purpose,result_status='missing',
+                research_binding=dict(mechanism_ref='h001.m1',revision=3,question='完整机制问题 <question>'),
+                change_criterion='改变判断的条件 <criterion>'))],
+        research_investment=dict(total_calls=1,consecutive_calls=1,direction='未提供',
+            by_mechanism=[dict(mechanism_ref='h001.m1',calls=1)]))
+    markup=InstanceUI._execution_activity(value)
+    foreground,original=markup.split('<details class="execution-original"',1)
+    assert '<div class="execution-cards">' in foreground and '<table' not in markup
+    assert 'check&lt;response&gt;.py' in foreground and '<span class="badge">状态未知</span>' in foreground
+    assert purpose[:140]+'…' in foreground and purpose not in foreground
+    assert '未提供声明结果' in foreground and ' = 0' not in foreground
+    assert 'h001.m1' not in foreground and '&lt;question&gt;' not in foreground
+    assert 'data-details-key="w-execution-2-original-&lt;id&gt;"' in original
+    assert '调用 ID：original-&lt;id&gt;' in original and 'attempt：未知' in original
+    assert '完整目的：'+purpose in original and 'h001.m1 · revision 3' in original
+    assert '完整机制问题 &lt;question&gt;' in original and '条件 &lt;criterion&gt;' in original
+    assert ' open' not in markup and '部分覆盖，计数为下界' in markup
+    statistics=markup.split('<summary>调用统计</summary>',1)[1]
+    assert '已接受原调用总数：1' in statistics and '不可相加作为总数' in statistics
 
 
 def test_legacy_execution_rows_keep_explicit_missing_descriptions_and_results(tmp_path):
@@ -276,6 +311,65 @@ def test_technical_pause_offers_only_exact_owner_reported_recovery(tmp_path):
     assert 'action="/control/' not in str(ui._primary(token,False,snapshot,status))
     available['expected_attempt']=0
     assert 'action="/control/' not in str(ui._primary(token,True,snapshot,status))
+
+
+def test_failed_native_recovery_form_rechecks_exact_source_and_keeps_prior_proof(tmp_path):
+    import json
+    root,key=prepare(tmp_path,enabled=False)
+    ui,cookie=session(root,key)
+    token=ui._browser(cookie)
+    snapshot=ui._snapshot()
+    intent=dict(path='native-evidence/002/native-intent.json',sha256='a'*64)
+    technical=dict(phase='native_failure',stage='technical_pause',pending_step=2,pending_role='W',
+        reason='automatic_recovery_permanent_failure',repair_scope='worker_attempt',expected_attempt=1,
+        recovery_available=False,supported_actions=[],recheck_required=True,native_intent_ref=intent,
+        after_interrupt=True,new_context=False)
+    snapshot['view'].update(nodes=[dict(step=2,role='W',state='automatic_recovery_stopped',
+        continuations=1,technical_stop=technical,returncode=0,native_started=True,terminal_observed=False,
+        cleanup='observed_group_cleaned')],paused=False,correction={})
+    snapshot.update(conclusion=None,final=None,operation=None,operations=[])
+    status=ui._status(snapshot,{})
+    assert '原生调用失败' in status['headline'] and '模型启动前' not in status['headline']
+    attention=repr(ui._attention(token,True,snapshot,status))
+    assert '原生调用失败' in attention and '启动前技术暂停' not in attention
+    pending=ui._technical_stop(snapshot)
+    assert pending['recovery_available'] is False and pending['supported_actions']==[]
+    primary=str(ui._primary(token,True,snapshot,status))
+    assert 'action="/control/resume"' in primary and '核对并接续' in primary
+    assert '通过核验后才接续同一原会话' in primary and '重试失败的原任务' not in primary
+    assert 'action="/control/' not in ui._primary(token,False,snapshot,status)
+    available=dict(technical,recovery_available=True,supported_actions=['worker-resume'])
+    snapshot['operation']=dict(status='applied',kind='controller',result=dict(technical_stop=available))
+    primary=str(ui._primary(token,True,snapshot,status))
+    fields={html.unescape(key):html.unescape(value) for key,value in
+        re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">',primary)}
+    assert primary.count('action="/control/resume"')==1 and '重试失败的原任务' in primary
+    assert fields['step']=='2' and fields['expected_attempt']=='1'
+    assert json.loads(fields['native_intent_ref'])==intent
+    assert fields['after_interrupt']=='1' and fields['new_context']=='0'
+    assert 'action="/control/' not in ui._primary(token,False,snapshot,status)
+    qualified=snapshot['operation']
+    snapshot['operations']=[qualified,dict(status='applied',kind='budget',result={}),
+        dict(status='applied',kind='configuration-update',result={})]
+    snapshot['operation']=snapshot['operations'][-1]
+    assert ui._technical_stop(snapshot)['recovery_available'] is True
+    assert '重试失败的原任务' in ui._primary(token,True,snapshot,status)
+    wrong=dict(status='applied',kind='controller',result=dict(technical_stop=dict(
+        available,native_intent_ref=dict(intent,sha256='b'*64))))
+    snapshot['operations'].append(wrong)
+    snapshot['operation']=wrong
+    assert 'action="/control/' not in ui._primary(token,True,snapshot,status)
+    snapshot.update(operation=None,operations=[])
+    current=snapshot['view']['nodes'][0]
+    current['technical_stop']=dict(technical,expected_attempt=2)
+    assert 'action="/control/' not in ui._primary(token,True,snapshot,status)
+    current.update(technical_stop=technical,state='unknown')
+    assert 'action="/control/' not in ui._primary(token,True,snapshot,status)
+    current.update(state='automatic_recovery_waiting',automatic_recovery=dict(status='waiting'))
+    active=ui._status(snapshot,{})
+    assert active['state']=='service_wait' and active['display']['active']
+    assert 'action="/control/resume"' not in ui._primary(token,True,snapshot,active)
+    assert 'action="/control/pause"' in ui._primary(token,True,snapshot,active)
 
 
 @pytest.mark.parametrize('expected_attempt',[0,2])
@@ -326,12 +420,60 @@ def test_service_backoff_presentation_remains_active_and_pausable(tmp_path):
     assert 'action="/control/pause"' in primary
     assert 'action="/control/start"' not in primary and 'action="/control/continue"' not in primary
     assert 'action="/control/' not in str(ui._primary(token, False, snapshot, status))
+    parts = ui._dashboard_parts(token, snapshot)
+    assert '<form' not in parts['live-hero'] and '<button' not in parts['live-hero']
+    assert 'action="/control/pause"' in parts['live-actions']
+    assert 'href="/configuration#recovery-settings"' in parts['live-actions']
+    tools = ui._more_actions(token, snapshot)
+    assert 'action="/control/pause"' not in tools and 'action="/control/start"' not in tools
+    assert 'action="/control/continue"' not in tools
     snapshot['view']['paused'] = True
     assert ui._presentation(snapshot, {})['active'] is True
     node.update(state='automatic_recovery_paused', automatic_recovery=dict(status='paused'))
     paused = ui._presentation(snapshot, {})
     assert paused['active'] is False
     assert ui_view.status_summary(paused, snapshot['view'])['state'] == 'paused'
+
+
+def test_saved_failed_outcome_waiting_schedule_outranks_stale_technical_stop(tmp_path):
+    from scidiscovery.research_loop import contracts as c
+    root,key=prepare(tmp_path,enabled=False)
+    ui,cookie=session(root,key)
+    token=ui._browser(cookie)
+    c.build_job(root,1,'H',[])
+    record=root/'native-evidence/001'
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'))
+    c.write(record/'native-intent.json',intent)
+    c.write(record/'native-outcome.json',dict(returncode=1,native_started=True,
+        terminal_observed=False,cleanup='observed_group_cleaned',stop_reason='native_failure_event',
+        native_failure=dict(category='temporary',codes=['rate_limit_exceeded'],statuses=[429])))
+    next_attempt='2026-10-26T12:00:00Z'
+    c.write(record/'automatic-recovery.json',dict(status='waiting',action='retry',reason='native_temporary',
+        next_attempt_at=next_attempt,retry_count=2,continue_count=1,service_wait_seconds=15))
+    snapshot=ui._snapshot()
+    node=snapshot['view']['nodes'][-1]
+    assert node['state']=='automatic_recovery_waiting' and node['returncode']==1
+    # Older saved projections or a stale prior receipt can retain a stopped
+    # attempt proof while the authoritative schedule is already waiting.
+    technical=dict(phase='native_failure',stage='technical_pause',pending_step=1,pending_role='H',
+        reason='native_temporary',repair_scope='worker_attempt',expected_attempt=0,
+        recovery_available=False,supported_actions=[],native_intent_ref=c.record_ref(record/'native-intent.json'),
+        after_interrupt=True,new_context=False)
+    node['technical_stop']=technical
+    snapshot['operation']=dict(status='applied',kind='controller',result=dict(technical_stop=dict(
+        technical,recovery_available=True,supported_actions=['worker-resume'])))
+    status=ui._status(snapshot,{})
+    assert status['state']=='service_wait' and status['display']['active'] is True
+    assert '已自动恢复 3 次（retry 2 / continue 1）' in status['headline']
+    assert '下次仲裁（UTC）'+next_attempt in status['headline']
+    assert ui._technical_stop(snapshot) is None
+    primary=str(ui._primary(token,True,snapshot,status))
+    assert 'action="/control/pause"' in primary and 'action="/control/resume"' not in primary
+    parts=ui._dashboard_parts(token,snapshot)
+    actions=str(parts['live-actions'])
+    assert actions.count('action="/control/pause"')==1 and 'action="/control/resume"' not in actions
+    assert '放弃本次尝试并分支重做' not in actions and '启动前技术暂停' not in actions
+    assert '技术暂停' not in parts['live-hero']
 
 
 def test_permanent_failure_overview_offers_pause_and_exact_current_task_fork(tmp_path, monkeypatch):
@@ -347,14 +489,17 @@ def test_permanent_failure_overview_offers_pause_and_exact_current_task_fork(tmp
     snapshot['view'].update(nodes=[node], paused=False, correction={})
     monkeypatch.setattr(ui, '_snapshot', lambda **options: snapshot)
     page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
-    hero = re.search(r'<div id="live-hero">(.*?)<div id="live-usage">', page, re.S)[1]
+    hero = re.search(r'<div id="live-hero">(.*?)<div id="live-actions">', page, re.S)[1]
+    actions = re.search(r'<div id="live-actions">(.*?)<div id="live-usage">', page, re.S)[1]
     assert '服务错误待处理' in hero and '永久服务错误：服务配额、余额或计费上限不足' in hero
-    assert 'insufficient_quota：服务配额、余额或计费上限不足' in hero
-    assert '增加本研究的 tokens 预算不会恢复服务账户额度' in hero
-    assert 'action="/control/pause"' in hero and 'action="/control/start"' not in hero
-    assert 'href="/nodes/2/fork"' in hero and '放弃本次尝试并分支重做' in hero
-    assert '不会重跑前一阶段' in hero and '新分支须声明新预算，创建后保持暂停' in hero
-    assert '原尝试不删除，已用预算不退还' in hero
+    assert '<form' not in hero and '<button' not in hero
+    assert 'insufficient_quota：服务配额、余额或计费上限不足' in actions
+    assert '增加本研究的 tokens 预算不会恢复服务账户额度' in actions
+    assert 'action="/control/pause"' in actions and 'action="/control/start"' not in actions
+    assert 'href="/nodes/2/fork"' in actions and '放弃本次尝试并分支重做' in actions
+    assert '不会重跑前一阶段' in actions and '新分支须声明新预算，创建后保持暂停' in actions
+    assert '原尝试不删除，已用预算不退还' in actions
+    assert 'href="/configuration#recovery-settings"' in actions and '重试设置' in actions
     assert 'private-token' not in page and '/private/provider' not in page and 'https://private.invalid' not in page
     assert not (root / 'pause.request').exists()
     _, _, read_headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
@@ -363,9 +508,10 @@ def test_permanent_failure_overview_offers_pause_and_exact_current_task_fork(tmp
     assert 'action="/control/' not in read_page and '/nodes/2/fork' not in read_page
     assert 'native-evidence/002/native-outcome.json' not in read_page
     snapshot['view']['paused'] = True
-    paused_hero = str(ui._dashboard_parts(ui._browser(cookie), snapshot)['live-hero'])
+    paused_parts = ui._dashboard_parts(ui._browser(cookie), snapshot)
+    paused_hero = str(paused_parts['live-hero'])
     assert '研究已暂停' in paused_hero and 'action="/control/continue"' not in paused_hero
-    assert 'href="/nodes/2/fork"' in paused_hero
+    assert 'href="/nodes/2/fork"' in paused_parts['live-actions']
 
 
 @pytest.mark.parametrize('state, cleanup', [
@@ -400,12 +546,15 @@ def test_confirmed_stopped_failure_keeps_pause_and_fork_preview_available(tmp_pa
         automatic_recovery=dict(status='stopped', reason=reason))
     snapshot.update(conclusion=None, final=None, operation=None)
     snapshot['view'].update(nodes=[node], paused=False, correction={})
-    hero = str(ui._dashboard_parts(ui._browser(cookie), snapshot)['live-hero'])
+    parts = ui._dashboard_parts(ui._browser(cookie), snapshot)
+    hero = str(parts['live-hero'])
+    actions = str(parts['live-actions'])
     assert expected in hero and '接续停止待处理' in hero and 'tone-bad' in hero
     assert '永久' not in hero
-    assert 'action="/control/pause"' in hero and 'action="/control/start"' not in hero
-    assert 'href="/nodes/2/fork"' in hero and '放弃本次尝试并分支重做' in hero
-    assert '预览仍会核对在途或未知外部调用' in hero
+    assert '<form' not in hero and '<button' not in hero
+    assert 'action="/control/pause"' in actions and 'action="/control/start"' not in actions
+    assert 'href="/nodes/2/fork"' in actions and '放弃本次尝试并分支重做' in actions
+    assert '预览仍会核对在途或未知外部调用' in actions
     assert not (root / 'pause.request').exists()
 
 
@@ -2335,7 +2484,7 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
     import subprocess
     import tempfile
     from pathlib import Path
-    from scidiscovery.research_loop import instance_render as render
+    from scidiscovery.research_loop import instance_render as render, ui_components as ui
     chrome = shutil.which('google-chrome') or shutil.which('chromium')
     if chrome is None:
         pytest.skip('No local Chrome executable for the explicit browser case')
@@ -2343,9 +2492,15 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
     form_markup = ('<form method="post" action="/control/continue"><input name="nonce" value="form-original">'
         '<input name="csrf" value="csrf-original"><input name="ack_correction" value="same-trigger">'
         '<textarea name="authorization_note"></textarea><button type="submit">Submit</button></form>')
+    action_markup = ui.actions(primary=ui.Safe(form_markup),settings_href='/configuration#recovery-settings')
+    def hero_markup(phase):
+        return ui.hero({},dict(state='active',badge='正在研究',headline='等待已登记实验的观察更新'))+f'<span data-phase="{phase}"></span>'
     execution_markup = InstanceUI._execution_activity(dict(step=2,coverage='observed',counts=dict(running=1),
         calls=[dict(call_id='fixture-original',attempt=0,state='running',updated_at=1.,
-            display=dict(entry='check.py'))]))
+            display=dict(entry='check.py',purpose='用于比较公开声明的响应与已有实验结果。'*40,
+                result_status='available',metrics=[dict(name='long_public_measurement_'*30,value=0,unit='a.u.')]))]))
+    def usage_markup(phase):
+        return execution_markup+f'<span data-usage-phase="{phase}"></span>'
     driver = '''document.addEventListener('DOMContentLoaded', () => {
       const input = document.querySelector('textarea'); input.value = 'preserved browser draft';
       input.dispatchEvent(new Event('input', {bubbles:true}));
@@ -2354,21 +2509,30 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
       const initiallyCollapsed = !execution.open && !identity.open;
       execution.open = true; identity.open = true;
       const observer = new MutationObserver(() => {
-        if (!document.querySelector('[data-phase="2"]')) return;
+        if (!document.querySelector('[data-phase="2"]') || !document.querySelector('[data-usage-phase="2"]')) return;
         const current = document.querySelector('textarea');
+        const action = document.getElementById('live-actions'), card = document.querySelector('.execution-card');
+        const viewport = document.documentElement;
+        const fits = window.innerWidth <= 600 && viewport.scrollWidth <= viewport.clientWidth + 1
+          && action.scrollWidth <= action.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1;
         const ok = current.value === 'preserved browser draft' && document.querySelector('[name="nonce"]').value === 'form-original'
+          && document.querySelector('[name="csrf"]').value === 'csrf-original'
+          && document.querySelector('[name="ack_correction"]').value === 'same-trigger'
+          && !document.getElementById('live-hero').querySelector('form,button') && action.contains(current)
+          && card.querySelector('.execution-results').textContent.includes(' = 0 a.u.')
           && initiallyCollapsed && document.querySelector('[data-details-key="w-executions-2"]').open
-          && document.querySelector('[data-details-key="w-execution-2-fixture-original"]').open;
+          && document.querySelector('[data-details-key="w-execution-2-fixture-original"]').open && fits;
         const result = document.createElement('output'); result.id = 'browser-result';
         result.textContent = ok ? 'PASSED_STABLE_DRAFT' : 'FAILED_DRAFT';
         document.body.append(result); observer.disconnect();
       });
-      observer.observe(document.getElementById('live-hero'), {subtree:true, childList:true});
+      observer.observe(document.body, {subtree:true, childList:true});
       fetch('/fixture-ready');
     });'''
     driver_csp = "'sha256-" + base64.b64encode(hashlib.sha256(driver.encode()).digest()).decode() + "'"
-    page = render.page('Offline browser fixture', '<p data-live-url="/live"></p><div id="live-hero">' + form_markup
-        + execution_markup + '</div><script>' + driver + '</script>', live=True)
+    page = render.page('Offline browser fixture', '<p data-live-url="/live"></p><div id="live-hero">'+hero_markup(0)
+        +'</div><div id="live-actions">'+action_markup+'</div><div id="live-usage">'
+        + usage_markup(0) + '</div><script>' + driver + '</script>', live=True)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_GET(self):
@@ -2376,7 +2540,8 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
                 self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
                 if ready.wait(3):
                     for phase in (1, 2):
-                        value = dict(fragments={'live-hero': form_markup + execution_markup + f'<p data-phase="{phase}">Updated</p>'},
+                        value = dict(fragments={'live-hero': hero_markup(phase), 'live-actions': action_markup,
+                            'live-usage': usage_markup(phase)},
                             nonce='unrelated-tab-token', csrf={'continue': 'unrelated-csrf'}, current=None)
                         self.wfile.write(b'event: snapshot\ndata: ' + json.dumps(value).encode() + b'\n\n')
                     self.wfile.flush()
@@ -2403,7 +2568,7 @@ def test_headless_browser_sse_preserves_draft_and_form_credentials(tmp_path):
             '--disable-background-networking', '--disable-component-update', '--disable-default-apps',
             '--disable-extensions', '--no-first-run', '--no-default-browser-check',
             '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--user-data-dir=' + str(browser_base / 'profile'),
-            '--virtual-time-budget=3000', '--dump-dom', f'http://127.0.0.1:{server.server_port}/']
+            '--window-size=540,900', '--virtual-time-budget=3000', '--dump-dom', f'http://127.0.0.1:{server.server_port}/']
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=browser_env, start_new_session=True)
         try:
             output, error = process.communicate(timeout=20)

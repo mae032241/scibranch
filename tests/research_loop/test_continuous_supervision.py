@@ -9,53 +9,21 @@ from scidiscovery.research_loop import (
     accepted_budget, budget, budget_notice, checkpoint, contracts, execution,
     experiments, protocol, supervision,
 )
+from current_strategy_fixtures import budget_facts
 
 
 def review(state=None, fraction=.3, *, job=None, intent=None):
     return supervision.worker_review(job or dict(role='W'), intent or {},
-        summary=state if state is not None else supervision.empty(),
-        budget_fraction=fraction, selected_policy=supervision.DEFAULT_POLICY)
+        summary=state if state is not None else supervision.authored_question_revision(supervision.empty(),True),
+        budget_fraction=fraction, selected_policy=supervision.DEFAULT_POLICY, budget_facts=budget_facts(fraction))
 
 
-def round_fact(number):
-    return dict(round_id=f'round-{number}', source_step=number,
-        pointer=f'/rounds/{number}', mechanism='retained-direction',
-        question='A bounded scientific question', finding='An accepted finding')
 
 
-def test_first_long_w_uses_budget_checkpoint_without_guessing_rounds_from_calls():
-    state=supervision.empty()
-    assert review(state,.299) is None
-    due=review(state,.3)
-    assert due['reasons']==['budget_checkpoint:0.3']
-    assert due['cutoff']['total_rounds']==0
-    # No native call count, score or context count is an input to this policy.
-    assert state['total_rounds']==0 and state['pending_due']==[]
 
 
-def test_four_accepted_rounds_have_their_own_direction_checkpoint():
-    state=supervision.empty()
-    for number in range(1,4):
-        state=supervision.add_round(state,round_fact(number))
-        assert review(state,.1) is None
-    state=supervision.add_round(state,round_fact(4))
-    due=review(state,.1)
-    assert due['reasons']==['consecutive_rounds']
-    assert due['cutoff']==dict(total_rounds=4,source_step=4,round_id='round-4')
 
 
-def test_automatic_spacing_and_review_limit_do_not_create_permanent_w_pause():
-    state=supervision.empty()
-    frozen=supervision.request(state,budget_fraction=.3,automatic=True)
-    state=supervision.cover(state,frozen,source_step=1,completion_fraction=.3)
-    for number in range(1,5):
-        state=supervision.add_round(state,round_fact(number))
-    assert review(state,.399) is None
-    assert review(state,.4)['reasons']==['consecutive_rounds']
-    frozen=supervision.request(state,budget_fraction=.4,automatic=True)
-    state=supervision.cover(state,frozen,source_step=5,completion_fraction=.4)
-    assert supervision.due(state,.65)['due']
-    assert review(state,.65) is None
 
 
 @pytest.mark.parametrize('job,intent',[
@@ -80,7 +48,7 @@ def test_one_current_cut_publishes_both_admission_pause_and_w_advice(tmp_path,mo
         max_tokens=1000,max_seconds=1000,search_policy={},
         supervision_policy=supervision.DEFAULT_POLICY,
         supervision_budget_basis=dict(max_tokens=1000,max_seconds=1000),
-        worker_fragment_policy=dict(max_context_windows=2))
+        worker_fragment_policy=dict(context='same_session',max_context_windows=2,context_handoff_version=2))
     job=dict(step=1,role='W',managed_admission_version=experiments.ADMISSION_VERSION)
     contracts.write(tmp_path/'jobs/001.json',job)
     task=contracts.record_ref(tmp_path/'jobs/001.json')
@@ -90,7 +58,7 @@ def test_one_current_cut_publishes_both_admission_pause_and_w_advice(tmp_path,mo
     work=tmp_path/'node';(work/'work').mkdir(parents=True)
     class Head(dict):
         base=settings
-    head=Head(search=dict(supervision=supervision.empty(),last_w=None))
+    head=Head(search=dict(supervision=supervision.authored_question_revision(supervision.empty(),True),last_w=None))
     def forbidden(*args,**kwargs):pytest.fail('Advice consumer reopened its producer facts')
     monkeypatch.setattr(accepted_budget,'read',forbidden)
     monkeypatch.setattr(accepted_budget,'usage',forbidden)
@@ -121,7 +89,7 @@ def test_one_current_cut_publishes_both_admission_pause_and_w_advice(tmp_path,mo
     assert published['direction_review']==hint['direction_review']
     assert hint['direction_review']['cutoff']['total_rounds']==0
     assert hint['worker_context_windows']['windows_started']==1
-    assert hint['closeout_notices']['review']['text']==budget_notice.WORKER_DIRECTION_TEXT
+    assert hint['closeout_notices']['review']['text']==budget_notice.WORKER_REFLECTION_TEXT
     assert 'independent A' in hint['instruction'] and 'never replay' in hint['instruction']
     assert len((work/'work/budget-status.json').read_bytes())<=4096
 
@@ -162,9 +130,10 @@ def test_direction_notice_is_independent_of_early_context_advice_marker(tmp_path
     path.write_text(json.dumps(hint))
     assert budget_notice.hook_output(tmp_path,0)['hookSpecificOutput']['additionalContext']==budget_notice.WORKER_CONTEXT_NEAR_TEXT
     hint['target_state']='reached'
-    hint['closeout_notices']['review']=budget_notice.worker_direction_notice(review())
+    hint['direction_review']=review()
+    hint['closeout_notices']['review']=budget_notice.worker_direction_notice(hint['direction_review'])
     path.write_text(json.dumps(hint))
-    assert budget_notice.hook_output(tmp_path,1)['hookSpecificOutput']['additionalContext']==budget_notice.WORKER_DIRECTION_TEXT
+    assert budget_notice.hook_output(tmp_path,1)['hookSpecificOutput']['additionalContext']==budget_notice.WORKER_REFLECTION_TEXT
     assert budget_notice.hook_output(tmp_path,2) is None
     assert (work/'.budget-notice-progress').exists() and (work/'.budget-notice-review').exists()
 

@@ -177,18 +177,37 @@ class AutomaticRecoveryRequired(RuntimeError):
 
 
 def technical_stop_from_facts(job, outcome, *, recovery_available=False,
-        blocked_reason=None, attempt=0):
+        blocked_reason=None, attempt=0, intent=None, native_intent_ref=None,
+        recovery_reason=None):
     """Public control diagnosis from the owner's already-read originals."""
     from . import native_recovery
-    if not native_recovery.never_started(outcome):return None
-    value = dict(phase='native_prelaunch', stage='technical_pause',
+    prelaunch=native_recovery.never_started(outcome)
+    if not prelaunch and not _native_failure_scope(job,intent,outcome):return None
+    value = dict(phase='native_prelaunch' if prelaunch else 'native_failure', stage='technical_pause',
         pending_step=job['step'], pending_role=job['role'],
-        reason=outcome['stop_reason'], repair_scope='worker_attempt',
+        reason=(outcome['stop_reason'] if prelaunch else recovery_reason or 'native_failure'), repair_scope='worker_attempt',
         recovery_available=bool(recovery_available), recheck_required=True,
         expected_attempt=attempt,
         supported_actions=['worker-resume'] if recovery_available else [])
+    if not prelaunch:
+        value.update(native_intent_ref=native_intent_ref,after_interrupt=True,new_context=False)
     if blocked_reason is not None:value['blocked_reason'] = blocked_reason
     return value
+
+
+def _native_failure_scope(job, intent, outcome):
+    """A failed ordinary task is resumable science, never a missing outcome."""
+    return (isinstance(intent,dict) and isinstance(outcome,dict)
+        and job.get('role') in {'H','W','A','E'}
+        and outcome.get('native_started') is True
+        and outcome.get('terminal_observed') is False
+        and outcome.get('cleanup')=='observed_group_cleaned'
+        and outcome.get('stop_reason') in {None,'native_failure_event'}
+        and not any(job.get(key) for key in ('formal_review','final_only','final_report'))
+        and job.get('purpose') not in {'closeout','delivery_review','delivery_correction'}
+        and intent.get('continuation_kind')!='author_closeout'
+        and not intent.get('output_repair') and not intent.get('work_repair')
+        and isinstance(intent.get('budget_slice'),dict))
 
 
 def _prelaunch_original_facts(root, step, record, *, attempt):
@@ -293,16 +312,73 @@ def _technical_restart_gate(root, job, paths, intents, outcomes, *, head, settin
 
 def technical_stop(root, job, record, outcome):
     """Status owner qualifies an actionable pause using current admission."""
+    stopped,_=technical_stop_facts(root,job,record,outcome)
+    return stopped
+
+
+def technical_stop_facts(root, job, record, outcome):
+    """Produce public diagnosis and private originals for this control owner."""
     from . import accepted_budget, native_recovery
-    if not native_recovery.never_started(outcome):return None
+    if (not native_recovery.never_started(outcome)
+            and not (outcome.get('native_started') is True
+                and outcome.get('terminal_observed') is False
+                and outcome.get('cleanup')=='observed_group_cleaned'
+                and outcome.get('stop_reason') in {None,'native_failure_event'})):
+        return None,None
     root=Path(root)
+    schedule_path=record/'automatic-recovery.json'
+    schedule=c.read(c.regular(schedule_path)) if schedule_path.exists() else {}
+    if schedule.get('status') in {'waiting','ready'}:return None,None
     head=accepted_budget.read(root)
     policy=c.settings_for_job(root,job,base=head.base,head=head)
     accepted=list(execution.accepted_intents_from_facts(root,job['step'],job=job,
         base=head.base,policy=policy,head=head,task_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')))
     paths=[path for path,_ in accepted];intents=[intent for _,intent in accepted]
     attempt=len(paths)-1
-    if not paths or paths[-1] != record:return None
+    if not paths or paths[-1] != record:return None,None
+    facts=dict(head=head,intent=intents[-1],schedule=schedule,attempt=attempt,
+        source_verified=False,stopped_writer=None)
+    if not native_recovery.never_started(outcome):
+        original=intents[-1]
+        if not _native_failure_scope(job,original,outcome):return None,None
+        from . import backends, correction, execution_recovery, profiles
+        available=False;reason=None
+        try:
+            if (head.current_job is None or head.current_job['step']!=job['step']
+                    or head.current_job['job_ref']!=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json')):
+                raise ResumeUnavailable('unexpected_recovery_current_job_changed')
+            if (head['closeout'] is not None or head['final_return'] is not None
+                    or head['active_audit'] is not None or head['unresolved_actions']
+                    or head['delivery_preparation']['unresolved_ref'] is not None
+                    or budget.execution_blocked(root) or execution_recovery.pending(root)):
+                raise ResumeUnavailable('automatic_recovery_managed_execution_pending')
+            if correction.gate(root,job['step']-1) is not None:
+                raise ResumeUnavailable('worker_resume_correction_paused')
+            _native_writer_facts(record,outcome)
+            facts['source_verified']=True
+            facts['stopped_writer']=_owner_interruption_proof(record,
+                execution.identity(root,job['step'],attempt),outcome,budget.clock_stamp())
+            validate_launcher(root,job['step'])
+            profiles.validate_intent(policy,job,original)
+            backend=backends.selected(policy).for_job(job)
+            if not backend.supports_resume:
+                raise ResumeUnavailable('worker_resume_unsupported_backend')
+            _automatic_session_from_facts(root,job['step'],outcome,original=original,policy=policy)
+            limits=budget.snapshot(root)
+            observed=accepted_budget.usage(root,head=head)
+            if (budget_limits.reached(limits['seconds_remaining'])
+                    or budget_limits.reached(budget_limits.remaining(limits['max_tokens'],
+                        observed['accounted_tokens']))):
+                raise ResumeUnavailable('worker_resume_budget_unavailable')
+            available=True
+        except (ResumeUnavailable,budget.NodeBudgetUnavailable) as error:
+            reason=getattr(error,'reason',str(error))
+        except (OSError,ValueError,KeyError,TypeError):
+            reason='unexpected_recovery_original_unverified'
+        return technical_stop_from_facts(job,outcome,intent=original,
+            native_intent_ref=c.record_ref(record/'native-intent.json'),
+            recovery_available=available,blocked_reason=reason,attempt=attempt,
+            recovery_reason=schedule.get('limitation') or schedule.get('reason')),facts
     outcomes=[c.read(c.regular(path/'native-outcome.json')) for path in paths[:-1]]+[outcome]
     try:
         _technical_restart_gate(root,job,paths,intents,outcomes,head=head,settings=policy)
@@ -312,7 +388,7 @@ def technical_stop(root, job, record, outcome):
     except OSError:
         available=False;reason='technical_restart_original_unverified'
     return technical_stop_from_facts(job,outcome,recovery_available=available,
-        blocked_reason=reason,attempt=attempt)
+        blocked_reason=reason,attempt=attempt),facts
 
 
 def _start_technical_restart(root, step, paths, *, outcome, expected_attempt):
@@ -445,15 +521,25 @@ def _format_source_from_facts(record, *, policy, intent, outcome):
 
 
 def _automatic_session(root, step, record, outcome):
-    identity = outcome.get('native_identity') or {}
     original = c.read(c.regular(record / 'native-intent.json'))
+    policy=configuration_updates.for_step(root,step)
+    return _automatic_session_from_facts(root,step,outcome,original=original,policy=policy)
+
+
+def _automatic_session_from_facts(root, step, outcome, *, original, policy):
+    from . import backends
+    identity = outcome.get('native_identity') or {}
+    backend=backends.selected(policy)
+    if backend.recovery_capability('resume').get('status')!='supported':
+        raise ResumeUnavailable('worker_resume_unsupported_backend')
     retained = original.get('session') or {}
     if retained and outcome.get('thread_id') == retained.get('thread_id'):
-        from . import backends
-        backend=backends.selected(configuration_updates.for_step(root,step))
         backend.validate_resume_session(retained,c.workspace(root,step),retained['home'])
         return retained
-    return session(root, step, record, home=identity.get('home'), session_path=identity.get('path'))
+    facts=dict(session=identity.get('session'),thread=outcome.get('thread_id'),
+        home=identity.get('home'),thread_event=outcome.get('native_thread_event'))
+    return _session_from_facts(root,step,facts,backend=backend,
+        home=identity.get('home'),session_path=identity.get('path'),identity_proof=False)
 
 
 def _completed_work_request(root, step, record, source_attempt, prior_intents, *, inventory):
@@ -822,6 +908,12 @@ def session(root, step, record, *, home=None, session_path=None, identity_proof=
             home=identity.get('home'),thread_event=outcome.get('native_thread_event'))
     else:
         facts=_interrupted_session_facts(root,step,record)
+    return _session_from_facts(root,step,facts,backend=backend,home=home,
+        session_path=session_path,identity_proof=identity_proof)
+
+
+def _session_from_facts(root, step, facts, *, backend, home, session_path, identity_proof):
+    from .native_usage import MetadataUnavailable
     thread = facts['thread']
     value = facts['session']
     if not isinstance(value, dict):
@@ -1130,9 +1222,9 @@ def finish_automatic_work(root, step, decision, reason, *, inventory):
                 or current['action'] not in {'continue','stop'}):
             raise ResumeUnavailable('automatic_recovery_decision_stale')
         if reason not in {'worker_resume_node_exhausted','worker_resume_budget_unavailable',
-                'automatic_recovery_continue_limit','wall_limit','token_limit','step_limit'}:
+                'automatic_recovery_continue_limit','automatic_recovery_attempt_limit','wall_limit','token_limit','step_limit'}:
             raise ValueError('Automatic work exit requires a verified original host budget or continue cap')
-        if reason=='automatic_recovery_continue_limit' and current['reason']!=reason:
+        if reason in {'automatic_recovery_continue_limit','automatic_recovery_attempt_limit'} and current['reason']!=reason:
             raise ValueError('Automatic work exit has no exhausted original continue cap')
         job=validate_task(root,step,inventory=inventory)
         return _work_exit(Path(root),job,execution.record(root,step),reason,inventory=inventory)
@@ -1222,7 +1314,7 @@ def seal_or_repair(root, step, *, inventory):
         job=inventory.job;record=inventory.record
         decision=automatic_decision(root,step,inventory=inventory)
         if decision['action'] in {'continue','retry'}:raise AutomaticRecoveryRequired(decision,inventory=inventory)
-        if decision['reason']=='automatic_recovery_continue_limit' and decision.get('work_repair') is not None:
+        if decision['reason'] in {'automatic_recovery_continue_limit','automatic_recovery_attempt_limit'} and decision.get('work_repair') is not None:
             return _work_exit(root,job,record,decision['reason'],inventory=inventory)
         try:return start(root,step,inventory=inventory)
         except budget.NodeBudgetUnavailable as error:return _work_exit(root,job,record,error.reason,inventory=inventory)

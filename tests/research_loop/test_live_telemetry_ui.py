@@ -19,6 +19,9 @@ from test_public_progress import line, message, transport
     (dict(reported_at=130, observed_at=160), '1970-01-01 00:02:10 UTC'),
     (dict(reported_at='invalid', observed_at=140), '1970-01-01 00:02:20 UTC'),
     (dict(reported_at=130, observed_at='invalid'), '1970-01-01 00:02:10 UTC'),
+    (dict(reported_at=130, observed_at=float('inf')), '1970-01-01 00:02:10 UTC'),
+    (dict(reported_at=130, observed_at=float('nan')), '1970-01-01 00:02:10 UTC'),
+    (dict(reported_at=float('inf')), '未知'),
     (dict(reported_at='invalid', observed_at=float('nan')), '未知'),
     (dict(reported_at=True, observed_at=-1), '未知'),
 ])

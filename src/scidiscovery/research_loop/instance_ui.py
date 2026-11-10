@@ -331,13 +331,19 @@ class InstanceUI:
         return self._form(browser_token, 'interrupt', fields, '立即中断当前工作') + (
             '<p class="note">请求原任务停止并暂停后续研究。已用预算和原调用保留；外部调用状态仍须按原调用核对。</p>')
 
-    def _operator_resume_form(self, browser_token, target, *, unexpected=False):
+    def _operator_resume_form(self, browser_token, target, *, unexpected=False, same_session_only=False, request_recheck=False):
         def form(new_context, label):
             fields=''.join('<input type="hidden" name="'+key+'" value="'+html.escape(value,quote=True)+'">'
                 for key,value in (('step',str(target['step'])),('expected_attempt',str(target['attempt'])),
                     ('native_intent_ref',json.dumps(target['native_intent_ref'],ensure_ascii=False)),
                     ('after_interrupt','1'),('new_context','1' if new_context else '0')))
             return self._form(browser_token,'resume',fields,label)
+        if same_session_only:
+            if request_recheck:
+                return form(False,'核对并接续') + (
+                    '<p class="note">请求控制层重查这一原任务的身份、进程、服务条件和剩余预算；通过核验后才接续同一原会话。原文件、已用预算与恢复次数保留。</p>')
+            return form(False,'重试失败的原任务') + (
+                '<p class="note">核对修复后的服务条件，接续同一原会话；保留原任务、已用预算与已消耗的恢复次数。未知实验仍须按原调用核对，不能重新提交。</p>')
         if unexpected:
             return form(False,'核对并恢复原任务') + form(True,'用新上下文恢复该原任务') + (
                 '<p class="note">仍在运行的原工作只重新连接、收集，不启动替身。原本机 writer 确认停止后才恢复同一任务；'
@@ -993,24 +999,30 @@ class InstanceUI:
                 # the retained display scope.
                 if not current and not producer_scope:
                     return result
-                previous = dict(scope=scope, epoch=-1, sample=None)
+                previous = dict(scope=scope, epoch=-1, sample=None, last_updated_at=None)
             retained = previous['sample']
             ordered = observed_epoch >= previous['epoch']
+            stamp = ui_view.context_timestamp(sample) if current else None
             if current and retained is not None:
                 # Older persisted samples must not supersede a newer observed
-                # sample even when their HTTP read happened to finish later.
-                stamp = sample.get('observed_at', sample.get('reported_at'))
-                prior_stamp = retained.get('observed_at', retained.get('reported_at'))
+                # sample even when their HTTP read happened to finish later or
+                # an intervening numeric sample had no valid original time.
+                prior_stamp = previous['last_updated_at']
                 ordered = ordered and not (stamp is not None and prior_stamp is not None and stamp < prior_stamp)
             if ordered:
                 previous['epoch'] = observed_epoch
                 if current:
                     previous['sample'] = sample
+                    if stamp is not None:
+                        previous['last_updated_at'] = stamp
                 self.context_display = previous
             retained = previous['sample']
             if retained is not None and (not current or not ordered):
                 return dict(status='historical', current_status='unavailable' if not current else 'out_of_order',
-                    sample={key: value for key, value in retained.items() if key != 'current_window'})
+                    sample={key: value for key, value in retained.items() if key != 'current_window'},
+                    last_updated_at=previous['last_updated_at'])
+            if current:
+                result['last_updated_at'] = previous['last_updated_at']
         return result
 
     def _progress_page(self, step, attempt, cursor):
@@ -1193,9 +1205,11 @@ class InstanceUI:
             waiting_reason=waiting_reason, current_round=rounds[0]['index'] if rounds else None,
             completed_line=completed_line, elapsed=elapsed, clean=clean)
         technical=self._technical_stop(snapshot,receipt)
-        if technical is not None:
-            status.update(state='technical_pause',badge='技术暂停',
-                headline='原任务在模型启动前停止，尚未进入科学评审；请修复本机配置后核对同一原任务。')
+        if technical is not None and not display['active']:
+            failed=technical.get('phase')=='native_failure'
+            status.update(state='technical_pause',badge='原生调用失败' if failed else '技术暂停',
+                headline=('原生调用失败，自动恢复已停止；请修复服务条件后核对同一原任务。' if failed else
+                    '原任务在模型启动前停止，尚未进入科学评审；请修复本机配置后核对同一原任务。'))
             display['active']=False
         return dict(status, display=display)
 
@@ -1203,17 +1217,41 @@ class InstanceUI:
     def _technical_stop(snapshot,receipt=None):
         nodes=snapshot.get('view',{}).get('nodes') or []
         current=nodes[-1] if nodes else None
-        if current is None or current.get('state') in ui_view.SEALED:return None
+        if current is None or current.get('state') in ui_view.SEALED or current.get('state') in {'running','automatic_recovery_waiting'}:return None
         safe=current.get('technical_stop')
-        if not isinstance(safe,dict) or safe.get('phase')!='native_prelaunch':return None
-        value=(receipt or snapshot.get('operation') or {}).get('result') or {}
-        reported=value.get('technical_stop')
-        if (isinstance(reported,dict) and all(reported.get(key)==safe.get(key)
-                for key in ('phase','pending_step','expected_attempt','reason'))
-                and reported.get('recovery_available') is True
-                and reported.get('supported_actions')==['worker-resume']):
-            return reported
-        return dict(safe,recovery_available=False,supported_actions=[])
+        if not isinstance(safe,dict) or safe.get('phase') not in {'native_prelaunch','native_failure'}:return None
+        failed=safe.get('phase')=='native_failure'
+        reference=safe.get('native_intent_ref')
+        # This is a request to the existing owner, not cached execution admission.
+        # Only the owner's typed, current original binding can supply its fields.
+        source_known=(failed and current.get('state') in {'automatic_recovery_stopped','automatic_recovery_paused','native_outcome_unsealed'}
+            and type(safe.get('pending_step')) is int and safe['pending_step']==current.get('step')
+            and type(safe.get('expected_attempt')) is int and safe['expected_attempt']>=0
+            and safe['expected_attempt']==current.get('continuations',0)
+            and safe.get('pending_role')==current.get('role') and current.get('role') in {'H','W','A','E'}
+            and safe.get('repair_scope')=='worker_attempt' and safe.get('after_interrupt') is True
+            and safe.get('new_context') is False and isinstance(reference,dict)
+            and isinstance(reference.get('path'),str) and bool(reference['path']))
+        blocked=dict(safe,recovery_available=False,supported_actions=[],show_recheck_form=False)
+        if failed and not source_known:return blocked
+        candidates=[receipt or snapshot.get('operation') or {}]
+        if failed:
+            candidates.append(snapshot.get('operation') or {})
+            candidates.extend(reversed(snapshot.get('operations') or []))
+        identity=('phase','pending_step','expected_attempt','reason')
+        if failed:identity+=('pending_role','repair_scope','native_intent_ref','after_interrupt','new_context')
+        for candidate in candidates:
+            reported=(candidate.get('result') or {}).get('technical_stop')
+            if not isinstance(reported,dict):continue
+            if (failed and reported.get('phase')=='native_failure'
+                    and all(reported.get(key)==safe.get(key) for key in ('pending_step','expected_attempt'))
+                    and reported.get('native_intent_ref')!=reference):
+                return blocked
+            if (all(reported.get(key)==safe.get(key) for key in identity)
+                    and reported.get('recovery_available') is True
+                    and reported.get('supported_actions')==['worker-resume']):
+                return reported
+        return dict(blocked,show_recheck_form=bool(source_known))
 
     def _activity(self, current):
         """Latest public messages of the active stage via a bounded forward cursor."""
@@ -1266,8 +1304,10 @@ class InstanceUI:
                     ui.esc(diagnostic.hint)+'</p></details>')))
         technical=self._technical_stop(snapshot)
         if technical is not None:
-            items.append(dict(text='当前为启动前技术暂停，未产生科学评审结论。先修复本机原生后端或必需控制观测配置；原任务身份、此前成果和已用预算保留。',
-                href='/nodes/'+str(technical['pending_step']),action='查看原任务与启动条件'))
+            failed=technical.get('phase')=='native_failure'
+            items.append(dict(text=('原生调用失败，自动恢复已停止。请核对并修复服务条件后，由控制层重查同一原调用的恢复条件；原任务身份、此前成果和已用预算保留。' if failed else
+                '当前为启动前技术暂停，未产生科学评审结论。先修复本机原生后端或必需控制观测配置；原任务身份、此前成果和已用预算保留。'),
+                href='/nodes/'+str(technical['pending_step']),action='查看原任务与恢复条件' if failed else '查看原任务与启动条件'))
         if status['state'] == 'waiting':
             current = display['current']
             item = dict(text='A 记录了等待条件：' + (status['headline'].removeprefix('A 等待：')) + ' 请核对原因、补充材料或方向建议后再处理。',
@@ -1295,7 +1335,7 @@ class InstanceUI:
                     details += '<p class="note">需要详细原因时，请维护者在宿主机查看该次诊断；公开页面仅显示安全错误类别和已知错误码。</p>'
                     if view.get('paused'):
                         details += '<p>研究已暂停；当前失败尝试及此前成果均已保留。</p>'
-                    elif status['state'] != 'service_error':
+                    elif status['state'] not in {'service_error','active','service_wait','pause_requested'}:
                         details += self._control_form(token, 'pause')
                     if (not display['active'] and not display['waiting']
                             and ui_view.native_failure_fork_available(current)):
@@ -1335,12 +1375,22 @@ class InstanceUI:
         state = status['state']
         view = snapshot['view']
         current = status['display']['current']
+        if state in {'active','service_wait','pause_requested'}:
+            if not manager:
+                return ui.Safe('<span class="readonly-note">只读查看</span>') if state!='pause_requested' else None
+            return ui.Safe((self._control_form(token, 'pause') if state!='pause_requested' else '')
+                + self._interrupt_form(token, current))
         technical=self._technical_stop(snapshot)
         if technical is not None:
-            if manager and technical.get('recovery_available'):
-                return ui.Safe(self._form(token,'resume','<input type="hidden" name="step" value="'
-                    +str(technical['pending_step'])+'"><input type="hidden" name="expected_attempt" value="'
-                    +str(technical['expected_attempt'])+'">','重查启动条件并续接同一原任务'))
+            if manager:
+                if technical.get('phase')=='native_failure' and (technical.get('recovery_available') or technical.get('show_recheck_form')):
+                    return ui.Safe(self._operator_resume_form(token,dict(step=technical['pending_step'],
+                        attempt=technical['expected_attempt'],native_intent_ref=technical['native_intent_ref']),same_session_only=True,
+                        request_recheck=not technical.get('recovery_available')))
+                if technical.get('recovery_available'):
+                    return ui.Safe(self._form(token,'resume','<input type="hidden" name="step" value="'
+                        +str(technical['pending_step'])+'"><input type="hidden" name="expected_attempt" value="'
+                        +str(technical['expected_attempt'])+'">','重查启动条件并续接同一原任务'))
             return ui.link('查看技术暂停与修复条件','/nodes/'+str(technical['pending_step']),cls='primary')
         if manager and current and current.get('operator_resume_target'):
             return ui.Safe(self._operator_resume_form(token,current['operator_resume_target']))
@@ -1370,10 +1420,6 @@ class InstanceUI:
         trigger = (view['correction'].get('current_pause') or {}).get('trigger_id')
         if state in {'ready', 'idle'}:
             return ui.Safe(self._control_form(token, 'start', correction_trigger=trigger))
-        if state in {'active', 'service_wait'}:
-            return ui.Safe(self._control_form(token, 'pause') + self._interrupt_form(token, current))
-        if state == 'pause_requested':
-            return ui.Safe(self._interrupt_form(token, current))
         if state == 'paused':
             return ui.Safe(self._control_form(token, 'continue', correction_trigger=trigger))
         return None
@@ -1426,8 +1472,10 @@ class InstanceUI:
                     'waiting_execution': '本次控制请求已结束，正在等待原实验执行（waiting_execution）。请核对原任务，勿重复提交。',
                 }
                 notice = stopped.get(result.get('status'), notice)
-                if self._technical_stop(snapshot,receipt) is not None:
-                    notice='本次控制请求因启动前技术问题停止推进；尚未进入科学评审。请修复本机配置，再核对同一原任务的续接条件。'
+                technical=self._technical_stop(snapshot,receipt)
+                if technical is not None:
+                    notice=('本次控制请求因原生调用失败停止推进；请核对并修复服务条件，再重查同一原任务的恢复条件。' if technical.get('phase')=='native_failure' else
+                        '本次控制请求因启动前技术问题停止推进；尚未进入科学评审。请修复本机配置，再核对同一原任务的续接条件。')
                 if result.get('status') in stopped:
                     if sealed:
                         notice = '历史控制请求曾停止推进；当前阶段结论已封存，请以当前研究状态为准。'
@@ -1473,10 +1521,13 @@ class InstanceUI:
             error = snapshot['error']
             status = dict(state='error', badge=ui_view.STATES['error'],
                           headline=error['error']['kind'] + '：' + error['error']['message'][:160])
-            hero = ui.hero({}, status, attention=[dict(text='实例快照读取失败（' + error['error']['kind'] + '：'
+            attention=[dict(text='实例快照读取失败（' + error['error']['kind'] + '：'
                 + error['error']['message'] + '）。本页面只读，没有写入任何记录；请核对实例记录后重新打开。',
-                href='/results', action='查看阶段结论')])
-            return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, error), 'live-activity': '', 'live-trail': self._fragment(ui.trail, error),
+                href='/results', action='查看阶段结论')]
+            hero = ui.hero({}, status)
+            return {'live-hero': hero, 'live-actions': ui.actions(attention=attention,
+                        settings_href='/configuration#recovery-settings' if manager else None),
+                    'live-usage': self._fragment(ui.stats, error), 'live-activity': '', 'live-trail': self._fragment(ui.trail, error),
                     'live-token-monitor': ''}
         view = snapshot['view']
         receipt = self._receipt(snapshot)
@@ -1495,12 +1546,18 @@ class InstanceUI:
                                     candidates=projection.get('candidates'), context_display=snapshot.get('context_display'))
             trail = projection.get('trail') or {}
             header = projection.get('header') or {}
-        hero = self._fragment(ui.hero, header, status, primary=self._primary(token, manager, snapshot, status),
-                       attention=self._attention(token, manager, snapshot, status), notices=self._notices(snapshot, receipt))
+        headline=status['headline']
+        hero_status=dict(status,headline=headline if len(headline)<=180 else headline[:179]+'…')
+        hero = self._fragment(ui.hero, header, hero_status)
+        primary=self._primary(token, manager, snapshot, status)
+        actions = self._fragment(ui.actions, primary=primary,
+                       attention=self._attention(token, manager, snapshot, status),
+                       settings_href='/configuration#recovery-settings' if manager else None,
+                       notices=([headline] if len(headline)>180 else [])+self._notices(snapshot, receipt))
         mechanisms = projection if 'error' in projection else (projection.get('mechanism_trails') or
             dict(error=dict(kind='Unavailable', message='机制记录暂不可读')))
         # A finished study shows every round as one line; otherwise the current round opens.
-        return {'live-hero': hero, 'live-usage': self._fragment(ui.stats, usage) + self._fragment(ui_mechanisms.render, mechanisms, compact=True)
+        return {'live-hero': hero, 'live-actions': actions, 'live-usage': self._fragment(ui.stats, usage) + self._fragment(ui_mechanisms.render, mechanisms, compact=True)
                     + self._execution_activity(view.get('live_executions')), 'live-activity': self._fragment(ui.activity, activity, href='/progress'),
                 'live-trail': self._fragment(ui.trail, trail, older_href='/results', open_current=not display['completed']),
                 'live-token-monitor': '' if 'error' in usage else self._fragment(ui.token_monitor,
@@ -1522,45 +1579,53 @@ class InstanceUI:
         body+='</summary>'
         body+='<p>'+ui.esc(coverage.get(value.get('coverage'),'观察不可用'))+'；'+ui.esc(value.get('limitation',''))+'</p>'
         investment=value.get('research_investment')
-        body+='<section><h3>原调用研究投入</h3><p class="note">仅当前 W 阶段的 owner 观察；逐机制计数含继承，可能重叠，不可相加作为总数。投入不等于科学轮次、研究深度或科学认可。</p>'
+        statistics='<details class="execution-statistics" data-details-key="'+ui.esc('w-execution-statistics-'+step)+'"><summary>调用统计</summary>'
+        statistics+='<p class="note">原调用研究投入仅当前 W 阶段的 owner 观察；逐机制计数含继承，可能重叠，不可相加作为总数。投入不等于科学轮次、研究深度或科学认可。</p>'
         if isinstance(investment,dict):
-            body+='<p>已接受原调用总数：'+ui.esc(investment['total_calls'])+'；当前连续投入：'+ui.esc(investment['consecutive_calls'])+' 次；方向：'+ui.esc(investment.get('direction') or '未提供')+'</p>'
-            body+='<ul>'+''.join('<li>'+ui.esc(row['mechanism_ref'])+'：'+ui.esc(row['calls'])+' 次</li>' for row in investment['by_mechanism'])+'</ul>'
-            if investment.get('omitted_count'):body+='<p>另有 '+str(investment['omitted_count'])+' 个机制计数未展开。</p>'
-        else:body+='<p>研究投入未观测；缺失视图不表示零投入。</p>'
-        body+='<p class="note">机制声明与原调用绑定版本见 W 已声明机制账本。</p>'
-        body+='</section>'
+            statistics+='<p>已接受原调用总数：'+ui.esc(investment['total_calls'])+'；当前连续投入：'+ui.esc(investment['consecutive_calls'])+' 次；方向：'+ui.esc(investment.get('direction') or '未提供')+'</p>'
+            statistics+='<ul>'+''.join('<li>'+ui.esc(row['mechanism_ref'])+'：'+ui.esc(row['calls'])+' 次</li>' for row in investment['by_mechanism'])+'</ul>'
+            if investment.get('omitted_count'):statistics+='<p>另有 '+str(investment['omitted_count'])+' 个机制计数未展开。</p>'
+        else:statistics+='<p>研究投入未观测；缺失视图不表示零投入。</p>'
+        statistics+='<p class="note">机制声明与原调用绑定版本见 W 已声明机制账本。</p></details>'
         rows=value.get('calls') or []
         if rows:
-            body+='<table><thead><tr><th>实验与目的</th><th>执行状态</th><th>声明结果指标</th><th>最近记录 / 调用详情</th></tr></thead><tbody>'
+            body+='<div class="execution-cards">'
             omitted_for_size=0
             for index,row in enumerate(rows):
                 age=ui_view.elapsed_text(row['updated_at'])
                 display=row.get('display') or {}
-                description=ui.esc(display.get('entry') or '实验名称未提供')
-                description+='<br>'+ui.esc('目的：'+(display.get('purpose') or '未提供'))
-                if display.get('mechanism'):description+='<br>'+ui.esc('机制：'+display['mechanism'])
-                binding=display.get('research_binding') or {}
-                if binding:
-                    description+='<br>'+ui.esc(binding['mechanism_ref']+' · revision '+str(binding['revision']))
-                    description+='<br>'+ui.esc('机制问题：'+(binding.get('question') or '未提供'))
-                if display.get('change_criterion'):description+='<br>'+ui.esc('改变判断的条件：'+display['change_criterion'])
+                purpose=display.get('purpose') or '未提供'
+                brief=purpose if len(purpose)<=140 else purpose[:140]+'…'
+                description='<header class="execution-heading"><h3>'+ui.esc(display.get('entry') or '实验名称未提供')+'</h3>'
+                description+='<span class="badge">'+ui.esc(labels[row['state']])+'</span></header>'
+                description+='<p class="execution-purpose">'+ui.esc('目的：'+brief)+'</p>'
                 metrics=display.get('metrics') or []
                 result_status=display.get('result_status')
-                result='；'.join(item['name']+' = '+str(item['value'])+(' '+item['unit'] if item.get('unit') else '') for item in metrics)
-                if not result:result=({'available':'无可展示的声明指标','missing':'未提供声明结果',
-                    'invalid':'声明结果不可用','unavailable':'声明结果不可用'}.get(result_status,'声明结果尚未提供'))
-                if display.get('metrics_partial'):result+='（仅显示部分指标）'
+                result='<div class="execution-results"><h4>声明结果指标</h4>'
+                if metrics:
+                    result+='<ul>'+''.join('<li>'+ui.esc(item['name']+' = '+str(item['value'])+(' '+item['unit'] if item.get('unit') else ''))+'</li>' for item in metrics)+'</ul>'
+                else:
+                    result+='<p class="note">'+ui.esc({'available':'无可展示的声明指标','missing':'未提供声明结果',
+                        'invalid':'声明结果不可用','unavailable':'声明结果不可用'}.get(result_status,'声明结果尚未提供'))+'</p>'
+                if display.get('metrics_partial'):result+='<p class="note">仅显示部分指标</p>'
+                result+='</div>'
                 details_key='w-execution-'+step+'-'+row['call_id']
-                details='<details data-details-key="'+ui.esc(details_key)+'"><summary>原调用详情</summary><p>调用 ID：'+ui.esc(row['call_id'])+'<br>attempt：'+ui.esc('未知' if row['attempt'] is None else str(row['attempt']))+'</p></details>'
-                markup='<tr><td>'+description+'</td><td>'+ui.esc(labels[row['state']])+'</td><td>'+ui.esc(result)+'</td><td>'+ui.esc(age+'前' if age else '时间未知')+details+'</td></tr>'
-                if len((body+markup).encode('utf-8'))>63*1024:
+                details='<details class="execution-original" data-details-key="'+ui.esc(details_key)+'"><summary>原调用详情</summary><p>调用 ID：'+ui.esc(row['call_id'])+'<br>attempt：'+ui.esc('未知' if row['attempt'] is None else str(row['attempt']))+'</p>'
+                if brief!=purpose:details+='<p>'+ui.esc('完整目的：'+purpose)+'</p>'
+                if display.get('mechanism'):details+='<p>'+ui.esc('机制：'+display['mechanism'])+'</p>'
+                binding=display.get('research_binding') or {}
+                if binding:
+                    details+='<p>'+ui.esc(binding['mechanism_ref']+' · revision '+str(binding['revision']))+'<br>'+ui.esc('机制问题：'+(binding.get('question') or '未提供'))+'</p>'
+                if display.get('change_criterion'):details+='<p>'+ui.esc('改变判断的条件：'+display['change_criterion'])+'</p>'
+                details+='</details>'
+                markup='<article class="execution-card">'+description+result+'<p class="execution-updated note">最近记录：'+ui.esc(age+'前' if age else '时间未知')+'</p>'+details+'</article>'
+                if len((body+markup+statistics).encode('utf-8'))>63*1024:
                     omitted_for_size=len(rows)-index;break
                 body+=markup
-            body+='</tbody></table>'
+            body+='</div>'
             if omitted_for_size:body+='<p>另有 '+str(omitted_for_size)+' 个调用因显示长度限制未展开；原件与后续封存记录保留。</p>'
-        if value.get('omitted_count'):body+='<p>另有 '+str(value['omitted_count'])+' 个调用未在此表展开。</p>'
-        return body+'</details>'
+        if value.get('omitted_count'):body+='<p>另有 '+str(value['omitted_count'])+' 个调用未在此列表展开。</p>'
+        return body+statistics+'</details>'
 
     def _live_snapshot(self, token, mount, *, force=False):
         self.browser.verify(token, instance_id=self.instance)
@@ -1609,19 +1674,14 @@ class InstanceUI:
         return '<p><a href="/configuration#budget-settings">在当前研究配置中调整总预算</a></p>'
 
     def _more_actions(self, browser_token, snapshot, *, step=None, open_=False):
-        """Secondary controls; every form keeps its existing endpoint, CSRF and controller gates."""
+        """Secondary tools; lifecycle controls stay in the single overview action row."""
         manager = 'maintenance' in self.browser.verify(browser_token, instance_id=self.instance).scopes
         body = '<details class="more-actions" id="more-actions"' + (' open' if open_ else '') + '><summary>更多操作</summary>'
         if not manager:
             body += '<p class="note">当前为只读查看。使用本地管理入口可开始、暂停研究或申请调整预算。</p>'
             return body + '<p><a href="/?after=0">浏览全部阶段记录</a></p></details>'
-        body += '<p class="note">以下操作仍受控制层原有条件约束；页面显示的状态不授予新的权限。</p><div class="action-row">'
-        trigger = None if 'error' in snapshot else (snapshot['view']['correction'].get('current_pause') or {}).get('trigger_id')
-        technical=self._technical_stop(snapshot)
-        for action in (('pause',) if technical is not None else ('start','pause','continue')):
-            body += self._control_form(browser_token, action, correction_trigger=trigger)
-        body += '</div>'
-        if step is not None and technical is None:
+        body += '<p class="note">以下操作仍受控制层原有条件约束；页面显示的状态不授予新的权限。</p>'
+        if step is not None and self._technical_stop(snapshot) is None:
             body += self._form(browser_token, 'resume', '<input type="hidden" name="step" value="' + str(step) + '">', '继续此阶段原任务（须满足原有条件）')
         body += '<div id="live-budget-navigation">' + self._budget_navigation(snapshot) + '</div>'
         body += '<p><a href="/delete">删除实例</a> · <a href="/candidates">全候选历史</a> · <a href="/operations">控制请求记录</a> · <a href="/?after=0">浏览全部阶段记录</a>'
@@ -1635,7 +1695,7 @@ class InstanceUI:
         body = self._navigation() + '<p class="settings-intro">为预算用完或已进入最终评估的研究追加总上限，以便后续继续研究。</p>'
         if self._budget_recovery_available(snapshot):
             parts = self._dashboard_parts(token, snapshot)
-            for name in ('live-hero', 'live-usage'):
+            for name in ('live-hero', 'live-actions', 'live-usage'):
                 body += '<div id="' + name + '">' + parts[name] + '</div>'
             body += '<details class="budget-adjustment"><summary>恢复前追加预算</summary><div id="budget"><p>此处的预算调整用于后续恢复研究；与下一个新节点生效的配置修改分别记录。</p>'
             body += self._form(token, 'budget', '<label>新的 tokens 总上限<input name="max_tokens" type="number" min="1"></label><label>新的时间总上限（秒）<input name="max_seconds" type="number" step="any" min="0"></label><label>新的阶段总上限<input name="max_steps" type="number" min="1"></label><label>调整说明<textarea name="authorization_note" required></textarea></label><p class="note">提交即确认所填写的新上限；变更在安全边界处理，已用额度保留。生效后返回总览继续研究；提交本表不会启动研究。恢复仍须满足原有条件。</p>', '确认追加预算')
@@ -1662,7 +1722,7 @@ class InstanceUI:
             header = {} if 'error' in snapshot else ((snapshot.get('ui') or {}).get('header') or {})
             title = header.get('title') if 'error' not in header and header.get('title') else '研究总览'
             body = self._navigation('/')
-            for name in ('live-hero', 'live-usage', 'live-activity', 'live-trail', 'live-token-monitor'):
+            for name in ('live-hero', 'live-actions', 'live-usage', 'live-activity', 'live-trail', 'live-token-monitor'):
                 body += '<div id="' + name + '">' + parts[name] + '</div>'
             state = None if 'error' in snapshot else self._status(snapshot, self._receipt(snapshot))['state']
             body += self._more_actions(browser_token, snapshot, open_=state in {'budget_exhausted', 'final'})

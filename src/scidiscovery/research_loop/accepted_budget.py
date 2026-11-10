@@ -20,7 +20,7 @@ EVENT_KINDS = frozenset(('clock','budget_amend','closeout_begin','closeout_resum
     'action_outcome','final_a_return','resource_grant','resource_reserve','resource_rebind',
     'resource_bind','resource_settle','resource_release','job_accept','native_accept','native_terminal',
     'scientific_seal','configuration_accept','configuration_bind','execution_recovery',
-    'audit_accept','audit_complete','delivery_preparation','authority_accept'))
+    'audit_accept','audit_complete','delivery_preparation','authority_accept','consultation_unavailable'))
 
 
 def _bytes(value):
@@ -363,6 +363,8 @@ def _apply(state, event):
             or state['clock']['basis'] != 'active'):
         raise ValueError('Invalid uptime accounting marker')
     _validate_budget_transition(state, event)
+    if event['kind']=='consultation_unavailable':
+        _validate_unavailable_transition(state,event)
     if 'reanchor' in event:
         from . import budget
         budget._verify_reanchor(state.root, state.base, event, AcceptedEvents(state))
@@ -739,8 +741,13 @@ def accept_job_from_facts(root, step, job, *, facts, guidance_current):
         return state
     current = state.current_job
     if current is not None and current['status'] != 'sealed':
+        unavailable=(current['status']=='unavailable'
+            and step==current['step']+1
+            and current.get('unavailable_ref')==dict(path=str(Path(state['logical_root'])/
+                current['native_record']/'consultation-unavailable.json'))
+            and _unavailable_successor(job,unavailable_consultation(root,head=state)))
         begin = state['closeout']
-        if (not job.get('final_only') or begin is None or begin['mode'] != 'final'
+        if not unavailable and (not job.get('final_only') or begin is None or begin['mode'] != 'final'
                 or begin['first_step'] != step):
             raise ValueError('Another accepted scientific job remains open')
     row = dict(step=step, role=job['role'], job_ref=reference, status='prepared',
@@ -754,6 +761,112 @@ def accept_job_from_facts(root, step, job, *, facts, guidance_current):
             max_local_step=max(state['max_local_step'], step)),
         index_updates={f'job/{step:03d}': dict(previous_seq=state['seq'], previous=prior, current=row)})
     return state
+
+
+def _validate_unavailable_transition(state,event):
+    """A control close cannot edit scientific acceptance or consumed accounting."""
+    current=state.current_job
+    receipt=event.get('receipt')
+    if (current is None or current['status']!='terminal' or state['current_native'] is not None
+            or state['closeout'] is not None or state['final_return'] is not None
+            or state['active_audit'] is not None or state['unresolved_actions']
+            or state['delivery_preparation']['unresolved_ref'] is not None
+            or not isinstance(receipt,dict) or receipt.get('version')!=1
+            or receipt.get('job_ref')!=current['job_ref']
+            or receipt.get('step')!=current['step'] or current['role'] not in {'H','A','E'}
+            or current.get('purpose')!='worker_consultation'
+            or receipt.get('native_intent_ref')!=dict(path=str(Path(state['logical_root'])/
+                current['native_record']/'native-intent.json'))
+            or receipt.get('requester_seal_ref')!=(state['prefix'].get('tip') or {}).get('seal_ref')
+            or receipt.get('requester_step')!=(state['prefix'].get('tip') or {}).get('step')
+            or receipt.get('reason') not in {'automatic_recovery_attempt_limit','automatic_recovery_retry_limit',
+                'automatic_recovery_continue_limit','automatic_recovery_wait_limit'}):
+        raise ValueError('Unavailable consultation lost its exact accepted owner')
+    reference=dict(path=str(Path(state['logical_root'])/current['native_record']/'consultation-unavailable.json'))
+    closed=dict(current,status='unavailable',unavailable_ref=reference)
+    expected=dict(current_job=closed)
+    index={f'job/{current["step"]:03d}':dict(previous_seq=state['seq'],previous=current,current=closed)}
+    relative=current['native_record']+'/consultation-unavailable.json'
+    route=receipt.get('route') or {}
+    failed=receipt.get('failed_outcome') or {}
+    outcome_ref=receipt.get('outcome_ref') or {}
+    stopped_writer=receipt.get('stopped_writer') or {}
+    if (event['head_updates']!=expected or event['index_updates']!=index
+            or event.get('control_files')!={relative:receipt}
+            or route.get('next_step')!=current['step']+1
+            or route.get('completed')!=receipt['requester_step']
+            or route.get('goal_id')!=state['instance_id']
+            or route.get('unavailable_ref')!=reference
+            or route.get('current_h')!=state['search']['last_h']
+            or route.get('current_w')!=receipt['requester_step']
+            or (route.get('route') or {}).get('parents')!=list(dict.fromkeys(
+                step for step in (state['search']['last_h'],receipt['requester_step']) if step is not None))
+            or failed.get('native_started') is not True or failed.get('terminal_observed') is not False
+            or failed.get('cleanup')!='observed_group_cleaned'
+            or failed.get('stop_reason') not in {None,'native_failure_event'}
+            or outcome_ref.get('path')!=str(Path(state['logical_root'])/current['native_record']/'native-outcome.json')
+            or type(outcome_ref.get('size_bytes')) is not int or outcome_ref['size_bytes']<=0
+            or stopped_writer.get('status')!='stopped' or stopped_writer.get('groups_absent') is not True
+            or stopped_writer.get('boot_id')!=event['boot_id']
+            or stopped_writer.get('outcome_ref')!=dict(path=outcome_ref.get('path'))
+            or (route.get('route') or {}).get('role')!='W'
+            or route.get('source')!=dict(step=receipt['requester_step'],seal_ref=receipt['requester_seal_ref'])):
+        raise ValueError('Unavailable consultation changed accounting or scientific routing')
+
+
+def _unavailable_successor(job,receipt):
+    saved=receipt['route'];route=saved['route']
+    return (job.get('step')==saved['next_step'] and job.get('role')=='W'
+        and [ref['path'] for ref in job.get('direct_refs',[])]==[
+            f'inputs/parents/{step:03d}/conclusion.json' for step in route['parents']]
+        and job.get('instruction','')==route['instruction']
+        and all(job.get(key) is None for key in ('purpose','evidence_return','correction_request',
+            'author_correction','supervision_request','worker_continuation'))
+        and not any(job.get(key) for key in ('formal_review','final_only','final_report')))
+
+
+def unavailable_consultation(root, *, head):
+    """Load the current accepted control receipt, including an uninstalled redo."""
+    current=head.current_job
+    if current is None or current['status']!='unavailable':return None
+    reference=current.get('unavailable_ref')
+    expected=dict(path=str(Path(head['logical_root'])/current['native_record']/'consultation-unavailable.json'))
+    if reference!=expected:raise ValueError('Unavailable consultation changed its receipt identity')
+    receipt=head.control_file(current['native_record']+'/consultation-unavailable.json')
+    if (not isinstance(receipt,dict) or receipt.get('job_ref')!=current['job_ref']
+            or receipt.get('step')!=current['step']):
+        raise ValueError('Unavailable consultation receipt is missing or changed')
+    return receipt
+
+
+def close_unavailable_consultation(root, *, base, job, record, intent, outcome, stopped_writer, receipt):
+    """Close optional advice under its original ledger, without scientific output."""
+    from . import budget, continuation, execution_recovery
+    root=Path(root);record=Path(record)
+    with budget._ledger_writer_from_base(root,base=base):
+        state=recover(root,load(root,base=base))
+        if state.current_job is not None and state.current_job['status']=='unavailable':
+            if unavailable_consultation(root,head=state)!=receipt:
+                raise ValueError('Unavailable consultation replay changed its original receipt')
+            return state
+        source=native_attempt(root,job['step'],record,head=state)
+        if budget.execution_blocked(root) or execution_recovery.pending(root):
+            raise ValueError('Unavailable consultation retains unresolved original execution')
+        if (source is None or source['status']!='closed' or source['intent']!=intent
+                or not continuation._native_failure_scope(job,intent,outcome)
+                or stopped_writer!=receipt.get('stopped_writer')
+                or stopped_writer.get('status')!='stopped' or stopped_writer.get('groups_absent') is not True
+                or (receipt.get('outcome_ref') or {}).get('path')!=str(record/'native-outcome.json')):
+            raise ValueError('Unavailable consultation has no exact clean failed attempt')
+        current=state.current_job
+        if current is None:raise ValueError('Unavailable consultation has no current task')
+        reference=dict(path=str(record/'consultation-unavailable.json'))
+        closed=dict(current,status='unavailable',unavailable_ref=reference)
+        _,state=_append_prepared(root,state,kind='consultation_unavailable',stamp=budget.clock_stamp(),
+            fields=dict(step=job['step'],receipt=receipt),updates=dict(current_job=closed),
+            index_updates={f'job/{job["step"]:03d}':dict(previous_seq=state['seq'],previous=current,current=closed)},
+            control_files={record.relative_to(root).as_posix()+'/consultation-unavailable.json':receipt})
+        return state
 
 
 def authority_calls(state, step):

@@ -196,6 +196,184 @@ def test_resume_request_is_not_reported_as_observed_continuity(resumed,verified,
     assert planned['mode']=='resume_requested'
 
 
+def _failed_optional_advice(tmp_path,role,*,unknown_cost=False):
+    from unittest.mock import patch
+    from scidiscovery.research_loop import accepted_budget,budget,controller
+    from test_history_handoff import finish
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'objective.md';objective.write_text('Continue W after unavailable optional advice.')
+    root=tmp_path/'instance'
+    settings=controller.prepare(root,objective,public,['never-launched'],native_backend='protocol',
+        max_tokens=10000,max_seconds=120,max_steps=8,search_policy=None,
+        node_budget_policy={name:dict(max_observed_tokens=1000,max_seconds=30.) for name in 'HWAE'},
+        model=PROFILE['model'],reasoning_effort=PROFILE['reasoning_effort'],experiment_mode='external')
+    original_write=c.write
+    def question(path,value):
+        if Path(path)==root/'native-evidence/001/science-output.json':
+            value=dict(value,consultation_question='Which retained evidence resolves the explicit W uncertainty?')
+        return original_write(path,value)
+    with patch.object(c,'write',question):
+        finish(root,1,'W',[],stage_intent={'H':'revise_h','A':'review','E':'extract'}[role])
+    worker=c.read(root/'native-evidence/001/result.json')
+    job=c.build_job(root,2,role,[1],evidence_return=dict(role='W',step=1))
+    record=root/'native-evidence/002'
+    intent=dict(step=2,task_ref=c.record_ref(root/'jobs/002.json'),
+        budget_slice=budget.accept_node(root,job,final_report=None))
+    accepted_budget.accept_native(root,2,record,intent)
+    outcome=dict(native_started=True,terminal_observed=False,returncode=1,
+        cleanup='observed_group_cleaned',stop_reason='native_failure_event')
+    c.write(record/'native-outcome.json',outcome)
+    accepted_budget.accept_terminal(root,2,record,
+        meter=None if unknown_cost else dict(input_tokens=11,cached_input_tokens=0,output_tokens=3),unknown=unknown_cost)
+    return root,settings,job,record,worker
+
+
+def _optional_close_facts(root,record):
+    from scidiscovery.research_loop import accepted_budget,budget,execution
+    outcome=c.native_outcome(record)
+    try:
+        proof=continuation._owner_interruption_proof(record,execution.identity(root,2,0),
+            outcome,budget.clock_stamp())
+    except continuation.ResumeUnavailable:
+        proof=None
+    return dict(outcome=outcome,source_facts=dict(head=accepted_budget.read(root),
+        intent=c.read(record/'native-intent.json'),attempt=0,source_verified=True,stopped_writer=proof,
+        schedule=dict(status='stopped',source_attempt=0,
+            source_intent_ref=c.record_ref(record/'native-intent.json'),
+            task_ref=c.record_ref(root/'jobs/002.json'),limitation='automatic_recovery_attempt_limit',
+            retry_count=4,continue_count=4,service_wait_seconds=915.)))
+
+
+@pytest.mark.parametrize('role',['H','A','E'])
+@pytest.mark.parametrize('crash_before_route_cache',[False,True])
+def test_unavailable_optional_advice_returns_w_across_gap_and_cold_retry(
+        tmp_path,monkeypatch,role,crash_before_route_cache):
+    from scidiscovery.research_loop import accepted_budget,controller
+    root,settings,job,record,worker=_failed_optional_advice(tmp_path,role)
+    before=accepted_budget.read(root)
+    frozen={path:path.read_bytes() for path in (record/'native-intent.json',record/'native-outcome.json',
+        root/'native-evidence/001/result-identity.json',root/'native-evidence/001/result.json')}
+    decision=dict(action='stop',reason='automatic_recovery_attempt_limit',source_attempt=0,
+        counters=dict(retries=4,continues=4,wait_seconds=915.))
+    cache=root/'host-history/controller-route.json'
+    if crash_before_route_cache:
+        original_write=c.write
+        def crash(path,value):
+            if Path(path)==cache:raise OSError('simulated crash after accepted control close')
+            return original_write(path,value)
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(c,'write',crash)
+            with pytest.raises(OSError,match='simulated crash'):
+                controller._unavailable_consultation_route(root,settings,1,worker,job=job,record=record,**_optional_close_facts(root,record),
+                    reason=decision['reason'])
+    else:
+        assert controller._unavailable_consultation_route(root,settings,1,worker,job=job,record=record,**_optional_close_facts(root,record),
+            reason=decision['reason'])
+    closed=accepted_budget.read(root)
+    receipt=accepted_budget.unavailable_consultation(root,head=closed)
+    assert closed.current_job['status']=='unavailable' and receipt['route']['next_step']==3
+    assert controller._unavailable_consultation_route(root,settings,1,worker,job=job,record=record,**_optional_close_facts(root,record),
+        reason=decision['reason'])
+    assert accepted_budget.read(root)['seq']==closed['seq']
+    for field in ('usage','role_usage','prepared_count','dispatch_count','continuation_count','prefix','search'):
+        assert closed[field]==before[field]
+    assert receipt['counters']==decision['counters']
+    calls=[]
+    def hold(root,step,**kwargs):
+        calls.append(step)
+        raise RuntimeError('Test stops before any native invocation')
+    monkeypatch.setattr(controller,'_native_call',hold)
+    controller.run(root)
+    controller.run(root)
+    successor=c.read(root/'jobs/003.json')
+    assert calls==[3,3]
+    assert successor['role']=='W' and [ref['path'] for ref in successor['direct_refs']]==[
+        'inputs/parents/001/conclusion.json']
+    assert successor.get('worker_continuation') is None
+    assert 'supplied no scientific conclusion or advice' in successor['instruction']
+    after=accepted_budget.read(root)
+    assert after['prepared_count']==before['prepared_count']+1
+    assert after['dispatch_count']==before['dispatch_count']
+    assert after['usage']==before['usage'] and after['prefix']==before['prefix']
+    assert all(path.read_bytes()==value for path,value in frozen.items())
+    assert not (record/'result-identity.json').exists()
+    assert not (record/'science-output.json').exists()
+    assert not (record/'result.json').exists()
+
+
+def test_unavailable_advice_cannot_pass_pending_execution_or_nonexhausted_stop(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget,controller
+    root,settings,job,record,worker=_failed_optional_advice(tmp_path,'H')
+    monkeypatch.setattr(controller.budget,'execution_blocked',lambda root:True)
+    assert not controller._unavailable_consultation_route(root,settings,1,worker,job=job,record=record,**_optional_close_facts(root,record),
+        reason='automatic_recovery_attempt_limit')
+    assert not controller._unavailable_consultation_route(root,settings,1,worker,job=job,record=record,**_optional_close_facts(root,record),
+        reason='automatic_recovery_cleanup_unknown')
+    assert accepted_budget.read(root).current_job['status']=='terminal'
+    assert not (record/'consultation-unavailable.json').exists()
+
+
+def test_unavailable_advice_retains_unknown_native_cost_as_lower_bound(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget,controller
+    root,settings,job,record,worker=_failed_optional_advice(tmp_path,'H',unknown_cost=True)
+    before=accepted_budget.read(root)
+    assert controller._unavailable_consultation_route(root,settings,1,worker,job=job,record=record,**_optional_close_facts(root,record),
+        reason='automatic_recovery_attempt_limit')
+    after=accepted_budget.read(root)
+    assert after['usage']==before['usage'] and after['usage']['unknown_count']>=1
+    assert after['role_usage']==before['role_usage']
+    usage=accepted_budget.usage(root,head=after)
+    assert 2 in usage['unknown_steps'] and usage['blocking_unknown_steps']==[]
+
+
+def test_exhausted_advice_with_live_bridge_group_cannot_close_or_dispatch_w(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget,budget,controller,execution,runtime
+    root,settings,job,record,worker=_failed_optional_advice(tmp_path,'H')
+    binding=execution.identity(root,2,0)
+    c.write(record/'bridge-process.json',dict(task_ref=binding,boot_id=budget.clock_stamp()['boot_id'],
+        pid=2_000_000_000,start_ticks=1,pgid=2_000_000_000,sid=2_000_000_000,ppid=1))
+    before=accepted_budget.read(root)
+    frozen={path:path.read_bytes() for path in (record/'native-intent.json',record/'native-outcome.json',
+        record/'bridge-process.json')}
+    probes=[]
+    def live(receipts,actual_binding,*,current_boot):
+        assert actual_binding==binding and 'bridge-process.json' in receipts
+        probes.append(receipts)
+        return dict(status='running',reason='original_process_group_live')
+    monkeypatch.setattr(runtime,'probe_owned_processes',live)
+    assert not controller._unavailable_consultation_route(root,settings,1,worker,job=job,record=record,**_optional_close_facts(root,record),
+        reason='automatic_recovery_attempt_limit')
+    after=accepted_budget.read(root)
+    assert probes and after['seq']==before['seq'] and after['usage']==before['usage']
+    assert after.current_job['status']=='terminal'
+    assert all(path.read_bytes()==value for path,value in frozen.items())
+    assert not (record/'consultation-unavailable.json').exists()
+    assert not (root/'jobs/003.json').exists()
+
+
+def test_exhausted_advice_routes_to_w_in_same_controller_run(tmp_path,monkeypatch):
+    """Real accepted routing uses provider stubs and explicit owner facts."""
+    from scidiscovery.research_loop import controller
+    root,settings,job,record,worker=_failed_optional_advice(tmp_path,'H')
+    stopped=dict(phase='native_failure',stage='technical_pause',reason='automatic_recovery_attempt_limit',
+        pending_step=2,pending_role='H',repair_scope='worker_attempt',supported_actions=[])
+    def owner(root,job,record,outcome):
+        return stopped,_optional_close_facts(root,record)['source_facts']
+    calls=[]
+    def provider(root,step,**kwargs):
+        calls.append(step)
+        if step==2:raise controller._AutomaticRecoveryUnavailable('automatic_recovery_attempt_limit')
+        assert step==3
+        raise RuntimeError('Provider stub stops after W admission')
+    monkeypatch.setattr(continuation,'technical_stop_facts',owner)
+    monkeypatch.setattr(controller,'_native_call',provider)
+    result=controller.run(root)
+    assert calls==[2,3] and result['next_role']=='W'
+    assert c.read(root/'jobs/003.json')['role']=='W'
+    assert (record/'consultation-unavailable.json').exists()
+    assert not (record/'result-identity.json').exists()
+
+
 @pytest.mark.parametrize('purpose,role,action,expected',[
     ('worker_consultation','H','wait',True),('worker_consultation','A','wait',True),
     (None,'A','continue_w',True),(None,'A','finish',False),('closeout','A','continue_w',False)])
@@ -239,16 +417,27 @@ def test_runner_consumes_accepted_plan_without_reopening_source_originals(tmp_pa
 
 @pytest.mark.parametrize('final',[False,True])
 def test_new_reflection_request_requires_complete_investment_binding(final):
-    request=dict(version=1,cutoff=dict(total_rounds=0,source_step=None,round_id=None),
+    legacy_reflection=dict(version=1,cutoff=dict(total_rounds=0,source_step=None,round_id=None),
         due_reasons=[],budget_fraction=.3,automatic=not final,final=final,investment_cutoff=4,
         review_kind='final_assessment' if final else 'ordinary_reflection',
         reflection_scope='worker_question_clues_evidence')
-    assert c.supervision_binding(request,step=2,research_strategy_version=3)==request
-    incomplete=dict(request);incomplete.pop('investment_cutoff')
-    with pytest.raises(ValueError):c.supervision_binding(incomplete,step=2,research_strategy_version=3)
-    legacy={key:value for key,value in request.items()
+    with pytest.raises(ValueError):
+        c.supervision_binding(legacy_reflection,step=2,research_strategy_version=3)
+    legacy={key:value for key,value in legacy_reflection.items()
         if key not in {'investment_cutoff','review_kind','reflection_scope'}}
-    assert c.supervision_binding(legacy,step=2,research_strategy_version=3)==legacy
+    with pytest.raises(ValueError):
+        c.supervision_binding(legacy,step=2,research_strategy_version=3)
+    request=dict(legacy_reflection,policy_version=4,source_w=1,
+        adaptive_cutoff=dict(question_revision=1,receipts=4),
+        budget_scope=dict(tokens=300,seconds=18,limits=dict(tokens=1000,seconds=60),
+            complete=dict(tokens=True,seconds=True)))
+    options=dict(step=2,research_strategy_version=3,supervision_policy_version=4,
+        supervision_budget_basis=dict(max_tokens=1000,max_seconds=60))
+    assert c.supervision_binding(request,**options)==request
+    for field in ('investment_cutoff','adaptive_cutoff','policy_version','source_w','budget_scope'):
+        incomplete=dict(request);incomplete.pop(field)
+        with pytest.raises(ValueError):
+            c.supervision_binding(incomplete,**options)
 
 
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
@@ -260,8 +449,9 @@ def test_actual_continuation_wire_contract_including_repair_allowance_fits(
     from scidiscovery.research_loop.output_repair import OutputRepairRequired
     from test_result_schema import rendered_contract
     job=dict(role='W',step=3,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,
-        native_role_instruction=guidance.WORKER_FIRST['W'],formal_review_version=1,search={},
-        worker_fragment_policy=dict(context='same_session'),
+        advisory_scope_version=1,worker_view_version=1,native_subagents=backend_name=='codex',
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST['W'],formal_review_version=1,search={},
+        worker_fragment_policy=dict(context='same_session',context_handoff_version=2),
         scientific_work_unit=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode())))
     job['scientific_response_fields']=c.response_fields(job,{})
     job['role_purpose_instruction']=guidance.role_contract(job)

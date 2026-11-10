@@ -196,9 +196,14 @@ def project(reader, steps, clean, *, live_executions=None, partial=False):
                     status=row['status'],source_step=row.get('source_step'),source_role=row.get('source_role'),
                     question_truncated=item['question_truncated']))
         for call in live_executions.get('calls') or []:
-            binding=(call.get('display') or {}).get('research_binding')
+            display=call.get('display') or {}
+            binding=display.get('research_binding')
             event=dict(step=step,role='W',kind='live_call',call_id=clean(call['call_id'],128),
-                state=call.get('state','unknown'))
+                state=call.get('state','unknown'),updated_at=call.get('updated_at'),
+                entry=clean(display.get('entry') or '',300),purpose=clean(display.get('purpose') or '',2000),
+                metrics=[dict(name=clean(row['name'],200),value=clean(str(row['value']),200),
+                    unit=clean(row.get('unit') or '',80)) for row in display.get('metrics') or []],
+                metrics_partial=display.get('metrics_partial') is True,result_status=display.get('result_status'))
             if not isinstance(binding, dict):
                 live['unbound_calls'].append(event)
                 continue
@@ -218,6 +223,19 @@ def project(reader, steps, clean, *, live_executions=None, partial=False):
         first=shown[0] if shown else None, last=shown[-1] if shown else None)
 
 
+def _live_result(event):
+    body=''
+    if event.get('entry'):body+='<p><strong>'+ui.esc(event['entry'])+'</strong></p>'
+    if event.get('purpose'):body+='<p>目的：'+ui.translatable(event['purpose'])+'</p>'
+    result='；'.join(row['name']+' = '+row['value']+(' '+row['unit'] if row['unit'] else '')
+        for row in event['metrics'])
+    if not result:
+        result={'available':'无可展示的声明指标','missing':'结果指标未报告',
+            'invalid':'声明结果不可用','unavailable':'声明结果不可用'}.get(event.get('result_status'),'结果指标未报告')
+    if event.get('metrics_partial'):result+='（仅显示部分指标）'
+    return body+'<p>声明结果指标：'+ui.esc(result)+'</p>'
+
+
 def _event(event):
     step, role = event['step'], event['role']
     if event.get('kind') in {'live_declaration', 'live_call'}:
@@ -229,12 +247,14 @@ def _event(event):
             body+='<p class="note">'+provenance+'；声明不表示科学发现。</p>'
         else:
             body+='<p>原调用 '+ui.esc(event['call_id'])+' · '+ui.esc(CALL_STATES.get(event['state'],'状态未知'))+' · 准确绑定 revision '+str(event['revision'])+'</p>'
+            body+=_live_result(event)
             body+='<p class="note">执行观察不表示科学认可；此调用保留原绑定版本。</p>'
         source=event.get('source_step')
         if type(source) is int and source>0:
             body+='<p>'+ui.link('声明来源 '+(event.get('source_role') or '作者未记录')+' · 第 '+str(source)+' 阶段','/progress' if source==step else '/results/'+str(source))+'</p>'
         else:body+='<p class="note">声明来源阶段未记录。</p>'
-        if event.get('text'):body+='<p>'+ui.translatable(event['text'])+'</p>'
+        if event.get('text') and not (event['kind']=='live_call' and event.get('purpose')):
+            body+='<p>'+ui.translatable(event['text'])+'</p>'
         if event.get('question_truncated'):body+='<p class="note">问题仅显示已有公共摘要；完整声明待封存原文核对。</p>'
         return '<li class="mechanism-event">'+body+'</li>'
     body = '<h4 class="mechanism-event-head"><span class="role role-' + role + '">' + role + '</span> ' + ui.link('第 ' + str(step) + ' 阶段 · ' + ui_view.ROLE_LABELS[role], '/results/' + str(step)) + '</h4>'
@@ -294,6 +314,17 @@ def _summary(item, *, compact=False):
         body += '<div><dt>封存 W 作者发现' + (' · ' + ui.link('第 ' + str(latest_w['step']) + ' 阶段', '/results/' + str(latest_w['step'])) if latest_w else '') + '</dt><dd>' + (ui.translatable(finding) if finding else '本窗口尚未记录逐机制的作者发现。') + '</dd></div>'
         if item.get('question_truncated'):body+='<div><dt>摘要范围</dt><dd>问题仅显示已有公共摘要，完整声明待封存原文核对。</dd></div>'
         body += '</dl>'
+    results=[event for event in item['events'] if event.get('kind')=='live_call'
+        and (event['metrics'] or event.get('result_status')=='available')
+        and type(event.get('updated_at')) in (int,float)]
+    if results:
+        latest_time=max(event['updated_at'] for event in results)
+        latest=[event for event in results if event['updated_at']==latest_time]
+        # Owner timestamps establish recency; ties never become an inferred ranking.
+        if len(latest)==1:
+            event=latest[0]
+            body+='<div class="mechanism-live-result"><h4>最近实验结果</h4><p>原调用 '+ui.esc(event['call_id'])+' · '+ui.esc(CALL_STATES.get(event['state'],'状态未知'))+' · 准确绑定 revision '+str(event['revision'])+'</p>'
+            body+=_live_result(event)+'</div>'
     return body
 
 

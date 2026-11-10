@@ -12,11 +12,12 @@ import subprocess
 import sys
 import time
 
-from .pi_sessions import (CONTEXT_EVENT, LINE_BYTES, context_boundary, decode,
+from .pi_sessions import (CONTEXT_EVENT, LINE_BYTES, LFRecords, context_boundary, decode,
     exact_path, session_context, validate_header)
 
 HANDSHAKE_SECONDS = 15
 SHUTDOWN_SECONDS = 5
+# Prompt/handoff control limit, never a native event or session quota.
 REQUEST_BYTES = 64 * 1024 * 1024
 CONTEXT_SECONDS = 2
 ACCOUNTING_EVENTS = frozenset({'message_end', 'message_update', 'compaction_start', 'compaction_end', 'entry_appended'})
@@ -27,9 +28,30 @@ CONTROLLED_EXIT = 'pi.controlled_exit'
 class TransportFault(ValueError): pass
 
 
+# Only literal adapter-owned reasons may cross the private transport boundary.
+# Exceptions from JSON, the provider, paths or settings never supply public prose.
+FAULT_CODES = frozenset({
+    'duplicate_settlement', 'invalid_launcher', 'invalid_resume_proof', 'invalid_rpc_record',
+    'model_binding_mismatch', 'pi_observer_proof_invalid', 'pi_observer_source_unavailable',
+    'pi_observer_start_invalid', 'pi_observer_start_or_source_missing', 'prompt_not_started',
+    'request_limit', 'resource_binding_invalid', 'resource_binding_mismatch',
+    'resource_policy_invalid', 'resource_policy_missing_or_changed', 'resume_model_or_path_changed',
+    'rpc_command_failed', 'rpc_metadata_or_shutdown_timeout', 'rpc_write_limit',
+    'session_header_changed', 'session_header_incomplete', 'session_header_invalid',
+    'session_header_path_unsafe', 'session_identity_changed', 'session_not_exact_idle',
+    'session_not_fresh', 'thinking_binding_mismatch', 'unaccepted_settlement',
+    'unexpected_rpc_response', 'unverified_rpc_exit', 'unverified_rpc_transport',
+    'work_after_settlement', 'work_before_model_binding', 'incomplete_rpc_record',
+})
+
+
 def fault_event(error=None):
     # Do not stringify errors: they can contain private provider/config data.
-    return dict(type='pi_transport_fault')
+    event = dict(type='pi_transport_fault')
+    if (isinstance(error, TransportFault) and len(error.args) == 1
+            and isinstance(error.args[0], str) and error.args[0] in FAULT_CODES):
+        event['code'] = error.args[0]
+    return event
 
 
 def _header_line(path, *, with_identity=False):
@@ -49,7 +71,7 @@ def _header_line(path, *, with_identity=False):
 
 
 def record(line):
-    if len(line) > LINE_BYTES or not line.endswith(b'\n'): raise TransportFault('invalid_rpc_record')
+    if not line.endswith(b'\n'): raise TransportFault('invalid_rpc_record')
     value = decode(line.decode('utf-8'))
     if not isinstance(value, dict) or not isinstance(value.get('type'), str): raise TransportFault('invalid_rpc_record')
     return value
@@ -487,34 +509,33 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
         # The namespace launch owner acquired and admitted current settings.
         # This consumer never rereads them or substitutes an offline-only grant.
         # The exact policy was validated before argv parsing or Popen.
-    except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
-        emit(fault_event()); return 1
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError) as error:
+        emit(fault_event(error)); return 1
     binding = Binding(provider, model, thinking, path, prompt,
         expected_session=session['thread_id'] if session is not None else None, resources=resources,
         observation=observation, resource_mode=mode)
     process = popen(child, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     failed = emitted_header = closing = stdout_eof = False
     accepted_header = accepted_identity = None
-    buffered = []; buffered_bytes = 0
-    pending = outgoing = b''
+    buffered = []
+    framing = LFRecords()
+    pending = framing.pending
+    outgoing = bytearray()
     deadline = clock() + HANDSHAKE_SECONDS
     context_deadline = None
 
     def fault(error=None):
-        nonlocal failed, buffered_bytes
+        nonlocal failed
         if not failed:
             emit(fault_event(error))
             for event in buffered:
                 if event['type'] in ACCOUNTING_EVENTS: emit(event)
-            buffered.clear(); buffered_bytes = 0
+            buffered.clear()
         failed = True
 
-    def publish(event, *, size=None):
-        nonlocal buffered_bytes
+    def publish(event):
         if emitted_header: emit(event); return
         buffered.append(event)
-        buffered_bytes += size if size is not None else len(json.dumps(event, ensure_ascii=False).encode('utf-8'))
-        if buffered_bytes > LINE_BYTES: raise TransportFault('session_header_unavailable')
 
     def publish_context():
         nonlocal published_context
@@ -526,11 +547,11 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
         nonlocal outgoing, context_deadline
         if command is not None and not stdout_eof:
             if command['type'] == 'get_session_stats': context_deadline = clock() + CONTEXT_SECONDS
-            outgoing += (json.dumps(command, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+            outgoing.extend((json.dumps(command, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8'))
             if len(outgoing) > REQUEST_BYTES + LINE_BYTES: raise TransportFault('rpc_write_limit')
 
     def header(*, final=False):
-        nonlocal emitted_header, buffered_bytes, accepted_header, accepted_identity
+        nonlocal emitted_header, accepted_header, accepted_identity
         if binding.session_id is None or emitted_header and not final: return
         observed = _header_line(path, with_identity=True)
         line, identity = observed if observed is not None else (None, None)
@@ -544,7 +565,7 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
         emit(value)
         emitted_header = True; accepted_header = line; accepted_identity = identity
         for event in buffered: emit(event)
-        buffered.clear(); buffered_bytes = 0
+        buffered.clear()
 
     try:
         os.set_blocking(process.stdin.fileno(), False); os.set_blocking(process.stdout.fileno(), False)
@@ -561,24 +582,27 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
                         if stdout_eof: continue
                         try: count = os.write(process.stdin.fileno(), outgoing[:65536])
                         except BlockingIOError: continue
-                        outgoing = outgoing[count:]
+                        del outgoing[:count]
                         if not outgoing: selector.unregister(process.stdin)
                         continue
                     try: chunk = os.read(process.stdout.fileno(), 65536)
                     except BlockingIOError: continue
                     if not chunk:
                         stdout_eof = True; selector.unregister(process.stdout)
-                        context.stop(); context_deadline = None; outgoing = b''
+                        context.stop(); context_deadline = None; outgoing.clear()
                         if process.stdin in [item.fileobj for item in selector.get_map().values()]: selector.unregister(process.stdin)
-                        if pending: fault()
+                        if pending: fault(TransportFault('incomplete_rpc_record'))
                         if not binding.idle: fault()
                         continue
-                    pending += chunk
-                    while b'\n' in pending:
-                        line, pending = pending.split(b'\n', 1)
+                    for line in framing.feed(chunk):
                         value = None; retained = False
                         try:
-                            value = record(line + b'\n')
+                            value = record(line)
+                            if value['type'] == 'agent_end':
+                                # SDK 1.5 repeats every new message here. Individual
+                                # originals/session bytes are already retained; only
+                                # willRetry is consumed from this lifecycle event.
+                                value = {key: value[key] for key in ('type', 'willRetry') if key in value}
                             if failed:
                                 if value['type'] in ACCOUNTING_EVENTS: emit(value)
                                 continue
@@ -618,14 +642,13 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
                                 context.boundary(value); publish_context(); header()
                                 from .pi_observation import START
                                 if value['type'] not in {'agent_settled', START}:
-                                    retained = True; publish(value, size=len(line))
+                                    retained = True; publish(value)
                             if binding.prompt_sent and not closing:
                                 deadline = ((deadline or clock() + HANDSHAKE_SECONDS)
                                     if binding.settled is not None else None)
                         except (ValueError, TypeError, UnicodeError, RecursionError) as error:
                             fault(error)
                             if not retained and value is not None and value['type'] in ACCOUNTING_EVENTS: emit(value)
-                    if len(pending) > LINE_BYTES: raise TransportFault('rpc_record_limit')
                     if not failed: send(context.request(enabled=binding.prompt_sent and binding.settled is None))
                 if not failed and not emitted_header: header()
                 if outgoing and not closing and process.stdin not in [key.fileobj for key in selector.get_map().values()]:

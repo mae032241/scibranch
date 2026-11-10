@@ -5,14 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import breadth, worker_research as research, supervision
+from scidiscovery.research_loop import breadth, protocol, worker_research as research, supervision
+from current_strategy_fixtures import budget_facts, current_policy
 
 
 def config(tmp_path, step=1):
     return dict(research_strategy_version=3,worker_research_goal_id='fixture',record_dir=str(tmp_path/'records'),breadth=None,
         scope=dict(step=step,role='W',job_ref=dict(path=str(tmp_path/'jobs'/f'{step:03d}.json')),
             execution_key=dict(path=str(tmp_path/'native-evidence'/f'{step:03d}'/'native-intent.json')),
-            mechanism_ref=None,handoff_protocol=13))
+            mechanism_ref=None,handoff_protocol=protocol.CURRENT))
 
 
 def batch(ref='w001.m1', *, action='declare', question='Which retained input can distinguish this explanation?', **extra):
@@ -94,25 +95,19 @@ def test_rename_requires_explicit_revision_and_retired_requires_resume(tmp_path)
 
 
 def test_original_investment_deduplicates_query_recovery_and_continuation():
-    selected=dict(supervision.WORKER_FIRST_POLICY,mode='review',max_automatic_reviews=2,consecutive_calls=2)
+    selected=dict(supervision.DEFAULT_POLICY,mode='review',max_automatic_reviews=2,consecutive_calls=2)
     state=supervision.empty(selected)
-    fact=dict(original_call_id='original-job:call-1',mechanism_ref='w001.m1',predecessors=[])
+    fact=dict(original_call_id='original-job:call-1',mechanism_ref='w001.m1',predecessors=[],completed_receipt=True)
     state=supervision.add_investment(state,fact)
     for _ in range(3):state=supervision.add_investment(state,fact)
     assert state['investment']['total_calls']==1 and not supervision.due(state)['due']
     state=supervision.add_investment(state,dict(fact,original_call_id='original-job:call-2'))
-    assert state['investment']['total_calls']==2 and supervision.due(state)['automatic_allowed']
+    assert state['investment']['total_calls']==2
+    assert supervision.due(state,budget_facts=budget_facts(.2))['automatic_allowed']
     assert state['total_rounds']==0  # Receipts never manufacture scientific rounds.
     with pytest.raises(ValueError,match='changed'):supervision.add_investment(state,dict(fact,mechanism_ref='w002.renamed'))
 
 
-def test_worker_first_default_never_forces_budget_checkpoint_reflection():
-    state=supervision.empty(supervision.WORKER_FIRST_POLICY)
-    for number in range(12):
-        state=supervision.add_investment(state,dict(original_call_id=str(number),mechanism_ref='w001.m1'))
-    assert not supervision.due(state,budget_fraction=.95)['due']
-    legacy=supervision.empty()
-    assert supervision.due(legacy,budget_fraction=.65)['automatic_allowed']
 
 
 def test_cross_w_seed_preserves_retired_identity_revision_and_explicit_resume(tmp_path):
@@ -132,7 +127,7 @@ def test_cross_w_seed_preserves_retired_identity_revision_and_explicit_resume(tm
 
 
 def test_merge_investment_is_original_union_even_when_parents_share_ancestry():
-    state=supervision.empty(supervision.WORKER_FIRST_POLICY)
+    state=supervision.empty(supervision.DEFAULT_POLICY)
     state=supervision.add_investment(state,dict(original_call_id='original:1',mechanism_ref='w001.root'))
     state=supervision.declare_investment(state,dict(mechanism_ref='w001.left',predecessors=['w001.root']))
     state=supervision.declare_investment(state,dict(mechanism_ref='w001.right',predecessors=['w001.root']))
@@ -142,7 +137,7 @@ def test_merge_investment_is_original_union_even_when_parents_share_ancestry():
 
 
 def test_live_investment_uses_exact_scope_and_does_not_recount_sealed_originals(tmp_path):
-    selected=config(tmp_path);scope=selected['scope'];state=supervision.empty(supervision.WORKER_FIRST_POLICY)
+    selected=config(tmp_path);scope=selected['scope'];state=supervision.empty(supervision.DEFAULT_POLICY)
     _,binding=research.prepare(selected,research.initial(selected),batch())
     accepted=dict(call_id='call-1',scope=scope,mechanism_binding=binding)
     live=research.investment(scope,[accepted,accepted])
@@ -191,26 +186,6 @@ def test_unpublished_accepted_preparation_uses_saved_v3_binding_without_current_
     with pytest.raises(ValueError):recovery._accepted(tmp_path/'unpublished',retained,selected,dict(path='original-snapshot'))
 
 
-def test_legacy_preparation_recovery_retains_its_frozen_breadth_gate(tmp_path,monkeypatch):
-    from scidiscovery.research_loop import preparation_recovery as recovery
-    selected=config(tmp_path);selected['research_strategy_version']=2
-    prepared=dict(name='original-call',local_path=str(tmp_path/'source.py'),size_bytes=4)
-    accepted=dict(call_id='original-call',scope=selected['scope'],native_attempt={'number':0},
-        interface={'version':1},prepared=prepared,source_script=prepared['local_path'],
-        script=dict(path=str(Path(selected['record_dir'])/'calls/original-call/source.py'),size_bytes=4),
-        snapshot_files=[],parent=dict(candidate_id=None),mechanism_binding=None)
-    retained=dict(records=selected['record_dir'],call_id='original-call',prepared=prepared,
-        scope=selected['scope'],native_attempt=accepted['native_attempt'],interface=accepted['interface'],
-        acceptance_base=recovery._acceptance_base(accepted),input_inventory=[])
-    monkeypatch.setattr(recovery,'_json',lambda *args:copy.deepcopy(accepted))
-    monkeypatch.setattr(recovery,'_local_unbound_acceptance',lambda *args:True)
-    monkeypatch.setattr(recovery,'_direct_input',lambda *args:False)
-    monkeypatch.setattr(recovery,'_tree',lambda *args,**kwargs:None)
-    observed=[]
-    monkeypatch.setattr(breadth,'check_binding',lambda value,binding,scope:observed.append((value,binding,scope)))
-    monkeypatch.setattr(research,'check_binding',lambda *args:pytest.fail('Legacy originals must keep the legacy gate'))
-    recovery._accepted(tmp_path/'unpublished',retained,selected,dict(path='original-snapshot'))
-    assert observed==[(None,None,selected['scope'])]
 
 
 def test_authority_allocation_retains_full_preflight_identity_before_preparation(tmp_path,monkeypatch):
@@ -307,11 +282,12 @@ def test_multilevel_no_call_merge_preserves_consecutive_original_investment(tmp_
     live=research.investment(selected['scope'],accepted,research_state=state)
     assert live['total_calls']==4 and live['consecutive_calls']==4
     assert set(live['predecessors'])=={'w001.m1','w001.m2'}
-    cumulative=supervision.empty(dict(supervision.WORKER_FIRST_POLICY,mode='review',max_automatic_reviews=2))
+    cumulative=supervision.empty(dict(supervision.DEFAULT_POLICY,mode='review',max_automatic_reviews=2))
     for row in state['mechanisms'].values():cumulative=supervision.declare_investment(cumulative,row)
     for row in accepted:cumulative=supervision.add_investment(cumulative,research.call_fact(row,selected['scope']))
-    assert cumulative['investment']['consecutive_calls']==4 and supervision.due(cumulative)['automatic_allowed']
-    previous=supervision.empty(supervision.WORKER_FIRST_POLICY)
+    assert cumulative['investment']['consecutive_calls']==4
+    assert not supervision.due(cumulative)['automatic_allowed']  # Missing consumption is not authorization.
+    previous=supervision.empty(supervision.DEFAULT_POLICY)
     for row in state['mechanisms'].values():previous=supervision.declare_investment(previous,row)
     for row in accepted[:3]:previous=supervision.add_investment(previous,research.call_fact(row,selected['scope']))
     assert supervision.with_live_investment(previous,live,scope=selected['scope'])['investment']['consecutive_calls']==4

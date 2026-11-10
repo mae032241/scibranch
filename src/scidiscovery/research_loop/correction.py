@@ -1,7 +1,9 @@
 """Sealed A assessments and immutable correction/ack facts, without a scheduler."""
 from __future__ import annotations
 
-from . import budget, execution
+from dataclasses import replace
+
+from . import budget, execution, guidance
 
 import json
 import re
@@ -321,23 +323,22 @@ def publish(root, cutoff):
 
 def effective_route(root, step, result, job, route):
     """Historical cutoff protects retained jobs from later progress or ack."""
-    role, parents, instruction, evidence_return, current_h, current_w = route
+    role, instruction = route.role, route.instruction
     request = None
     if job.get('purpose')=='worker_consultation':
-        return role,parents,instruction,evidence_return,current_h,current_w,None
+        return route
     state = project(root, step + 1)
     review = state['review_request']
     if job['role'] == 'A' and review is not None and result['next_action'] in {'continue_w', 'revise_h'}:
         role = 'H'
         request = dict(trigger_id=review['trigger_id'])
-        instruction += f'\nControl requires H to reconsider {review["reason"]} after sealed A {review["step"]}; '
-        instruction += 'own the scientific response; the prior A conclusion is unchanged.'
+        instruction += guidance.correction_reconsideration(review['reason'],review['step'])
     elif job['role'] == 'E' and role == 'H':
         # Base E routing clears evidence_return; use its original requester.
         from . import originals
         requester = originals.source_job(originals.node(root, job['evidence_return']['step']))
         request = requester.get('correction_request')
-    return role, parents, instruction, evidence_return, current_h, current_w, request
+    return replace(route,role=role,instruction=instruction,correction_request=request)
 
 
 def validate_job(root, job):

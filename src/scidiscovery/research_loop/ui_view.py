@@ -894,9 +894,19 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
         if view.get('paused'):
             headline = '研究已暂停；' + headline
     elif state == 'service_wait':
-        headline = '等待服务恢复：' + str(recovery.get('reason') or '有界退避后重新核对原任务')
+        headline = '等待服务恢复'
+        retries,continues=recovery.get('retry_count'),recovery.get('continue_count')
+        known_retries=type(retries) is int and retries>=0
+        known_continues=type(continues) is int and continues>=0
+        if known_retries and known_continues:
+            headline+='；已自动恢复 '+str(retries+continues)+' 次（retry '+str(retries)+' / continue '+str(continues)+'）'
+        elif known_retries:
+            headline+='；已重试 '+str(retries)+' 次'
+        elif known_continues:
+            headline+='；已接续 '+str(continues)+' 次'
         if recovery.get('next_attempt_at') is not None:
             headline += '；下次仲裁（UTC）' + str(recovery['next_attempt_at'])
+        headline+='；'+str(recovery.get('reason') or '有界退避后重新核对原任务')
         if clean is not None:
             headline = clean(headline, 900)
     elif state == 'waiting':
@@ -947,6 +957,23 @@ def exhausted_limits(view, used_steps):
 
 # ---------------------------------------------------------------- usage
 
+def context_timestamp(context, *, now=None):
+    """Select a valid original context time; the wall clock only bounds it."""
+    if not isinstance(context, dict):
+        return None
+    now = time.time() if now is None else now
+    for timestamp in (context.get('observed_at'), context.get('reported_at')):
+        if (type(timestamp) not in (int, float) or not 0 <= timestamp <= now
+                or type(timestamp) is float and not math.isfinite(timestamp)):
+            continue
+        try:
+            time.gmtime(timestamp)
+        except (OverflowError, OSError, ValueError):
+            continue
+        return timestamp
+    return None
+
+
 def token_details(usage, context=None, *, context_display=None):
     """Shared overview and exact-attempt labels; context is never accumulated."""
     meter = native_usage.tokens(usage)
@@ -963,15 +990,14 @@ def token_details(usage, context=None, *, context_display=None):
     updated = '未知'
     if telemetry['status'] == 'last_reported':
         value = f'{fmt_int(telemetry["total_tokens"])} / {fmt_int(telemetry["model_context_window"])} · {telemetry["ratio"]:.1%}'
-        now = time.time()
-        for timestamp in (telemetry.get('observed_at'), telemetry.get('reported_at')):
-            if type(timestamp) not in (int, float) or not 0 <= timestamp <= now:
-                continue
-            try:
-                updated = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(timestamp))
-            except (OverflowError, OSError, ValueError):
-                continue
-            break
+        # The retained time is independent of the currently displayed numeric
+        # sample; never attach it to that sample's original telemetry.
+        timestamp_source = (dict(observed_at=context_display['last_updated_at'])
+            if isinstance(context_display, dict) and 'last_updated_at' in context_display
+            and context_display.get('status') in {'current', 'historical'} else telemetry)
+        timestamp = context_timestamp(timestamp_source)
+        if timestamp is not None:
+            updated = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(timestamp))
     else:
         value = '不可用'
     details.append(dict(label='上下文', value=value))

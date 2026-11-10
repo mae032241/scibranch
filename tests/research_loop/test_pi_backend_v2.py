@@ -516,6 +516,36 @@ def test_original_provider_diagnostics_keep_permanent_unknown_veto(text, categor
     assert permanent['category'] == 'permanent'
 
 
+@pytest.mark.parametrize('field', ['errorMessage', 'finalError'])
+def test_exact_native_fetch_failure_has_common_connection_fact_without_rejection_authority(field):
+    source = {field: 'fetch failed'}
+    original = copy.deepcopy(source)
+    failure = pi.failure_projection(source)
+    assert failure['category'] == 'temporary'
+    assert failure['codes'] == ['connection_error'] and failure['statuses'] == []
+    assert failure['message_patterns'] == ['pi_native_fetch_failed_v1']
+    assert failure['not_accepted'] is False and source == original
+    permanent = pi.failure_projection(dict(source, code='invalid_api_key', status=401))
+    assert permanent['category'] == 'permanent' and permanent['statuses'] == [401]
+    assert permanent['codes'] == ['connection_error', 'invalid_api_key']
+    assert pi.failure_projection(dict(source, accepted=False))['not_accepted'] is True
+    assert pi.failure_projection(dict(source, accepted=True))['not_accepted'] is False
+
+
+@pytest.mark.parametrize('text', ['Reported: fetch failed', 'fetch failed\n', 'fetch failed: private request'])
+def test_fetch_failure_translation_does_not_classify_prose_or_another_backend(text):
+    from scidiscovery.research_loop import native_recovery
+    assert pi.failure_projection(dict(errorMessage=text))['category'] == 'unknown'
+    assert native_recovery.classify(dict(type='error', message='fetch failed'))['category'] == 'unknown'
+    assert pi.failure_projection(dict(message='fetch failed'))['category'] == 'unknown'
+
+
+def test_native_fetch_failure_is_not_inferred_from_scientific_text(tmp_path):
+    backend = bind_engine(tmp_path)
+    assert 'failure' not in backend.event(dict(type='message_end', message=message('fetch failed')))
+    assert backend.event(dict(type='agent_settled', aborted=False)) == dict(completed=True, result_text='fetch failed')
+
+
 def test_temporary_failure_needs_same_native_retry_proof(tmp_path):
     backend = bind_engine(tmp_path)
     failure = backend.event(dict(type='error', code='rate_limit_exceeded'))['failure']

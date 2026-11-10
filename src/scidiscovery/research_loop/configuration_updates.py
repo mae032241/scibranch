@@ -74,7 +74,8 @@ def _reference(root, row):
     return dict(revision=row['revision'], path=path.relative_to(Path(root)).as_posix())
 
 
-def _revision(root, ref, *, head):
+def _accepted_reference(ref, *, head):
+    """Check exact accepted reference metadata without interpreting its policy."""
     if not isinstance(ref, dict) or set(ref) != {'revision', 'path'} or type(ref.get('revision')) is not int or ref['revision'] < 1:
         raise ValueError('Exact configuration revision reference required')
     expected = f'host-control/configuration/revisions/{ref["revision"]:06d}.json'
@@ -83,9 +84,16 @@ def _revision(root, ref, *, head):
     accepted = head.row(f'configuration/{ref["revision"]:06d}')
     if accepted is None or accepted['ref'] != dict(path=expected):
         raise ValueError('Configuration revision has not been accepted')
+    return expected
+
+
+def _revision(root, ref, *, head):
+    expected = _accepted_reference(ref, head=head)
     value = c.read(c.regular(Path(root) / expected))
     if value.get('revision') != ref['revision']:
         raise ValueError('Configuration revision is missing or changed')
+    from .protocol import require_settings_format
+    require_settings_format(value.get('settings'))
     return value
 
 
@@ -182,10 +190,18 @@ def _current_revision(root, *, head):
 
 def editable(root):
     """Editor projection: shared ledger ceilings plus explicit pending changes."""
-    from . import budget
     root = Path(root)
     values = revisions(root)
     settings = copy.deepcopy(values[-1]['settings']) if values else c.settings(root)
+    from .protocol import require_settings_format
+    require_settings_format(settings)
+    return _editable_settings(root, values=values, settings=settings)
+
+
+def _editable_settings(root, *, values, settings):
+    """Project the owner's already accepted latest policy and revision facts."""
+    from . import budget
+    settings = copy.deepcopy(settings)
     latest = len(values)
     bound = any((c.read(c.regular(path)).get('configuration_revision') or {}).get('revision', 0) == latest
                 for path in (_directory(root) / 'bindings').glob('*.json'))
@@ -200,10 +216,11 @@ def editable(root):
 
 
 def status(root):
-    from . import research_config
+    from . import accepted_budget, research_config
     root = Path(root).resolve()
     values = revisions(root)
     latest = len(values)
+    head = accepted_budget.read(root)
     active_ref = None
     steps = set(int(path.stem) for path in (_directory(root) / 'bindings').glob('*.json'))
     steps.update(int(path.stem) for path in (root / 'jobs').glob('*.json'))
@@ -211,16 +228,22 @@ def status(root):
         path = root / 'jobs' / f'{step:03d}.json'
         if path.exists():
             job = c.read(c.regular(path))
-            for_job(root, job)
             active_ref = job.get('configuration_revision')
         else:
-            from . import accepted_budget
-            head = accepted_budget.read(root)
             reserved = _reservation(root, step, head=head)
-            policy_for_job(root, reserved, base=head.base, head=head)
             active_ref = reserved['configuration_revision']
-    settings = editable(root)
-    active = for_job(root, dict(configuration_revision=active_ref))
+        if active_ref is not None:
+            _accepted_reference(active_ref, head=head)
+            if active_ref['revision']>latest:
+                raise ValueError('Configuration revision is missing or changed')
+    from .protocol import require_settings_format
+    latest_settings = values[-1]['settings'] if values else head.base
+    require_settings_format(latest_settings)
+    settings = _editable_settings(root, values=values, settings=latest_settings)
+    active_settings = values[active_ref['revision']-1]['settings'] if active_ref is not None else head.base
+    if active_settings is not latest_settings:
+        require_settings_format(active_settings)
+    active = copy.deepcopy(active_settings)
     return dict(status='configuration_inspected', revision=latest,
                 active_revision=(active_ref or {}).get('revision', 0), pending=latest != (active_ref or {}).get('revision', 0),
                 effective_from='next_new_node', configuration=research_config.to_document(root, settings),

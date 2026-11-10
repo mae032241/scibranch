@@ -14,10 +14,11 @@ import stat
 
 from .native_usage import FIELDS, MAX_SAFE_INTEGER, context as context_projection, context_windows
 
+# Headers/settings are compact control records. Native JSONL records and whole
+# session originals have no byte quota; READ_BYTES is only an acquisition chunk.
 LINE_BYTES = READ_BYTES = 1024 * 1024
 ANCHOR_BYTES = 4096
 MAX_ENTRIES = 65536
-RESUME_BYTES = 64 * 1024 * 1024
 SESSION_NAME = 'pi-session.jsonl'
 CATEGORIES = ('assistant', 'toolResult', 'compaction', 'branch_summary', 'usage')
 CONTEXT_EVENT = 'pi_context_usage'
@@ -37,6 +38,37 @@ def decode(line):
     if isinstance(line, bytes):line = line.decode('utf-8')
     return json.loads(line, object_pairs_hook=_object,
         parse_constant=lambda value: (_ for _ in ()).throw(ValueError('invalid_json_constant')))
+
+
+class LFRecords:
+    """Frame arbitrary native records without repeatedly copying a growing row.
+
+    JSON decoding still requires a complete individual record in memory. The
+    chunk size bounds each read, not the record or retained original's size.
+    """
+    def __init__(self): self.pending = bytearray()
+
+    def feed(self, data):
+        start = 0
+        while True:
+            end = data.find(b'\n', start)
+            if end < 0:
+                self.pending.extend(data[start:]); return
+            self.pending.extend(data[start:end + 1])
+            line = bytes(self.pending); self.pending.clear()
+            yield line
+            start = end + 1
+
+
+def original_records(stream, remaining):
+    """Read exactly the owner's stat snapshot, one acquisition chunk at a time."""
+    framing = LFRecords()
+    while remaining:
+        chunk = stream.read(min(READ_BYTES, remaining))
+        if not chunk: raise ValueError('Pi original truncated during acquisition')
+        remaining -= len(chunk)
+        yield from framing.feed(chunk)
+    if framing.pending: raise ValueError('Pi original partial line')
 
 
 def exact_path(value):
@@ -99,7 +131,7 @@ def validate_resume_binding(session, workspace, home):
     identity, size, digest = session.get('identity'), session.get('size_bytes'), session.get('sha256')
     if (not isinstance(identity, list) or len(identity) != 2
             or any(type(n) is not int or n < 0 for n in identity)
-            or type(size) is not int or not 0 < size <= RESUME_BYTES
+            or type(size) is not int or size <= 0
             or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)):
         raise ValueError('Original Pi session proof changed')
     return path
@@ -251,7 +283,7 @@ def open_original(home, path):
 
 
 def load_resume_original(session, workspace, home, *, resource_mode='closed'):
-    """One bounded producer read, retained by the attempt owner for its meter."""
+    """One chunked producer acquisition retained by the attempt owner for its meter."""
     path = validate_resume_binding(session, workspace, home)
     validator = ResumeEntries(session['profile'], resource_mode=resource_mode); digest = hashlib.sha256()
     with open_original(home, path) as stream:
@@ -266,10 +298,7 @@ def load_resume_original(session, workspace, home, *, resource_mode='closed'):
         validate_header(header, session['thread_id'], workspace)
         if header.decode('utf-8') != session['header']:raise ValueError('Pi resume header changed')
         digest.update(header)
-        while stream.tell() < info.st_size:
-            line = stream.readline(min(LINE_BYTES + 1, info.st_size - stream.tell()))
-            if not line or len(line) > LINE_BYTES or not line.endswith(b'\n'):
-                raise ValueError('Pi resume partial or oversized line')
+        for line in original_records(stream, info.st_size - stream.tell()):
             digest.update(line); validator.entry(decode(line))
         if digest.hexdigest() != session['sha256']:raise ValueError('Pi resume original changed')
         if not header.endswith(b'\n') or not validator.conversation or validator.tools:
@@ -303,7 +332,7 @@ def recheck_prefix(original, *, phase='prelaunch'):
     with open_original(session['home'], session['path']) as stream:
         info = os.fstat(stream.fileno())
         if ((info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino)
-                or info.st_size < expected.st_size or info.st_size > RESUME_BYTES
+                or info.st_size < expected.st_size
                 or phase == 'prelaunch' and info.st_size != expected.st_size):
             raise ValueError('Pi resume original replaced, resized or has unaccounted append')
         digest = hashlib.sha256(); remaining = expected.st_size
@@ -319,10 +348,7 @@ def recheck_prefix(original, *, phase='prelaunch'):
             fields = {'model_change': {'provider', 'modelId'},
                 'thinking_level_change': {'thinkingLevel'}}
             if validator.resource_mode == 'configured':fields['custom'] = {'customType'}
-            while stream.tell() < info.st_size:
-                line = stream.readline(min(LINE_BYTES + 1, info.st_size - stream.tell()))
-                if not line or len(line) > LINE_BYTES or not line.endswith(b'\n'):
-                    raise ValueError('Pi resume setup partial or oversized line')
+            for line in original_records(stream, info.st_size - stream.tell()):
                 value = decode(line)
                 if (not isinstance(value, dict) or not isinstance(value.get('type'), str)
                         or value['type'] not in fields
@@ -466,12 +492,16 @@ class SessionUsage:
         self.baseline_offset = 0
         self.context_state = context_windows(context_state)
         self.offset = 0
-        self.pending = b''
-        self.skipping = False
+        self.framing = LFRecords()
+        self.pending = self.framing.pending
         self.identity = self.header = self.mtime = None
         self.anchor = b''
         self.reason = 'session_unavailable'
         self.fault = None
+        # Missing billing is not evidence that the original/branch is corrupt.
+        # Keep this sticky across later reports: unknown historical debits must
+        # neither disappear nor be charged again as a manufactured baseline.
+        self.usage_reason = None
         self.known = _zeros()
         self.observed = self.finished = False
         self.persisted = {key: _zeros() for key in CATEGORIES}
@@ -503,8 +533,8 @@ class SessionUsage:
         # Only stopped-writer, rehashed bytes can become a reusable proof.
         # Live incremental hashes/anchors alone cannot attest an early prefix.
         if (self.verified_offset != self.offset or self.identity is None
-                or self.header is None or self.profile is None or self.fault or self.reason
-                or self.pending or self.skipping):
+                or self.header is None or self.profile is None or self.fault or self.reason or self.usage_reason
+                or self.pending):
             return None
         return dict(backend='pi', home=str(self.home), workspace=str(self.workspace), path=str(self.path),
             thread_id=self.thread, profile=dict(self.profile), header=self.header.decode('utf-8'),
@@ -557,10 +587,12 @@ class SessionUsage:
             return
         elif kind not in {'usage', 'compaction', 'branch_summary'}: raise ValueError('unknown_session_entry')
         converted = usage_tokens(usage)
-        if converted is None: raise ValueError('pi_session_usage_unreported')
         if kind == 'message': self.persisted_messages[identity] = converted
-        for key in FIELDS: self.persisted[category][key] += converted[key]
         self.counts[category] += 1
+        if converted is None:
+            self.usage_reason = self.usage_reason or 'pi_session_usage_unreported'
+            return
+        for key in FIELDS: self.persisted[category][key] += converted[key]
         self.observed = True
 
     def _poll_original(self):
@@ -593,25 +625,16 @@ class SessionUsage:
                 data = stream.read(min(READ_BYTES, info.st_size - self.offset))
                 self.digest.update(data)
                 self.offset += len(data)
-                chunks = data.split(b'\n')
-                for index, part in enumerate(chunks):
-                    if not self.skipping:
-                        self.pending += part
-                        if len(self.pending) > LINE_BYTES:
-                            self.pending = b''; self.skipping = True
-                            self.fault = self.fault or 'session_line_oversized'
-                    if index < len(chunks) - 1:
-                        if not self.skipping:
-                            try: self._entry(self.pending)
-                            except (ValueError, TypeError, UnicodeError, RecursionError):
-                                self.fault = self.fault or 'pi_session_usage_invalid'
-                        self.pending = b''; self.skipping = False
+                for line in self.framing.feed(data):
+                    try: self._entry(line)
+                    except (ValueError, TypeError, UnicodeError, RecursionError):
+                        self.fault = self.fault or 'pi_session_usage_invalid'
                 stream.seek(max(0, self.offset - ANCHOR_BYTES))
                 self.anchor = stream.read(min(self.offset, ANCHOR_BYTES))
                 self.mtime = info.st_mtime_ns
                 self.reason = ('session_read_backlog' if self.offset < info.st_size
-                    else 'session_partial_line' if self.pending or self.skipping
-                    else None if self.observed else 'token_counter_unreported')
+                    else 'session_partial_line' if self.pending
+                    else None if self.observed or self.usage_reason else 'token_counter_unreported')
         except FileNotFoundError:
             if self.identity is not None: self.fault = 'session_log_missing'
             self.reason = 'session_unavailable'
@@ -644,8 +667,7 @@ class SessionUsage:
         try:
             with self._open() as stream:
                 info = os.fstat(stream.fileno())
-                if ((info.st_dev, info.st_ino) != self.identity or info.st_size != self.offset
-                        or info.st_size > RESUME_BYTES):
+                if ((info.st_dev, info.st_ino) != self.identity or info.st_size != self.offset):
                     raise ValueError('session_terminal_snapshot_unavailable')
                 digest = hashlib.sha256(); remaining = self.offset
                 while remaining:
@@ -671,7 +693,7 @@ class SessionUsage:
         if not self.fault and self.reason is None:
             self._verify_stopped_original()
         if self.events is not None and self.events.partial_open: self.reason = 'pi_partial_message_unfinished'
-        if not self.fault and self.reason is None and self.events is not None:
+        if not self.fault and self.reason is None and not self.usage_reason and self.events is not None:
             for identity, usage in self.events.records.items():
                 persisted = self.persisted_messages.get(identity)
                 if persisted is None or usage is not None and persisted != usage:
@@ -685,7 +707,7 @@ class SessionUsage:
 
     def snapshot(self):
         self._project()
-        reason = self.fault or (self.events.fault if self.events else None) or self.reason
+        reason = self.fault or (self.events.fault if self.events else None) or self.reason or self.usage_reason
         result = dict(source='pi_session_usage', thread_id=self.thread, tokens=dict(self.known),
             coverage='unknown' if reason else 'terminal' if self.finished else 'live', reason=reason,
             has_observation=self.observed, baseline_tokens=_zeros() if self.resumed else None,

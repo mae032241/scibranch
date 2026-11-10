@@ -112,11 +112,12 @@ GROUP_FIELDS = {
         Field('policies.resume.output_only', '恢复时只修复输出', 'boolean'),
         Field('policies.resume.native_home', '冻结的原生主目录（绝对路径）'),
         Field('policies.resume.automatic_recovery.enabled', '允许有界自动接续当前任务', 'boolean', placeholder='依后端能力与声明决定'),
-        Field('policies.resume.automatic_recovery.max_continues', '提前停止的 continue 上限（次）', 'integer', placeholder='2'),
-        Field('policies.resume.automatic_recovery.max_retries', '临时服务故障 retry 上限（次）', 'integer', placeholder='3'),
-        Field('policies.resume.automatic_recovery.initial_backoff_seconds', '首次服务退避（秒）', 'number', placeholder='30'),
+        Field('policies.resume.automatic_recovery.max_attempts', '最大重试次数（retry + continue 总计）', 'integer', placeholder='8'),
+        Field('policies.resume.automatic_recovery.max_continues', '提前停止的 continue 子上限（次）', 'integer', placeholder='8'),
+        Field('policies.resume.automatic_recovery.max_retries', '临时服务故障 retry 子上限（次）', 'integer', placeholder='8'),
+        Field('policies.resume.automatic_recovery.initial_backoff_seconds', '首次服务退避（秒）', 'number', placeholder='5'),
         Field('policies.resume.automatic_recovery.max_backoff_seconds', '单次服务退避上限（秒）', 'number', placeholder='300'),
-        Field('policies.resume.automatic_recovery.jitter_fraction', '服务退避抖动比例（0–1）', 'number', placeholder='0.1'),
+        Field('policies.resume.automatic_recovery.jitter_fraction', '服务退避抖动比例（0–1）', 'number', placeholder='0'),
         Field('policies.resume.automatic_recovery.max_wait_seconds', '累计服务等待上限（秒）', 'number', placeholder='1800'),
     ],
 }
@@ -613,6 +614,7 @@ def render(draft, *, edit=False):
         'policies.resume.output_only': '启用需同时允许修复输出；此授权仅允许输出补填。自动接续当前未完成任务须由下方独立策略明确允许。',
         'policies.resume.native_home': '仅在“只修复输出”启用时使用，必须是规范绝对路径。这里只保存路径引用。',
         'policies.resume.automatic_recovery.enabled': '独立允许支持的后端在原会话接续未完成任务，以及原请求明确尚未开始时的有限启动重试。不会新开上下文、扩大权限或重新提交未知外部调用。已有显式策略留空不新增此授权。',
+        'policies.resume.automatic_recovery.max_attempts': '单位：次。同一任务原 attempt 链的 retry 与 continue 合计上限；新配置的后端默认值为 8。0 禁用自动恢复。已有显式策略未声明此项时保留原义，不自动补入总上限。保存后从下一个新节点生效；已消耗次数和等待不清零。',
         'policies.resume.automatic_recovery.max_continues': '单位：次。同一任务的原 attempt 链中，提前停止后最多追加的同会话工作次数；与临时故障重试分别累计，推进和重启均不清零。0 禁用此类接续。',
         'policies.resume.automatic_recovery.max_retries': '单位：次。同一任务的原 attempt 链中，对明确可恢复的临时限流、容量或连接故障最多重试次数；永久错误和未知原因不重试，推进和重启均不清零。0 禁用此类重试。',
         'policies.resume.automatic_recovery.initial_backoff_seconds': '单位：秒。首次服务退避的有限时长；后续指数增长，仍受单次及累计等待上限约束。',
@@ -678,14 +680,22 @@ def render(draft, *, edit=False):
                     missing = object()
                     if _get(remainder, key, missing) is not missing:
                         _delete(remainder, key)
-                contents = '<div class="config-grid config-grid-four">'+''.join(control(child, advanced=True) for child in GROUP_FIELDS[field.path])+'</div>'
+                children=GROUP_FIELDS[field.path]
+                if field.path=='policies.resume':
+                    primary_paths={'policies.resume.automatic_recovery.enabled','policies.resume.automatic_recovery.max_attempts'}
+                    contents='<p class="note recovery-scope">保存后从下一个新节点生效；已经准备、正在运行或恢复的节点继续使用原配置。已消耗的重试、接续次数与等待时间不会清零。</p>'
+                    contents+='<div class="config-grid">'+''.join(control(child) for child in children if child.path in primary_paths)+'</div>'
+                    contents+='<p class="note">支持有界自动恢复的后端，新配置默认 retry + continue 总上限为 8 次。已有显式策略未声明总上限时保持原义；留空不会改写当前原调用。</p>'
+                    contents+='<details class="recovery-advanced"><summary>分类上限、等待与恢复协议</summary><div class="config-grid config-grid-four">'+''.join(control(child, advanced=True) for child in children if child.path not in primary_paths)+'</div></details>'
+                else:
+                    contents = '<div class="config-grid config-grid-four">'+''.join(control(child, advanced=True) for child in children)+'</div>'
                 contents += '<details class="expert-settings"><summary>其他已导入参数 / 专家编辑</summary><p class="note">标准参数请使用上方表单。这里保留其他键名与类型；未知字段会在检查配置时验证。</p>'
                 contents += '<div class="config-children" data-parent="@'+field.path+'">'+tree(remainder, '@'+field.path)+'</div><button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加扩展项</button></details>'
             else:
                 contents = '<p class="note">此结构由插件或专门合同定义。已有值会完整保留；请根据插件说明导入 TOML，或在下面按原类型编辑。无需使用时保持未声明。</p>'
                 contents += '<div class="config-children" data-parent="@'+field.path+'">'+tree(body,'@'+field.path)+'</div><button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加项</button>'
             known = field.path in GROUP_FIELDS
-            opening = '<fieldset class="structured-setting known-settings"'+attributes+'><legend>'+label+configured+'</legend>' if known else '<details class="structured-setting"'+attributes+'><summary>'+label+configured+'</summary>'
+            opening = '<fieldset class="structured-setting known-settings"'+(' id="recovery-settings"' if field.path=='policies.resume' else '')+attributes+'><legend>'+('重试设置' if field.path=='policies.resume' else label)+configured+'</legend>' if known else '<details class="structured-setting"'+attributes+'><summary>'+label+configured+'</summary>'
             return opening+\
                 '<label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>使用这组自定义设置（关闭后不保存本组）</label>'+hint+'<noscript><p class="note">填写前请先启用本组；未启用时，本组内容不会保存。</p></noscript>'+contents+('</fieldset>' if known else '</details>')
         text = '' if value is None else (str(value).lower() if type(value) is bool else str(value))
@@ -801,7 +811,8 @@ def render(draft, *, edit=False):
         '<p>模型可以沿用统一默认值。三项总预算都需明确填写，达到任一限制会影响研究继续。</p></div>')
     rows.append(heading + '<fieldset class="config-group"><legend>统一模型</legend><div class="model-fields">'+fields(primary[:3])+'</div></fieldset>'
         '<fieldset class="config-group" id="budget-settings"><legend>研究总上限</legend><div class="budget-fields">'+fields(primary[3:])+'</div></fieldset>')
-    used = set(primary+permissions+['research.root','research.public_root','research.objective'])
+    rows.append(fields(['policies.resume']))
+    used = set(primary+permissions+['research.root','research.public_root','research.objective','policies.resume'])
     role_paths = [f'agent.roles.{role}.{key}' for role in 'HWAE' for key in ('model','reasoning_effort','service_tier')]
     target_paths = [f'budget.node_targets.{role}.{key}' for role in 'HWAE' for key in ('max_observed_tokens','max_seconds')]
     configured = any(_get(document, path) is not None for path in role_paths+target_paths)

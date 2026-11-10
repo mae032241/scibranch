@@ -1,5 +1,6 @@
 """Science delivery structure, exact frozen observations and read-only validation."""
 import os
+from pathlib import Path
 
 import pytest
 
@@ -182,6 +183,95 @@ def test_no_resume_or_node_budget_retains_partial_known_original_without_replace
     assert ending['work_exit']['kind']=='resume_policy'
     assert len(execution.records(root,2))==1 and len(experiments_calls(config))==1
     before=tree(root);c.validate(c.workspace(root,2));assert tree(root)==before
+
+
+def _automatic_cap(cap):
+    return dict(enabled=True,max_attempts=cap,max_retries=8,max_continues=8,
+        initial_backoff_seconds=5.,max_backoff_seconds=300.,jitter_fraction=0.,max_wait_seconds=1800.)
+
+
+def _scene_with_automatic_cap(tmp_path,cap,monkeypatch):
+    original_prepare=controller.prepare;original_write=c.write
+    root=tmp_path/'instance';record=root/'native-evidence/002'
+    def declared(*args,**kwargs):
+        kwargs['resume_policy']=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
+            output_repair=True,output_only=True,automatic_recovery=_automatic_cap(cap))
+        kwargs['node_budget_policy']={role:dict(max_observed_tokens=10000,max_seconds=60.) for role in 'HWAE'}
+        return original_prepare(*args,**kwargs)
+    def receipts(path,value):
+        if Path(path)==record/'native-intent.json':
+            job=c.read(root/'jobs/002.json')
+            value=dict(value,budget_slice=budget.accept_node(root,job))
+        if Path(path)==record/'native-outcome.json':
+            job=c.read(root/'jobs/002.json');intent=c.read(record/'native-intent.json')
+            meter=c.read(record/'usage.json')
+            report=dict(role='W',limits=intent['budget_slice']['limits'],
+                advance_seconds=budget._node_duration(root,job,intent,budget.snapshot(root)),
+                observed_tokens=meter['input_tokens']+meter['output_tokens'],dispatches=1,
+                usage_observed=True,**meter)
+            value=dict(value,budget_slice=report)
+        return original_write(path,value)
+    monkeypatch.setattr(c,'write',receipts)
+    with monkeypatch.context() as preparation:
+        preparation.setattr(controller,'prepare',declared)
+        return scene(tmp_path)
+
+
+def test_zero_automatic_attempt_cap_seals_actual_partial_work_exit(tmp_path,execution_registry,monkeypatch):
+    root,job,config=_scene_with_automatic_cap(tmp_path,0,monkeypatch)
+    record,payload=output(root,None)
+    payload.update(scientific_result='Retained comparison records two untested mechanisms; no experiment or scientific success is claimed.',
+        consultation_question='Which untested mechanism offers a decision-changing prediction that W can evaluate under its retained authorization?',
+        limitations=['No mechanism was tested.'])
+    c.write(record/'science-output.json',payload)
+    outcome=c.read(record/'native-outcome.json')
+    c.write(record/'native-outcome.json',dict(outcome,raw_ref=c.file_ref(record/'science-output.json')))
+    stopped_native(root,record)
+    monkeypatch.setattr(runtime,'process_matches',lambda *args:False)
+    inventory=c.accept_current_inventory(root,2)
+    continuation._work_exit(root,job,record,'automatic_recovery_attempt_limit',inventory=inventory)
+    ending=checkpoint.stage_end(root,job,record)
+    assert ending['work_exit']['kind']=='automatic_attempt_cap'
+    assert ending['work_exit']['max_attempts']==0
+    assert ending['work_exit']['reason']=='automatic_recovery_attempt_limit'
+    assert ending['work_exit']['source_attempt']==0
+    assert ending['work_exit']['counters']==dict(retries=0,continues=0,wait_seconds=0.)
+    worker_delivery.validate_exit(root,job,record,ending['work_exit'])
+    receipt=c.read(record/'result-identity.json')['control_outcome']['worker_delivery']
+    assert receipt['status']=='partial' and receipt['reason']=='worker_review'
+    before=tree(root);c.validate(c.workspace(root,2));assert tree(root)==before
+    assert len(execution.records(root,2))==1 and len(experiments_calls(config))==0
+
+
+@pytest.mark.parametrize('used,accepted',[(8,True),(7,False)])
+def test_mixed_automatic_attempt_cap_proof_binds_exact_original_counters(tmp_path,monkeypatch,used,accepted):
+    from scidiscovery.research_loop import history,native_recovery
+    root=tmp_path/'instance';job=dict(step=1,role='W')
+    c.write(root/'jobs/001.json',job)
+    first=root/'native-evidence/001';paths=[first]
+    intents=[dict(step=1,task_ref=c.record_ref(root/'jobs/001.json'))]
+    for number in range(1,used+1):
+        path=first/'continuations'/f'{number:03d}';paths.append(path)
+        intents.append(dict(step=1,attempt=number,continuation_kind='automatic_recovery',
+            automatic_recovery=dict(action='retry' if number%2 else 'continue',wait_seconds=0.)))
+    for path,intent in zip(paths,intents):c.write(path/'native-intent.json',intent)
+    record=paths[-1];c.write(record/'native-outcome.json',dict(returncode=0))
+    monkeypatch.setattr(execution,'records',lambda *args:paths)
+    monkeypatch.setattr(worker_delivery.configuration_updates,'for_job',
+        lambda *args,**kwargs:dict(resume_policy=dict(automatic_recovery=_automatic_cap(8))))
+    counters=native_recovery.counters(intents)
+    proof=dict(kind='automatic_attempt_cap',reason='automatic_recovery_attempt_limit',
+        job_ref=c.record_ref(root/'jobs/001.json'),source_attempt=used,
+        outcome_ref=c.record_ref(record/'native-outcome.json'),max_attempts=8,counters=counters)
+    if accepted:
+        assert worker_delivery.authorize_exit(root,job,record,proof['reason'])==proof
+        worker_delivery.validate_exit(root,job,record,proof)
+        forged=dict(proof,counters=dict(counters,retries=counters['retries']-1))
+        with pytest.raises(history.ObserverIntegrityError,match='attempt cap'):
+            worker_delivery.validate_exit(root,job,record,forged)
+    else:
+        with pytest.raises(history.ObserverIntegrityError,match='attempt cap'):
+            worker_delivery.validate_exit(root,job,record,proof)
 
 
 def test_structured_output_ambiguity_at_review_boundary_cannot_become_work_exit(tmp_path,execution_registry,monkeypatch):

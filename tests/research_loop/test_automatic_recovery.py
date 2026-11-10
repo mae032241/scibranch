@@ -57,7 +57,7 @@ def test_permanent_structured_error_dominates_429(code):
     projected = recovery.classify(native)
     assert projected['category'] == 'permanent'
     assert native == original
-    assert decide(dict(outcome(), native_failure=projected))['action'] == 'stop'
+    assert decide(dict(outcome(), native_failure=projected))['action'] == 'retry'
 
 
 def test_only_native_failure_events_can_supply_classification():
@@ -65,6 +65,49 @@ def test_only_native_failure_events_can_supply_classification():
         assert recovery.classify(dict(type=kind, error=dict(code='rate_limit_exceeded'))) is None
     assert recovery.classify(dict(type='error', message='429 rate limit temporary capacity'))['category'] == 'unknown'
     assert decide(dict(outcome(), native_failure=None))['action'] == 'stop'
+
+
+def stopped_process_facts(**changes):
+    return {**dict(native_started=True, process_id=dict(pid=123, task_ref=dict(path='exact-original')),
+        returncode=7, terminal_observed=False, native_failure=None, error=None, stop=None,
+        terminal_fault=None, cleanup='observed_group_cleaned', technical_diagnostic=None), **changes}
+
+
+@pytest.mark.parametrize('returncode,category,action,event_type', [
+    (0, 'incomplete', 'continue', 'turn.incomplete'), (7, 'unknown', 'retry', 'error')])
+def test_bound_clean_exit_without_completion_uses_common_finite_recovery_without_rejection_authority(
+        returncode, category, action, event_type):
+    from scidiscovery.research_loop import native
+    facts = stopped_process_facts(returncode=returncode)
+    projected = native._stopped_process_failure(**facts)
+    assert projected['category'] == category and projected['codes'] == ['native_process_exit']
+    assert projected['event_type'] == event_type and projected['not_accepted'] is False
+    value = dict(outcome(), returncode=returncode, native_failure=projected)
+    used = dict(retries=0, continues=0, wait_seconds=0.)
+    for attempt, delay in enumerate((5, 10, 20, 40, 80, 160, 300, 300)):
+        used['continues' if action == 'continue' else 'retries'] = attempt
+        selected = decide(value, used=used)
+        assert selected['action'] == action and selected['delay_seconds'] == delay
+        assert selected['startup_retry'] is False
+        used['wait_seconds'] += delay
+    used['continues' if action == 'continue' else 'retries'] = 8
+    assert decide(value, used=used)['reason'] == 'automatic_recovery_attempt_limit'
+    assert decide(dict(value, thread_id=None), available=False)['action'] == 'stop'
+    assert facts == stopped_process_facts(returncode=returncode)
+
+
+@pytest.mark.parametrize('changes', [dict(native_started=False), dict(process_id=None),
+    dict(returncode=None), dict(returncode=True), dict(terminal_observed=True),
+    dict(native_failure=failure('invalid_api_key')), dict(error=ValueError('retained integrity failure')),
+    dict(stop='wall_limit'), dict(stop='token_limit'), dict(stop='operator_interrupt'),
+    dict(terminal_fault='native_thread_changed'), dict(cleanup='cleanup_unknown'),
+    dict(technical_diagnostic=dict(original_call_state='unknown'))])
+def test_mechanical_exit_projection_never_overrides_completion_or_stronger_original_fault(changes):
+    from scidiscovery.research_loop import native
+    facts = stopped_process_facts()
+    facts.update(changes)
+    assert native._stopped_process_failure(**facts) is None
+    assert all(facts[key] is value for key, value in changes.items())
 
 
 @pytest.mark.parametrize('code,category', [('rate_limit_exceeded','temporary'),
@@ -95,15 +138,15 @@ def test_exact_native_capacity_failure_retries_only_the_original_session(kind):
     assert projected['not_accepted'] is False and event == original
     value = dict(outcome(), native_failure=projected, native_activity_observed=True)
     used = dict(continues=0, retries=0, wait_seconds=0.)
-    for retries, delay in enumerate((30., 60., 120.)):
+    for retries, delay in enumerate((5., 10., 20., 40., 80., 160., 300., 300.)):
         used['retries'] = retries
         decided = recovery.decision(value, recovery.policy({}), used,
             session_available=True, activity_observed=True)
         assert decided['action'] == 'retry' and decided['startup_retry'] is False
         assert decided['delay_seconds'] == delay
         used['wait_seconds'] += delay
-    used['retries'] = 3
-    assert decide(value, used=used)['reason'] == 'automatic_recovery_retry_limit'
+    used['retries'] = 8
+    assert decide(value, used=used)['reason'] == 'automatic_recovery_attempt_limit'
     for thread in ('original', None):
         stopped = recovery.decision(dict(value, thread_id=thread), recovery.policy({}),
             dict(continues=0, retries=0, wait_seconds=0.), session_available=False,
@@ -134,7 +177,7 @@ def test_capacity_message_cannot_override_permanent_native_facts(fact):
     projected = recovery.classify(event)
     assert projected['category'] == 'permanent'
     combined = recovery.combine([recovery.classify(dict(type='error', message=CODEX_CAPACITY_MESSAGE)), projected])
-    assert decide(dict(outcome(), native_failure=combined))['reason'] == 'automatic_recovery_permanent_failure'
+    assert decide(dict(outcome(), native_failure=combined))['reason'] == 'native_permanent'
 
 
 @pytest.mark.parametrize('message', CODEX_ROUTING_MESSAGES)
@@ -176,7 +219,7 @@ def test_routing_failure_cannot_override_permanent_native_facts(code):
     assert recovery.classify(event)['category'] == 'permanent'
     combined = recovery.combine([recovery.classify(dict(type='error', message=CODEX_ROUTING_MESSAGES[0])), failure(code)])
     assert combined['category'] == 'permanent'
-    assert decide(dict(outcome(), native_failure=combined))['reason'] == 'automatic_recovery_permanent_failure'
+    assert decide(dict(outcome(), native_failure=combined))['reason'] == 'native_permanent'
 
 
 @pytest.mark.parametrize('status', [400, 401, 403, 404, 422])
@@ -233,7 +276,7 @@ def test_nested_json_permanent_error_dominates_temporary_code_and_http_429():
     projected = recovery.classify(dict(type='turn.failed', error=dict(status=429, message=message)))
     assert projected['category'] == 'permanent'
     assert projected['codes'] == ['invalid_json_schema', 'rate_limit_exceeded']
-    assert decide(dict(outcome(), native_failure=projected))['action'] == 'stop'
+    assert decide(dict(outcome(), native_failure=projected))['action'] == 'retry'
 
 
 @pytest.mark.parametrize('kind', ['message', 'item.completed', 'tool', 'turn.completed'])
@@ -289,15 +332,15 @@ def test_codex_adapter_keeps_failure_projection_without_public_error_prose():
     assert backend.public_events(event) == []
 
 
-def test_retry_backoff_and_independent_continue_limit_are_finite():
-    used = dict(continues=2, retries=0, wait_seconds=0.)
-    for retries, seconds in enumerate((30, 60, 120)):
+def test_retry_backoff_and_native_attempt_limit_are_finite():
+    used = dict(continues=0, retries=0, wait_seconds=0.)
+    for retries, seconds in enumerate((5, 10, 20, 40, 80, 160, 300, 300)):
         used['retries'] = retries
         assert decide(used=used)['delay_seconds'] == seconds
-    used['retries'] = 3
-    assert decide(used=used)['reason'] == 'automatic_recovery_retry_limit'
+    used['retries'] = 8
+    assert decide(used=used)['reason'] == 'automatic_recovery_attempt_limit'
     incomplete = dict(outcome(), native_failure=recovery.classify(dict(type='turn.incomplete')))
-    assert decide(incomplete, used=used)['reason'] == 'automatic_recovery_continue_limit'
+    assert decide(incomplete, used=used)['reason'] == 'automatic_recovery_attempt_limit'
 
 
 def test_retry_after_is_honored_or_stops_without_shortening():
@@ -305,6 +348,106 @@ def test_retry_after_is_honored_or_stops_without_shortening():
     assert decide(outcome(retry_after_seconds=301))['reason'] == 'automatic_recovery_retry_after_limit'
     used = dict(continues=0, retries=1, wait_seconds=1790.)
     assert decide(outcome(retry_after_seconds=30), used=used)['reason'] == 'automatic_recovery_wait_limit'
+
+
+@pytest.mark.parametrize('event', [dict(type='error', code='invalid_api_key'),
+    dict(type='error', code='unrecognized_error'), dict(type='turn.incomplete')])
+def test_all_native_failure_categories_back_off_eight_times_without_budget_refund(event):
+    projected = recovery.classify(event)
+    value = dict(outcome(), native_failure=projected)
+    original = copy.deepcopy(value)
+    action = 'continue' if projected['category'] == 'incomplete' else 'retry'
+    counter = 'continues' if action == 'continue' else 'retries'
+    used = dict(continues=0, retries=0, wait_seconds=0.)
+    for attempt, delay in enumerate((5, 10, 20, 40, 80, 160, 300, 300)):
+        used[counter] = attempt
+        result = decide(value, used=used)
+        assert result['action'] == action and result['delay_seconds'] == delay
+        assert result['startup_retry'] is False and result['counters'] == used
+        used['wait_seconds'] += delay
+    used[counter] = 8
+    assert used['wait_seconds'] == 915
+    assert decide(value, used=used)['reason'] == 'automatic_recovery_attempt_limit'
+    assert value == original
+
+
+def test_frozen_explicit_recovery_policy_keeps_its_original_limits_and_waits():
+    frozen = dict(enabled=True, max_continues=2, max_retries=3,
+        initial_backoff_seconds=30, max_backoff_seconds=300,
+        jitter_fraction=.1, max_wait_seconds=1800)
+    assert recovery.policy(frozen) == dict(frozen, max_attempts=None)
+    used = dict(continues=0, retries=0, wait_seconds=0.)
+    for attempt, delay in enumerate((30, 60, 120)):
+        used['retries'] = attempt
+        assert decide(used=used, policy=frozen)['delay_seconds'] == delay
+    used['retries'] = 3
+    assert decide(used=used, policy=frozen)['reason'] == 'automatic_recovery_retry_limit'
+
+
+def test_mixed_native_failures_share_eight_attempts_without_resetting_either_counter():
+    used = dict(continues=0, retries=0, wait_seconds=0.)
+    for attempt, delay in enumerate((5, 10, 20, 40, 80, 160, 300, 300)):
+        incomplete = attempt % 2 == 1
+        failure_event = dict(type='turn.incomplete') if incomplete else dict(type='error', code='invalid_api_key')
+        value = dict(outcome(), native_failure=recovery.classify(failure_event))
+        decided = decide(value, used=used)
+        assert decided['action'] == ('continue' if incomplete else 'retry')
+        assert decided['delay_seconds'] == delay
+        assert decided['counters'] == used
+        used['continues' if incomplete else 'retries'] += 1
+        used['wait_seconds'] += decided['delay_seconds']
+    assert used == dict(continues=4, retries=4, wait_seconds=915.)
+    original = dict(used)
+    for value in (outcome(), dict(outcome(), native_failure=recovery.classify(dict(type='turn.incomplete')))):
+        stopped = decide(value, used=used)
+        assert stopped['reason'] == 'automatic_recovery_attempt_limit'
+        assert stopped['action'] == 'stop' and stopped['counters'] == original
+    assert used == original
+
+
+def test_nonempty_legacy_policy_omitting_total_cap_keeps_independent_action_allowances():
+    frozen = dict(max_retries=8, max_continues=8)
+    assert recovery.policy(frozen)['max_attempts'] is None
+    used = dict(continues=4, retries=4, wait_seconds=150.)
+    assert decide(used=used, policy=frozen)['action'] == 'retry'
+    incomplete = dict(outcome(), native_failure=recovery.classify(dict(type='turn.incomplete')))
+    assert decide(incomplete, used=used, policy=frozen)['action'] == 'continue'
+    assert frozen == dict(max_retries=8, max_continues=8)
+
+
+@pytest.mark.parametrize('value', [None, 0, 8, 100, True, -1, 101, 1.5, math.inf, '8'])
+def test_total_recovery_attempt_configuration_accepts_only_null_or_bounded_integers(value):
+    declared = dict(max_attempts=value)
+    if value is None or type(value) is int and 0 <= value <= 100:
+        assert recovery.policy(declared)['max_attempts'] == value
+    else:
+        with pytest.raises(ValueError, match='total attempts'):
+            recovery.policy(declared)
+    assert declared == dict(max_attempts=value)
+
+
+@pytest.mark.parametrize('cap,used', [(0, dict(continues=0, retries=0, wait_seconds=0.)),
+    (8, dict(continues=4, retries=4, wait_seconds=915.))])
+def test_total_cap_applies_to_native_work_and_format_without_changing_consumed_facts(cap, used):
+    limits = recovery.policy(dict(max_attempts=cap))
+    original = copy.deepcopy((limits, used))
+    decisions = [recovery.decision(outcome(), limits, used, session_available=True),
+        recovery.work_decision(limits, used, session_available=True),
+        recovery.format_decision(limits, used, session_available=True)]
+    for decided in decisions:
+        assert decided['action'] == 'stop'
+        assert decided['reason'] == 'automatic_recovery_attempt_limit'
+        assert decided['counters'] == used
+    assert (limits, used) == original
+
+
+def test_legacy_absent_total_cap_preserves_native_work_and_format_admission():
+    limits = recovery.policy(dict(max_retries=8, max_continues=8))
+    used = dict(continues=4, retries=4, wait_seconds=150.)
+    assert limits['max_attempts'] is None
+    assert recovery.decision(outcome(), limits, used, session_available=True)['action'] == 'retry'
+    assert recovery.work_decision(limits, used, session_available=True)['action'] == 'continue'
+    assert recovery.format_decision(limits, used, session_available=True)['action'] == 'retry'
 
 
 def test_no_thread_is_not_positive_unaccepted_evidence():
@@ -317,12 +460,13 @@ def test_no_thread_is_not_positive_unaccepted_evidence():
     assert decide(dict(value, thread_id='accepted-original'), available=False)['action'] == 'stop'
 
 
-def test_completed_turn_and_unknown_failure_never_enter_continue_loop():
+def test_completed_turn_stays_terminal_and_all_native_categories_have_finite_recovery():
     assert decide(dict(outcome(), terminal_observed=True))['action'] == 'none'
-    assert decide(outcome('unrecognized_error'))['action'] == 'stop'
+    assert decide(outcome('unrecognized_error'))['action'] == 'retry'
+    assert decide(outcome('unrecognized_error'), available=False)['action'] == 'stop'
     interrupted = dict(outcome(), native_failure=recovery.classify(dict(type='turn.interrupted')))
     assert decide(interrupted)['action'] == 'continue'
-    assert decide(interrupted)['delay_seconds'] == 0
+    assert decide(interrupted)['delay_seconds'] == 5
     assert decide(interrupted, available=False)['action'] == 'stop'
 
 
@@ -345,8 +489,9 @@ def test_policy_rejects_unbounded_or_ambiguous_configuration(changed):
 
 def test_default_policy_is_independent_and_retains_narrow_output_only_meaning():
     first = recovery.policy({});first['max_retries'] = 0
-    assert recovery.policy({})['max_retries'] == 3
-    assert recovery.policy({})['max_continues'] == 2
+    assert recovery.policy({})['max_retries'] == 8
+    assert recovery.policy({})['max_continues'] == 8
+    assert recovery.policy({})['max_attempts'] == 8
     assert decide(policy=dict(enabled=False))['action'] == 'none'
 
 
@@ -354,8 +499,10 @@ def test_missing_usage_eligibility_does_not_clear_unknown_or_weaken_cleanup():
     value = outcome()
     assert recovery.recoverable_source(value)
     for change in (dict(terminal_observed=True), dict(stop_reason='token_limit'),
-            dict(cleanup='cleanup_unknown'), dict(native_failure=failure('insufficient_quota'))):
+            dict(cleanup='cleanup_unknown')):
         assert not recovery.recoverable_source(dict(value, **change))
+    for code in ('insufficient_quota', 'unrecognized_error'):
+        assert recovery.recoverable_source(dict(value, native_failure=failure(code)))
 
 
 def arbiter_instance(tmp_path, monkeypatch, *, role='W', output_only=True):
@@ -516,7 +663,7 @@ def test_legacy_unknown_routing_diagnostic_without_compact_facts_is_unavailable(
     with pytest.raises(continuation.ResumeUnavailable, match='native_compact_control_facts_unavailable'):
         continuation.automatic_source(tmp_path, 1, record)
     assert all((record / name).read_bytes() == raw for name, raw in originals.items())
-    assert decide(saved)['reason'] == 'automatic_recovery_unknown_failure'
+    assert decide(saved)['reason'] == 'native_unknown'
 
 
 def test_legacy_unknown_capacity_diagnostic_without_compact_facts_is_unavailable(tmp_path, monkeypatch):
@@ -550,7 +697,7 @@ def test_legacy_unknown_capacity_diagnostic_without_compact_facts_is_unavailable
         record / 'native-outcome.json', record / 'native.jsonl', session)}
     with pytest.raises(continuation.ResumeUnavailable, match='native_compact_control_facts_unavailable'):
         continuation.automatic_source(tmp_path, 5, record)
-    assert decide(saved)['reason'] == 'automatic_recovery_unknown_failure'
+    assert decide(saved)['reason'] == 'native_unknown'
     assert not (record / 'usage.json').exists()
     assert all(path.read_bytes() == raw for path, raw in originals.items())
 
@@ -625,7 +772,10 @@ def test_current_writer_format_rejection_requires_no_other_native_activity(tmp_p
         assert value['format_rejected'] is True and value['native_failure']['category']=='permanent'
     current=continuation.automatic_source(tmp_path,1,record)
     assert current['native_failure']['category']=='permanent'
-    assert decide(current)['action'] not in {'retry','continue'}
+    assert decide(current)['action'] == ('none' if activity == dict(type='turn.completed') else 'retry')
+    if activity == dict(type='turn.completed'):
+        assert decide(current)['reason'] == 'automatic_recovery_completed_turn'
+    assert 'format_fallback' not in decide(current)
     assert all((record/name).read_bytes()==original for name,original in originals.items())
 
 
@@ -770,11 +920,43 @@ def test_default_controller_recovers_one_exact_session_and_keeps_attempt_chain(t
     assert (c.workspace(root,failed_step) / 'work/launches').read_text() == 'exec\nresume\n'
 
 
+@pytest.mark.parametrize('returncode,category,action', [
+    (0, 'incomplete', 'continue'), (7, 'unknown', 'retry')])
+def test_current_app_server_bound_exit_contract_preserves_profile_and_exact_resume(
+        tmp_path, returncode, category, action):
+    """Current transport/producer contract only; no native process conformance."""
+    from test_native_app_server import ready
+    from scidiscovery.research_loop import native, native_app_server
+    transport, declaration, events, _ = ready(tmp_path)
+    original = copy.deepcopy(events)
+    assert transport.thread and transport.turn and not transport.finished
+    assert not any(event['type'] in {'error', 'turn.failed', 'turn.completed'} for event in events)
+    projected = native._stopped_process_failure(**stopped_process_facts(returncode=returncode))
+    stopped = dict(outcome(), returncode=returncode, native_failure=projected,
+        thread_id=transport.thread, native_backend='codex',
+        native_identity=dict(participant_scope=native_app_server.SCOPE))
+    intent = dict(native_profile=events[0]['requested_profile'])
+    assert backends.Codex.validate_participant_event(events[0], stopped, intent, tmp_path) == (
+        'codex_exec', transport.thread)
+    assert projected['category'] == category and projected['not_accepted'] is False
+    decided = decide(stopped)
+    assert decided['action'] == action and decided['startup_retry'] is False
+    resumed, current, resumed_events, requests = ready(tmp_path, resumed=transport.thread)
+    request = next(row for row in requests if row['method'] == 'thread/resume')
+    assert request['params']['threadId'] == transport.thread == resumed.thread
+    assert current == dict(declaration, resumed=transport.thread)
+    assert resumed_events[0]['requested_profile'] == intent['native_profile']
+    assert sum(row['method'] == 'thread/resume' for row in requests) == 1
+    assert sum(row['method'] == 'turn/start' for row in requests) == 1
+    assert not declaration['pending'].exists() and not resumed.finished
+    assert events == original
+
+
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('mode,cap,attempts,reason', [
     ('recover', 1, 2, None), ('always', 1, 2, 'automatic_recovery_retry_limit'),
     ('recover', 0, 1, 'automatic_recovery_retry_limit'),
-    ('permanent', 1, 1, 'automatic_recovery_permanent_failure'),
+    ('permanent', 1, 2, None),
 ])
 def test_retained_routing_failure_resumes_exact_w_session_with_original_receipts_and_caps(tmp_path, monkeypatch, mode, cap, attempts, reason):
     import sys
@@ -814,6 +996,12 @@ if not (config['fault']=='completed-missing-output'""", 1)
     # classifier. All original native/process facts come from the real fake CLI.
     with monkeypatch.context() as previous:
         previous.setattr(continuation, 'automatic_source', old_diagnostic)
+        current_decision = recovery.decision
+        def legacy_decision(value, limits, used, **facts):
+            if (value.get('native_failure') or {}).get('category') == 'unknown':
+                return dict(action='stop', reason='automatic_recovery_unknown_failure', counters=dict(used))
+            return current_decision(value, limits, used, **facts)
+        previous.setattr(recovery, 'decision', legacy_decision)
         stopped = controller.run(root)
     assert stopped['status'] != 'finish', stopped
     first, = execution.records(root, 2)
@@ -944,7 +1132,7 @@ def test_installed_codex_http_failure_conformance(tmp_path, status, code):
     try:
         original = invoke(args,'original')
         original_thread = original['observed_thread_id']
-        if code != 'insufficient_quota' and original_thread is not None:
+        if original_thread is not None:
             # Let the actual CLI resolve exactly its own ID in this same empty
             # home. Do not enumerate session files or synthesize session proof.
             schema = tmp_path / 'resume-schema.json'
@@ -959,7 +1147,7 @@ def test_installed_codex_http_failure_conformance(tmp_path, status, code):
     sample = dict(status=status,code=code,returncode=original['returncode'],events=original['events'],
         launches=launches,requests=requests,session_observation=(
             'exact_thread_resume_attempted' if len(launches) == 2 else
-            'permanent_failure_not_resumed' if code == 'insufficient_quota' else 'thread_not_observed'),
+            'thread_not_observed'),
         limitation='Synthetic loopback failures only; no real provider recovery, model work, or usage qualification.')
     encoded_sample = json.dumps(sample,ensure_ascii=False,indent=2)+'\n'
     if os.environ.get('SCID_TEST_LOG_DIR'):
@@ -978,8 +1166,9 @@ def test_installed_codex_http_failure_conformance(tmp_path, status, code):
         assert launch['requests'], launch
         assert not launch['non_json_stdout'], launch
     if code == 'insufficient_quota':
-        assert len(launches) == 1
-        assert original['native_failure_decision']['reason'] == 'automatic_recovery_permanent_failure'
+        assert len(launches) == (2 if original_thread is not None else 1)
+        assert original['native_failure_decision']['reason'] == (
+            'native_permanent' if original_thread is not None else 'automatic_recovery_permanent_failure')
     elif original['observed_thread_id'] is not None:
         resumed = launches[1]
         assert resumed['requested_thread_id'] == original['observed_thread_id']
@@ -1267,26 +1456,28 @@ def test_production_prompt_permanent_failure_does_not_start_schema_negotiation(t
     from test_default_cli_output_repair import prepare_cli
     from scidiscovery.research_loop import controller
     schemas=retained_strict_contract(monkeypatch)
-    root,_,env=prepare_cli(tmp_path,fault=fault)
+    root,_,env=prepare_cli(tmp_path,fault=fault,automatic=dict(max_retries=2))
     (tmp_path/'native.py').write_text('#!'+sys.executable+'\n'+FORMAT_NATIVE)
     config=c.read(tmp_path/'launcher-config.json');config['format_role']='H';c.write(tmp_path/'launcher-config.json',config)
     for key in ('CODEX_HOME','PATH','PYTHONPATH'):monkeypatch.setenv(key,env[key])
+    monkeypatch.setattr(controller,'_recovery_remaining',lambda *_:0.)
     assert controller.run(root)['status']!='finish'
-    first,=execution.records(root,1)
+    paths=execution.records(root,1);first=paths[0]
+    assert len(paths)==3
     assert not (root/'jobs/002.json').exists()
     launches=[json.loads(line) for line in (c.workspace(root,1)/'work/format-launches.jsonl').read_text().splitlines()]
-    assert launches==[dict(native=False,resume=False,role='H')]
+    assert launches==[dict(native=False,resume=number>0,role='H') for number in range(3)]
     assert c.read(first/'native-outcome.json')['native_schema_transport']=='prompt'
     assert all(path.read_bytes()==raw for path,raw in schemas.items())
     retained={path:path.read_bytes() for path in (first/'native-intent.json',first/'native-outcome.json',first/'native.jsonl')}
     assert controller.run(root)['status']!='finish'
-    assert execution.records(root,1)==[first]
+    assert execution.records(root,1)==paths
     assert all(path.read_bytes()==raw for path,raw in retained.items())
 
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('cap,fault,attempts,success',[(0,'format',1,True),(0,'format-transient',1,False),
-    (1,'format-always-transient',2,False),(3,'format-repeat',2,False)])
+    (1,'format-always-transient',2,False),(3,'format-repeat',3,True)])
 def test_production_ordinary_prompt_obeys_retry_cap_without_schema_requests(tmp_path,monkeypatch,cap,fault,attempts,success):
     import sys
     from test_default_cli_output_repair import prepare_cli

@@ -9,6 +9,7 @@ from scidiscovery.research_loop import (
     controller, research_config, supervision,
 )
 from test_reflection_configuration import prepare
+from scidiscovery.research_loop.routing import Route
 from test_worker_first_investment import scene, publish
 
 
@@ -39,15 +40,16 @@ def test_fresh_input_requirement_is_an_explicit_boolean(value):
 
 
 @pytest.mark.parametrize('flag',[None,False,True])
-def test_old_v4_operational_cadence_and_new_notice_are_distinct(flag):
+def test_explicit_current_operational_opt_out_is_distinct_from_fresh_input_default(flag):
     chosen=dict(supervision.ADAPTIVE_REFLECTION_POLICY)
     if flag is not None:chosen['require_fresh_input']=flag
-    assert supervision.policy(chosen)==chosen
+    selected=supervision.policy(chosen)
+    assert selected==dict(chosen,require_fresh_input=flag is not False)
     state=supervision.empty(chosen);before=copy.deepcopy(state)
     status=supervision.due(state,budget_facts=facts())
     assert status['due'] and status['operational_due'] and not status['fresh_input']
-    assert status['automatic_allowed'] is (flag is not True)
-    if flag is True:assert status['suppression_reason']=='no_new_review_input'
+    assert status['automatic_allowed'] is (flag is False)
+    if flag is not False:assert status['suppression_reason']=='no_new_review_input'
     assert state==before
 
 
@@ -76,19 +78,7 @@ def test_operational_notice_does_not_insert_a_or_publish_live_pause(tmp_path):
     assert not review['pending'] and review['reason']!='worker_direction_review_due'
     summary=accepted_search.empty();summary['last_w']=job['step']
     summary['supervision']=supervision.empty(POLICY)
-    route=('W',[job['step']],'Continue the original question',None,None,job['step'],None,None)
+    route=Route(role='W',parents=[job['step']],instruction='Continue the original question',current_w=job['step'])
     selected,frozen=controller._supervision_route(job['step'],dict(role='W',stage_intent='handoff'),route,
         facts=dict(summary=summary,policy=POLICY,budget_fraction=.2,budget_facts=facts()),source_job=job)
     assert selected==route and frozen is None
-
-
-def test_default_does_not_upgrade_existing_v3_or_old_explicit_v4(tmp_path):
-    for name,chosen in [('v3',supervision.AUTOMATIC_REFLECTION_POLICY),
-            ('v4',supervision.ADAPTIVE_REFLECTION_POLICY)]:
-        branch=tmp_path/name;branch.mkdir()
-        root,options=prepare(branch,supervision_policy=chosen)
-        before=(root/'settings.json').read_bytes();original=c.settings(root)
-        options.pop('supervision_policy')
-        restored=controller.prepare(**dict(options,validate_only=True,_existing_settings=original))
-        assert restored['supervision_policy']==chosen
-        assert (root/'settings.json').read_bytes()==before

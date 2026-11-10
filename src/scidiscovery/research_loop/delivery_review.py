@@ -6,7 +6,8 @@ def binding(job):
     value = job.get('evidence_return')
     if not isinstance(value, dict) or value.get('kind') not in KINDS:
         return None
-    if (job.get('research_strategy_version') not in (2, 3) or set(value) != {'kind', 'step', 'corrections_used'}
+    version = job.get('research_strategy_version')
+    if (type(version) is not int or version != 3 or set(value) != {'kind', 'step', 'corrections_used'}
             or type(value['step']) is not int or not 0 < value['step'] < job['step']
             or type(value['corrections_used']) is not int or value['corrections_used'] not in (0, 1)
             or job['role'] != ('A' if value['kind'] == 'delivery_review' else 'W')

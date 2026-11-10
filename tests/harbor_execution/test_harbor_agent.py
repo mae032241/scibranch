@@ -405,6 +405,51 @@ def test_recovery_operation_must_name_exact_failed_attempt(entry,tmp_path):
     assert not entry._recovery_action(changed,stopped,instance=str(tmp_path))
 
 
+def _native_failure_status(root,*,attempt=2):
+    status=_technical_status(root,attempt=attempt)
+    record=root/'native-evidence/001'
+    if attempt:record=record/'continuations'/f'{attempt:03d}'
+    status['technical_stop'].update(phase='native_failure',reason='automatic_recovery_attempt_limit',
+        native_intent_ref=dict(path=str(record/'native-intent.json')),after_interrupt=True,new_context=False)
+    status['nodes'][-1]['state']='native_outcome_unsealed'
+    return status
+
+
+@pytest.mark.parametrize('change',[None,'attempt','reference','node','cleanup'])
+def test_native_failure_hold_requires_exact_clean_original(entry,tmp_path,change):
+    status=_native_failure_status(tmp_path)
+    terminal=dict(reason='exited',returncode=2,cleanup_confirmed=True)
+    if change=='attempt':status['technical_stop']['expected_attempt']=1
+    if change=='reference':status['technical_stop']['native_intent_ref']={'path':'/foreign/native-intent.json'}
+    if change=='node':status['nodes'][-1]['step']=2
+    if change=='cleanup':terminal['cleanup_confirmed']=False
+    assert entry.technical_pause_hold(status,terminal,instance=str(tmp_path.resolve())) is (change is None)
+
+
+def test_native_failure_recovery_operation_requires_original_resume_proof(entry,tmp_path):
+    stopped=_native_failure_status(tmp_path)['technical_stop']
+    operation=_explicit_recovery(tmp_path,expected=2)
+    assert not entry._recovery_action(operation,stopped,instance=str(tmp_path))
+    operation['action'].update(after_interrupt=True,new_context=False,native_intent_ref=stopped['native_intent_ref'])
+    assert entry._recovery_action(operation,stopped,instance=str(tmp_path))
+    operation['action']['native_intent_ref']={'path':'/foreign/native-intent.json'}
+    assert not entry._recovery_action(operation,stopped,instance=str(tmp_path))
+
+
+def test_native_failure_hold_keeps_original_finite_deadline(entry,monkeypatch,tmp_path):
+    agent=entry.SciDiscoveryHarborAgent(logs_dir=tmp_path/'logs',config_template=TEMPLATE,
+        max_seconds=5,poll_seconds=.05)
+    root=agent.private_root/'instance';root.mkdir()
+    status=_native_failure_status(root)
+    async def current(*args,**kwargs):return status
+    async def operations(*args,**kwargs):return []
+    monkeypatch.setattr(agent,'_status',current);monkeypatch.setattr(agent,'_operations',operations)
+    monkeypatch.setattr(entry,'_command',lambda *args,**kwargs:pytest.fail('Hold submitted new work'))
+    with pytest.raises(TimeoutError,match='original Harbor trial deadline'):
+        asyncio.run(agent._wait_technical_recovery(root,types.SimpleNamespace(),deadline=time.time()+5,
+            monotonic_deadline=time.monotonic()+.02,initial_status=status))
+
+
 def test_applied_recovery_requires_exact_original_controller_receipt(entry,tmp_path):
     operation=_explicit_recovery(tmp_path)
     assert entry._controller_process(operation)==operation['process']

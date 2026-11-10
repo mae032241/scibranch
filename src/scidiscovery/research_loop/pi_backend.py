@@ -431,6 +431,14 @@ def failure_projection(source, *, reason=None, event_type=None):
             target = event if slot is None else event.setdefault(slot, {})
             target['message'] = json.dumps(body, ensure_ascii=True, separators=(',', ':'))
     failure = recovery.classify(event)
+    # Exact native SDK diagnostics only: an assistant/tool's ordinary text is
+    # never inspected, and a connection failure proves no request rejection.
+    if (not rejected and kind in {'error', 'turn.failed'}
+            and any(source.get(key) == 'fetch failed' for key in ('errorMessage', 'finalError'))):
+        connection = recovery.classify(dict(type=kind, code='connection_error'))
+        failure = dict(failure, category=recovery.combine([failure, connection])['category'],
+            codes=sorted(set(failure['codes']) | {'connection_error'}),
+            message_patterns=sorted(set(failure['message_patterns']) | {'pi_native_fetch_failed_v1'}))
     if rejected and kind in {'error', 'turn.failed'} and failure['category'] != 'permanent': failure['category'] = 'unknown'
     return failure
 
@@ -552,7 +560,11 @@ class PiEvents:
             return {}
         if context_boundary(value)[0] or kind == 'pi_transport_fault': self.usage.context = dict(status='unavailable')
         if kind == 'pi_transport_fault':
-            self.accounting_only = True; self.usage.unknown('pi_transport_fault'); return self.failure()
+            from .pi_transport import FAULT_CODES
+            code = value.get('code')
+            reason = 'pi_transport_fault'
+            if isinstance(code, str) and code in FAULT_CODES: reason += ':' + code
+            self.accounting_only = True; self.usage.unknown(reason); return self.failure()
         if self.accounting_only or self.settled:
             self.accounting_only = True; self.usage.unknown('pi_activity_after_settlement'); return self.accounting_event(value)
         if kind == 'pi.session_bound':
@@ -651,26 +663,23 @@ class PiEvents:
 
 
 class PiEventSelector:
-    """Strict LF framing; malformed/oversized rows veto, never silently skip."""
-    def __init__(self): self.pending = b''; self.skipping = False
+    """Strict LF/JSON framing with no native record byte quota."""
+    def __init__(self):
+        from .pi_sessions import LFRecords
+        self.framing = LFRecords()
+        self.pending = self.framing.pending
+
     def feed(self, data, *, final=False):
-        from .pi_sessions import LINE_BYTES, decode
+        from .pi_sessions import decode
         events = []
-        for i, part in enumerate(data.split(b'\n')):
-            if i:
-                if not self.skipping:
-                    try:
-                        value = decode(self.pending.decode('utf-8'))
-                        if not isinstance(value, dict): raise ValueError('object required')
-                    except (ValueError, UnicodeError, RecursionError): value = dict(type='pi_transport_fault')
-                    events.append(value)
-                self.pending = b''; self.skipping = False
-            if not self.skipping:
-                self.pending += part
-                if len(self.pending) > LINE_BYTES:
-                    events.append(dict(type='pi_transport_fault')); self.pending = b''; self.skipping = True
-        if final and (self.pending or self.skipping):
-            events.append(dict(type='pi_transport_fault')); self.pending = b''; self.skipping = False
+        for line in self.framing.feed(data):
+            try:
+                value = decode(line)
+                if not isinstance(value, dict): raise ValueError('object required')
+            except (ValueError, UnicodeError, RecursionError): value = dict(type='pi_transport_fault')
+            events.append(value)
+        if final and self.pending:
+            events.append(dict(type='pi_transport_fault')); self.pending.clear()
         return events
 
 
@@ -690,7 +699,6 @@ class Pi(Backend):
     supports_resume = True
     instruction_transport = schema_transport = active_schema_transport = 'prompt'
     terminal_source = 'pi.agent_settled'
-    event_byte_limit = 1024 * 1024
 
     def __init__(self, settings, *, schema_transport=None):
         validate_launcher(settings['native_launcher_argv'])
@@ -758,13 +766,15 @@ class Pi(Backend):
         return agent_directory()
     def default_resume_policy(self):
         import shutil
+        from . import native_recovery
         invoked = shutil.which(self.launcher[0])
         if invoked is None:
             raise ValueError('The selected Pi native launcher is unavailable')
         # Preserve the invoked entry point. The existing continuation owner
         # freezes its exact executable originals and validates finite grammar.
         # Private session storage never redirects inherited Pi authentication.
-        return dict(launcher=[str(Path(invoked).absolute())], policy=dict(DEFAULT_RESUME_POLICY))
+        return dict(launcher=[str(Path(invoked).absolute())], policy=dict(DEFAULT_RESUME_POLICY,
+            automatic_recovery=native_recovery.policy({})))
     def validate_resume_policy(self, value): return validate_resume_policy(value)
     @staticmethod
     def default_experiment_mode(): return 'local'
@@ -913,12 +923,18 @@ class Pi(Backend):
         from .pi_transport import CONTROLLED_EXIT
         if value.get('type') == CONTROLLED_EXIT:
             try:
-                if (self._controlled_exit is not None or not self.engine.settled or self.engine.failed
-                        or self.engine.final is None or self._launch_evidence is None or self._meter is None):
+                failed_settlement = (self.engine.final is None and bool(self.engine.failures)
+                    and not self.engine.accounting_only and not self.engine.open_message
+                    and not self.engine.tools and not self.engine.compacting and not self.engine.summarizing)
+                if (self._controlled_exit is not None or not self.engine.settled
+                        or ((self.engine.failed or self.engine.final is None) and not failed_settlement)
+                        or self._launch_evidence is None or self._meter is None):
                     raise ValueError('pi_authorship_exit_unexpected')
                 session = dict(thread_id=self.engine.session, profile=dict(self._profile),
                     path=self._binding['path'], workspace=self._binding['workspace'])
                 _controlled_transport(value, self._launch_evidence, session, self._meter.observation.prompt_hash)
+                # A verified failed settlement retains lifecycle evidence only.
+                # It supplies neither a completed event nor successful authorship.
                 self._controlled_exit = copy.deepcopy(value)
                 return {}
             except (ValueError, TypeError, KeyError, AttributeError):

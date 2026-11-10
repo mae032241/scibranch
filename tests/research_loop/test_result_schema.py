@@ -107,7 +107,7 @@ def test_fixed_contract_counts_progress_notice_only_for_eligible_worker(scope):
     from scidiscovery.research_loop import backends,budget_notice
     backend=backends.selected(dict(native_backend='codex',native_launcher_argv=['codex'],native_options={}),
         schema_transport='prompt')
-    job=dict(role='W',worker_fragment_policy=dict(context='same_session'))
+    job=dict(role='W',worker_fragment_policy=dict(version=2,context='same_session'))
     intent={};context={}
     if scope=='wake':intent['execution_wake']={}
     elif scope=='repair':intent['output_repair']=dict(code='fixture')
@@ -123,7 +123,10 @@ def test_fixed_contract_counts_progress_notice_only_for_eligible_worker(scope):
 def rendered_contract(tmp_path,job,task,intent,backend,**context):
     """Include actual renderer escaping and the selected backend's request wire."""
     import json
-    from scidiscovery.research_loop import native
+    from scidiscovery.research_loop import native, guidance
+    assert job.get('research_strategy_version') == 3
+    assert job.get('advisory_scope_version') == 1
+    assert isinstance(job.get('native_role_instruction'), str)
     prompt,instruction,projection=native.render_scientific_request(job,task,intent,
         backend_name=backend.name,instruction_transport=backend.instruction_transport,**context)
     schema=tmp_path/'schema.json';c.write(schema,projection)
@@ -137,9 +140,10 @@ def rendered_contract(tmp_path,job,task,intent,backend,**context):
     return size,prompt,instruction,packet
 
 
-@pytest.mark.parametrize(('role','scope'),[('H','ordinary'),('W','ordinary'),('A','ordinary'),('A','closeout'),('A','final'),('E','ordinary')])
+@pytest.mark.parametrize(('role','scope','branch'),[(role,scope,branch)
+    for role,scope in [('H','ordinary'),('W','ordinary'),('A','ordinary'),('A','closeout'),('A','final'),('E','ordinary')]
+    for branch in ['ordinary','automatic','repair','fragment'] if branch!='fragment' or role=='W'])
 @pytest.mark.parametrize('backend_name',['codex','protocol'])
-@pytest.mark.parametrize('branch',['ordinary','automatic','repair','fragment'])
 @pytest.mark.parametrize('shared_balance',[0,None],ids=['finite','unlimited'])
 def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,scope,backend_name,branch,shared_balance):
     """Measure the production's final renderer and transport, never an AST slice.
@@ -151,13 +155,13 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
     """
     import json
     from scidiscovery.research_loop import backends,guidance
-    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,search={},
+    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,search={},
         scientific_response_fields=['portfolio_review','final_coverage'],formal_review_version=1,
-        native_role_instruction=max((guidance.OPPORTUNITY[role],c.ROLE_INSTRUCTIONS[role]),key=lambda value:len(value.encode())))
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST[role])
     if role=='A':job.update(portfolio_context={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')])
     if scope in {'closeout','final'}:job.update(purpose='closeout',search=None)
     if scope=='final':job.update(final_only=True,delivery_sources=dict(items=[{}]))
-    if role=='W':job.update(worker_fragment_policy=dict(context='same_session'),
+    if role=='W':job.update(worker_fragment_policy=dict(version=2,context='same_session'),
         scientific_work_unit=max(guidance.WORK_UNITS.values(),key=lambda value:len(value.encode())))
     task=c.response_instructions(job)
     intent={};remaining=None
@@ -165,7 +169,6 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
     if branch=='automatic':intent['continuation_kind']='automatic_recovery';remaining={}
     elif branch=='repair':intent['work_repair' if role=='W' else 'output_repair']=diagnosis;remaining={}
     elif branch=='fragment':
-        if role!='W':pytest.skip('Scientific fragments belong only to W')
         intent['continuation_kind']='fragment';remaining={}
     backend=backends.selected(dict(native_backend=backend_name,native_launcher_argv=['codex'] if backend_name=='codex' else ['independent'],
         native_options={} if backend_name=='codex' else None),
@@ -212,10 +215,10 @@ def test_complete_fixed_model_response_contract_fits_three_kib(tmp_path,role,sco
 def test_diagnostic_allowance_counts_actual_escaped_renderer_and_backend_wire(tmp_path,backend_name,text):
     import json
     from scidiscovery.research_loop import backends,guidance
-    job=dict(role='A',handoff_protocol=c.HANDOFF_PROTOCOL,search={},portfolio_context={},formal_review_version=1,
+    job=dict(role='A',handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,search={},formal_review_version=1,
         scientific_response_fields=['portfolio_review','final_coverage'],
         final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')],
-        native_role_instruction=guidance.OPPORTUNITY['A'])
+        native_role_instruction=guidance.ADVISORY_WORKER_FIRST['A'])
     task=c.response_instructions(job)
     backend=backends.selected(dict(native_backend=backend_name,
         native_launcher_argv=['codex'] if backend_name=='codex' else ['independent'],
@@ -250,7 +253,7 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
     import json
     from scidiscovery.research_loop import backends,guidance,native
     role='A' if scope=='protected_final' else 'W'
-    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,native_role_instruction=guidance.OPPORTUNITY[role])
+    job=dict(role=role,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,native_role_instruction=guidance.ADVISORY_WORKER_FIRST[role])
     if scope=='protected_final':job.update(final_only=True,delivery_sources=dict(items=[{}]),purpose='closeout',
         portfolio_context={},final_coverage_mechanisms=[dict(mechanism_ref='h001.m1')],
         scientific_response_fields=['portfolio_review','final_coverage'])
@@ -281,7 +284,9 @@ def test_full_renderer_special_suffixes_fit_same_contract(tmp_path,backend_name,
         author=dict(facts='work/author-closeout-science.json',limits={}) if scope=='author_closeout' else None,
         final_return=scope=='protected_final')
     if scope=='wake':
-        assert prompt.count(guidance.STAGE_PLANNING['W'])==1
+        delivered=instruction+'\n'+prompt if backend.instruction_transport=='developer' else prompt
+        assert delivered.count(job['native_role_instruction'])==1
+        assert instruction.startswith(job['native_role_instruction']+'\n')
     assert size<=c.MAX_FIXED_RESPONSE_BYTES==3072,(backend_name,scope,size)
 
 
@@ -296,13 +301,14 @@ def test_protected_final_delivery_repairs_missing_explicit_candidate(tmp_path,ch
 
 
 def test_same_task_output_repair_requires_bounded_assessment_request(tmp_path,monkeypatch):
-    from scidiscovery.research_loop import continuation,candidate_refs,formal_review,candidate_nominations,search,semantic
-    root=tmp_path/'instance';record=c.host_record(c.workspace(root,1))
-    job=dict(role='A',step=1,handoff_protocol=c.HANDOFF_PROTOCOL,worker_view_version=1,lineage_projection_version=1,
+    from scidiscovery.research_loop import continuation,candidate_refs,formal_review,candidate_nominations,search,semantic,delivery_review
+    root=tmp_path/'instance';record=c.host_record(c.workspace(root,2))
+    job=dict(role='A',step=2,handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,
+        worker_view_version=1,lineage_projection_version=1,evidence_return=delivery_review.make('delivery_review',1,0),
         direct_materials=[],history=dict(nodes=[]),scientific_response_fields=['decision_request'])
-    c.write(root/'settings.json',dict(handoff_protocol=c.HANDOFF_PROTOCOL,search_policy=None))
+    c.write(root/'settings.json',dict(handoff_protocol=c.HANDOFF_PROTOCOL,research_strategy_version=3,advisory_scope_version=1,search_policy=None))
     c.write(root/'settings-identity.json',dict(path='settings.json'))
-    c.write(root/'jobs/001.json',job)
+    c.write(root/'jobs/002.json',job)
     raw=record/'science-output.json'
     science=dict(summary='Finding',scientific_result='Retained evidence',limitations=[],next_action='continue_w',route_reason='More evidence is needed')
     c.write(raw,science)
@@ -316,8 +322,8 @@ def test_same_task_output_repair_requires_bounded_assessment_request(tmp_path,mo
     def forbidden(*args,**kwargs):pytest.fail('Retired global inventory cannot gate an assessment request')
     monkeypatch.setattr(search,'require_portfolio_review',forbidden)
     monkeypatch.setattr(candidate_nominations,'require_final_coverage',forbidden)
-    request=continuation.output_request(root,1,record,inventory=inventory,source_attempt=0)
-    assert request['code']=='a_decision_request_incomplete'
+    request=continuation.output_request(root,2,record,inventory=inventory,source_attempt=0)
+    assert request['code']=='a_delivery_review_incomplete'
     assert request['raw_ref']==c.file_ref(raw) and request['source_attempt']==0
 
 
@@ -398,21 +404,16 @@ def test_legacy_a_schema_and_raw_validation_reject_without_rewriting_original(tm
     assert snapshot(originals) == before
 
 
-def test_current_a_seals_without_any_scientific_recommendation(scene):
+def test_current_a_rejects_explicit_wait_without_rewriting_scientific_original(scene):
     source(scene)
-    job, work, record = finish(scene, 3, 'A', [2], action='wait')
-    assert job['handoff_protocol'] == protocol.CURRENT
-    assert c.read(record / 'science-output.json')['candidate_recommendation'] is None
-    assert c.validate(work)['next_action'] == 'wait'
-    originals = (scene, scene / 'settings.json', scene / 'settings-identity.json',
-                 scene / 'jobs', scene / 'jobs/003.json', work, work / 'science-task.json',
-                 record, record / 'science-result.schema.json', record / 'science-output.json',
-                 record / 'result-identity.json', record / 'native-intent.json',
-                 record / 'native-outcome.json', record / 'usage.json')
-    before = snapshot(originals)
-    assert c.build_job(scene, 3, 'A', [2]) == job
-    assert snapshot(originals) == before
-    assert not (scene / 'jobs/004.json').exists()
+    with pytest.raises(OutputRepairRequired):
+        finish(scene, 3, 'A', [2], action='wait')
+    record=c.host_record(c.workspace(scene,3))
+    original=(record/'science-output.json').read_bytes()
+    assert c.read(record/'science-output.json')['next_action']=='wait'
+    assert not (record/'result-identity.json').exists()
+    assert (record/'science-output.json').read_bytes()==original
+    assert not (scene/'jobs/004.json').exists()
 
 
 @pytest.mark.parametrize('retired', [3, 4])

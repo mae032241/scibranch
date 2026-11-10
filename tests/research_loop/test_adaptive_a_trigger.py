@@ -1,12 +1,13 @@
-"""Opt-in review admission consumes originals, never a scientific stall score."""
+"""Explicit operational-review opt-out preserves original inputs and budgets."""
 import copy
 
 import pytest
 
 from scidiscovery.research_loop import accepted_prefix, accepted_search, contracts, controller, lineage, supervision
+from scidiscovery.research_loop.routing import Route
 
 
-POLICY=supervision.ADAPTIVE_REFLECTION_POLICY
+POLICY=supervision.policy(dict(supervision.DEFAULT_POLICY,require_fresh_input=False))
 
 
 def facts(tokens=0,seconds=0,*,token_limit=10000,seconds_limit=1000,tokens_complete=True,seconds_complete=True):
@@ -52,9 +53,7 @@ def test_third_low_cost_automatic_a_is_admitted_without_changing_frozen_policies
     assert state['automatic_reviews']==3
     assert state['adaptive']['automatic_cost']==dict(tokens=30,seconds=3.)
     assert POLICY['max_automatic_reviews'] is None
-    assert supervision.AUTOMATIC_REFLECTION_POLICY['version']==3
-    assert supervision.AUTOMATIC_REFLECTION_POLICY['max_automatic_reviews']==2
-    assert supervision.WORKER_FIRST_POLICY['mode']=='off'
+    assert POLICY['version']==4 and POLICY['require_fresh_input'] is False
 
 
 def test_unchanged_inputs_and_consumption_do_not_repeat_a_but_quiet_spending_can():
@@ -110,11 +109,11 @@ def test_request_validation_and_final_and_consultation_scope_remain_distinct():
     assert final['review_kind']=='final_assessment' and not final['automatic']
     assert charge(state,final,cost=None)==state
     summary=accepted_search.empty();summary.update(supervision=state,last_w=1)
-    route=('A',[1],'W consultation',dict(role='W',step=1),None,1,None,None)
+    route=Route(role='A',parents=[1],instruction='W consultation',evidence_return=dict(role='W',step=1),current_w=1)
     selected,binding=controller._supervision_route(1,dict(role='W'),route,
         facts=dict(summary=summary,budget_fraction=.11,policy=POLICY,budget_facts=facts(1100,110)),
         source_job=dict(role='W'))
-    assert selected==route and binding is None
+    assert selected==route and binding['automatic'] is True and binding['source_w']==1
 
 
 def test_restart_and_inherited_summary_retain_costs_cutoffs_and_unknowns():
@@ -129,7 +128,7 @@ def test_restart_and_inherited_summary_retain_costs_cutoffs_and_unknowns():
     assert restored['adaptive']['automatic_cost']['tokens']==250
     assert not supervision.due(restored,budget_facts=facts(3300,330))['automatic_allowed']
     with pytest.raises(ValueError,match='cannot reset accepted counters'):
-        supervision.observe(inherited,selected_policy=supervision.AUTOMATIC_REFLECTION_POLICY)
+        supervision.observe(inherited,selected_policy=dict(POLICY,mode='off'))
 
 
 def test_positive_cooldown_is_required_and_optional_emergency_cap_is_explicit():
@@ -168,5 +167,5 @@ def test_public_v4_bindings_reject_mixed_or_changed_scopes(mutation):
         with pytest.raises(ValueError):contracts.supervision_binding(bad,step=2,research_strategy_version=3,supervision_policy_version=4)
     else:
         with pytest.raises(ValueError):supervision.validate_adaptive_request(
-            supervision.empty(supervision.AUTOMATIC_REFLECTION_POLICY) if mutation=='old_policy' else state,
+            supervision.empty(dict(version=3)) if mutation=='old_policy' else state,
             bad,job=job,budget_facts=facts(1200,120),source_w=1)

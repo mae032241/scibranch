@@ -1,4 +1,4 @@
-"""Frozen v2 readiness/refusal contracts; fixtures never invoke a model or solver."""
+"""Current readiness/refusal contracts; fixtures never invoke a model or solver."""
 import copy
 
 import pytest
@@ -14,8 +14,8 @@ from test_history_handoff import finish
 from test_worker_led_strategy import instance, publish, chain
 
 
-def v2(tmp_path):
-    return instance(tmp_path,strategy=2)
+def current_instance(tmp_path):
+    return instance(tmp_path,strategy=3)
 
 
 def review(root,step=3,source=2,used=0,parents=None):
@@ -24,11 +24,11 @@ def review(root,step=3,source=2,used=0,parents=None):
 
 
 def test_prepared_final_declines_with_candidate_inventory_and_seals(tmp_path,monkeypatch):
-    root=v2(tmp_path);chain(root)
+    root=current_instance(tmp_path);chain(root)
     budget.begin_closeout(root,2,3,'Fixture exhausted FINAL',final_only=True)
     job=c.build_job(root,3,'A',[1,2],final_report=dict(source_cutoff=2,stopped_original=None))
     # The response contract depends only on the frozen candidate inventory;
-    # availability never changes a v2 final assessor's right to reject all.
+    # availability never changes a current final assessor's right to reject all.
     with_candidates=dict(job,delivery_sources=dict(items=[dict(candidate_id='retained-invalid')]))
     assert c.result_schema('A',**c.response_options(with_candidates))['properties']['next_action']['enum']==['deliver','finish']
     payload=publish(root,job,action='finish',candidate=None,
@@ -42,23 +42,23 @@ def test_prepared_final_declines_with_candidate_inventory_and_seals(tmp_path,mon
 
 
 def test_one_gap_requires_request_and_final_reassessment_has_no_second_correction(tmp_path):
-    invalid=v2(tmp_path/'missing-request');chain(invalid)
+    invalid=current_instance(tmp_path/'missing-request');chain(invalid)
     with pytest.raises(OutputRepairRequired,match='decision_request'):
         publish(invalid,review(invalid),action='continue_w')
-    root=v2(tmp_path/'one-correction');chain(root)
+    root=current_instance(tmp_path/'one-correction');chain(root)
     first=review(root)
     publish(root,first,action='continue_w',request=copy.deepcopy(REQUEST))
     route=controller._route(root,3,'A',handoff_state.read_sealed(root,3),first,1,2)
-    assert route[0]=='W' and route[3]==delivery_review.make('delivery_correction',3,1)
-    correction=c.build_job(root,4,'W',route[1],instruction=route[2],evidence_return=route[3])
+    assert route.role=='W' and route.evidence_return==delivery_review.make('delivery_correction',3,1)
+    correction=c.build_job(root,4,'W',list(route.parents),instruction=route.instruction,evidence_return=route.evidence_return)
     task=c.read(c.workspace(root,4)/'science-task.json')
     assert REQUEST['question'] in str(task) and REQUEST['change_criterion'] in str(task)
     schema=c.result_schema('W',**c.response_options(correction))
     assert schema['properties']['stage_intent']['enum']==['continue','handoff','decision']
     assert schema['properties']['search_plan']==dict(type='null')
-    finish(root,4,'W',route[1],text='Corrected the exact validation-object gap.')
+    finish(root,4,'W',list(route.parents),text='Corrected the exact validation-object gap.')
     route=controller._route(root,4,'W',handoff_state.read_sealed(root,4),correction,1,2)
-    second=c.build_job(root,5,'A',route[1],instruction=route[2],evidence_return=route[3])
+    second=c.build_job(root,5,'A',list(route.parents),instruction=route.instruction,evidence_return=route.evidence_return)
     assert delivery_review.binding(second)['corrections_used']==1
     assert 'continue_w' not in c.result_schema('A',**c.response_options(second))['properties']['next_action']['enum']
     with pytest.raises(OutputRepairRequired):
@@ -66,16 +66,16 @@ def test_one_gap_requires_request_and_final_reassessment_has_no_second_correctio
 
 
 def test_handoff_cold_route_and_parent_binding_cannot_reset_correction(tmp_path):
-    root=v2(tmp_path);chain(root)
+    root=current_instance(tmp_path);chain(root)
     first=review(root);publish(root,first,request=copy.deepcopy(REQUEST))
     binding=delivery_review.make('delivery_correction',3,1)
     job=c.build_job(root,4,'W',[1,2,3],evidence_return=binding)
     finish(root,4,'W',[1,2,3],stage_intent='handoff')
     route=controller._route(root,4,'W',handoff_state.read_sealed(root,4),job,1,2)
-    controller._save_route(root,4,(*route[:4],None,None),route[4],route[5],resumed=None)
-    saved=controller._saved_route(root,first_step=1,resumed=None)
+    controller._save_route(root,4,route,resumed=None)
+    saved=controller._saved_route(root,first_step=1,resumed=None,head=accepted_budget.read(root))
     assert saved['route']['evidence_return']==delivery_review.make('delivery_correction',4,1)
-    next_job=c.build_job(root,5,'W',route[1],evidence_return=route[3],instruction=route[2])
+    next_job=c.build_job(root,5,'W',list(route.parents),evidence_return=route.evidence_return,instruction=route.instruction)
     assert delivery_review.binding(next_job)['corrections_used']==1
     with pytest.raises(ValueError,match='allowance|scope'):
         c.build_job(root,6,'A',[1,4],evidence_return=delivery_review.make('delivery_review',4,0))
@@ -83,32 +83,29 @@ def test_handoff_cold_route_and_parent_binding_cannot_reset_correction(tmp_path)
         c.build_job(root,7,'A',[1],evidence_return=delivery_review.make('delivery_review',4,1))
 
 
-def test_ordinary_assessment_cannot_authorize_but_requests_scoped_final_review(tmp_path):
-    root=v2(tmp_path);chain(root)
-    job=c.build_job(root,3,'A',[1,2]);payload=publish(root,job,action='finish')
-    assert controller._worker_led_final_required(job)
-    route=controller._route(root,3,'A',payload,job,1,2)
-    final=c.build_job(root,4,'A',route[1],evidence_return=route[3],instruction=route[2])
-    assert delivery_review.scope(final)=='delivery_review'
-    assert not controller._worker_led_final_required(final)
-    admitted=role_share.effective_route(root,3,payload,job,(*route,None,None))
-    assert admitted[-1] is None and admitted[0]=='A'
+def test_ordinary_assessment_cannot_authorize_or_request_finalization(tmp_path):
+    root=current_instance(tmp_path);chain(root)
+    job=c.build_job(root,3,'A',[1,2])
+    original=(root/'jobs/003.json').read_bytes()
+    with pytest.raises(OutputRepairRequired):publish(root,job,action='finish')
+    assert not (root/'jobs/004.json').exists()
+    assert (root/'jobs/003.json').read_bytes()==original
 
 
 def test_due_supervision_does_not_replace_readiness_or_correction(tmp_path):
-    root=v2(tmp_path);chain(root)
+    root=current_instance(tmp_path);chain(root)
     worker=c.read_job(root/'jobs/002.json')
     authored=handoff_state.read_sealed(root,2)
     route=controller._route(root,2,'W',authored,worker,1,None)
-    selected,request=controller._supervision_route(2,authored,(*route,None,None),facts=facts(),source_job=worker)
-    assert selected==(*route,None,None) and request is None
+    selected,request=controller._supervision_route(2,authored,route,facts=facts(),source_job=worker)
+    assert selected==route and request is None
     job=review(root)
     assert supervision.worker_review(dict(job,role='W',evidence_return=delivery_review.make('delivery_correction',2,1)),{},
         summary={},budget_fraction=.8,selected_policy=supervision.DEFAULT_POLICY) is None
 
 
 def test_exhausted_original_budget_never_reopens_correction_w(tmp_path,monkeypatch):
-    root=v2(tmp_path);chain(root)
+    root=current_instance(tmp_path);chain(root)
     first=review(root);publish(root,first,request=copy.deepcopy(REQUEST))
     stamp=budget.clock_stamp()
     later=dict(stamp,at_unix=stamp['at_unix']+10000,at_boottime=stamp['at_boottime']+10000)
@@ -189,7 +186,7 @@ def test_voluntary_ready_one_final_a_delivers_exact_candidate_and_reconciles_ori
 
 @pytest.mark.parametrize('changed',[dict(step=1,corrections_used=0),dict(step=2,corrections_used=1)])
 def test_input_owner_rejects_changed_scope_before_sealing(tmp_path,changed):
-    root=v2(tmp_path);chain(root);job=review(root)
+    root=current_instance(tmp_path);chain(root);job=review(root)
     changed_job=dict(job,evidence_return=dict(job['evidence_return'],**changed))
     base=c.settings(root);head=accepted_budget.read(root)
     with pytest.raises(ValueError,match='scope|allowance'):
@@ -199,7 +196,7 @@ def test_input_owner_rejects_changed_scope_before_sealing(tmp_path,changed):
 
 
 def test_controller_runs_one_bounded_correction_and_one_reassessment(tmp_path,monkeypatch):
-    root=v2(tmp_path);chain(root);calls=[]
+    root=current_instance(tmp_path);chain(root);calls=[]
     def execute(root,step,**kwargs):
         job=c.read_job(root/'jobs'/f'{step:03d}.json');calls.append((step,job['role']))
         if step==3:
@@ -221,7 +218,7 @@ def test_controller_runs_one_bounded_correction_and_one_reassessment(tmp_path,mo
 
 
 def test_readiness_review_required_share_rule_is_identical_on_resume(tmp_path,monkeypatch):
-    job=dict(step=3,role='A',research_strategy_version=2)
+    job=dict(step=3,role='A',research_strategy_version=3,advisory_scope_version=1)
     target=delivery_review.make('delivery_review',3,0)
     monkeypatch.setattr(role_share,'configured',lambda *args:dict(role_share.DEFAULT))
     monkeypatch.setattr(role_share,'usage',lambda *args:pytest.fail('Required readiness cannot spend optional reflection shares'))
@@ -232,7 +229,7 @@ def test_readiness_review_required_share_rule_is_identical_on_resume(tmp_path,mo
 
 def test_no_artifact_selected_fork_preserves_consumed_correction_and_validates_parent(tmp_path):
     from scidiscovery.research_loop import fork_runtime, fork_service, fork_sources
-    parent=v2(tmp_path/'source');chain(parent)
+    parent=current_instance(tmp_path/'source');chain(parent)
     first=review(parent);publish(parent,first,request=copy.deepcopy(REQUEST))
     correction=c.build_job(parent,4,'W',[1,2,3],
         evidence_return=delivery_review.make('delivery_correction',3,1))
