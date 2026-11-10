@@ -1969,7 +1969,7 @@ def _final_a_result(root, job, result):
     settings = contracts.settings(root, job)
     begin = budget.closeout_state(root)['begin']
     policy = settings.get('delivery_policy')
-    if job.get('research_strategy_version') in (2, 3) and result.get('next_action') == 'finish':
+    if result.get('next_action') == 'finish':
         if begin is not None:
             return _closeout_result(root,'final_a_completed',reason='scientific_delivery_declined',step=job['step'])
         return _finish(root,settings,'final_a_completed',job['step'],result,reason='scientific_delivery_declined')
@@ -2123,17 +2123,7 @@ def _run_final(root, begin, *, sources=None):
         has_worker = 'W' in last_roles
         # Keep all accepted closeout science in the exact final history.
         parents = sorted(set(last_roles.values()) | after_cutoff)
-        instruction = ('This is FINAL. Give the final scientific conclusion from accepted existing W evidence, '
-            'make your explicit selection, and explain all unmet objectives and missing work in scientific_result and limitations. '
-            'No new scientific role, experiment, audit, wait or correction is authorized. '
-            'When existing candidate originals and delivery permission are available, use deliver and select an exact candidate; '
-            'control performs the original host submission and supplies its actual confirmed, failed or unknown receipt. '
-            'Never manufacture submission success. If originals or delivery permission are absent, return finish with the explicit unsubmitted reason.')
-        if settings.get('research_strategy_version') in (2, 3):
-            instruction = ('This is FINAL: judge only accepted existing evidence. Candidate availability never requires scientific acceptance. '
-                'Use finish to decline every candidate, with no recommendation and a truthful unsubmitted reason in scientific_result and limitations. '
-                'Use deliver only to explicitly select a justified exact existing candidate under the original declared delivery policy. '
-                'No new role, experiment, audit, wait or correction is authorized. Never manufacture submission success.')
+        instruction = guidance.final_report()
         policy = settings.get('delivery_policy')
         sources = None
         if not has_worker:

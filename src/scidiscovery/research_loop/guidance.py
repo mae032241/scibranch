@@ -153,9 +153,16 @@ def worker_assessment(step, instruction, *, ending, control_outcome):
 
 def worker_handoff(step, instruction):
     request=(' Authored W request: '+instruction) if instruction else ''
-    return (f'Continue the retained W research in inputs/parents/{step:03d}/conclusion.json.{request} '
-        'Preserve original directions, unfinished questions, candidates, materials, mechanisms and consumed opportunities. '
+    return (f'Read the original objective and hard constraints again, then reassess retained W results and their applicability in inputs/parents/{step:03d}/conclusion.json.{request} '
+        'W decides whether to continue, revise or stop that direction. Preserve original evidence, unfinished questions, candidates, materials, mechanism history and consumed budgets/opportunities. '
         'Partial sealing is neither independent A review nor mechanism completion; permissions and global budgets persist.')
+
+
+def final_report():
+    return ('This is FINAL: judge only accepted existing evidence. Candidate availability never requires scientific acceptance. '
+        'Use finish to decline every candidate, with no recommendation and a truthful unsubmitted reason in scientific_result and limitations. '
+        'Use deliver only to explicitly select a justified exact existing candidate under the original declared delivery policy. '
+        'No new role, experiment, audit, wait or correction is authorized. Never manufacture submission success.')
 
 
 def worker_consultation(step, instruction, *, question, intent, same_session):
