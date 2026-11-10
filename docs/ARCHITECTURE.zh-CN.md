@@ -81,6 +81,11 @@ settings、job、作者输出、accepted call、receipt 与控制账本是原件
 控制器的恢复 cursor 和单步推进复用已接受决定；内部不可变 `Route` 值不新增持久 schema
 或另一状态权威。`guidance.py` 拥有新任务指导文字，恢复不重新生成留存任务说明。
 
+有界的 `execution_facts` 视图从已接受值描述受管调用，复用于现有调用回执、W 接续和
+Final A。accepted-prefix publisher 保留其冻结历史，不扫描旧日志。作用域、结果缺失和
+省略量明确展示；执行成功不证明科学结论有效。覆盖范围与读取限制见
+[执行事实视图](RESEARCH_LOOP_CONTRACTS.zh-CN.md#execution-facts)。
+
 新节点绑定准确运行配置 revision。保存修改只排队未来设置，不改已有任务、不清零预算，
 也不启动研究。暂停阻止新工作，已接受原件继续遵守原限制；类型化暂停诊断保留已准入的
 resume 动作。原生续接、输出补填、执行唤醒与服务恢复分别需要自己的冻结许可，

@@ -943,7 +943,8 @@ def science_view(job, root=None):
         for reference in job.get('execution_qualifications', [])[:3]:
             _, proof=formal_review._receipt_original(root,reference,base=base,owners=owners)
             qualified.append(proof['subject']['material']['path'])
-    return _science_view(job,root,parent_sources=parents,policy=policy,qualified_materials=qualified)
+    return _science_view(job,root,parent_sources=parents,policy=policy,qualified_materials=qualified,
+        execution_fact_view=job.get('history',{}).get('execution_facts'))
 
 
 def _validate_worker_consultation(job, requester):
@@ -976,7 +977,7 @@ def consultation_view(job):
         return_role='W',scope=('Bounded evidence for the exact W question; return to the requesting W with original materials and missing evidence. No scientific decision or execution grant.' if job['role']=='E' else 'Fallible advice on the exact W question; W judges and resumes autonomous research. No formal review verdict or execution grant.'))
 
 
-def _science_view(job, root, *, parent_sources, policy, qualified_materials):
+def _science_view(job, root, *, parent_sources, policy, qualified_materials, execution_fact_view):
     from .protocol import require_job_format
     require_job_format(job)
     if job.get('fork_source') is not None:
@@ -1085,6 +1086,7 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials):
            if job.get('project') is not None else {}),
         **(dict(configured_delivery=job['configured_delivery']) if 'configured_delivery' in job else {}),
         'parents': parents,
+        **(dict(execution_facts=execution_fact_view) if execution_fact_view is not None else {}),
         'reading_order':reading[job['role']]+' Read each parent conclusion first; its history_alias and matching history-index pages expose the same scientific source, not independent evidence. lineage.indexes.research locates the latest shared H/W/A authored understanding, limitations and direction supervision. Use its exact original links and lineage indexes on demand for decision-relevant gaps; a new role turn does not require rereading the full history. Use existing reports/artifact_index for exact entries to local observations, counterevidence, untested combinations and open questions; do not manufacture clues. Use native file/shell tools: inspect JSON keys/shapes, then needed fields or line ranges; size combined batch returns for every inner/outer tool limit. Analyze large numeric arrays with your own local code and report needed results with exact source locators; originals remain available. Reuse unchanged originals fully read this session; fill gaps/conflicts/truncation, including later pages and limitations.'
             +(' A judges independently; no routine redo of old observations. Parent claims are not qualification.'
               if job['role']=='A' else ' A verifies independently. Parents are claims.')
@@ -1154,6 +1156,8 @@ class CurrentInventory:
     redundant_materials: list = field(default_factory=list)
     research_state: dict | None = None
     review_binding: dict | None = None
+    managed_call_metadata: dict = field(default_factory=dict)
+    execution_fact_view: dict | None = None
 
 
 def accept_current_inventory(root: Path, step: int):
@@ -1217,6 +1221,36 @@ def accept_current_inventory(root: Path, step: int):
             worker_research_seed=((job.get('search') or {}).get('worker_research') or {}).get('seed',[])))
     inventory.scientific_outputs={row['call_id']:history._observe_scientific_outputs_for_inventory(root,job,row,inventory=inventory)
         for row in calls if row['status'] in {'known_success','known_failed'}}
+    from . import execution_facts
+    presentation_facts=[]
+    for row in calls:
+        metadata=inventory.managed_call_metadata[row['call_id']]
+        presentation_facts.append(execution_facts.accepted_fact(call_id=row['call_id'],status=row['status'],
+            accepted=metadata['accepted'],observed=metadata['observed'],
+            outputs=inventory.scientific_outputs.get(row['call_id']),
+            observation_basis='accepted_terminal' if metadata['observed'] is not None else 'accepted_call',
+            native_state=(row.get('execution') or {}).get('native_state')))
+    fact_scope=dict(kind='stopped_worker',node=f'{job["role"]}{step:03d}',attempt=inventory.attempt)
+    public_refs={}
+    work=workspace(root,step)
+    for row in calls:
+        call_id=row['call_id']
+        observed=inventory.managed_call_metadata[call_id]['observed'] or {}
+        slots=[]
+        for output in inventory.scientific_outputs.get(call_id,[]):
+            alias=Path('work/retained-experiments')/call_id/'outputs'/output['name']
+            slots.append(dict(name=output['name'],source=str(work/alias),path=alias.as_posix()))
+        public_refs[call_id]=dict(result=execution_facts.output_refs(
+            observed_outputs=observed.get('scientific_outputs',[]),published_slots=slots))
+    try:
+        inventory.execution_fact_view=execution_facts.render(facts=presentation_facts,
+            scope=fact_scope,public_refs=public_refs,
+            coverage='accepted_scope' if history._managed_config_for_inventory(job,inventory) else 'unknown',
+            omitted_calls=0 if history._managed_config_for_inventory(job,inventory) else None)
+    except (ValueError,TypeError,OverflowError):
+        # Original identity/status acceptance above remains strict. Presentation
+        # capacity or optional metadata must not erase an accepted result.
+        inventory.execution_fact_view=execution_facts.unavailable(scope=fact_scope)
     needs_checkpoint=(job['role']=='W' and (checkpoint.enabled_for_policy(job,settings=policy)
         or worker_delivery.applicable(job) or job.get('managed_execution_wait')))
     if not raw.exists():
@@ -2141,7 +2175,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         if statements:
             job['user_guidance'] = statements
         for path, value in ((root / 'jobs' / f'{step:03d}.json', job_record(job)),
-                            (work / 'science-task.json', read(regular(work / 'science-task.json')) if retained is not None else _science_view(job,root,parent_sources=parent_views,policy=policy,qualified_materials=authority_facts['qualified_materials'])),
+                            (work / 'science-task.json', read(regular(work / 'science-task.json')) if retained is not None else _science_view(job,root,parent_sources=parent_views,policy=policy,qualified_materials=authority_facts['qualified_materials'],execution_fact_view=job['history'].get('execution_facts'))),
                             (host_record(work) / 'science-result.schema.json', read(regular(host_record(work) / 'science-result.schema.json')) if retained is not None else result_schema(role, protocol, 'selection' in job,**response_options(job)))):
             if path.exists():
                 if read(regular(path)) != value:

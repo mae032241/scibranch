@@ -36,6 +36,20 @@ FRAGMENT_INSTRUCTION = 'Read work/science-resume.json; follow stage_response.'
 OPERATOR_INTERRUPT_VERSION = 1
 
 
+def write_science_resume(work, *, intent):
+    """Publish the public brief frozen by fragment admission, without reads."""
+    value = intent.get('science_resume')
+    try:
+        available = (isinstance(value, dict) and value.get('version') == 1
+            and len(checkpoint._bytes(value)) <= checkpoint.MAX_BRIEF_BYTES)
+    except (TypeError, ValueError):
+        available = False
+    if not available:
+        value = dict(task='science-task.json', diagnostic='science_resume_view_unavailable',
+            scope='Original task, permissions and same-call reconciliation remain binding; no execution grant.')
+    write(Path(work) / 'work/science-resume.json', value)
+
+
 def interrupt_binding(record, step, attempt, intent):
     """Pure binding to this accepted original; never select another attempt."""
     return dict(version=1, reason='operator_interrupt', step=step, attempt=attempt,
@@ -505,7 +519,7 @@ def run_native(root: Path, step: int, attempt=0):
         prior=execution.record(root,step,attempt-1)
         if intent['fragment_checkpoint']['path']!=(prior/'checkpoint.json').relative_to(root).as_posix():
             raise ValueError('Native fragment checkpoint changed before launch')
-        write(work/'work/science-resume.json',checkpoint.brief(root,job,prior))
+        write_science_resume(work, intent=intent)
     author_limits=None;author=None
     author_context_facts=None
     if intent.get('continuation_kind')=='author_closeout':

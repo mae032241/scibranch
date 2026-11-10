@@ -446,6 +446,16 @@ def prepare_node(root, job, payload, seal, *, inventory):
         implementations=[dict(id=f'{job["role"]}{job["step"]:03d}-I{index:03d}',
             label=Path(row['path']).name) for index,row in enumerate(sorted(seal['materials'],key=lambda row:row['path']),1)],
         scope='Accepted authored science and exact implementation locators; no inherited qualification.')
+    from . import execution_facts
+    fact_scope=dict(kind='accepted_sources',node=f'{job["role"]}{job["step"]:03d}')
+    try:
+        node['execution_facts']=execution_facts.combine(
+            previous=prior.get('execution_facts') if prior is not None else None,
+            current=inventory.execution_fact_view,scope=fact_scope,
+            source_cutoff=max(prefix['cutoff'],job['step']),node_count=prefix['count']+1,
+            navigation=[f'inputs/history/{base}/index.json'])
+    except (KeyError,TypeError,ValueError,OverflowError):
+        node['execution_facts']=execution_facts.unavailable(scope=fact_scope)
     node['research']=lineage.research_navigation(prior_research,job,payload,node_path=base,
         supervision_state=search_delta['summary'],retained_memory=retained_memory,budget_facts=supervision_facts)
     node['entities']=[]

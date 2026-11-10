@@ -6,6 +6,7 @@ stage nor starts a native turn, queries adapters, or updates scientific counters
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from . import configuration_updates
@@ -74,24 +75,6 @@ def _binding(root, job, record):
                 stage_owner=digest, record=record.relative_to(root).as_posix())
 
 
-def _science(root, job, originals):
-    row = next((item for item in originals if Path(item['path']).name == 'science-output.json'), None)
-    if row is None:
-        return dict(status='missing', diagnostic='missing_output'), None
-    outcome = next((item for item in originals if Path(item['path']).name == 'native-outcome.json'), None)
-    try:
-        receipt = c.native_outcome((root / outcome['path']).parent) if outcome else None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        receipt = None
-    if not isinstance(receipt, dict) or receipt.get('raw_ref') != dict(path=str(Path(root)/row['path']),size_bytes=row['size_bytes']):
-        return dict(status='unverified', diagnostic='unbound_final_output'), None
-    try:
-        payload = c.science_payload(root / row['path'], 'W', job['handoff_protocol'],**c.response_options(job))
-    except OutputRepairRequired as error:
-        return dict(status='invalid', diagnostic=error.code), None
-    return dict(status='present', diagnostic=None), payload
-
-
 def _binding_for_inventory(root,job,record,inventory):
     c._inventory_identity(root,job['step'],inventory)
     if job!=inventory.job or record!=inventory.record or job.get('role')!='W':
@@ -138,12 +121,12 @@ def _capture(root, job, record, *, inventory):
         original = c.regular(path)
         if original.stat().st_mode & 0o777 != 0o400:original.chmod(0o400)
         originals.append(dict(experiments.proof(original),path=original.relative_to(root).as_posix()))
-    science, _ = _science_for_inventory(root,originals,inventory)
+    science, payload = _science_for_inventory(root,originals,inventory)
     work = c.workspace(root, job['step'])
     materials = []
     try:
         for call in history.managed_calls(inventory):
-            accepted=c.read(root/call['accepted']['snapshot'])
+            accepted=inventory.managed_call_metadata[call['call_id']]['accepted']
             attempt=accepted.get('native_attempt')
             if not isinstance(attempt,dict) or type(attempt.get('number')) is not int:
                 raise history.ObserverIntegrityError('Checkpoint output has no exact accepted native attempt')
@@ -169,6 +152,7 @@ def _capture(root, job, record, *, inventory):
                  material_status=material_status, material_diagnostic=material_diagnostic,
                  omitted_materials=0,
                  scope='Stopped native originals and sealed terminal outputs only; mutable drafts are not retained. Not a stage seal, scientific qualification or restart permission.')
+    value['resume_brief']=_make_brief(job,value,science=payload,execution_view=inventory.execution_fact_view)
     c.write(destination, value)
     destination.chmod(0o400)
     return _validate_value(root,job,record,value,inventory=inventory)
@@ -210,7 +194,7 @@ def _validate_value(root,job,record,value,*,inventory):
             selected.setdefault(parts[1],[]).append(row)
     calls=history.managed_calls(inventory,call_ids=list(selected)) if selected else []
     for call in calls:
-        accepted=c.read(root/call['accepted']['snapshot'])
+        accepted=inventory.managed_call_metadata[call['call_id']]['accepted']
         attempt=accepted.get('native_attempt')
         if (not isinstance(attempt,dict) or type(attempt.get('number')) is not int
                 or attempt['number']>value['binding']['attempt'] or call['status'] not in {'known_success','known_failed'}):
@@ -273,16 +257,9 @@ def stage_end(root, job, record):
     return value
 
 
-def brief(root, job, record):
-    """Return at most 4KB of ordinary science and direct-file availability.
-
-    Host paths, hashes, raw logs and private execution bindings are omitted. Full
-    originals stay in the checkpoint; omissions never become inferred evidence.
-    """
-    root, record = Path(root), Path(record)
-    value = c.read(c.regular(record/'checkpoint.json'))
-    _, science = _science(root, job, value['originals'])
-    result = dict(task='science-task.json', science_status=value['science']['status'], scientific_summary=None,
+def _make_brief(job, value, *, science, execution_view):
+    """Freeze the bounded public preview at the producer's accepted cutoff."""
+    result = dict(version=1, execution_facts=deepcopy(execution_view), task='science-task.json', science_status=value['science']['status'], scientific_summary=None,
                   current_understanding=None, limitations=[], omitted_limitations=0, direct_files=[],
                   omitted_files=value['omitted_materials'], truncated=False,
                   material_status=value['material_status'],
@@ -297,7 +274,7 @@ def brief(root, job, record):
         result['truncated'] = a or b or result['omitted_limitations']>0
         result['stage_intent']=science['stage_intent']
     plan=job.get('history',{}).get('view',{}).get('mechanisms',{}).get('unfinished_plan')
-    if plan is not None:
+    if plan is not None and isinstance(plan.get('index'),str) and len(plan['index'].encode())<=512:
         result['unfinished_mechanisms']=dict(count=plan['remaining_count'],index=plan['index'],
             interpretation='Original unconsumed opportunities, not proof of scientifically untested mechanisms. Read the index for all entries.')
     for row in value['materials']:
@@ -316,7 +293,35 @@ def brief(root, job, record):
             result['truncated'] = True
     while len(_bytes(result)) > MAX_BRIEF_BYTES and result['limitations']:
         result['limitations'].pop();result['omitted_limitations']+=1;result['truncated']=True
+    # Execution counts and original identity take precedence over expanded rows.
+    view=result['execution_facts']
+    while len(_bytes(result)) > MAX_BRIEF_BYTES and isinstance(view,dict) and view.get('calls'):
+        view['calls'].pop();view['omitted_rows']+=1;result['truncated']=True
+    if len(_bytes(result)) > MAX_BRIEF_BYTES:
+        result.pop('unfinished_mechanisms',None)
+    if len(_bytes(result)) > MAX_BRIEF_BYTES:
+        # The compact fixed envelope fits even when all optional excerpts go.
+        result=dict(version=1,task='science-task.json',science_status=value['science']['status'],
+            execution_facts=view,omitted_files=len(value['materials'])+value['omitted_materials'],
+            omitted_limitations=len(science['limitations']) if science is not None else None,
+            truncated=True,interpretation='Author claims and execution facts do not grant scientific qualification or execution permission.')
     return result
+
+
+
+def brief(*, checkpoint):
+    """Consume a previously accepted checkpoint; never reopen its science."""
+    from . import execution_facts
+    saved=checkpoint.get('resume_brief')
+    if isinstance(saved,dict) and saved.get('version')==1:
+        try:
+            if len(_bytes(saved))<=MAX_BRIEF_BYTES:return deepcopy(saved)
+        except (ValueError,TypeError,OverflowError):
+            pass
+    return dict(version=1,task='science-task.json',science_status='unavailable',
+        execution_facts=execution_facts.unavailable(scope=dict(kind='accepted_sources',node='current')),
+        diagnostic='resume_brief_unavailable',
+        interpretation='Original task, permissions and original-call reconciliation remain binding.')
 
 
 def disposition(science, *, review_requested=False):

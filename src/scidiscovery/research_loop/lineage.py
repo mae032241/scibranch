@@ -875,6 +875,8 @@ def bind_from_facts(root, step, role, protocol, *, base, head, policy,
             scope='Declared relationships; read exact node navigation for original facts.'),
         access='Read the indexed node and its previous links for complete history; exact public entity pages support point choices. Unread history remains unknown.')
     binding=dict(prefix=prefix,breadth_snapshot=head['search_ref'],inputs=[],view=bounded_brief(view))
+    if tip is not None and tip.get('execution_facts') is not None:
+        binding['execution_facts']=tip['execution_facts']
     if audit_projection_version==1:
         binding.update(audit_projection_version=1,adjacent_audit=adjacent_audit,
             audit_receipts=[adjacent_audit] if adjacent_audit is not None else [])

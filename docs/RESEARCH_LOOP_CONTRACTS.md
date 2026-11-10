@@ -265,6 +265,38 @@ reinterpreted under the current W-led contract. Historical trials remain unchang
 
 ### Scientific navigation and evidence memory
 
+<a id="execution-facts"></a>
+
+`execution_facts` is an optional version-1 presentation of already accepted managed
+call facts, bounded to 4096 serialized JSON UTF-8 bytes. Existing `run`, `query` and
+`collect` feedback, stopped-W fragment briefs, new W tasks and normal/protected
+Final A tasks use the same semantics. The accepted-prefix node publisher folds
+the prior published view with the current accepted inventory; task consumers do
+not reopen call records, scientific outputs or historical logs to reconstruct it.
+The fragment brief is produced at checkpoint capture, bound into the continuation
+intent and written to `work/science-resume.json`; the whole brief remains within
+4096 bytes, including excerpts and execution facts.
+
+The view names its scope and cutoff, original call IDs, observed status, selected
+code identity when available, result availability and existing public navigation.
+Counts cover only that scope; omitted rows and unknown additional coverage are
+explicit. Late observations do not rewrite an older frozen task or brief. Live
+query observations are distinguished from accepted terminal evidence. Native
+scratch commands and evaluations inside a script are outside this coverage.
+`known_success` describes execution, not scientific validity; `known_failed`
+does not disprove a mechanism, and `unknown` permits no resubmission. Available
+outputs and adapter-reported metrics are not independently verified science.
+
+Expanded rows may be omitted to fit the presentation bound. Unmounted originals
+remain unavailable to direct reading; only existing public locators are shown.
+Missing optional presentation, metrics or code display fields do not add a
+scientific completion gate. Required identity checks, unresolved-call restrictions,
+permissions and consumed budgets retain their existing owners. The current
+`budget_status` remains the operational budget prompt; no remaining budget is
+copied into this historical view. Existing frozen artifacts are not backfilled.
+This supplies execution navigation, not a new authority ledger, scientific summary,
+evaluation service or numerical verifier. Scientific efficiency gains are untested.
+
 The existing accepted-prefix publisher appends H and W authored originals and
 publishes bounded `indexes.research` navigation beside each accepted node. It
 links the latest W understanding, H competing explanations, ordinary A assessment

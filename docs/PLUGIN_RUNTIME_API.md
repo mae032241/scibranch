@@ -131,6 +131,14 @@ frozen projection; they do not re-query a backend to reconstruct historical fact
 The optional local result/candidate protocol is explicitly frozen; arbitrary result
 fields do not opt an implementation into that protocol.
 
+Existing `run`, `query` and `collect` responses also carry the host's bounded
+version-1 `execution_facts` presentation. It uses accepted values already obtained
+by that operation; it adds no adapter call or mandatory metric. Adapter-reported
+values remain unverified scientific claims, and a live query is distinguished from
+accepted terminal evidence. The same presentation feeds W continuation and Final A;
+its exact coverage and omission rules belong to the
+[research-loop contract](RESEARCH_LOOP_CONTRACTS.md#execution-facts).
+
 Protocol 33 keeps W as the research main line. `continue` resumes the same W;
 `handoff` seals and starts a new W, `revise_h` and `review` request serial H/A
 consultation returning to a new W, and `decision` requests an ordinary A assessment.

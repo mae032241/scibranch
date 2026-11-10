@@ -579,10 +579,11 @@ def _observe_managed_calls(root, job, *, context=None, call_ids=None):
 def _observe_managed_calls_for_inventory(root,job,*,inventory,context=None,call_ids=None):
     from .protocol import stage_scope_for_job
     return _observe_managed_calls_from_facts(root,job,chain=inventory.chain,
-        scope=stage_scope_for_job(root,job,task_ref=inventory.task_ref),context=context,call_ids=call_ids)
+        scope=stage_scope_for_job(root,job,task_ref=inventory.task_ref),context=context,call_ids=call_ids,
+        metadata=inventory.managed_call_metadata)
 
 
-def _observe_managed_calls_from_facts(root,job,*,chain,scope,context=None,call_ids=None):
+def _observe_managed_calls_from_facts(root,job,*,chain,scope,context=None,call_ids=None,metadata=None):
     """Capture small common receipts, independent of domain candidates or observers."""
     from . import experiments, breadth, generic_results
     from .experiment_client import record_directory
@@ -618,6 +619,8 @@ def _observe_managed_calls_from_facts(root,job,*,chain,scope,context=None,call_i
             experiments.verify_observation(observed,lambda item:Path(item['path']),
                 interface=interface,context=context,verify_files=False)
             terminal=_managed_proof(root,terminal_path,observed['native_terminal'],context=context)
+        if metadata is not None:
+            metadata[directory.name]=dict(accepted=accepted,observed=observed)
         retired_path=directory/'submission-retirement.json'
         if retired_path.exists() or retired_path.is_symlink():
             retirement_config=dict(record_dir=str(records.root),scope=scope,execution_interface=interface,breadth=(job.get('search') or {}).get('breadth'))
@@ -1036,7 +1039,8 @@ def _capture(root, job, payload, materials, *, inventory):
             from . import generic_results
             diagnostics=[]
             snapshot=dict(binding=binding,candidates=generic_results.candidates(rows,diagnostics=diagnostics),current_candidate=None,actual_submission=None,contexts=[],managed_calls=rows,
-                coverage=dict(status='partial',note='Registered call originals and explicitly declared candidates only; scientific qualification is unobserved.'))
+                coverage=dict(status='partial',note='Registered call originals and explicitly declared candidates only; scientific qualification is unobserved.'),
+                execution_facts=inventory.execution_fact_view)
             if inventory.research_state is not None:snapshot['research_state']=inventory.research_state
             if diagnostics:snapshot['candidate_diagnostics']=diagnostics
             c.write(path,snapshot)
@@ -1273,6 +1277,7 @@ def _capture(root, job, payload, materials, *, inventory):
     if snapshot.get('candidate_diagnostics'):
         snapshot['coverage']=dict(status='partial',note='Some observer items have no verified binding; retained valid facts remain available.')
     if inventory.research_state is not None:snapshot['research_state']=inventory.research_state
+    snapshot['execution_facts']=inventory.execution_fact_view
     c.write(path, snapshot)
     inventory.observation_document,inventory.observation_inputs=snapshot,inputs
     return dict(path=path.relative_to(root).as_posix())
@@ -1310,6 +1315,7 @@ def capture(root, job, payload, materials, *, inventory):
             value['candidates']=generic_results.candidates(value['managed_calls'],diagnostics=diagnostics)
             if diagnostics:value['candidate_diagnostics']=diagnostics
         if inventory.research_state is not None:value['research_state']=inventory.research_state
+        value['execution_facts']=inventory.execution_fact_view
         c.write(path, value)
         inventory.observation_document,inventory.observation_inputs=value,None
         return dict(path=path.relative_to(root).as_posix())
@@ -1570,7 +1576,8 @@ def load_records_from_source_facts(root, sources, *, source_facts, write_cache=T
                 raise ValueError('Observer snapshot differs from scientific source')
         row = dict(step=step, role=job['role'], seal_ref=seal_sha, view=view, detail=detail,
                    recommendation=recommendation_for(job,payload),
-                   observation=observation)
+                   observation=observation,
+                   execution_facts=observation.get('execution_facts') if observation is not None else None)
         if observation is not None and observation.get('candidates'):
             origin=owner_origin(step);origin_key=originals.identity_key(origin)
             references=candidate_refs.references([row])

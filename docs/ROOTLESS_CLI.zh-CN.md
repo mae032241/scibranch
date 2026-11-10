@@ -1332,6 +1332,11 @@ scid-research closeout --root /绝对路径/实例 --export-only
 
 共享研究视图沿用 accepted prefix、封存科学原件、history/lineage 与候选目录。任务中的 `lineage` 保持紧凑导航，`lineage.indexes.research` 按需给出最近 W 理解、最近 H 竞争解释、普通 A 正式评估和单列 A 咨询入口；未决问题直接读作者 scientific_result 与 limitations。已有候选与判别工作沿用既有目录，`direction_supervision` 提供有界轮次、准确作者入口、连续计数、覆盖边界与待监督原因。摘录显式标出文字截断和省略的限制，候选入口沿既有节点索引覆盖未提名候选；完整原文保持可读，不新增可改 ledger 库、通用必填科学字段、控制层科学总结或排名。候选可用不等于资格，预算、私有路径、cursor、token 不进入科学页。正式独审只保留既有中性精确 subject 输入。
 
+`run/query/collect` 回执、W 接续与 Final A 另有控制层生成的有界 `execution_facts`：
+显示准确范围内的受管调用状态、代码身份、结果入口与省略量。实时查询和已接受终态分开，
+执行成功不等于科学有效；缺少可选指标不会新增补填要求。fragment 使用捕获时冻结的
+`work/science-resume.json` 简报。完整语义见[执行事实视图](RESEARCH_LOOP_CONTRACTS.zh-CN.md#execution-facts)。
+
 未传 `--worker-resume-policy` 时另冻结最多两次同任务、同 session 的输出补填；普通 fragment 和受管执行唤醒单独按原累计共享预算推进，不受这两次补填上限约束：
 `output_repair: true`、`output_only: true`、`execution_wake: true`。
 补填修正已确认完成的必需返回、实际动作消费的作者引用及明确诊断的交付布局冲突；

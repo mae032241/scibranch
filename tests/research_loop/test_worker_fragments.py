@@ -94,7 +94,7 @@ def test_missing_scientific_summary_preserves_native_identity_and_direct_results
     assert result.read_bytes() == b'public_metric\n0.61\n'
     assert not (record / 'result-identity.json').exists()
     assert ledger_snapshot()==before_ledger
-    view = checkpoint.brief(root, job, record)
+    view = checkpoint.brief(checkpoint=value)
     assert view['current_understanding'] is None and view['science_status'] == 'missing'
     assert checkpoint.disposition(None) == 'repair'
 
@@ -134,7 +134,7 @@ def test_invalid_science_is_saved_without_manufacturing_conclusion(fragment):
         raw_ref=c.file_ref(record / 'science-output.json')))
     value = capture_fragment(root, job, record)
     assert value['science']['status'] == 'invalid'
-    assert checkpoint.brief(root, job, record)['scientific_summary'] is None
+    assert checkpoint.brief(checkpoint=value)['scientific_summary'] is None
     assert (record / 'science-output.json').read_text() == '{torn'
     assert not (record / 'result-identity.json').exists()
 
@@ -146,7 +146,7 @@ def test_output_without_original_completion_binding_is_retained_as_unverified(fr
     c.write(record/'native-outcome.json',outcome)
     value = capture_fragment(root, job, record)
     assert value['science'] == dict(status='unverified', diagnostic='unbound_final_output')
-    assert checkpoint.brief(root, job, record)['scientific_summary'] is None
+    assert checkpoint.brief(checkpoint=value)['scientific_summary'] is None
     assert (record / 'science-output.json').exists()
 
 
@@ -158,7 +158,7 @@ def test_unknown_usage_and_cleanup_still_preserve_mechanical_checkpoint(fragment
     value = capture_fragment(root, job, record)
     assert 'usage.json' in value['missing_native_originals']
     assert value['science']['status'] == 'missing'
-    assert checkpoint.brief(root, job, record)['current_understanding'] is None
+    assert checkpoint.brief(checkpoint=value)['current_understanding'] is None
     assert not (record / 'result-identity.json').exists()
 
 
@@ -170,7 +170,7 @@ def test_unsafe_mutable_file_is_not_promoted_into_execution_checkpoint(fragment)
     value = capture_fragment(root, job, record)
     assert value['material_status'] == 'observed' and value['materials'] == []
     assert any(row['path'].endswith('/native-intent.json') for row in value['originals'])
-    assert checkpoint.brief(root, job, record)['material_status'] == 'observed'
+    assert checkpoint.brief(checkpoint=value)['material_status'] == 'observed'
 
 
 def test_bounded_multibyte_brief_preserves_omissions_and_no_host_bindings(sealed_fragment):
@@ -188,7 +188,7 @@ def test_bounded_multibyte_brief_preserves_omissions_and_no_host_bindings(sealed
     originals += [work/'artifacts'/f'{index:03d}-结果.csv' for index in range(60)]
     originals += [root/row['original']['snapshot'] for row in saved['materials']]
     before = {path: path.read_bytes() for path in originals}
-    view = checkpoint.brief(root, job, record)
+    view = checkpoint.brief(checkpoint=saved)
     raw = checkpoint._bytes(view)
     assert len(raw) <= checkpoint.MAX_BRIEF_BYTES and view['truncated']
     assert len(view['direct_files']) + view['omitted_files'] == len(saved['materials'])
@@ -201,8 +201,8 @@ def test_json_escaping_is_bounded_even_without_direct_files(fragment):
     root, job, record = fragment
     escaped = '"\\\n' * 1000
     science(record, summary=escaped, scientific_result=escaped, limitations=[escaped] * 4)
-    capture_fragment(root, job, record)
-    view = checkpoint.brief(root, job, record)
+    saved = capture_fragment(root, job, record)
+    view = checkpoint.brief(checkpoint=saved)
     assert len(checkpoint._bytes(view)) <= checkpoint.MAX_BRIEF_BYTES
     assert view['truncated'] and view['omitted_limitations'] > 0
     assert view['direct_files'] == [] and view['omitted_files'] == 0

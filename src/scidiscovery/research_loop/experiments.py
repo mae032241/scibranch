@@ -446,6 +446,37 @@ def _run_view(value):
     return result
 
 
+def _execution_feedback(result, *, accepted, observed, command, operation_started, work):
+    """Project this operation's acquired originals without another provider read."""
+    if accepted is None:return result
+    from . import execution_facts
+    frozen=observed if result.get('status')!='integrity_error' else None
+    basis=('accepted_terminal' if frozen is not None else
+        'current_observation' if command=='query' and operation_started else 'accepted_call')
+    status=(frozen['status'] if frozen is not None else
+        execution_status(result.get('state',result.get('status'))))
+    call_id=accepted['call_id']
+    outputs=frozen.get('scientific_outputs',frozen.get('outputs',[])) if frozen is not None else None
+    fact=execution_facts.accepted_fact(call_id=call_id,status=status,accepted=accepted,
+        observed=frozen,outputs=outputs,observation_basis=basis,
+        native_state=frozen.get('native_state') if frozen is not None else result.get('state'))
+    # A host path is never made public by dropping its prefix. Only an accepted
+    # output in the existing mounted publication slot gets its declared alias.
+    aliases=[]
+    if work is not None and frozen is not None:
+        for item in frozen.get('scientific_outputs',[]):
+            # This exact existing publication slot is already mounted by the
+            # native owner. Other absolute originals gain no invented alias.
+            alias=Path('work/retained-experiments')/call_id/'outputs'/item['name']
+            if item['path']==str(work/alias):aliases.append(alias.as_posix())
+    scope=dict(kind='single_call',node='current')
+    attempt=(accepted.get('native_attempt') or {}).get('number')
+    if type(attempt) is int and attempt>=0:scope['attempt']=attempt
+    return dict(result,execution_facts=execution_facts.render(facts=[fact],scope=scope,
+        public_refs={call_id:dict(result=aliases)},coverage='accepted_scope'),
+        adapter_report_interpretation='Adapter-reported scientific values are not independently verified. Execution success does not establish scientific validity.')
+
+
 def _source_projection(config, accepted):
     """Project a declared file or its permanent code identity, without exporting code."""
     declared,_=registration(config['execution_interface']['executor'])
@@ -2579,6 +2610,7 @@ def main(argv=None):
         _report_diagnostic(error)
         print(json.dumps(dict(status='integrity_error',note='Configuration client cannot be read; preserve its original and report the unavailable input.'),allow_nan=False));return 3
     owner_lease = ExitStack();feedback_config=None;accepted_call_id=None;original_operation_started=True
+    accepted=None;observed=None;feedback_work=None
     try:
         config=json.loads(read(args.config.absolute()))
         if isinstance(config,dict) and 'worker_view_version' in config and 'scope' not in config:
@@ -2596,7 +2628,7 @@ def main(argv=None):
         if args.command in {'query','lookup','collect','cancel','reconcile','retire'}:
             # Establish the original before local capability/loading preflight.
             # Only entering the provider operation can make its reply uncertain.
-            Records(config).accepted(args.call_id)
+            accepted=Records(config).accepted(args.call_id)
             accepted_call_id=args.call_id
             original_operation_started=False
         if args.command=='research-declare':
@@ -2721,13 +2753,13 @@ def main(argv=None):
                         preaccept_unknown=any(row['call_id']==call_id and not row['resolved']
                             for row in preparation_recovery.retained_preparations(root,records.root,context=storage.Deadline(65)))
                 if not (approval or preaccept_unknown) or directory.exists():
-                    records.accepted(call_id)
+                    accepted=records.accepted(call_id)
                     accepted_call_id=call_id
                     observation=records.directory(call_id)/'execution-observation.json'
             if observation is not None and observation.exists() and result.get('status')!='integrity_error':
                 observed=json.loads(read(observation))
                 verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
-                result=scientific_result(config,Records(config).accepted(result['call_id']),result,observed)
+                result=scientific_result(config,accepted,result,observed)
             elif result.get('status')=='known_not_started' and result.get('accepted') is False:
                 result={key:result[key] for key in ('status','accepted','error','note') if key in result}
             elif result.get('accepted') is True and result.get('status') in {'unknown','integrity_error','unavailable','review_required'}:pass
@@ -2738,7 +2770,6 @@ def main(argv=None):
             code={'known_success':0,'known_failed':1}.get(result['status'],2)
         elif args.command=='lineage-status':result=progress(config);code=0
         elif args.command=='retire':
-            Records(config).accepted(args.call_id)
             accepted_call_id=args.call_id
             config,adapter=original_adapter(config,args.call_id,'retire')
             accepted_call_id=args.call_id
@@ -2748,7 +2779,6 @@ def main(argv=None):
             if isinstance(result.get('resource_accounting'),dict):result['resource_accounting']=_accounting_view(result['resource_accounting'])
             code=0 if result.get('status')=='not_submitted' else 2
         else:
-            Records(config).accepted(args.call_id)
             accepted_call_id=args.call_id
             capability='lookup_submission' if args.command=='lookup' else 'query' if args.command in {'query','reconcile'} else args.command
             if not getattr(lifecycle_capabilities(adapter),capability):
@@ -2772,7 +2802,7 @@ def main(argv=None):
                     **(dict(native_state=observed['native_state']) if observed is not None and 'native_state' in observed else {}),
                     note='Original terminal observation frozen; no new submission.' if observed is not None else 'Original accepted execution is '+state+'.' if pending else 'Original execution has no verified terminal observation.')
             elif args.command=='lookup':
-                records=Records(config);accepted=records.accepted(args.call_id)
+                records=Records(config)
                 descriptor=LocalFileDescriptor.model_validate(accepted['prepared'])
                 found=adapter.lookup_submission(descriptor)
                 if found is None:result=dict(state='unknown',call_id=args.call_id)
@@ -2796,7 +2826,7 @@ def main(argv=None):
                     result=_collected_view(config,args.call_id,observed,adapter,operation_context=operation_context)
             elif args.command in {'query','lookup'} and execution_status(result.get('state')) in {'known_success','known_failed'}:
                 if (Records(config).directory(args.call_id)/'execution-observation.json').exists():
-                    reconcile_saved_observation(config,adapter,args.call_id)
+                    observed=reconcile_saved_observation(config,adapter,args.call_id)
             if args.command in {'query','lookup'}:result=_status_view(result)
             code=2 if args.command=='reconcile' and result['status'] not in {'known_success','known_failed'} else 0
         result=_candidate_view(config,result)
@@ -2807,6 +2837,7 @@ def main(argv=None):
         from . import experiment_client,contracts as c
         root=experiment_client.root_for_configuration(feedback_config,allow_standalone=True)
         work=c.workspace(root,feedback_config['scope']['step']) if root is not None else Path(feedback_config['record_dir']).parent.parent
+        feedback_work=work if root is not None else None
         result['feedback']=dict(version=1,budget=feedback.budget_hint(work),
             review=review_feedback(feedback_config),
             qualification='Execution metadata does not establish scientific or candidate qualification.')
@@ -2891,6 +2922,16 @@ def main(argv=None):
             and result.get('accepted') is False):
         from . import managed_wait
         result['handoff']=managed_wait.handoff(feedback_config,result,args.command,getattr(args,'call_id',None))
+    if args.command in {'run','query','collect'}:
+        try:
+            result=_execution_feedback(result,accepted=accepted,observed=observed,
+                command=args.command,operation_started=original_operation_started,work=feedback_work)
+        except Exception:
+            # Optional navigation cannot erase an original response or change
+            # execution/recovery routing. No exception text enters science.
+            from . import execution_facts
+            result=dict(result,execution_facts=execution_facts.unavailable(
+                scope=dict(kind='single_call',node='current')))
     # CLI is a compact model view; the complete collection is already durable.
     if isinstance(result.get('outputs'),list):
         original=result['outputs'];result=dict(result,outputs=[])
@@ -2899,7 +2940,7 @@ def main(argv=None):
             if len(encoded(proposed))>16_000:break
             result['outputs'].append(item)
         if len(result['outputs'])<len(original):result['outputs_omitted_count']=len(original)-len(result['outputs'])
-    print(json.dumps(result,allow_nan=False));return code
+    print(json.dumps(result,ensure_ascii=False,allow_nan=False));return code
 
 
 def _code_export_entry(root, accepted):

@@ -1465,8 +1465,8 @@ def validate_fragment_chain(root, step, chain):
             raise ValueError('Fragment continuation cannot expand an author closeout scope')
         saved = c.read(c.regular(prior/'checkpoint.json'))
         original = c.native_outcome(prior)
-        science = c.science_payload(prior / 'science-output.json', 'W', job.get('handoff_protocol', 1))
-        if (saved['science']['status'] != 'present' or science.get('stage_intent') != 'continue'
+        brief = checkpoint.brief(checkpoint=saved)
+        if (intent.get('science_resume') != brief or saved['science']['status'] != 'present'
                 or original.get('returncode') != 0 or original.get('stop_reason')
                 or original['usage']['unknown_steps'] and not budget.native_completion_known(original, configuration_updates.for_step(root, step))):
             raise ValueError('Fragment continuation has no qualified original continuing turn')
@@ -1550,7 +1550,7 @@ def fragment_start(root, step, *, inventory):
     if c.read(c.regular(last / 'native-intent.json')).get('continuation_kind') == 'author_closeout':
         raise ResumeUnavailable('worker_fragment_special_scope_unavailable')
     saved = checkpoint.validate(root, job, last,inventory=inventory)
-    science = c.science_payload(last / 'science-output.json', 'W', job.get('handoff_protocol', 1))
+    science = inventory.payload
     if saved['science']['status'] != 'present' or checkpoint.disposition(science) != 'continue':
         raise ResumeUnavailable('worker_fragment_not_continuing')
     _eligible_original(root, step, paths, successful=True, wait_runner=True)
@@ -1586,7 +1586,8 @@ def fragment_start(root, step, *, inventory):
                   operator_interrupt_version=native.OPERATOR_INTERRUPT_VERSION, **profile_binding,
                   task_ref=c.record_ref(root / 'jobs' / f'{step:03d}.json'),
                   root_intent_ref=c.record_ref(paths[0] / 'native-intent.json'), previous=execution.proof(last),
-                  fragment_checkpoint=dict(path=(last / 'checkpoint.json').relative_to(root).as_posix()), budget_slice=anchor)
+                  fragment_checkpoint=dict(path=(last / 'checkpoint.json').relative_to(root).as_posix()),
+                  science_resume=checkpoint.brief(checkpoint=saved), budget_slice=anchor)
     if session_ref is not None:
         intent['session'] = session_ref
     else:

@@ -99,6 +99,13 @@ reuse accepted decisions. The internal immutable `Route` value adds no durable
 schema or second state authority. `guidance.py` owns new-task instruction text;
 recovery never regenerates retained task instructions.
 
+The bounded `execution_facts` view describes managed calls from accepted values.
+Existing call feedback, W continuation and Final A share this presentation; the
+accepted-prefix publisher carries its frozen history without scanning old logs.
+Scope, missing results and omissions remain explicit. Execution success does not
+establish scientific validity. See [execution facts](RESEARCH_LOOP_CONTRACTS.md#execution-facts)
+for the view's coverage and reading limits.
+
 New nodes bind an exact operational configuration revision. Saving edits queues
 future settings; it does not change existing tasks, reset budgets or launch work.
 Pause prevents new work while accepted originals retain their own limits. Typed
