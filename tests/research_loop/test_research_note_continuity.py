@@ -69,6 +69,10 @@ def test_real_notes_publish_into_memory_new_worker_and_protected_final(
     assert notes==second['history']['research_notes']
     assert notes['note_count']==1 and notes['source_cutoff']==1
     retained=notes['notes'][0]
+    assert retained['preview']['text']==body
+    assert not retained['preview']['truncated']
+    assert 'After relevant observations' in task['reading_order']
+    assert task['reading_order'].startswith('Original objective and constraints')
     assert retained['author']==dict(node='W001',attempt=0)
     assert retained['call_id']==row['accepted']['call_id']
     for locator in retained['navigation'].values():
@@ -101,6 +105,8 @@ def test_real_notes_publish_into_memory_new_worker_and_protected_final(
     final_task=c.read(c.workspace(root,3)/'science-task.json')
     assert final_task['research_notes']['note_count']==1
     assert final_task['research_notes']['notes'][0]['navigation']['original']==original
+    assert final_task['research_notes']['notes'][0]['preview']['text']==body
+    assert 'At the relevant evidence and limitations' in final_task['reading_order']
     assert _published(root,final,original).read_text()==body
     assert task_path.read_bytes()==frozen
 
@@ -118,6 +124,8 @@ def test_missing_final_science_keeps_acknowledged_notes_and_abnormal_resume_disc
     assert saved['science']['status']=='missing'
     assert frozen['science_status']=='missing'
     assert frozen['research_notes']['note_count']==1
+    assert frozen['research_notes']['notes'][0]['preview']['text']
+    assert frozen['research_notes']['notes'][0]['preview']['truncated']
     assert len(checkpoint._bytes(frozen))<=checkpoint.MAX_BRIEF_BYTES
     assert (c.workspace(root,1)/ack['note']['original']).read_text()==body
     assert not (record/'science-output.json').exists()
@@ -194,7 +202,8 @@ def test_stopped_note_access_composite_stays_bounded_through_checkpoint(
     row=live_terminal_code()
     e.record_observation(row['config'],row['adapter'],row['accepted']['call_id'])
     for number in range(12):
-        _note(root,job,record,row,note_id=f'bounded-{number:02d}',body=f'Scoped original author claim {number}.')
+        _note(root,job,record,row,note_id=f'bounded-{number:02d}',body=f'Scoped original author claim {number}.',
+            supersedes='bounded-00' if number==1 else None)
     inventory=_stopped(root,job,record,monkeypatch,missing=True)
     view=inventory.research_note_view
     assert view is not None and view['note_count']==12
@@ -209,7 +218,30 @@ def test_stopped_note_access_composite_stays_bounded_through_checkpoint(
     notes=saved['resume_brief']['research_notes']
     assert notes['note_count']==12 and notes['omitted_rows']>0
     assert notes['navigation']==view['navigation']
+    assert notes['notes'][0]['note_id']=='bounded-00'
+    assert notes['notes'][0]['preview']['text']=='Scoped original author claim 0.'
+    assert notes['notes'][0]['superseded_by']==['bounded-01']
+    if len(notes['notes'])>1:assert notes['notes'][-1]['note_id']=='bounded-11'
     assert len(checkpoint._bytes(saved['resume_brief']))<=checkpoint.MAX_BRIEF_BYTES
+
+    facts=[execution_facts.accepted_fact(call_id=f'unresolved-{number:03d}',status='unknown',
+        accepted=dict(call_id=f'unresolved-{number:03d}'),observed=None,outputs=None,
+        observation_basis='accepted_call') for number in range(60)]
+    unresolved=execution_facts.render(facts=facts,scope=view['scope'],public_refs={},coverage='accepted_scope')
+    def forbidden(*args,**kwargs):raise AssertionError('Final packet trimming acquired originals')
+    with monkeypatch.context() as patch:
+        patch.setattr(c,'read',forbidden)
+        patch.setattr(research_notes,'load',forbidden)
+        packet=checkpoint._make_brief(job,saved,science=None,
+            execution_view=unresolved,research_note_view=view)
+    shown=packet['execution_facts']
+    assert shown['unresolved_calls']==60
+    assert shown['unresolved_shown']==len(shown['calls'])
+    assert shown['unresolved_omitted']==60-len(shown['calls'])>0
+    assert shown['unresolved_id_access'] in {'limited','unavailable'}
+    assert shown['omitted_rows']==60-len(shown['calls'])
+    assert packet['research_notes']['note_count']==12
+    assert len(checkpoint._bytes(packet))<=checkpoint.MAX_BRIEF_BYTES
 
 
 def _instrument_fragments(root):
@@ -229,6 +261,7 @@ def _instrument_fragments(root):
         assert task['research_note_recording']['index']=='work/execution-results/research-notes/index.json'
         notes=json.loads((work/'work/execution-results/research-notes/index.json').read_text())
         assert notes['notes'][0]['note_id']=='reading-1'
+        assert notes['notes'][0]['preview']['text']=='First authored interpretation; target limits remain unknown.'
         note=work/'work/reading-2.txt';note.write_text('Revised authored interpretation with the same original call.')
         assert exp(['note','--call-id',call,'--note-id','reading-2','--note-file',str(note),'--supersedes','reading-1'])['status']=='research_note_recorded'
 ''')
@@ -254,6 +287,8 @@ def test_real_fragment_notes_freeze_then_publish_both_revisions(internal_fragmen
     by_id={row['note_id']:row for row in notes['notes']}
     assert set(by_id)=={'reading-1','reading-2'}
     assert by_id['reading-2']['supersedes']=='reading-1'
+    assert by_id['reading-1']['superseded_by']==['reading-2']
+    assert by_id['reading-2']['preview']['text']=='Revised authored interpretation with the same original call.'
     assert by_id['reading-2']['author']['attempt']==1
     assert by_id['reading-1']['call_id']==by_id['reading-2']['call_id']
     for row in notes['notes']:
@@ -311,8 +346,11 @@ def test_protected_final_report_uses_real_accepted_note_original(
     assert controller._run_final(root,begin)['status']=='closeout_native_unsealed'
     final=c.read(root/'jobs/002.json')
     assert final['final_only'] and final['role']=='A'
-    notes=c.read(c.workspace(root,2)/'science-task.json')['research_notes']
+    task=c.read(c.workspace(root,2)/'science-task.json')
+    notes=task['research_notes']
     assert notes['note_count']==1 and notes['source_cutoff']==1
+    assert notes['notes'][0]['preview']['text']=='A scoped author interpretation.'
+    assert 'At the relevant evidence and limitations' in task['reading_order']
     assert _published(root,final,notes['notes'][0]['navigation']['original']).is_file()
 
 

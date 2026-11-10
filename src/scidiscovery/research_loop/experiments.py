@@ -474,6 +474,10 @@ def _execution_feedback(result, *, accepted, observed, command, operation_starte
     if type(attempt) is int and attempt>=0:scope['attempt']=attempt
     return dict(result,execution_facts=execution_facts.render(facts=[fact],scope=scope,
         public_refs={call_id:dict(result=aliases)},coverage='accepted_scope'),
+        **(dict(research_note_hint='Optionally preserve a useful interpretation with exp note; consider putting the main point on the first line. No note is required for every result.')
+            if command in {'run','collect'} and operation_started and frozen is not None
+            and status in {'known_success','known_failed'}
+            and result.get('status') in {'known_success','known_failed','collected'} else {}),
         adapter_report_interpretation='Adapter-reported scientific values are not independently verified. Execution success does not establish scientific validity.')
 
 

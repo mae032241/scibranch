@@ -1346,7 +1346,10 @@ exp note --call-id CALL_ID --note-id residual-2 --note-file artifacts/revised-no
 ```
 
 当前入口为 `work/execution-results/research-notes/index.json`。这不是必填动作；同 ID 同内容
-重试只确认保存，不重跑实验。完整原文经既有接续和公开导航保留，详见
+重试只确认保存，不重跑实验。已接受终态的 `run`／`collect` 回执会给出可选提示，建议把
+要点放在第一行。新笔记预览带至多 200 UTF-8 字节的正文前缀、截断和作者修订标签；旧笔记
+不回填摘录。紧凑视图优先保留首尾笔记及未决调用，并明确省略量和覆盖限制。
+完整原文经既有接续和公开导航保留，详见
 [作者笔记](RESEARCH_LOOP_CONTRACTS.zh-CN.md#research-notes)。
 
 未传 `--worker-resume-policy` 时另冻结最多两次同任务、同 session 的输出补填；普通 fragment 和受管执行唤醒单独按原累计共享预算推进，不受这两次补填上限约束：

@@ -43,9 +43,12 @@ def test_note_after_reading_preserves_originals_and_no_provider_calls(
     assert first['code']==0 and first['result']['status']=='research_note_recorded'
     assert 'accepted' not in first['result']
     public=server.work/first['result']['note']['original']
+    metadata=server.work/first['result']['note']['record']
+    frozen=metadata.read_bytes()
+    assert json.loads(frozen)['preview']['text'].startswith('After reading:')
     assert public.read_text().startswith('After reading:')
     repeated,_=_note(server,call)
-    assert repeated==first
+    assert repeated==first and metadata.read_bytes()==frozen
     conflict,_=_note(server,call,text='Different bytes')
     assert conflict['code']==2 and conflict['result']['error']=='note_identity_conflict'
     assert public.read_text().startswith('After reading:')
@@ -123,8 +126,11 @@ def test_live_index_rebuild_preserves_counts_after_truncation_retry_and_missing_
     assert directory['kind']=='directory' and 'later native attempts' in directory['scope']
     public=server.work/directory['path']
     entries={path.name for path in public.iterdir()}
-    assert 'note-0' in entries and 'note-0' not in {row['note_id'] for row in view['notes']}
-    assert (public/'note-0/original.raw').read_text()=='Claim 0'
+    shown={row['note_id'] for row in view['notes']}
+    assert {'note-0','note-7'}<=shown
+    omitted_id=next(f'note-{number}' for number in range(8) if f'note-{number}' not in shown)
+    assert omitted_id in entries
+    assert (public/omitted_id/'original.raw').read_text()==f'Claim {omitted_id[5:]}'
     assert len((json.dumps(view,ensure_ascii=False,indent=2)+'\n').encode('utf-8'))<=4096
     omitted,_=_note(server,call,note_id='note-0',text='Claim 0')
     assert omitted['code']==0 and json.loads(index.read_text())['note_count']==8
@@ -259,3 +265,37 @@ def test_live_note_index_marks_interrupted_private_sibling_unavailable(
     assert {row['note_id'] for row in view['notes']}=={'readable-note'}
     assert view['unavailable_notes']==[dict(note_id='interrupted-private',diagnostic='research_note_original_unavailable')]
     assert not (server.work/'work/execution-results/research-notes/interrupted-private/original.raw').exists()
+
+
+def test_preview_is_created_once_before_freeze_and_retry_does_not_backfill(
+        live_fragment,live_terminal_code,monkeypatch):
+    root,job,record=live_fragment;terminal=live_terminal_code();config=terminal['config']
+    server=_server(root,job,record,config);call=terminal['accepted']['call_id']
+    preview=research_notes._preview;seen=[]
+    def capture(path):
+        seen.append(Path(path).name)
+        assert Path(path).name=='original.raw'
+        assert not (Path(path).parent/'note.json').exists()
+        return preview(path)
+    monkeypatch.setattr(research_notes,'_preview',capture)
+    first,_=_note(server,call,text='中文\\\"'*100)
+    original=server.work/first['result']['note']['original']
+    metadata=server.work/first['result']['note']['record']
+    frozen=metadata.read_bytes();raw=original.read_bytes()
+    assert seen==['original.raw']
+    assert json.loads(frozen)['preview']['truncated'] is True
+    def forbidden(*args,**kwargs):pytest.fail('Retry regenerated a frozen preview')
+    monkeypatch.setattr(research_notes,'_preview',forbidden)
+    repeated,_=_note(server,call,text='中文\\\"'*100)
+    assert repeated==first and metadata.read_bytes()==frozen and original.read_bytes()==raw
+    # Model an already frozen legacy note without introducing a second fixture family.
+    private=Path(config['record_dir'])/'research-notes/note-1/note.json'
+    for path in (private,metadata):
+        value=json.loads(path.read_text());value.pop('preview')
+        path.chmod(0o600);c.write(path,value);path.chmod(0o400)
+    legacy_private=private.read_bytes();legacy_public=metadata.read_bytes()
+    loaded=research_notes.load(config,accepted_calls={call:terminal['accepted']},
+        accepted_attempts=[config['native_attempt']])
+    assert 'preview' not in loaded['records'][0]
+    assert private.read_bytes()==legacy_private and metadata.read_bytes()==legacy_public
+    assert original.read_bytes()==raw

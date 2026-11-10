@@ -196,3 +196,36 @@ def test_exact_pending_execution_states_are_unresolved_without_io(status,monkeyp
     cumulative=facts.combine(None,current,scope=dict(kind='accepted_sources',node='current'),
         source_cutoff=2,node_count=1,navigation=[])
     assert cumulative['status_counts'][status]==1 and cumulative['unresolved_calls']==1
+
+
+def test_unresolved_overflow_prioritizes_minimal_calls_and_reports_limited_id_access(monkeypatch):
+    rows=[fact(f'{index:04d}-resolved','known_success') for index in range(8)]
+    rows += [fact(f'{index:04d}-pending','unknown') for index in range(90)]
+    def forbidden(*args,**kwargs):pytest.fail('Overflow attempted to acquire unresolved IDs')
+    for method in ('open','read_text','read_bytes','stat','resolve'):
+        monkeypatch.setattr(Path,method,forbidden)
+    current=view(rows)
+    assert current['unresolved_calls']==90
+    assert current['unresolved_shown']==len(current['calls'])>0
+    assert current['unresolved_omitted']==90-current['unresolved_shown']>0
+    assert current['unresolved_id_access']=='limited'
+    assert all(row['status']=='unknown' and 'selected_code' not in row for row in current['calls'])
+    assert current['omitted_rows']+len(current['calls'])==98
+    assert len(facts.serialized_bytes(current))<=4096
+    current['calls']=[]
+    empty=facts.with_rows(dict(current,omitted_rows=98),[])
+    assert empty['unresolved_id_access']=='unavailable' and empty['unresolved_omitted']==90
+
+
+def test_resolved_head_tail_and_whole_envelope_fitting_skip_oversized_candidates():
+    rows=[fact(f'{index:04d}-resolved','known_success') for index in range(80)]
+    current=view(rows)
+    assert current['calls'][0]['call_id']=='0000-resolved'
+    assert current['calls'][-1]['call_id']=='0079-resolved'
+    assert [row['call_id'] for row in current['calls']]==sorted(row['call_id'] for row in current['calls'])
+    candidates=['too large'*1000,'中文\\\"','tail']
+    result=facts.fit_rows(candidates,priority=facts.head_tail_indices(3),
+        build=lambda selected:dict(rows=selected,omitted=3-len(selected),navigation=['inputs/history/index.json']),
+        max_bytes=200)
+    assert result['rows']==candidates[1:] and result['omitted']==1
+    assert len(facts.serialized_bytes(result))<=200

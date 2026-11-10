@@ -287,6 +287,13 @@ scratch commands and evaluations inside a script are outside this coverage.
 does not disprove a mechanism, and `unknown` permits no resubmission. Available
 outputs and adapter-reported metrics are not independently verified science.
 
+Unresolved calls (including `unknown` and pending states) take priority when rows
+must be omitted. They retain compact original IDs, source and reconciliation
+navigation; resolved rows use alternating first/last priority and display in
+chronological order. `unresolved_shown`, `unresolved_omitted` and
+`unresolved_id_access` describe remaining visibility. An overflow can leave some
+IDs inaccessible in this preview; counts and available navigation do not claim
+that all omitted IDs can be enumerated. No extra ID manifest is published.
 Expanded rows may be omitted to fit the presentation bound. Unmounted originals
 remain unavailable to direct reading; only existing public locators are shown.
 Missing optional presentation, metrics or code display fields do not add a
@@ -305,6 +312,10 @@ interpretation. The ordinary task file is retained byte for byte; no finding
 JSON schema or per-call note is required. The current logical W call, author's
 attempt and call's frozen mechanism/question remain distinct exact bindings.
 These are authored claims, separate from execution facts or qualification.
+Fresh `run`/`collect` receipts with an accepted terminal result offer a short
+optional note hint, including failed results with useful diagnostics. Pending,
+unknown and query-only responses do not. Put the main point on the first line
+when useful; this is advice, not a format requirement.
 
 Identical note-ID/content retries confirm the same original; conflicting reuse
 refuses only the note request. A revision uses a new ID and `--supersedes OLD`,
@@ -318,6 +329,23 @@ under the existing host-owned read-only publication root, including after a nati
 turn without final science. One stopped owner acquires originals for checkpoint,
 accepted public navigation, later W and Final A. Optional `research_memory` may
 cite them and remains W's curated synthesis. Frozen tasks/briefs are not rewritten.
+New note metadata captures a UTF-8 prefix excerpt of at most 200 bytes from one
+read of at most 204 original bytes before metadata freezes. Truncation and
+unavailable invalid/binary/control prefixes or read failures are explicit; the
+excerpt does not validate the whole file as text. Older notes show
+`preview.status=not_generated` in compact views without rereading or backfilling
+their immutable metadata. Full public `note.json` retains the frozen mechanism
+and question; compact rows keep identity, excerpt, revision labels and exact links.
+
+Note views alternate first/last priority, restoring chronological display after
+selection against the complete serialized envelope. Before trimming, the current
+owner computes direct, same-task/call `superseded_by` labels from all loaded note
+metadata (up to three successor IDs plus an omitted count). These author revision
+labels survive omission of the successor row; they do not establish scientific
+refutation. View-level `revision_coverage` is `complete`, `partial` or
+`not_computed`; older/uncomputed contributing views cannot imply complete coverage.
+W's objective-first reading guidance and A's evidence/limitations guidance point
+to these notes and navigation even when preview rows are omitted.
 Previews disclose omissions and stay byte-bounded; original notes have no new byte
 quota. Optional missing notes or preview failures do not erase intact records or
 add a Worker completion gate. Scientific efficiency gains remain unmeasured.

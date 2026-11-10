@@ -260,6 +260,7 @@ def stage_end(root, job, record):
 
 def _make_brief(job, value, *, science, execution_view,research_note_view=None):
     """Freeze the bounded public preview at the producer's accepted cutoff."""
+    from . import execution_facts, research_notes
     result = dict(version=1, execution_facts=deepcopy(execution_view), task='science-task.json', science_status=value['science']['status'], scientific_summary=None,
                   current_understanding=None, limitations=[], omitted_limitations=0, direct_files=[],
                   omitted_files=value['omitted_materials'], truncated=False,
@@ -300,33 +301,42 @@ def _make_brief(job, value, *, science, execution_view,research_note_view=None):
             result['truncated'] = True
     while len(_bytes(result)) > MAX_BRIEF_BYTES and result['limitations']:
         result['limitations'].pop();result['omitted_limitations']+=1;result['truncated']=True
-    # Exact originals remain in the same-task fixed index; only the compact
-    # preview is reduced to fit the combined resume packet.
-    notes=result.get('research_notes')
-    if isinstance(notes,dict) and len(_bytes(result))>MAX_BRIEF_BYTES:
-        for row in notes.get('notes',[]):
-            if not isinstance(row,dict):continue
-            for field in ('mechanism','mechanism_ref','experiment_question','interpretation'):
-                row.pop(field,None)
-        notes['preview_reduced']=True
-        result['truncated']=True
-    while len(_bytes(result)) > MAX_BRIEF_BYTES and isinstance(notes,dict) and notes.get('notes'):
-        notes['notes'].pop();notes['omitted_rows']=notes.get('omitted_rows',0)+1;result['truncated']=True
-    # Execution counts and original identity take precedence over expanded rows.
+    # Select against the complete packet; refitting must retain excerpts and
+    # revision labels and recompute unresolved visibility after the final trim.
     view=result['execution_facts']
-    while len(_bytes(result)) > MAX_BRIEF_BYTES and isinstance(view,dict) and view.get('calls'):
-        view['calls'].pop();view['omitted_rows']+=1;result['truncated']=True
-    if len(_bytes(result)) > MAX_BRIEF_BYTES:
+    notes=result.get('research_notes')
+    calls=view.get('calls',[])
+    if len(_bytes(result))>MAX_BRIEF_BYTES:
+        calls=execution_facts.compact_rows(calls)
+        view=dict(view,calls=calls)
+    note_rows=notes.get('notes',[]) if isinstance(notes,dict) else []
+    candidates=[('calls',row) for row in calls]+[('notes',row) for row in note_rows]
+    def build(selected):
+        packet=dict(result,execution_facts=execution_facts.with_rows(view,
+            [row for kind,row in selected if kind=='calls']))
+        if isinstance(notes,dict):
+            packet['research_notes']=research_notes.with_rows(notes,
+                [row for kind,row in selected if kind=='notes'])
+        packet['truncated']=result['truncated'] or len(selected)<len(candidates)
+        return packet
+    if len(_bytes(build([]))) > MAX_BRIEF_BYTES:
         result.pop('unfinished_mechanisms',None)
-    if len(_bytes(result)) > MAX_BRIEF_BYTES:
-        # The compact fixed envelope fits even when all optional excerpts go.
+    if len(_bytes(build([]))) > MAX_BRIEF_BYTES:
         result=dict(version=1,task='science-task.json',science_status=value['science']['status'],
-            execution_facts=view,omitted_files=len(value['materials'])+value['omitted_materials'],
+            omitted_files=len(value['materials'])+value['omitted_materials'],
             omitted_limitations=len(science['limitations']) if science is not None else None,
             truncated=True,interpretation='Author claims and execution facts do not grant scientific qualification or execution permission.')
-        if isinstance(notes,dict) and len(_bytes(dict(result,research_notes=notes)))<=MAX_BRIEF_BYTES:
-            result['research_notes']=notes
-    return result
+    for envelope in (notes,view):
+        if not isinstance(envelope,dict):continue
+        for field in ('unavailable_notes','navigation'):
+            while len(_bytes(build([])))>MAX_BRIEF_BYTES and envelope.get(field):
+                envelope[field]=envelope[field][:-1]
+    unresolved=execution_facts.PENDING_EXECUTION_STATES|{'unknown'}
+    order=execution_facts.priority_indices(calls)
+    priority=([index for index in order if calls[index]['status'] in unresolved]
+        +[len(calls)+index for index in execution_facts.head_tail_indices(len(note_rows))]
+        +[index for index in order if calls[index]['status'] not in unresolved])
+    return execution_facts.fit_rows(candidates,priority=priority,build=build,max_bytes=MAX_BRIEF_BYTES)
 
 
 

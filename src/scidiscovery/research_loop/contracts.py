@@ -1033,6 +1033,11 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials, exe
         'W':'Original objective and constraints, retained W candidate memory and unresolved questions, then relevant observations and H/A advice.',
         'A':'The concrete assessment question and latest W changes, then relevant prior A/H evidence and unresolved alternatives. Judge what can change this decision; retain material limitations.',
         'E':'Exact requester question and constraints, then requested original evidence.'}
+    notes=job.get('history',{}).get('research_notes') or {}
+    if job['role']=='W':
+        reading['W']+=' After relevant observations, read available author research_notes and their exact original links; same-task notes are indexed at work/execution-results/research-notes/index.json when present.'
+    elif job['role']=='A' and (notes.get('notes') or notes.get('navigation')):
+        reading['A']+=' At the relevant evidence and limitations, read author research_notes and their exact original links, including navigation when preview rows are omitted; these remain author claims.'
     parents=[_parent_view(job,ref,source=parent_sources[int(Path(ref['path']).parts[2])] if root is not None else None,
         limitation_bytes=1024//max(1,len(job['direct_refs']))) for ref in job['direct_refs']]
     order=priorities[job['role']]
@@ -1288,14 +1293,7 @@ def accept_current_inventory(root: Path, step: int):
                     'and its directory may include later attempts; exact note originals remain immutable.')
             # Bound the final composite, including owner-supplied navigation.
             # Only previews are trimmed; accepted counts and exact access stay.
-            note_view=inventory.research_note_view
-            while len(execution_facts.serialized_bytes(note_view))>research_notes.MAX_BYTES and note_view['notes']:
-                note_view['notes'].pop(0);note_view['omitted_rows']+=1
-            while (len(execution_facts.serialized_bytes(note_view))>research_notes.MAX_BYTES
-                    and note_view.get('unavailable_notes')):
-                note_view['unavailable_notes'].pop(0)
-            if len(execution_facts.serialized_bytes(note_view))>research_notes.MAX_BYTES:
-                raise ValueError('Authored note access envelope exceeds its preview bound')
+            inventory.research_note_view=research_notes.fit_view(inventory.research_note_view)
         except (OSError,ValueError,TypeError,KeyError,UnicodeError,OverflowError):
             # Notes are optional author claims. Required original call identity
             # has already been accepted above and remains strict.

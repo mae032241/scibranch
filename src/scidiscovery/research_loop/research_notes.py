@@ -73,6 +73,7 @@ def public_record(value):
         result['mechanism_ref']=public_text(binding['mechanism_ref'],128)
     if question:result['experiment_question']={key:public_text(question.get(key),240)
         for key in ('question','change_criterion')}
+    if 'preview' in value:result['preview']=deepcopy(value['preview'])
     return result
 
 
@@ -89,9 +90,23 @@ def _locator(value):
     return locator(value)
 
 
+def with_rows(value, rows):
+    return dict(value,notes=rows,omitted_rows=value.get('omitted_rows',0)+len(value['notes'])-len(rows))
+
+
+def fit_view(value, *, max_bytes=MAX_BYTES):
+    from .execution_facts import fit_rows, head_tail_indices, serialized_bytes
+    value=dict(value)
+    while len(serialized_bytes(with_rows(value,[])))>max_bytes and value.get('unavailable_notes'):
+        value=dict(value,unavailable_notes=value['unavailable_notes'][:-1])
+    while len(serialized_bytes(with_rows(value,[])))>max_bytes and value.get('navigation'):
+        value=dict(value,navigation=value['navigation'][:-1])
+    return fit_rows(value['notes'],priority=head_tail_indices(len(value['notes'])),
+        build=lambda rows:with_rows(value,rows),max_bytes=max_bytes)
+
+
 def render(records, *, scope, public_refs, unavailable_notes=(), max_bytes=MAX_BYTES):
-    """Bound navigation only; the exact authored body is never preview-truncated."""
-    from .execution_facts import _public_scope, serialized_bytes
+    """Project immutable snapshots and direct revisions before selecting rows."""
     scope=_scope(scope)
     if (not isinstance(records,(list,tuple)) or not isinstance(public_refs,dict)
             or type(max_bytes) is not int or not 768<=max_bytes<=MAX_BYTES):
@@ -99,26 +114,37 @@ def render(records, *, scope, public_refs, unavailable_notes=(), max_bytes=MAX_B
     rows=[]
     for record in records:
         value=public_record(record)
-        refs=public_refs.get(record['note_id'],{})
         value['navigation']={key:path for key in ('record','original')
-            if (path:=_locator(refs.get(key))) is not None}
+            if (path:=_locator(public_refs.get(record['note_id'],{}).get(key))) is not None}
+        value=_public_row(value)
+        successors=[item['note_id'] for item in records if item.get('supersedes')==record['note_id']
+            and item['scope']==record['scope'] and item['call_id']==record['call_id']]
+        value.update(superseded_by=successors[:3],superseded_by_omitted=max(0,len(successors)-3))
         rows.append(value)
     diagnostics=[dict(note_id=item.get('note_id') if isinstance(item.get('note_id'),str) and _ID.fullmatch(item['note_id']) else None,
         diagnostic='research_note_original_unavailable') for item in unavailable_notes]
     value=dict(version=VERSION,scope=scope,note_count=len(rows)+len(diagnostics),
         omitted_rows=len(diagnostics),notes=rows,unavailable_notes=diagnostics,
         unavailable_note_count=len(diagnostics),coverage='partial' if diagnostics else 'accepted_scope',
+        revision_coverage='partial' if diagnostics else 'complete',
         navigation=[],interpretation=INTERPRETATION)
-    while len(serialized_bytes(value))>max_bytes and value['notes']:
-        value['notes'].pop(0);value['omitted_rows']+=1
-    while len(serialized_bytes(value))>max_bytes and value['unavailable_notes']:
-        value['unavailable_notes'].pop()
-    if len(serialized_bytes(value))>max_bytes:raise ValueError('Authored note view exceeds its bound')
-    return value
+    return fit_view(value,max_bytes=max_bytes)
+
+
+def _public_preview(value):
+    if value is None or value==dict(status='not_generated'):return dict(status='not_generated')
+    if isinstance(value,dict) and value.get('version')==1:
+        if value.get('status')=='unavailable' and value.get('reason') in {
+                'binary_or_control_prefix','invalid_utf8_prefix','prefix_read_failed'}:
+            return dict(version=1,status='unavailable',reason=value['reason'])
+        text=value.get('text')
+        if (value.get('status')=='available' and isinstance(text,str)
+                and len(text.encode('utf-8'))<=200 and type(value.get('truncated')) is bool):
+            return dict(version=1,status='available',text=text,truncated=value['truncated'])
+    return dict(status='unavailable',reason='invalid_preview')
 
 
 def _public_row(row):
-    from .worker_research import public_mechanism, public_text
     author=row.get('author') or {}
     if (not isinstance(author.get('node'),str) or re.fullmatch(r'W[0-9]{3,}',author['node']) is None
             or type(author.get('attempt')) is not int or author['attempt']<0):
@@ -128,13 +154,10 @@ def _public_row(row):
     result=dict(version=VERSION,note_id=identity(row.get('note_id')),
         call_id=row.get('call_id'),author=dict(node=author['node'],attempt=author['attempt']),
         supersedes=identity(row['supersedes']) if row.get('supersedes') is not None else None,
-        original='original.raw',interpretation=INTERPRETATION)
-    mechanism=public_mechanism(row.get('mechanism'))
-    if mechanism is not None:result['mechanism']=mechanism
-    if row.get('mechanism_ref') is not None:result['mechanism_ref']=public_text(row['mechanism_ref'],128)
-    if isinstance(row.get('experiment_question'),dict):
-        result['experiment_question']={key:public_text(row['experiment_question'].get(key),240)
-            for key in ('question','change_criterion')}
+        original='original.raw',preview=_public_preview(row.get('preview')))
+    if 'superseded_by' in row:
+        result['superseded_by']=[identity(item) for item in row['superseded_by'][:3]]
+        result['superseded_by_omitted']=row.get('superseded_by_omitted',0)+max(0,len(row['superseded_by'])-3)
     result['navigation']={key:path for key,item in row.get('navigation',{}).items()
         if key in {'record','original'} and (path:=_locator(item)) is not None}
     return result
@@ -142,14 +165,18 @@ def _public_row(row):
 
 def combine(previous,current,*,scope,source_cutoff,node_count,navigation,max_bytes=MAX_BYTES):
     """Carry accepted projections across a prefix, never reopen note originals."""
-    from .execution_facts import _public_scope, serialized_bytes
     value=dict(version=VERSION,scope=_scope(scope),source_cutoff=source_cutoff,
         node_count=node_count,note_count=0,omitted_rows=0,notes=[],unavailable_notes=[],
-        unavailable_note_count=0,coverage='accepted_scope',
+        unavailable_note_count=0,coverage='accepted_scope',revision_coverage='complete',
         navigation=list(dict.fromkeys(path for item in navigation if (path:=_locator(item)) is not None)),
         interpretation=INTERPRETATION)
+    computed=False
     for document in (previous,current):
-        if not isinstance(document,dict) or document.get('version')!=VERSION:continue
+        if not isinstance(document,dict) or document.get('version')!=VERSION:
+            if document is current or node_count>1:value['revision_coverage']='partial'
+            continue
+        if document.get('revision_coverage') in {'complete','partial'}:computed=True
+        if document.get('revision_coverage')!='complete':value['revision_coverage']='partial'
         value['note_count']+=document.get('note_count',0)
         value['omitted_rows']+=document.get('omitted_rows',0)
         if document.get('coverage','accepted_scope')!='accepted_scope':value['coverage']='partial'
@@ -162,13 +189,27 @@ def combine(previous,current,*,scope,source_cutoff,node_count,navigation,max_byt
             # These are already public projections; retain only their public schema.
             result=_public_row(row)
             value['notes'].append(result)
-    while len(serialized_bytes(value))>max_bytes and value['notes']:
-        value['notes'].pop(0);value['omitted_rows']+=1
-    while len(serialized_bytes(value))>max_bytes and value['navigation']:value['navigation'].pop(0)
-    while len(serialized_bytes(value))>max_bytes and value['unavailable_notes']:
-        value['unavailable_notes'].pop()
-    if len(serialized_bytes(value))>max_bytes:raise ValueError('Authored note view exceeds its bound')
-    return value
+    if not computed:value['revision_coverage']='not_computed'
+    return fit_view(value,max_bytes=max_bytes)
+
+
+def _preview(source):
+    """Read only the retained original's prefix, once before metadata freezes."""
+    try:
+        with Path(source).open('rb') as stream:raw=stream.read(204)
+        try:text=raw.decode('utf-8')
+        except UnicodeDecodeError as error:
+            if len(raw)!=204 or error.reason!='unexpected end of data':raise
+            text=raw[:error.start].decode('utf-8')
+        if any(ord(char)<32 and char not in '\t\n\r' or 127<=ord(char)<160 for char in text):
+            return dict(version=1,status='unavailable',reason='binary_or_control_prefix')
+        prefix=text.encode('utf-8')[:200]
+        while True:
+            try:excerpt=prefix.decode('utf-8');break
+            except UnicodeDecodeError as error:prefix=prefix[:error.start]
+        return dict(version=1,status='available',text=excerpt,truncated=len(raw)>len(prefix))
+    except UnicodeError:return dict(version=1,status='unavailable',reason='invalid_utf8_prefix')
+    except OSError:return dict(version=1,status='unavailable',reason='prefix_read_failed')
 
 
 # IO producers. Internal consumers must receive their already loaded values.
@@ -267,7 +308,6 @@ def _publish_public(config,value,*,work):
 
 def _write_live_index(config,work,records,*,unavailable_notes=()):
     from . import contracts as c
-    from .execution_facts import serialized_bytes
     records=sorted(records,key=lambda row:row['sequence'])
     refs={row['note_id']:dict(record=f'work/execution-results/research-notes/{row["note_id"]}/note.json',
         original=f'work/execution-results/research-notes/{row["note_id"]}/original.raw') for row in records}
@@ -278,10 +318,7 @@ def _write_live_index(config,work,records,*,unavailable_notes=()):
         layout='<note-id>/note.json and <note-id>/original.raw',
         read_hint='List this one directory to discover omitted note IDs, then read selected note.json and original.raw files.',
         scope='Live same-task directory; it may include later native attempts and is not a frozen inventory snapshot.')
-    while len(serialized_bytes(view))>MAX_BYTES and view['notes']:
-        view['notes'].pop(0);view['omitted_rows']+=1
-    while len(serialized_bytes(view))>MAX_BYTES and view['unavailable_notes']:
-        view['unavailable_notes'].pop()
+    view=fit_view(view)
     c.write(work/'work/execution-results/research-notes/index.json',view)
 
 
@@ -400,6 +437,7 @@ def publish(config, *, accepted, note_id, source, supersedes=None, facts):
                     mechanism_binding=deepcopy(accepted.get('mechanism_binding')),supersedes=supersedes)
                 raw_proof=e.proof(temporary/'original.raw')
                 value['raw_proof']=dict(raw_proof,path=str(destination/'original.raw'))
+                value['preview']=_preview(temporary/'original.raw')
                 c.write(temporary/'note.json',value)
                 for name in ('note.json','original.raw'):(temporary/name).chmod(0o400)
                 os.rename(temporary,destination)

@@ -25,6 +25,58 @@ def serialized_bytes(value):
     return (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode('utf-8')
 
 
+def head_tail_indices(size):
+    return [index for left in range((size+1)//2)
+            for index in dict.fromkeys((left,size-1-left))]
+
+
+def fit_rows(candidates, *, priority, build, max_bytes):
+    """Greedily fit caller-prioritized original positions against a whole envelope."""
+    selected=set();value=build([])
+    if len(serialized_bytes(value))>max_bytes:
+        raise ValueError('Presentation envelope exceeds its bound without rows')
+    for index in priority:
+        proposed=selected|{index}
+        candidate=build([row for position,row in enumerate(candidates) if position in proposed])
+        if len(serialized_bytes(candidate))<=max_bytes:selected=proposed;value=candidate
+    return value
+
+
+def priority_indices(rows):
+    unresolved=[index for index,row in enumerate(rows) if row['status'] in _UNRESOLVED]
+    resolved=[index for index,row in enumerate(rows) if row['status'] not in _UNRESOLVED]
+    return unresolved+[resolved[index] for index in head_tail_indices(len(resolved))]
+
+
+def with_rows(value, rows):
+    omitted=value.get('omitted_rows')
+    result=dict(value,calls=rows,omitted_rows=None if omitted is None else omitted+len(value['calls'])-len(rows))
+    shown=sum(row['status'] in _UNRESOLVED for row in rows)
+    total=value.get('unresolved_calls')
+    result.update(unresolved_shown=shown,unresolved_omitted=None if total is None else total-shown,
+        unresolved_id_access=('complete' if total==shown and value.get('counts_are')=='exact_within_accepted_scope'
+            else 'limited' if shown else 'unavailable'))
+    return result
+
+
+def compact_rows(rows):
+    """Keep exact unresolved identity, status, origin and reconciliation only."""
+    return [dict({key:item for key,item in row.items() if key in {'call_id','status','node',
+        'observation_basis','scientific_result','native_state'}},
+        navigation={key:item for key,item in row.get('navigation',{}).items() if key=='reconcile'})
+        if row['status'] in _UNRESOLVED else row for row in rows]
+
+
+def fit_view(value, *, max_bytes=MAX_BYTES):
+    rows=value['calls']
+    if len(serialized_bytes(with_rows(value,rows)))>max_bytes:rows=compact_rows(rows)
+    base=dict(value,calls=rows)
+    while len(serialized_bytes(with_rows(base,[])))>max_bytes and base.get('navigation'):
+        base=dict(base,navigation=base['navigation'][:-1])
+    return fit_rows(rows,priority=priority_indices(rows),
+        build=lambda selected:with_rows(base,selected),max_bytes=max_bytes)
+
+
 def _locator(value):
     # These are existing science namespace aliases, never host path rewrites.
     if (not isinstance(value, str) or not value or len(value.encode()) > 512
@@ -193,13 +245,7 @@ def render(*, facts, scope, public_refs, coverage, omitted_calls=0, max_bytes=MA
                  additional_calls=omitted_calls, omitted_rows=0, calls=rows,
                  interpretation='Execution status is not scientific validity. Unknown requires same-call reconciliation; it grants no resubmission or execution permission.',
                  result_interpretation='Result availability and public navigation are separate; neither establishes scientific qualification. Unmounted originals are unavailable to direct reading.')
-    while len(serialized_bytes(value)) > max_bytes and value['calls']:
-        value['calls'].pop()
-        value['omitted_rows'] += 1
-    if len(serialized_bytes(value)) > max_bytes:
-        # Constants and bounded public scope fit the minimum supported envelope.
-        raise ValueError('Execution fact envelope exceeds its presentation bound')
-    return value
+    return fit_view(value,max_bytes=max_bytes)
 
 
 def unavailable(*, scope):
@@ -275,9 +321,4 @@ def combine(previous, current, *, scope, source_cutoff, node_count, navigation,
         additional_calls=None if missing else additional,omitted_rows=omitted,calls=rows,
         navigation=list(dict.fromkeys(alias for item in navigation if (alias:=_locator(item)) is not None)),
         interpretation='Accepted managed calls only. Execution status is not scientific validity; preserve original permissions and same-call reconciliation.')
-    while len(serialized_bytes(value))>max_bytes and value['calls']:
-        value['calls'].pop(0);value['omitted_rows']+=1
-    while len(serialized_bytes(value))>max_bytes and value['navigation']:
-        value['navigation'].pop()
-    if len(serialized_bytes(value))>max_bytes:raise ValueError('Execution fact envelope exceeds its presentation bound')
-    return value
+    return fit_view(value,max_bytes=max_bytes)

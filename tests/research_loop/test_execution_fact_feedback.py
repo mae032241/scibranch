@@ -54,6 +54,7 @@ def test_local_bridge_distinguishes_current_query_from_frozen_collection(
 
     reply=worker_execution_bridge._execute(server,['query','--call-id',call])
     assert reply['code']==0 and reply['result']['state']=='succeeded'
+    assert 'research_note_hint' not in reply['result']
     fact=_fact(reply['result'])
     assert fact['call_id']==call and fact['status']=='known_success'
     assert fact['observation_basis']=='current_observation'
@@ -63,6 +64,7 @@ def test_local_bridge_distinguishes_current_query_from_frozen_collection(
 
     reply=worker_execution_bridge._execute(server,['collect','--call-id',call])
     assert reply['code']==0 and reply['result']['status']=='collected'
+    assert 'exp note' in reply['result']['research_note_hint']
     fact=_fact(reply['result'])
     assert fact['observation_basis']=='accepted_terminal'
     # This fixture retains an output file but supplies no optional result.json.
@@ -125,6 +127,7 @@ def test_remote_metricless_run_query_collect_keep_original_provider_counts(
     reply=worker_execution_bridge._execute(server,['run','--script',str(source),
         '--research',str(research)])
     assert reply['code']==0 and reply['result']['status']=='known_success'
+    assert 'first line' in reply['result']['research_note_hint']
     call=reply['result']['call_id'];fact=_fact(reply['result'])
     assert fact['call_id']==call and fact['scientific_result']=='available'
     assert fact['observation_basis']=='accepted_terminal'
@@ -138,6 +141,8 @@ def test_remote_metricless_run_query_collect_keep_original_provider_counts(
     collect=worker_execution_bridge._execute(server,['collect','--call-id',call])
     assert query['code']==collect['code']==0
     assert _fact(query['result'])['observation_basis']=='accepted_terminal'
+    assert 'research_note_hint' not in query['result']
+    assert 'exp note' in collect['result']['research_note_hint']
     assert _fact(collect['result'])['scientific_result']=='available'
     assert collect['result']['outputs'] and 'metrics' not in collect['result']
     assert counts==dict(prepare=1,submit=1,status_details=2,collect_original=2)
@@ -198,6 +203,30 @@ def test_live_feedback_retains_supported_pending_states(state):
     assert fact['observation_basis']=='current_observation'
     assert fact['scientific_result']=='not_accepted'
     assert view['unresolved_calls']==1 and view['status_counts'][state]==1
+    assert 'research_note_hint' not in result
+
+
+@pytest.mark.parametrize('status',['known_success','known_failed'])
+@pytest.mark.parametrize('command',['run','collect'])
+def test_note_hint_accepts_terminal_failure_diagnostics_without_new_reads(monkeypatch,status,command):
+    accepted=dict(call_id='exact-original')
+    observed=dict(status=status,scientific_outputs=[])
+    def forbidden(*args,**options):pytest.fail('Note hint acquired new originals')
+    for name in ('open','stat','resolve'):monkeypatch.setattr(Path,name,forbidden)
+    result=e._execution_feedback(dict(status=status if command=='run' else 'collected'),
+        accepted=accepted,observed=observed,command=command,operation_started=True,work=None)
+    assert 'Optionally' in result['research_note_hint']
+    assert 'first line' in result['research_note_hint']
+
+
+@pytest.mark.parametrize('status,observed,started',[
+    ('submitted',None,True),('unknown',None,True),('caller_error',None,False),
+    ('integrity_error',dict(status='known_failed'),True),
+    ('known_success',dict(status='known_success'),False)])
+def test_note_hint_skips_unaccepted_or_nonfresh_results(status,observed,started):
+    result=e._execution_feedback(dict(status=status),accepted=dict(call_id='exact-original'),
+        observed=observed,command='run',operation_started=started,work=None)
+    assert 'research_note_hint' not in result
 
 
 def test_cli_nonascii_fact_view_obeys_its_actual_wire_byte_bound(

@@ -144,6 +144,10 @@ the exact current-task call without constructing or querying an adapter. No
 adapter note method or metric is required. Stable IDs, revisions and recovery
 belong to the [authored-note contract](RESEARCH_LOOP_CONTRACTS.md#research-notes),
 separately from immutable execution observations and qualification.
+Fresh accepted terminal `run`/`collect` feedback may include an optional
+`research_note_hint`; it requires no adapter support. New note metadata snapshots
+a bounded UTF-8 prefix before freezing, while compact views select rows and show
+revision/coverage labels from passed values without reopening original files.
 
 Protocol 33 keeps W as the research main line. `continue` resumes the same W;
 `handoff` seals and starts a new W, `revise_h` and `review` request serial H/A
