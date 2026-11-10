@@ -94,6 +94,7 @@ def test_checkpoint_capture_freezes_brief_from_loaded_metadata(tmp_path,monkeypa
     inventory=SimpleNamespace(root=root,job=job,record=record,attempt=2,task_ref=dict(path='original-task'),
         managed_calls=[call],managed_call_metadata={'0001-pending':dict(accepted=dict(native_attempt=dict(number=2)))},
         scientific_outputs={},native_outcome=None,science_error=None,payload=None,
+        research_note_view=None,
         execution_fact_view=view([fact('0001-pending','unknown')]))
     monkeypatch.setattr(c,'_inventory_identity',lambda *args:None)
     def forbidden(*args,**kwargs):pytest.fail('Checkpoint consumer reopened an accepted record')

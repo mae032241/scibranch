@@ -86,6 +86,9 @@ Final A。accepted-prefix publisher 保留其冻结历史，不扫描旧日志�
 省略量明确展示；执行成功不证明科学结论有效。覆盖范围与读取限制见
 [执行事实视图](RESEARCH_LOOP_CONTRACTS.zh-CN.md#execution-facts)。
 
+W 读到结果后可及时记录[可选作者笔记](RESEARCH_LOOP_CONTRACTS.zh-CN.md#research-notes)，
+持续保存并保留修订，进入既有恢复／导航路径，与执行事实分列。
+
 新节点绑定准确运行配置 revision。保存修改只排队未来设置，不改已有任务、不清零预算，
 也不启动研究。暂停阻止新工作，已接受原件继续遵守原限制；类型化暂停诊断保留已准入的
 resume 动作。原生续接、输出补填、执行唤醒与服务恢复分别需要自己的冻结许可，

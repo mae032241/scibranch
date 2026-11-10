@@ -152,7 +152,8 @@ def _capture(root, job, record, *, inventory):
                  material_status=material_status, material_diagnostic=material_diagnostic,
                  omitted_materials=0,
                  scope='Stopped native originals and sealed terminal outputs only; mutable drafts are not retained. Not a stage seal, scientific qualification or restart permission.')
-    value['resume_brief']=_make_brief(job,value,science=payload,execution_view=inventory.execution_fact_view)
+    value['resume_brief']=_make_brief(job,value,science=payload,execution_view=inventory.execution_fact_view,
+        research_note_view=inventory.research_note_view)
     c.write(destination, value)
     destination.chmod(0o400)
     return _validate_value(root,job,record,value,inventory=inventory)
@@ -257,7 +258,7 @@ def stage_end(root, job, record):
     return value
 
 
-def _make_brief(job, value, *, science, execution_view):
+def _make_brief(job, value, *, science, execution_view,research_note_view=None):
     """Freeze the bounded public preview at the producer's accepted cutoff."""
     result = dict(version=1, execution_facts=deepcopy(execution_view), task='science-task.json', science_status=value['science']['status'], scientific_summary=None,
                   current_understanding=None, limitations=[], omitted_limitations=0, direct_files=[],
@@ -267,6 +268,12 @@ def _make_brief(job, value, *, science, execution_view):
                   original_access='Read sealed parents and lineage originals through science-task.json. The previous fragment full text is not mounted; this preview is incomplete when omissions are reported.',
                   interpretation='Current understanding and limitations are authored claims, not independently verified observations. Unstated questions remain unknown.',
                   scope='Fragment preview; original task and permissions remain binding. No restart or scientific qualification is granted.')
+    if (isinstance(research_note_view,dict) and isinstance(research_note_view.get('notes'),list)
+            and type(research_note_view.get('omitted_rows')) is int):
+        try:
+            if len(_bytes(research_note_view))<=MAX_BRIEF_BYTES:
+                result['research_notes']=deepcopy(research_note_view)
+        except (TypeError,ValueError,OverflowError):pass
     if science is not None:
         result['scientific_summary'], a = _clip(science['summary'], 384)
         result['current_understanding'], b = _clip(science['scientific_result'], 1400)
@@ -293,6 +300,18 @@ def _make_brief(job, value, *, science, execution_view):
             result['truncated'] = True
     while len(_bytes(result)) > MAX_BRIEF_BYTES and result['limitations']:
         result['limitations'].pop();result['omitted_limitations']+=1;result['truncated']=True
+    # Exact originals remain in the same-task fixed index; only the compact
+    # preview is reduced to fit the combined resume packet.
+    notes=result.get('research_notes')
+    if isinstance(notes,dict) and len(_bytes(result))>MAX_BRIEF_BYTES:
+        for row in notes.get('notes',[]):
+            if not isinstance(row,dict):continue
+            for field in ('mechanism','mechanism_ref','experiment_question','interpretation'):
+                row.pop(field,None)
+        notes['preview_reduced']=True
+        result['truncated']=True
+    while len(_bytes(result)) > MAX_BRIEF_BYTES and isinstance(notes,dict) and notes.get('notes'):
+        notes['notes'].pop();notes['omitted_rows']=notes.get('omitted_rows',0)+1;result['truncated']=True
     # Execution counts and original identity take precedence over expanded rows.
     view=result['execution_facts']
     while len(_bytes(result)) > MAX_BRIEF_BYTES and isinstance(view,dict) and view.get('calls'):
@@ -305,6 +324,8 @@ def _make_brief(job, value, *, science, execution_view):
             execution_facts=view,omitted_files=len(value['materials'])+value['omitted_materials'],
             omitted_limitations=len(science['limitations']) if science is not None else None,
             truncated=True,interpretation='Author claims and execution facts do not grant scientific qualification or execution permission.')
+        if isinstance(notes,dict) and len(_bytes(dict(result,research_notes=notes)))<=MAX_BRIEF_BYTES:
+            result['research_notes']=notes
     return result
 
 

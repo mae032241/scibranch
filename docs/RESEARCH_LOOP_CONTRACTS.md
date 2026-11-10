@@ -297,6 +297,31 @@ copied into this historical view. Existing frozen artifacts are not backfilled.
 This supplies execution navigation, not a new authority ledger, scientific summary,
 evaluation service or numerical verifier. Scientific efficiency gains are untested.
 
+<a id="research-notes"></a>
+
+After reading a `run` or `collect` result, W may use
+`exp note --call-id CALL --note-id NOTE --note-file FILE` to preserve an
+interpretation. The ordinary task file is retained byte for byte; no finding
+JSON schema or per-call note is required. The current logical W call, author's
+attempt and call's frozen mechanism/question remain distinct exact bindings.
+These are authored claims, separate from execution facts or qualification.
+
+Identical note-ID/content retries confirm the same original; conflicting reuse
+refuses only the note request. A revision uses a new ID and `--supersedes OLD`,
+retaining the same call and the old explanation. Bridge receipt recovery confirms
+an already-published claimed note without rereading a later-edited source or
+rerunning an experiment. Notes change no execution state, counters, A policy,
+permission or consumed budget.
+
+Current notes are readable at `work/execution-results/research-notes/index.json`
+under the existing host-owned read-only publication root, including after a native
+turn without final science. One stopped owner acquires originals for checkpoint,
+accepted public navigation, later W and Final A. Optional `research_memory` may
+cite them and remains W's curated synthesis. Frozen tasks/briefs are not rewritten.
+Previews disclose omissions and stay byte-bounded; original notes have no new byte
+quota. Optional missing notes or preview failures do not erase intact records or
+add a Worker completion gate. Scientific efficiency gains remain unmeasured.
+
 The existing accepted-prefix publisher appends H and W authored originals and
 publishes bounded `indexes.research` navigation beside each accepted node. It
 links the latest W understanding, H competing explanations, ordinary A assessment

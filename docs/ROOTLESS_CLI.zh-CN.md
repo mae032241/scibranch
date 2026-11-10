@@ -1337,6 +1337,18 @@ scid-research closeout --root /绝对路径/实例 --export-only
 执行成功不等于科学有效；缺少可选指标不会新增补填要求。fragment 使用捕获时冻结的
 `work/science-resume.json` 简报。完整语义见[执行事实视图](RESEARCH_LOOP_CONTRACTS.zh-CN.md#execution-facts)。
 
+读完实验结果后，W 可将当时的解读写到普通文件，再按需记录：
+
+```sh
+exp note --call-id CALL_ID --note-id residual-1 --note-file artifacts/residual-note.md
+# 修订同一原调用的解释，保留旧记录：
+exp note --call-id CALL_ID --note-id residual-2 --note-file artifacts/revised-note.md --supersedes residual-1
+```
+
+当前入口为 `work/execution-results/research-notes/index.json`。这不是必填动作；同 ID 同内容
+重试只确认保存，不重跑实验。完整原文经既有接续和公开导航保留，详见
+[作者笔记](RESEARCH_LOOP_CONTRACTS.zh-CN.md#research-notes)。
+
 未传 `--worker-resume-policy` 时另冻结最多两次同任务、同 session 的输出补填；普通 fragment 和受管执行唤醒单独按原累计共享预算推进，不受这两次补填上限约束：
 `output_repair: true`、`output_only: true`、`execution_wake: true`。
 补填修正已确认完成的必需返回、实际动作消费的作者引用及明确诊断的交付布局冲突；

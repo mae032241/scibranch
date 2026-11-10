@@ -919,6 +919,10 @@ def inspect_source(parent_root, selected_job_ref):
                     or member['step']>frozen_prefix['cutoff']):
                 raise ValueError('Fork history member crosses its frozen input cut')
             nav_ref=closure.add(owner,frozen_prefix['visibility_root']['path']+'/'+member['navigation']['path'])
+            navigation=_json(o.resolve_ref(owner,nav_ref))
+            for note in accepted_prefix.research_note_files(navigation):
+                closure.reference(owner,(Path(nav_ref['path']).parent/note['path']).as_posix(),
+                    proof=note,visibility='historical_science')
             event_owner=o.source_for_ref(owner,member['scientific_event'])
             event_path=Path(member['scientific_event']['path'])
             if event_path.is_absolute():event_path=event_path.relative_to(event_owner.original_root)

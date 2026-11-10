@@ -33,6 +33,21 @@ def _relative(value):
     return originals.relative(value)
 
 
+def research_note_files(node):
+    """Consume the exact published node manifest; never discover note files."""
+    rows=node.get('research_note_files',[])
+    if not isinstance(rows,list):raise ValueError('Exact authored note manifest required')
+    seen=set()
+    for row in rows:
+        if (not isinstance(row,dict) or set(row)!={'path','size_bytes'}
+                or not isinstance(row['path'],str) or re.fullmatch(
+                    r'research-notes/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:note\.json|original\.raw)',row['path']) is None
+                or type(row['size_bytes']) is not int or row['size_bytes']<0 or row['path'] in seen):
+            raise ValueError('Exact authored note manifest required')
+        seen.add(row['path'])
+    return rows
+
+
 def visibility(root, prefix):
     if (prefix.get('version')!=VERSION
             or type(prefix.get('count')) is not int or prefix['count']<0
@@ -131,13 +146,13 @@ def candidate_for_implementation(root,prefix,identity):
     return value['candidate_id'] if value['count']==1 else None
 
 
-def _research_memory_facts(root, prefix, job, payload, seal, observation, *, prior=None):
+def _research_memory_facts(root, prefix, job, payload, seal, observation, *, prior=None,note_references=None):
     """Resolve W-selected identities/references using this publication's facts."""
-    from . import candidate_refs,generic_results,research_memory
+    from . import candidate_refs,generic_results,research_memory,contracts as c
     current=candidate_refs.references([dict(step=job['step'],role=job['role'],observation=observation)])
     candidates={}
     def add(choice, public):candidates[research_memory._identity(choice)]=public
-    references={}
+    references=dict(note_references or {})
     memory=(prior or {}).get('candidate_memory') or {}
     for row in research_memory.rows(memory,'candidates'):
         choice=row.get('candidate')
@@ -176,7 +191,7 @@ def _research_memory_facts(root, prefix, job, payload, seal, observation, *, pri
         for evidence in row.get('evidence',[]) if isinstance(row,dict) and isinstance(row.get('evidence'),list) else []:
             reference=evidence.get('ref') if isinstance(evidence,dict) else None
             if not isinstance(reference,str) or reference in references:continue
-            match=re.fullmatch(r'inputs/history/(nodes/[^/]+/([0-9]{3,})/)(science\.json|scientific-original\.json|index\.json|research\.json)',reference)
+            match=re.fullmatch(r'inputs/history/(nodes/[^/]+/([0-9]{3,})/)(science\.json|scientific-original\.json|index\.json|research\.json|research-notes/[A-Za-z0-9._-]+/(?:note\.json|original\.raw))',reference)
             if match is None:continue
             number=int(match[2])
             if not 0<number<job['step'] or number>prefix['cutoff']:continue
@@ -186,7 +201,11 @@ def _research_memory_facts(root, prefix, job, payload, seal, observation, *, pri
             accepted=members[number]
             if accepted is None:continue
             parent=Path(accepted['navigation']['path']).parent.as_posix()+'/'
-            if match[1]==parent:references[reference]=reference
+            if match[1]!=parent:continue
+            if match[3].startswith('research-notes/'):
+                try:c.regular(visibility(root,prefix)/reference.removeprefix('inputs/history/'))
+                except (OSError,ValueError):continue
+            references[reference]=reference
     return dict(candidates=candidates,references=references)
 
 
@@ -269,7 +288,8 @@ def fork_seed(root,settings,*,search_seed,identity_root):
                 rows[name]=change['current']
         nav_ref=entry['navigation_ref']
         nav_owner=originals.source_for_ref(source,nav_ref)
-        nav=c.read(originals.resolve_ref(nav_owner,nav_ref))
+        nav_path=originals.resolve_ref(nav_owner,nav_ref)
+        nav=c.read(nav_path)
         directory=public/Path(old['navigation']['path']).parent
         directory.mkdir(parents=True,exist_ok=True)
         seal=c.read(originals.source_record(owner,'result-identity.json'))
@@ -278,6 +298,15 @@ def fork_seed(root,settings,*,search_seed,identity_root):
             target=directory/name
             if target.exists():
                 if not target.samefile(original):raise ValueError('Fork scientific alias changed its original')
+            else:os.link(original,target,follow_symlinks=False)
+        for note in research_note_files(nav):
+            relative=note['path']
+            note_ref=dict(path=(Path(nav_ref['path']).parent/relative).as_posix(),size_bytes=note['size_bytes'])
+            original=c.regular(originals.resolve_ref(nav_owner,note_ref))
+            target=directory/relative
+            target.parent.mkdir(parents=True,exist_ok=True)
+            if target.exists():
+                if not target.samefile(original):raise ValueError('Fork authored note alias changed')
             else:os.link(original,target,follow_symlinks=False)
         _write_once(directory/'index.json',nav)
         _write_once(directory/'research.json',nav['research'])
@@ -403,7 +432,20 @@ def prepare_node(root, job, payload, seal, *, inventory):
         if token_complete and time_complete:
             completion_fraction=budget_fraction
     prior_research=prior['research'] if prior else {}
-    memory_facts=(_research_memory_facts(root,prefix,job,payload,seal,observation,prior=prior_research)
+    note_publications=[];note_references={};note_public_refs={}
+    for row in inventory.research_note_records:
+        note_base=f'{base}/research-notes/{row["note_id"]}'
+        published={kind:f'inputs/history/{note_base}/{name}'
+            for kind,name in (('record','note.json'),('original','original.raw'))}
+        note_public_refs[row['note_id']]=published
+        for kind in ('record','original'):
+            target=published[kind]
+            note_references[row['public'][kind]]=target
+            note_references[target]=target
+            note_publications.append(dict(source=row['publication'][kind],
+                path=target.removeprefix('inputs/history/')))
+    memory_facts=(_research_memory_facts(root,prefix,job,payload,seal,observation,prior=prior_research,
+        note_references=note_references)
         if job.get('research_strategy_version')==3 and job['role']=='W' and payload.get('research_memory') is not None else None)
     retained_memory=lineage.retained_research_memory(prior_research,job,payload,node_path=base,memory_facts=memory_facts)
     search_delta=accepted_search.prepare_node_from_facts(root,job,payload,seal,summary=state['search'],
@@ -446,6 +488,9 @@ def prepare_node(root, job, payload, seal, *, inventory):
         implementations=[dict(id=f'{job["role"]}{job["step"]:03d}-I{index:03d}',
             label=Path(row['path']).name) for index,row in enumerate(sorted(seal['materials'],key=lambda row:row['path']),1)],
         scope='Accepted authored science and exact implementation locators; no inherited qualification.')
+    if note_publications:
+        node['research_note_files']=[dict(path=row['path'].removeprefix(base+'/'),
+            size_bytes=row['source']['size_bytes']) for row in note_publications]
     from . import execution_facts
     fact_scope=dict(kind='accepted_sources',node=f'{job["role"]}{job["step"]:03d}')
     try:
@@ -456,8 +501,27 @@ def prepare_node(root, job, payload, seal, *, inventory):
             navigation=[f'inputs/history/{base}/index.json'])
     except (KeyError,TypeError,ValueError,OverflowError):
         node['execution_facts']=execution_facts.unavailable(scope=fact_scope)
+    from . import research_notes
+    try:
+        current_notes=research_notes.render(inventory.research_note_records,
+            scope=fact_scope,public_refs=note_public_refs,unavailable_notes=inventory.research_note_diagnostics)
+    except (KeyError,TypeError,ValueError,OverflowError):
+        count=len(inventory.research_note_records)+len(inventory.research_note_diagnostics)
+        current_notes=dict(version=1,scope=fact_scope,note_count=count,omitted_rows=count,
+            notes=[],navigation=[],coverage='partial',
+            unavailable_notes=[dict(note_id=None,diagnostic='research_note_preview_unavailable')])
+    try:
+        node['research_notes']=research_notes.combine(
+            previous=prior.get('research_notes') if prior is not None else None,
+            current=current_notes,scope=fact_scope,
+            source_cutoff=max(prefix['cutoff'],job['step']),node_count=prefix['count']+1,
+            navigation=[f'inputs/history/{base}/index.json'])
+    except (KeyError,TypeError,ValueError,OverflowError):
+        # An optional preview failure does not change accepted science.
+        node['research_notes']=None
     node['research']=lineage.research_navigation(prior_research,job,payload,node_path=base,
-        supervision_state=search_delta['summary'],retained_memory=retained_memory,budget_facts=supervision_facts)
+        supervision_state=search_delta['summary'],retained_memory=retained_memory,budget_facts=supervision_facts,
+        research_note_view=node['research_notes'])
     node['entities']=[]
     for name,row in search_delta['rows'].items():
         parts=name.split('/',2)
@@ -478,7 +542,8 @@ def prepare_node(root, job, payload, seal, *, inventory):
     pending=dict(version=VERSION,step=job['step'],job_ref=c.record_ref(root/'jobs'/f'{job["step"]:03d}.json'),
         previous=prefix,prefix=updated,node=node,member=membership,search_delta=search_delta,
         result_ref=seal['result_ref'],search_ref=snapshot_ref,
-        candidate_aliases=aliases,implementation_candidates=implementation_candidates)
+        candidate_aliases=aliases,implementation_candidates=implementation_candidates,
+        research_note_publications=note_publications)
     c.write(root/PENDING,pending)
     return pending
 
@@ -526,6 +591,17 @@ def commit_node_from_facts(root, pending, *, base, head, seal):
         if raw_alias.exists():
             if not raw_alias.samefile(original):raise ValueError('Accepted public scientific original changed')
         else:os.link(original,raw_alias,follow_symlinks=False)
+        for row in pending.get('research_note_publications',[]):
+            source=c.regular(Path(row['source']['path']))
+            from . import experiments
+            actual=experiments.proof(source)
+            if any(actual.get(key)!=value for key,value in row['source'].items()):
+                raise ValueError('Accepted authored note original changed')
+            target=visibility(root,prefix)/row['path']
+            target.parent.mkdir(parents=True,exist_ok=True)
+            if target.exists():
+                if not target.samefile(source):raise ValueError('Accepted authored note alias changed')
+            else:os.link(source,target,follow_symlinks=False)
         _write_once(directory/'index.json',pending['node'])
         _write_once(directory/'research.json',pending['node']['research'])
         for public,canonical in pending['candidate_aliases'].items():

@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from execution_fixtures import execution_registry
-from test_worker_fragments import fragment
-from test_mutable_run_inputs import (fixed_code,terminal_code,_configuration,_code,_prepare)
+from test_mutable_run_inputs import (fixed_code,fragment,live_fragment,terminal_code,
+    _configuration,_code,_prepare)
 from scidiscovery.research_loop import (budget,code_versions,contracts as c,experiments as e,
     worker_execution_bridge as bridge)
 
@@ -113,9 +113,8 @@ def test_cached_collect_rejects_replaced_returned_log_without_reexecution(termin
 def test_cached_collect_does_not_consume_unreturned_retained_output(terminal_code,fragment,monkeypatch):
     case=_cached_case(terminal_code,fragment,monkeypatch,command='collect',omitted=True)
     assert _reply(case)['result']['status']=='collected'
-    Path(case.skipped['path']).unlink()
     original=next(item for item in case.observation['scientific_outputs'] if item['name']==case.skipped['name'])
-    Path(original['path']).unlink()
+    for path in {Path(case.skipped['path']),Path(original['path'])}:path.unlink()
     result=_reply(case)
     assert result['code']==0 and result['result']['outputs']==case.response['result']['outputs']
     assert result['result']['outputs_omitted_count']==1 and case.execution==[]
@@ -142,12 +141,16 @@ def test_cached_unknown_keeps_same_calls_and_consumed_budget(terminal_code,fragm
     fixed_code['exports'][(root,1,accepted['call_id'])].joinpath(accepted['code_version']['entry']).unlink()
     case.draft.unlink()
     stamp=budget.clock_stamp();before=budget.snapshot(root,sample_stamp=stamp)
-    usage=(case.record/'usage.json').read_bytes();calls=[path.name for path in e.Records(case.config).calls()]
+    # This owner is live: absence of a terminal usage original remains unknown,
+    # and cache reads must preserve that absence as well as accepted spending.
+    usage=case.record/'usage.json'
+    assert not usage.exists()
+    calls=[path.name for path in e.Records(case.config).calls()]
     for _ in range(2):
         result=_reply(case)
         assert result['code']==2 and result['result']['status']=='unknown'
         assert result['result']['call_id']==accepted['call_id']
-    assert budget.snapshot(root,sample_stamp=stamp)==before and (case.record/'usage.json').read_bytes()==usage
+    assert budget.snapshot(root,sample_stamp=stamp)==before and not usage.exists()
     assert [path.name for path in e.Records(case.config).calls()]==calls and case.execution==[]
     assert not (case.directory/'execution-observation.json').exists()
     assert all(path.read_bytes()==raw for path,raw in case.originals.items())

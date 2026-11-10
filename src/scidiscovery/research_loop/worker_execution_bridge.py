@@ -29,10 +29,10 @@ SUBMISSION_DIRECTORY = 'work/experiment'
 SUBMISSION_REF = re.compile(r'S[0-9]{3,6}\Z')
 WAIT_SECONDS = 3600
 COMMANDS = frozenset({'capabilities','describe','compile','run','lineage-status',
-    'query','lookup','collect','cancel','reconcile','retire','research-declare'})
+    'query','lookup','collect','cancel','reconcile','retire','research-declare','note'})
 PATH_OPTIONS = frozenset({'--script','--payload','--experiment-dir','--implementation',
-    '--scientific-files','--output','--research'})
-VALUE_OPTIONS = PATH_OPTIONS | {'--start','--key','--parent-plan','--change-intent','--mechanism','--call-id'}
+    '--scientific-files','--output','--research','--note-file'})
+VALUE_OPTIONS = PATH_OPTIONS | {'--start','--key','--parent-plan','--change-intent','--mechanism','--call-id','--note-id','--supersedes'}
 FLAG_OPTIONS = frozenset({'--metadata','--new-plan'})
 _LOCAL_LAUNCH = ContextVar('scientific_local_launch', default=None)
 _LOCAL_LAUNCH_CONTEXT = ContextVar('scientific_local_launch_context', default=None)
@@ -122,6 +122,9 @@ def _arguments(arguments, work, config=None):
                             and len(relative.parts)==2 and relative.parts[0]=='experiments')
                         if not path.is_dir() and not (local_runtime and not path.exists()):
                             raise CallerError('Select an ordinary --experiment-dir directory. Current-W Local execution can create an explicit experiments/<name> runtime directory.',error='scientific_input_unusable')
+                    elif option=='--note-file':
+                        # The note operation owns its exact input observation.
+                        pass
                     elif config is not None:
                         from . import experiment_client
                         experiment_client.input_reference(config,path)
@@ -325,10 +328,48 @@ def _with_diagnostic(server,response,error,submission_ref):
     return response
 
 
-def _execute(server, arguments, *, submission_ref=None):
+def _note_claim_binding(binding,original,submission_ref):
+    """Bind the owner-loaded original claim, independently of today's attempt."""
+    return dict(step=binding['step'],attempt=binding['attempt'],
+        submission_ref=submission_ref,original=original)
+
+
+def _save_note_ack(server,submission_ref,arguments,result,*,binding):
+    from . import contracts as c
+    response=dict(code=0,result=result)
+    value=dict(binding=binding,response=response,
+        notes=_note_evidence(server.configuration,arguments,response))
+    path=server.claims/submission_ref/'note-publication.json'
+    if path.exists():
+        if c.read(c.regular(path))!=value:raise ValueError('Original authored note acknowledgement changed')
+    else:c.write(path,value)
+    path.chmod(0o400)
+
+
+def _recover_note_ack(server,submission_ref,arguments,*,binding):
+    from . import contracts as c, research_notes
+    purpose=_request_consumption(arguments)
+    path=server.claims/submission_ref/'note-publication.json'
+    if path.exists():
+        value=c.read(c.regular(path))
+        if set(value)!={'binding','response','notes'} or value['binding']!=binding:
+            raise ValueError('Original authored note publication changed')
+        _verify_note_evidence(server.configuration,value['notes'],purpose=purpose,result=value['response']['result'])
+        research_notes.refresh_navigation(server.configuration,note_id=purpose.note_id)
+        return value['response']
+    result=research_notes.recover(server.configuration,note_id=purpose.note_id,
+        call_id=purpose.call_id,binding=binding)
+    if result is None:return None
+    _save_note_ack(server,submission_ref,arguments,result,binding=binding)
+    return dict(code=0,result=result)
+
+
+def _execute(server, arguments, *, submission_ref=None, claim_binding=None):
     from . import experiments as e
     config=_configuration(server)
     arguments=_arguments(arguments,server.work,config)
+    if submission_ref is not None and arguments[:1]==['note'] and not isinstance(claim_binding,dict):
+        raise e.IntegrityError('Claimed authored note requires its explicit original claim binding')
     from . import contracts as c,experiment_client,budget,budget_limits
     shared_deadline=_bridge_deadline(experiment_client.root_for_configuration(config),config)
     deadline=budget_limits.minimum(shared_deadline,
@@ -367,7 +408,12 @@ def _execute(server, arguments, *, submission_ref=None):
     try:
         reporting=(e.diagnostic_reporter(report,clean=server.diagnostic_clean)
             if submission_ref is not None else nullcontext())
-        with _environment(server.environment),redirect_stdout(out),redirect_stderr(err),reporting:
+        from . import research_notes
+        note_publication=(research_notes.publication_request(
+            claim_binding,
+            lambda result:_save_note_ack(server,submission_ref,arguments,result,binding=claim_binding))
+            if submission_ref is not None and arguments[:1]==['note'] else nullcontext())
+        with _environment(server.environment),redirect_stdout(out),redirect_stderr(err),reporting,note_publication:
             try:code=e.main(['--config',str(server.config_path),*arguments])
             except SystemExit:raise ValueError('Scientific execution command options are invalid') from None
     finally:_LOCAL_LAUNCH.reset(token)
@@ -395,11 +441,44 @@ def _call_evidence(config, call_id):
     return value
 
 
-def _verify_calls(config, calls, *, arguments=None, response=None):
+def _note_evidence(config,arguments,response):
+    from . import contracts as c, experiments as e, experiment_client, research_notes
+    result=response.get('result',{})
+    if not isinstance(arguments,list) or arguments[:1]!=['note'] or result.get('status')!='research_note_recorded':return []
+    purpose=_request_consumption(arguments)
+    directory=research_notes._paths(config,purpose.note_id)
+    root=experiment_client._configuration_root(config,allow_standalone=False)
+    public=c.workspace(root,config['scope']['step'])/'work/execution-results/research-notes'/purpose.note_id
+    return [dict(note_id=purpose.note_id,call_id=purpose.call_id,
+        record=e.proof(directory/'note.json'),original=e.proof(directory/'original.raw'),
+        public_record=e.proof(public/'note.json'),public_original=e.proof(public/'original.raw'))]
+
+
+def _verify_note_evidence(config,notes,*,purpose,result):
+    from . import contracts as c, experiments as e, experiment_client, research_notes
+    if not isinstance(notes,list) or len(notes)!=1:
+        raise e.IntegrityError('Cached authored note lost its original acknowledgement')
+    value=notes[0];directory=research_notes._paths(config,purpose.note_id)
+    root=experiment_client._configuration_root(config,allow_standalone=False)
+    public=c.workspace(root,config['scope']['step'])/'work/execution-results/research-notes'/purpose.note_id
+    expected=dict(record=directory/'note.json',original=directory/'original.raw',
+        public_record=public/'note.json',public_original=public/'original.raw')
+    if (set(value)!={'note_id','call_id',*expected} or value['note_id']!=purpose.note_id
+            or value['call_id']!=purpose.call_id or result.get('note_id')!=purpose.note_id
+            or result.get('call_id')!=purpose.call_id
+            or result.get('note')!=dict(record=f'work/execution-results/research-notes/{purpose.note_id}/note.json',
+                original=f'work/execution-results/research-notes/{purpose.note_id}/original.raw')):
+        raise e.IntegrityError('Cached authored note acknowledgement changed')
+    for key,path in expected.items():
+        if value[key]!=e.proof(path):raise e.IntegrityError('Cached authored note original changed')
+
+
+def _verify_calls(config, calls, *, arguments=None, response=None, notes=()):
     """Pure original-byte verification; no factory, backend query or replay."""
     from . import experiments as e
     purpose=_request_consumption(arguments) if calls and arguments is not None else None
     result=response.get('result',{}) if isinstance(response,dict) else {}
+    note_request=(purpose is not None and purpose.command=='note')
     consume=(purpose is not None and purpose.command=='collect' and result.get('status')=='collected')
     fields=('path','size_bytes','file_stat')
     def bound(item):
@@ -492,6 +571,11 @@ def _verify_calls(config, calls, *, arguments=None, response=None):
                     raise e.IntegrityError('Cached collection lost its declared original output')
                 bound(matches[0])
         if call['observation'] is None and call['retirement'] is None:complete=False
+    if note_request:
+        if result.get('status')=='research_note_recorded':
+            _verify_note_evidence(config,notes,purpose=purpose,result=result)
+        # A note-only response never inherits the referenced call's wait state.
+        return True
     return complete
 
 
@@ -571,26 +655,40 @@ def _handle(server, raw, *, retained=False):
             response_path=claim/'response.json';outcome=claim/'outcome.json'
             if response_path.exists() and outcome.exists():
                 expected=c.read(c.regular(outcome))
-                if (not isinstance(expected,dict) or set(expected)!={'submission','response','calls'}
+                if (not isinstance(expected,dict) or set(expected) not in ({'submission','response','calls'},{'submission','response','calls','notes'})
                         or any(e.proof(claim/'binding.json').get(key)!=item for key,item in expected['submission'].items())
                         or any(e.proof(response_path).get(key)!=item for key,item in expected['response'].items())
                         or not isinstance(expected['calls'],list)):
                     raise ValueError('Submission original result differs')
                 response=json.loads(_read_file(response_path))
                 if not _verify_calls(server.configuration,expected['calls'],
-                        arguments=request['arguments'],response=response):response=_pending_cache(response,expected['calls'])
+                        arguments=request['arguments'],response=response,notes=expected.get('notes',())):response=_pending_cache(response,expected['calls'])
+            elif isinstance(request['arguments'],list) and request['arguments'][:1]==['note']:
+                # Note publication is independently idempotent, including a crash
+                # after immutable publication but before the response is sealed.
+                original_claim=_note_claim_binding(binding,e.proof(claim/'binding.json'),reference)
+                response=_recover_note_ack(server,reference,request['arguments'],binding=original_claim)
+                if response is None:response=_execute(server,request['arguments'],submission_ref=reference,claim_binding=original_claim)
+                calls=_response_calls(server,request,response,{path.name for path in e.Records(server.configuration).calls()})
+                note_proofs=_note_evidence(server.configuration,request['arguments'],response)
+                _verify_calls(server.configuration,calls,arguments=request['arguments'],response=response,notes=note_proofs)
+                response=dict(response,submission_ref=reference,request=request)
+                _publish(response_path,_encoded(response))
+                c.write(outcome,dict(submission=e.proof(claim/'binding.json'),response=e.proof(response_path),calls=calls,
+                    **(dict(notes=note_proofs) if note_proofs else {})))
             else:response=_unknown()
         else:
             _publish(claim/'submit.json',raw)
-            c.write(claim/'binding.json',dict(step=server.client['step'],attempt=server.client['attempt'],
-                configuration=server.configuration,retained_at_start=retained,submission=e.proof(claim/'submit.json')))
+            binding=dict(step=server.client['step'],attempt=server.client['attempt'],
+                configuration=server.configuration,retained_at_start=retained,submission=e.proof(claim/'submit.json'))
+            c.write(claim/'binding.json',binding)
             before={path.name for path in e.Records(server.configuration).calls()}
             try:
                 if request.get('client_error')=='submission_frame_too_large':raise _frame_refusal()
                 if len(raw)>MAX_REQUEST_BYTES:raise _frame_refusal(len(raw))
                 if (not retained and isinstance(request['arguments'],list)
                         and request['arguments'] and isinstance(request['arguments'][0],str)
-                        and request['arguments'][0] in {'query','lookup','collect','cancel','reconcile','retire'}):
+                        and request['arguments'][0] in {'query','lookup','collect','cancel','reconcile','retire','note'}):
                     purpose=_request_consumption(request['arguments'])
                     if purpose.call_id not in before:
                         # Only reject this operation's current addressing scope;
@@ -600,16 +698,22 @@ def _handle(server, raw, *, retained=False):
                             'Read earlier retained files from the assigned inputs/history node index and its material IDs. '
                             'Preserve any existing unknown submission and reconcile it with its original owner. '
                             'Do not resubmit the earlier experiment.',error='call_outside_current_task')
-                response=_unknown() if retained else _execute(server,request['arguments'],submission_ref=reference)
+                if retained:response=_unknown()
+                elif isinstance(request['arguments'],list) and request['arguments'][:1]==['note']:
+                    original_claim=_note_claim_binding(binding,e.proof(claim/'binding.json'),reference)
+                    response=_execute(server,request['arguments'],submission_ref=reference,claim_binding=original_claim)
+                else:response=_execute(server,request['arguments'],submission_ref=reference)
             except e.CallerError as error:
                 response=_with_diagnostic(server,dict(code=2,result=e.caller_feedback(error)),error,reference)
             calls=[] if retained else _response_calls(server,request,response,before)
-            _verify_calls(server.configuration,calls,arguments=request['arguments'],response=response)
+            note_proofs=_note_evidence(server.configuration,request['arguments'],response)
+            _verify_calls(server.configuration,calls,arguments=request['arguments'],response=response,notes=note_proofs)
             # A fresh e.main return owns its verified pending state and handle.
             # Only reuse of an older pending response is qualified as unknown.
             response=dict(response,submission_ref=reference,request=request)
             _publish(claim/'response.json',_encoded(response))
-            c.write(claim/'outcome.json',dict(submission=e.proof(claim/'binding.json'),response=e.proof(claim/'response.json'),calls=calls))
+            c.write(claim/'outcome.json',dict(submission=e.proof(claim/'binding.json'),response=e.proof(claim/'response.json'),calls=calls,
+                **(dict(notes=note_proofs) if note_proofs else {})))
         response=dict(response,submission_ref=reference,request=request)
     except e.CallerError as error:
         response=_with_diagnostic(server,dict(code=2,result=e.caller_feedback(error),submission_ref=reference,request=request),error,reference)
@@ -682,14 +786,14 @@ def terminal_caller_error(root,job,record):
             continue
         outcome=c.read(c.regular(outcome_path))
         response=json.loads(_read_file(response_path))
-        if (set(outcome)!={'submission','response','calls'}
+        if (set(outcome) not in ({'submission','response','calls'},{'submission','response','calls','notes'})
                 or any(e.proof(binding_path).get(key)!=value for key,value in outcome['submission'].items())
                 or any(e.proof(response_path).get(key)!=value for key,value in outcome['response'].items())
                 or set(response)!={'code','result','submission_ref','request'}
                 or response['submission_ref']!=claim.name or request['submission_ref']!=claim.name
                 or response['request']!=request or not isinstance(outcome['calls'],list)):
             raise e.IntegrityError('Caller-error original response changed')
-        _verify_calls(config,outcome['calls'],arguments=request['arguments'],response=response)
+        _verify_calls(config,outcome['calls'],arguments=request['arguments'],response=response,notes=outcome.get('notes',()))
         terminal=True
         for call in outcome['calls']:
             current=_call_evidence(config,call['call_id'])
@@ -1019,7 +1123,7 @@ def main(argv=None):
     except e.CallerError as error:response=dict(code=2,result=e.caller_feedback(error))
     except (OSError,ValueError):
         response=dict(code=3,result=dict(status='unknown',note='Scientific submission result is unavailable; preserve original calls'))
-    if (response['result'].get('status') in {'unknown','integrity_error','caller_error'}
+    if (arguments[2:3]!=['note'] and response['result'].get('status') in {'unknown','integrity_error','caller_error'}
             and not isinstance(response['result'].get('handoff'),dict)):
         from . import managed_wait
         response['result']['handoff']=managed_wait.handoff(None,response['result'],'run')

@@ -2568,6 +2568,11 @@ def _cli_parser(*,configuration=True):
     sub.add_parser('lineage-status')
     declarations=sub.add_parser('research-declare',help='Register exact W mechanism identities without submitting an experiment')
     declarations.add_argument('--research',action=_ResearchFileArgument,required=True,help=RESEARCH_FILE_HELP)
+    note=sub.add_parser('note',help='Optionally persist a W-authored interpretation after reading an original run or collect result; grants no execution or qualification')
+    note.add_argument('--call-id',required=True)
+    note.add_argument('--note-id',required=True)
+    note.add_argument('--note-file',type=Path,required=True,help='Ordinary task UTF-8 text or JSON file; exact original bytes are retained')
+    note.add_argument('--supersedes',help='Exact prior note-id for a revision; old originals remain available')
     compile_command = sub.add_parser('compile', help='Optional local compilation of scientific slots; grants no execution')
     compile_command.add_argument('--implementation', type=Path, required=True)
     compile_command.add_argument('--scientific-files', type=Path, required=True, help='JSON slot-name to listed scientific input alias map; {} for self-contained sources')
@@ -2622,7 +2627,7 @@ def main(argv=None):
         if args.command=='lineage-status' and (type(scope.get('handoff_protocol')) is not int or scope['handoff_protocol']!=protocol.CURRENT):
             print(json.dumps(preserved_progress(config),allow_nan=False));return 0
         owner_lease.enter_context(instance_owner.lease_for_configuration(config))
-        if args.command in {'run','compile','research-declare','lookup','collect','cancel','reconcile','retire'}:
+        if args.command in {'run','compile','research-declare','note','lookup','collect','cancel','reconcile','retire'}:
             from .protocol import require_scope
             require_scope(config.get('scope'))
         if args.command in {'query','lookup','collect','cancel','reconcile','retire'}:
@@ -2631,6 +2636,20 @@ def main(argv=None):
             accepted=Records(config).accepted(args.call_id)
             accepted_call_id=args.call_id
             original_operation_started=False
+        if args.command=='note':
+            from . import research_notes, experiment_client, contracts as c
+            # The exact call is accepted independently of the optional note.
+            # Format/path corrections concern this note request only.
+            accepted_note=Records(config).accepted(args.call_id)
+            facts=experiment_client.load_client_facts(config)
+            try:
+                reference=experiment_client._observe_input_reference(config,args.note_file,facts=facts)
+            except (FileNotFoundError,IsADirectoryError):
+                raise CallerError('Write the optional note to an ordinary task file, then retry exp note with its exact note-id.',error='note_file_required') from None
+            with c.record_writer(Path(config['record_dir'])):
+                result=research_notes.publish(config,accepted=accepted_note,note_id=args.note_id,
+                    source=Path(reference['path']),supersedes=args.supersedes,facts=facts)
+            print(json.dumps(result,ensure_ascii=False,allow_nan=False));return 0
         if args.command=='research-declare':
             from . import worker_research, experiment_client, storage_policy as storage
             if not worker_research.enabled(config):raise CallerError('Live declarations require the frozen W-first strategy')

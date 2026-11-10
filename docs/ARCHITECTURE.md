@@ -106,6 +106,10 @@ Scope, missing results and omissions remain explicit. Execution success does not
 establish scientific validity. See [execution facts](RESEARCH_LOOP_CONTRACTS.md#execution-facts)
 for the view's coverage and reading limits.
 
+W may preserve optional [authored notes](RESEARCH_LOOP_CONTRACTS.md#research-notes)
+after reading a result. They persist during the task, retain revisions and enter
+existing recovery/navigation paths, separately from execution facts.
+
 New nodes bind an exact operational configuration revision. Saving edits queues
 future settings; it does not change existing tasks, reset budgets or launch work.
 Pause prevents new work while accepted originals retain their own limits. Typed

@@ -1087,6 +1087,13 @@ def _science_view(job, root, *, parent_sources, policy, qualified_materials, exe
         **(dict(configured_delivery=job['configured_delivery']) if 'configured_delivery' in job else {}),
         'parents': parents,
         **(dict(execution_facts=execution_fact_view) if execution_fact_view is not None else {}),
+        **(dict(research_notes=job['history']['research_notes'])
+           if job.get('history',{}).get('research_notes') is not None else {}),
+        **(dict(research_note_recording=dict(
+            command='exp note --call-id ID --note-id ID --note-file FILE [--supersedes ID]',
+            index='work/execution-results/research-notes/index.json',
+            scope='Optional after reading results; index exists after notes. Author claims and exact originals persist across same-task attempts; optionally curate into research_memory.'))
+           if job['role']=='W' else {}),
         'reading_order':reading[job['role']]+' Read each parent conclusion first; its history_alias and matching history-index pages expose the same scientific source, not independent evidence. lineage.indexes.research locates the latest shared H/W/A authored understanding, limitations and direction supervision. Use its exact original links and lineage indexes on demand for decision-relevant gaps; a new role turn does not require rereading the full history. Use existing reports/artifact_index for exact entries to local observations, counterevidence, untested combinations and open questions; do not manufacture clues. Use native file/shell tools: inspect JSON keys/shapes, then needed fields or line ranges; size combined batch returns for every inner/outer tool limit. Analyze large numeric arrays with your own local code and report needed results with exact source locators; originals remain available. Reuse unchanged originals fully read this session; fill gaps/conflicts/truncation, including later pages and limitations.'
             +(' A judges independently; no routine redo of old observations. Parent claims are not qualification.'
               if job['role']=='A' else ' A verifies independently. Parents are claims.')
@@ -1158,6 +1165,9 @@ class CurrentInventory:
     review_binding: dict | None = None
     managed_call_metadata: dict = field(default_factory=dict)
     execution_fact_view: dict | None = None
+    research_note_records: list = field(default_factory=list)
+    research_note_view: dict | None = None
+    research_note_diagnostics: list = field(default_factory=list)
 
 
 def accept_current_inventory(root: Path, step: int):
@@ -1251,6 +1261,45 @@ def accept_current_inventory(root: Path, step: int):
         # Original identity/status acceptance above remains strict. Presentation
         # capacity or optional metadata must not erase an accepted result.
         inventory.execution_fact_view=execution_facts.unavailable(scope=fact_scope)
+    if job['role']=='W':
+        from . import research_notes,experiment_client
+        from .protocol import stage_scope_for_job
+        note_config=dict(scope=stage_scope_for_job(root,job,task_ref=task_ref),
+            record_dir=str(experiment_client._record_directory_from_facts(root,step,job)))
+        note_acquisition={}
+        try:
+            note_acquisition=research_notes.load(note_config,
+                accepted_calls={identity:metadata['accepted']
+                    for identity,metadata in inventory.managed_call_metadata.items()},
+                accepted_attempts=[dict(number=number,execution_key=(task_ref if number==0 else
+                    dict(path=str(path/'native-intent.json')))) for number,path in enumerate(chain)])
+            inventory.research_note_records=note_acquisition['records']
+            inventory.research_note_diagnostics=note_acquisition['unavailable_notes']
+        except (OSError,ValueError,TypeError,KeyError,UnicodeError,OverflowError):
+            inventory.research_note_diagnostics=[dict(note_id=None,diagnostic='research_note_inventory_unavailable')]
+        try:
+            inventory.research_note_view=research_notes.render(inventory.research_note_records,
+                scope=fact_scope,public_refs={row['note_id']:row['public']
+                    for row in inventory.research_note_records},unavailable_notes=inventory.research_note_diagnostics)
+            if note_acquisition.get('public_index') is not None:
+                inventory.research_note_view['navigation']=[note_acquisition['public_index']]
+                inventory.research_note_view['access']=(
+                    'Rows and omissions are frozen at this stopped attempt. The linked same-task live index '
+                    'and its directory may include later attempts; exact note originals remain immutable.')
+            # Bound the final composite, including owner-supplied navigation.
+            # Only previews are trimmed; accepted counts and exact access stay.
+            note_view=inventory.research_note_view
+            while len(execution_facts.serialized_bytes(note_view))>research_notes.MAX_BYTES and note_view['notes']:
+                note_view['notes'].pop(0);note_view['omitted_rows']+=1
+            while (len(execution_facts.serialized_bytes(note_view))>research_notes.MAX_BYTES
+                    and note_view.get('unavailable_notes')):
+                note_view['unavailable_notes'].pop(0)
+            if len(execution_facts.serialized_bytes(note_view))>research_notes.MAX_BYTES:
+                raise ValueError('Authored note access envelope exceeds its preview bound')
+        except (OSError,ValueError,TypeError,KeyError,UnicodeError,OverflowError):
+            # Notes are optional author claims. Required original call identity
+            # has already been accepted above and remains strict.
+            inventory.research_note_view=None
     needs_checkpoint=(job['role']=='W' and (checkpoint.enabled_for_policy(job,settings=policy)
         or worker_delivery.applicable(job) or job.get('managed_execution_wait')))
     if not raw.exists():

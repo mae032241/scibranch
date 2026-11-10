@@ -275,7 +275,7 @@ def retained_research_memory(prior, job, payload, *, node_path, memory_facts):
 
 
 def research_navigation(prior, job, payload, *, node_path, supervision_state=None, memory_facts=None,
-        retained_memory=_MEMORY_UNPRODUCED,budget_facts=None):
+        retained_memory=_MEMORY_UNPRODUCED,budget_facts=None,research_note_view=None):
     """Project authored research locators at the existing single-node writer.
 
     The producer supplies the preceding accepted navigation and current original.
@@ -300,6 +300,8 @@ def research_navigation(prior, job, payload, *, node_path, supervision_state=Non
         unresolved_questions='Read the linked authored scientific_result and limitations; active work remains in the existing work navigation.',
         previous=prior.get('current_author'),
         scope='Derived authored-source navigation only. Excerpts mark omissions; linked originals retain complete text. For complete candidate navigation, inspect candidate entities in the linked node index and follow its previous links. Consultation is not a completed A assessment cycle. Authored navigation and candidate availability grant no qualification. No scientific ranking or confidence is inferred.')
+    if research_note_view is not None:
+        result['research_notes']=copy.deepcopy(research_note_view)
     if supervision_state is not None:
         from . import supervision
         result['direction_supervision']=supervision.project(supervision_state,budget_facts=budget_facts)
@@ -877,6 +879,8 @@ def bind_from_facts(root, step, role, protocol, *, base, head, policy,
     binding=dict(prefix=prefix,breadth_snapshot=head['search_ref'],inputs=[],view=bounded_brief(view))
     if tip is not None and tip.get('execution_facts') is not None:
         binding['execution_facts']=tip['execution_facts']
+    if tip is not None and tip.get('research_notes') is not None:
+        binding['research_notes']=tip['research_notes']
     if audit_projection_version==1:
         binding.update(audit_projection_version=1,adjacent_audit=adjacent_audit,
             audit_receipts=[adjacent_audit] if adjacent_audit is not None else [])

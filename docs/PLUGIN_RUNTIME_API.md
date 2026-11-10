@@ -139,6 +139,12 @@ accepted terminal evidence. The same presentation feeds W continuation and Final
 its exact coverage and omission rules belong to the
 [research-loop contract](RESEARCH_LOOP_CONTRACTS.md#execution-facts).
 
+Host-owned `exp note` records a W interpretation after reading a result, using
+the exact current-task call without constructing or querying an adapter. No
+adapter note method or metric is required. Stable IDs, revisions and recovery
+belong to the [authored-note contract](RESEARCH_LOOP_CONTRACTS.md#research-notes),
+separately from immutable execution observations and qualification.
+
 Protocol 33 keeps W as the research main line. `continue` resumes the same W;
 `handoff` seals and starts a new W, `revise_h` and `review` request serial H/A
 consultation returning to a new W, and `decision` requests an ordinary A assessment.
