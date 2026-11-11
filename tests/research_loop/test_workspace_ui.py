@@ -148,7 +148,7 @@ def test_workspace_structured_form_preview_create_and_open_exact_instance(tmp_pa
         fields = controls(page)
         fields.update({'task_text': 'Research a new task directly from the form.',
             'cfg.research.root': str(workspace / 'new-instance'), 'cfg.research.public_root': str(workspace / 'public'),
-            'cfg.agent.launcher': 'never-launched', 'cfg.agent.model': 'form-model',
+            'advanced_toml': '[agent]\nlauncher = ["never-launched"]\n', 'cfg.agent.model': 'form-model',
             'cfg.budget.max_tokens': '1234', 'cfg.budget.max_seconds': '120', 'cfg.budget.max_steps': '8'})
         assert request(connection, 'POST', '/control/configure', cookie=cookie, fields=fields, origin='null')[0] == 403
         assert request(connection, 'POST', '/control/configure', cookie=cookie,
@@ -160,6 +160,7 @@ def test_workspace_structured_form_preview_create_and_open_exact_instance(tmp_pa
         assert retained['task_text'] == fields['task_text'] and retained['cfg.agent.model'] == 'form-model'
         assert retained['cfg.research.root'] == str(workspace / 'new-instance')
         assert retained['cfg.budget.max_tokens'] == 'not-a-number'
+        assert retained['advanced_toml'] == fields['advanced_toml']
         assert b'action="/control/create"' not in invalid
         fields = dict(retained, **{'cfg.budget.max_tokens': '1234'})
         status, page, _ = request(connection, 'POST', '/control/configure', cookie=cookie, fields=fields, origin=origin)

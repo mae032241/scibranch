@@ -13,7 +13,10 @@ import json
 import math
 from pathlib import Path
 import re
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from . import research_config, skill_supply, backends, model_catalog, supervision
 
@@ -464,9 +467,14 @@ def parse(fields, *, base, _fixed_skill_sets=None):
             errors.append('自动方向复核：请选择支持的选项')
         else:
             current = _get(result['document'], 'policies.supervision')
-            selected = copy.deepcopy(current) if isinstance(current, dict) else _default_supervision()
-            selected['mode'] = mode
-            _put(result['document'], 'policies.supervision', selected)
+            if isinstance(current, dict) and 'mode' in current:
+                errors.append('policies.supervision.mode：高级设置与表单字段重复，请只保留一处')
+            if current is not None and not isinstance(current, dict):
+                errors.append('policies.supervision：高级设置中的父字段不是对象')
+            else:
+                selected = copy.deepcopy(current) if isinstance(current, dict) else _default_supervision()
+                selected['mode'] = mode
+                _put(result['document'], 'policies.supervision', selected)
     # Disabled groups' children are deliberately omitted. Reject stray topology.
     allowed = {identity for identity, node in nodes.items() if node['parent'].startswith('@') and
                node['parent'][1:] in {f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}}
@@ -626,7 +634,9 @@ def render(draft, *, edit=False, catalogs=None):
     document = draft['document']
     current_backend = _get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND
     form_fields=_fields(current_backend)
-    catalogs = model_catalog.load_all(backends.names()) if catalogs is None else catalogs
+    catalogs = {current_backend: model_catalog.load(current_backend,
+        launcher=_get(document, 'agent.launcher'), native=_get(document, 'agent.native'),
+        base=draft['base'])} if catalogs is None else catalogs
     short_hints = {
         'research.root': '服务器上一个尚不存在的目录，用来保存这项研究的全部记录。',
         'research.public_root': '服务器上已存在的目录，研究只能读取其中的文件；没有材料也需要一个空目录。',
@@ -827,7 +837,8 @@ def render(draft, *, edit=False, catalogs=None):
         '<p>选好模型并填写三项上限即可创建。其余设置都有默认值，需要时再展开。</p></div>')
     catalog_note = ''.join('<p class="note" data-catalog-note="'+escape(name,quote=True)+'"'+('' if name==current_backend else ' hidden')+'>'
         + escape('模型列表来自 '+value['source']+(('（更新于 '+str(value['fetched_at'])+'）') if value.get('fetched_at') else '')+'；也可选择“自定义”填写精确 ID。'
-                 if value.get('models') else (value.get('error') or '此后端没有模型列表，请填写精确模型 ID。'))+'</p>'
+                 if value.get('models') else (value.get('error') or '此后端没有模型列表，请填写精确模型 ID。'))
+        + (' '+escape(value['warning']) if value.get('warning') else '')+'</p>'
         for name, value in catalogs.items())
     rows.append(heading + '<fieldset class="config-group"><legend>模型</legend><div class="config-grid config-grid-four model-fields">'+fields(model_paths)+'</div>'+catalog_note+'</fieldset>'
         '<fieldset class="config-group" id="budget-settings"><legend>研究总上限</legend><div class="budget-fields">'+fields(budget_paths)+'</div>'

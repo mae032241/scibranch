@@ -1239,7 +1239,9 @@ class InstanceUI:
             with self.cache_lock:
                 observed_epoch = time.monotonic_ns()
                 latest = self._latest_step()
-                view = saved_status.status(self.root, after=max(0, latest - ui_view.WINDOW), limit=ui_view.WINDOW, memo=self.status_memo)
+                wait_sources = {}
+                view = saved_status.status(self.root, after=max(0, latest - ui_view.WINDOW), limit=ui_view.WINDOW, memo=self.status_memo,
+                    wait_sources=wait_sources)
                 context = (view.get('usage') or {}).get('context') or {}
                 context_display = self._context_display_value(context, observed_epoch, producer_scope=True)
                 conclusion = None
@@ -1251,19 +1253,21 @@ class InstanceUI:
                             ordinary=self._ordinary_assessment(job), payload=payload)
                         break
                 operations = saved_status.operations(self.root, memo=self.status_memo)
+                current = view['nodes'][-1] if view['nodes'] else None
+                wait_live = (self._execution_wait_live(current['step'], source=wait_sources[current['step']], include_logs=True)
+                    if current and current.get('state') == 'waiting' and current['step'] in wait_sources else None)
+                controller = execution_wait_monitor.controller_observation(self.root, operations, wait_live)
                 final = self._selected_result(view, latest, conclusion, terminal=True)
                 # One read-only projection per snapshot; components fail separately.
                 projection = self._guarded(ui_view.project, self.root, view, final_step=final, memo=self.view_memo,
                                              clean=ui_view.cleaner(self.root))
                 return dict(view=view, conclusion=conclusion, operation=operations[-1] if operations else None, operations=operations[-20:],
-                            final=final, ui=projection, context_display=context_display)
+                            final=final, ui=projection, context_display=context_display,
+                            execution_wait_live=wait_live, controller=controller)
         return self.live_cache.read(self.root, load, force=force)
 
     def _receipt(self, snapshot):
         receipt = snapshot['operation'] or self.control_result or {}
-        operation_id = receipt.get('operation_id')
-        if operation_id and (self.root / 'host-control/operations' / (operation_id + '.json')).is_file():
-            receipt = c.read(self.root / 'host-control/operations' / (operation_id + '.json'))
         return receipt
 
     def _summary_snapshot(self, *, force=False):
@@ -1271,7 +1275,9 @@ class InstanceUI:
         def load():
             with self.cache_lock:
                 latest = self._latest_step()
-                view = saved_status.status(self.root, after=max(0, latest - 1), limit=1, memo=self.status_memo)
+                wait_sources = {}
+                view = saved_status.status(self.root, after=max(0, latest - 1), limit=1, memo=self.status_memo,
+                    wait_sources=wait_sources)
                 conclusion = None
                 if view['nodes'] and view['nodes'][-1]['state'] == 'seal_present_unverified':
                     node = display.node(self.root, latest)
@@ -1279,8 +1285,13 @@ class InstanceUI:
                     conclusion = dict(step=latest, role=job['role'],
                         ordinary=self._ordinary_assessment(job), payload=node['payload'])
                 operations = saved_status.operations(self.root, memo=self.status_memo)
+                current = view['nodes'][-1] if view['nodes'] else None
+                wait_live = (self._execution_wait_live(current['step'], source=wait_sources[current['step']], include_logs=False)
+                    if current and current.get('state') == 'waiting' and current['step'] in wait_sources else None)
                 return dict(view=view, conclusion=conclusion, final=self._selected_result(view, latest, conclusion, terminal=True),
                     operation=operations[-1] if operations else None, operations=operations[-20:],
+                    execution_wait_live=wait_live,
+                    controller=execution_wait_monitor.controller_observation(self.root, operations, wait_live),
                     ui=dict(header=ui_view.header(self.root, view['objective']),
                         used_steps=view.get('used_steps', (view.get('closeout') or {}).get('used_steps', latest))))
         return self.summary_cache.read(self.root, load, force=force)
@@ -1322,7 +1333,7 @@ class InstanceUI:
                        and conclusion['payload'].get('next_action') == 'wait' and current.get('kind')!='consultation')
         completed = snapshot['final'] is not None or (view.get('closeout') or {}).get('status') in {'final_a_completed', 'delivery_confirmed', 'exported_unsubmitted'}
         # A durable sealed/terminal node outranks a transient accepted receipt.
-        active = state in {'running', 'automatic_recovery_waiting'} or (state in {'ready', 'prepared'} and receipt.get('status') in {'accepted', 'running'})
+        active = state in {'running', 'automatic_recovery_waiting'} or (state in {'ready', 'prepared'} and self._monitoring(snapshot) is True)
         title = ('立即中断已请求：等待原任务清理' if current and current.get('interrupt_requested') else
             '最终结论已返回' if completed else '等待补充条件' if waiting else
             '暂停已请求：本阶段结束后停止' if view['paused'] and active else '研究已暂停' if view['paused'] else
@@ -1360,7 +1371,7 @@ class InstanceUI:
             exhausted=ui_view.exhausted_limits(view, used if isinstance(used, int) else None),
             waiting_reason=waiting_reason, current_round=rounds[0]['index'] if rounds else None,
             completed_line=completed_line, elapsed=elapsed, clean=clean,
-            monitoring=self._monitoring(receipt))
+            monitoring=self._monitoring(snapshot))
         technical=self._technical_stop(snapshot,receipt)
         if technical is not None and not display['active']:
             failed=technical.get('phase')=='native_failure'
@@ -1370,11 +1381,10 @@ class InstanceUI:
             display['active']=False
         return dict(status, display=display)
 
-    def _execution_wait_live(self, step, *, include_logs):
+    def _execution_wait_live(self, step, *, source, include_logs):
         """Fresh, uncached local liveness; reads files only and never queries an adapter."""
         try:
-            record = saved_status.attempts(self.root, step)[-1]
-            return execution_wait_monitor.observe(self.root, record, step, include_logs=include_logs,
+            return execution_wait_monitor.observe_acquired(self.root, step, source, include_logs=include_logs,
                 clean=ui_view.cleaner(self.root) if include_logs else None)
         except Exception:  # noqa: BLE001 - liveness is optional display
             return None
@@ -1392,9 +1402,9 @@ class InstanceUI:
         return body
 
     @staticmethod
-    def _monitoring(receipt):
-        """A live controller request owns waiting; a finished one watches nothing."""
-        return receipt.get('kind') == 'controller' and receipt.get('status') in {'accepted', 'running'}
+    def _monitoring(snapshot):
+        """Use the producer's fresh observation; persisted running is insufficient."""
+        return (snapshot.get('controller') or {}).get('monitoring')
 
     @staticmethod
     def _technical_stop(snapshot,receipt=None):
@@ -1502,13 +1512,15 @@ class InstanceUI:
         if status['state'] == 'external_wait' and not (display['current'] or {}).get('native_failure'):
             current = display['current']
             receipt = self._receipt(snapshot)
-            monitoring = self._monitoring(receipt)
+            monitoring = self._monitoring(snapshot)
             stop_reason = ((receipt.get('result') or {}).get('reason')
                 if (receipt.get('result') or {}).get('status') == 'waiting_execution' else None)
-            live = self._execution_wait_live(current['step'], include_logs=manager)
+            live = snapshot.get('execution_wait_live')
             body = str(ui.facts(ui_view.execution_wait_facts(current.get('execution_wait') or {},
-                monitoring=monitoring, stop_reason=stop_reason, live=live)))
-            body += self._execution_logs(live)
+                monitoring=monitoring, stop_reason=stop_reason, live=live,
+                waiting_consumes_budget=(view.get('budget') or {}).get('waiting_consumes_budget'))))
+            if manager:
+                body += self._execution_logs(live)
             items.append(dict(text=status['headline'] + '。原调用不会被重新提交；唤醒只核对同一原调用的结果。',
                 href='/nodes/' + str(current['step']), action='查看本阶段原任务',
                 form=ui.Safe('<details class="execution-wait" data-details-key="overview-execution-wait" open>'
@@ -1601,7 +1613,7 @@ class InstanceUI:
         if state == 'external_wait':
             if not manager:
                 return ui.Safe('<span class="readonly-note">只读查看</span>')
-            if self._monitoring(self._receipt(snapshot)):
+            if self._monitoring(snapshot) is True or (snapshot.get('controller') or {}).get('host_locked') is True:
                 return ui.Safe(self._control_form(token, 'pause'))
             ready = ((current or {}).get('execution_wait') or {}).get('all_ready')
             label = '唤醒 W 继续研究' if ready else '恢复监视（出结果后自动唤醒 W）'

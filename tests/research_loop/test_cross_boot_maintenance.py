@@ -53,8 +53,13 @@ def test_paused_clock_bridge_preserves_consumption_grants_and_old_history(tmp_pa
     originals = {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
     checkpoint, transfer = _owner_receipts(root, monkeypatch, 'one')
     now.update(at_unix=1000., at_boottime=10., boot_id='next-boot')
-    with pytest.raises(ValueError, match='boot changed'):
-        budget.snapshot(root)
+    # A read preserves measured active consumption across boots and exposes
+    # the unmeasured shutdown tail; it does not append a continuation receipt.
+    before_reanchor = budget.snapshot(root)
+    assert (before_reanchor['advance_seconds'], before_reanchor['waiting_seconds'],
+        before_reanchor['consumed_seconds'], before_reanchor['seconds_remaining']) == (2., 3., 2., 998.)
+    assert before_reanchor['unmeasured_shutdown_tail'] is True
+    assert {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == originals
     assert budget.reanchor_paused_checkpoint(root, checkpoint, transfer)['status'] == 'clock_reanchored'
     value = budget.snapshot(root)
     assert (value['advance_seconds'], value['waiting_seconds'], value['consumed_seconds'], value['seconds_remaining']) == (2., 3., 2., 998.)
@@ -68,13 +73,15 @@ def test_paused_clock_bridge_preserves_consumption_grants_and_old_history(tmp_pa
     budget.transition(root, 'advance', 'Second original segment')
     now.update(at_unix=1004., at_boottime=14.)
     budget.transition(root, 'paused', 'Second verified pause')
-    assert budget.snapshot(root)['consumed_seconds'] == 9.
+    assert budget.snapshot(root)['consumed_seconds'] == 6.
     second, moved = _owner_receipts(root, monkeypatch, 'two')
     now.update(at_unix=2000., at_boottime=2., boot_id='third-boot')
     assert budget.reanchor_paused_checkpoint(root, second, moved)['status'] == 'clock_reanchored'
-    assert budget.snapshot(root)['consumed_seconds'] == 9.
-    with pytest.raises(ValueError, match='reused on another boot'):
+    assert budget.snapshot(root)['consumed_seconds'] == 6.
+    before_replay = {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+    with pytest.raises(ValueError, match='current original budget'):
         budget.reanchor_paused_checkpoint(root, checkpoint, transfer)
+    assert {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == before_replay
     assert (root / 'host-started.json').read_bytes() == started
     assert all((root / 'control-ledger' / name).read_bytes() == raw for name, raw in originals.items())
 

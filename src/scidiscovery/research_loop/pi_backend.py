@@ -4,11 +4,18 @@ H/W/A/E and owner schemas share the existing control owners. Transport alone
 never grants scientific qualification, complete authorship or unknown-call replay.
 """
 import copy
+from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import selectors
+import shutil
+import signal
+import subprocess
 import sys
+import time
 from types import MappingProxyType
 
 from .backends import Backend, JSON_RESPONSE_INSTRUCTION
@@ -26,6 +33,49 @@ DEFAULT_RESUME_POLICY = dict(max_attempts=2, protocol='pi_rpc_v1', usage_scope='
     output_repair=True, output_only=True, execution_wake=True)
 PARTICIPANT_SCOPE = 'pi_controlled_session_v1'
 PARTICIPANT_PROOF = 'pi_controlled_native_v1'
+CATALOG_TIMEOUT_SECONDS = 5
+CATALOG_MAX_BYTES = 1_000_000
+CATALOG_THINKING_ORDER = ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+
+
+def _catalog_output(argv, *, base, env):
+    """Read bounded CLI metadata; never send a prompt or invoke a model."""
+    process = subprocess.Popen(argv, cwd=base, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    selector = selectors.DefaultSelector()
+    chunks = []
+    size = 0
+    deadline = time.monotonic() + CATALOG_TIMEOUT_SECONDS
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('Pi 模型目录读取超时。')
+            for key, _ in selector.select(remaining):
+                data = os.read(key.fileobj.fileno(), min(65536, CATALOG_MAX_BYTES + 1 - size))
+                if not data:
+                    selector.unregister(key.fileobj)
+                    continue
+                size += len(data)
+                if size > CATALOG_MAX_BYTES:
+                    raise ValueError('Pi 模型目录超过可读取的元数据上限。')
+                chunks.append(data)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('Pi 模型目录读取超时。')
+        code = process.wait(timeout=remaining)
+        if code != 0:
+            raise ValueError('Pi 模型目录命令退出码 ' + str(code))
+        return b''.join(chunks).decode('utf-8')
+    finally:
+        selector.close()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        process.stdout.close()
 
 
 def resource_mode(value='closed'):
@@ -728,6 +778,60 @@ class Pi(Backend):
 
     @staticmethod
     def default_launcher(): return ['pi']
+    @classmethod
+    def model_catalog_context(cls, **declaration):
+        context = super().model_catalog_context(**declaration)
+        validate_launcher(context['launcher'])
+        native = context['native']
+        if native is not None:
+            native = cls.declaration_options(native, base=context['base'])
+        context['resource_mode'] = resource_mode((native or {}).get('resource_mode', 'closed'))
+        launcher = context['launcher'][0]
+        if '/' in launcher or launcher.startswith('~'):
+            # Preserve the invoked entry point, as the native launcher owner
+            # does; resolving a symlink can change wrapper/runtime behavior.
+            launcher = os.path.abspath(Path(context['base']) / Path(launcher).expanduser())
+        else:
+            launcher = shutil.which(launcher)
+            if launcher is None:
+                raise ValueError('未找到所选 Pi 启动器；请填写精确 provider/model-id。')
+            launcher = str(Path(launcher).absolute())
+        context['launcher'] = [launcher]
+        context['home'] = str(Path.home())
+        context['agent_directory'] = str((Path(context['base']) / cls.default_home().expanduser()).resolve())
+        return context
+    @classmethod
+    def model_catalog(cls, context):
+        from .model_catalog import unavailable
+        env = dict(os.environ, HOME=context['home'], PI_OFFLINE='1', PI_CODING_AGENT_DIR=context['agent_directory'])
+        try:
+            from .pi_transport import load_resource_settings
+            # Reuse the declared runtime's package admission. Configured cached
+            # packages remain native-owned; offline suppresses install/refresh,
+            # and the metadata-only command keeps extension loading disabled.
+            load_resource_settings(context['agent_directory'], context['base'], mode=context['resource_mode'])
+            output = _catalog_output([*context['launcher'], *resource_flags('closed'), '--list-models'],
+                base=context['base'], env=env)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return unavailable('读取 Pi 模型列表失败：' + str(error))
+        lines = [line.split() for line in output.splitlines() if line.strip()]
+        if not lines or lines[0][:2] != ['provider', 'model']:
+            return unavailable('无法识别所选 Pi 启动器的模型列表格式。')
+        if len(lines) > 4097:
+            return unavailable('Pi 模型目录条目超过上限。')
+        header = lines[0]
+        thinking = header.index('thinking') if 'thinking' in header else None
+        models = []
+        for row in lines[1:]:
+            if len(row) < 2:
+                continue
+            supports = thinking is not None and len(row) > thinking and row[thinking] == 'yes'
+            identity = row[0] + '/' + row[1]
+            models.append(dict(id=identity, label=identity,
+                efforts=list(CATALOG_THINKING_ORDER) if supports else ['off'], default_effort=None, tiers=[]))
+        return dict(models=models, source='所选 Pi 启动器 --list-models',
+            fetched_at=datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            error=None if models else 'Pi 没有列出可用模型。')
     @staticmethod
     def profile_defaults(): return dict(model=None, reasoning_effort=None, service_tier=None)
     @staticmethod

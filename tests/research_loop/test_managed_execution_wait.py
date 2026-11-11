@@ -339,7 +339,7 @@ def run_cli(root,*,on_wait=None):
 
 
 def standard_instance(tmp_path,monkeypatch,*,wake='default',adaptive_batches=2,same_focus=False,
-        repeat_output_repair=False,temporary_wake_failure=False):
+        repeat_output_repair=False,temporary_wake_failure=False,seconds=120,node_seconds=20):
     """Use the real prepare CLI and its standard Codex defaulting path."""
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Read the same original managed result and retain its limitations.')
@@ -350,14 +350,14 @@ def standard_instance(tmp_path,monkeypatch,*,wake='default',adaptive_batches=2,s
     monkeypatch.setenv('CODEX_HOME',str(home))
     monkeypatch.setenv('PATH',str(executable.parent)+os.pathsep+os.environ['PATH'])
     root=tmp_path/'instance';nodes=tmp_path/'nodes.json'
-    c.write(nodes,{role:dict(max_observed_tokens=200,max_seconds=20) for role in 'HWAE'})
+    c.write(nodes,{role:dict(max_observed_tokens=200,max_seconds=node_seconds) for role in 'HWAE'})
     launcher=['codex'] if wake=='default' and not temporary_wake_failure else [str(executable)]
     options=dict(collect=True,terminal_status='known_success',adaptive_batches=adaptive_batches,worker_first=True,
         same_focus=same_focus,repeat_output_repair=repeat_output_repair,temporary_wake_failure=temporary_wake_failure)
     selection=tmp_path/'execution.json';c.write(selection,dict(executor='composed_execution:fixture',configuration=options))
     arguments=['prepare','--root',str(root),'--objective',str(objective),'--public-root',str(public),
         '--native-launcher-json',json.dumps(launcher),'--execution-config',str(selection),'--max-tokens','1000',
-        '--max-seconds','120','--max-steps','7','--model','no-model','--reasoning-effort','high',
+        '--max-seconds',str(seconds),'--max-steps','7','--model','no-model','--reasoning-effort','high',
         '--node-budget-policy',str(nodes)]
     if wake!='default' or temporary_wake_failure:
         policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
@@ -692,18 +692,20 @@ def test_uncertain_execution_is_not_running_or_replayed(tmp_path,composed_regist
     assert len(e.Records(config).calls())==1
 
 
-def test_waiting_longer_than_time_budget_consumes_nothing_and_pause_stops_without_replay(tmp_path,composed_registry):
-    root=instance(tmp_path,dict(collect=False),seconds=4,node_seconds=1)
+def test_waiting_longer_than_time_budget_consumes_nothing_and_pause_stops_without_replay(tmp_path,monkeypatch,composed_registry):
+    root,_=standard_instance(tmp_path,monkeypatch,adaptive_batches=1,seconds=8,node_seconds=6)
+    settings_bytes=(root/'settings.json').read_bytes()
     def outlast_budget_then_pause(record,config,call):
-        # Wait past the whole 4 s time budget: waiting is not research activity.
-        time.sleep(5.);(root/'pause.request').write_text('')
+        # Use the current W-first CLI contract; outlast its whole shared clock.
+        time.sleep(9.);(root/'pause.request').write_text('')
     reply=run_cli(root,on_wait=outlast_budget_then_pause);result=json.loads(reply.stdout)
     assert result['status']=='waiting_execution' and result['reason']=='paused_before_execution_wake',result
     report=budget.snapshot(root)
-    assert report['waiting_seconds']>=5 and report['consumed_seconds']==report['advance_seconds']<4
+    assert report['waiting_seconds']>=9 and report['consumed_seconds']==report['advance_seconds']<8
     assert report['seconds_remaining']>0
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-    assert len(execution.records(root,2))==1 and not (execution.origin(root,2)/'result-identity.json').exists()
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert len(execution.records(root,1))==1 and not (execution.origin(root,1)/'result-identity.json').exists()
+    assert (root/'settings.json').read_bytes()==settings_bytes
 
 
 def test_missing_session_capability_retains_checkpoint_without_fabricated_wake(tmp_path,composed_registry):

@@ -40,6 +40,18 @@ class Backend(ABC):
         """Optional native capability; older providers remain unsupported."""
         return dict(status='unsupported', reason='native_subagents_unsupported')
 
+    @classmethod
+    def model_catalog_context(cls, *, launcher=None, native=None, base=None):
+        """Optional edit-time metadata context, independent of invocation state."""
+        return dict(launcher=cls.default_launcher() if launcher is None else launcher,
+            native=native, base=str(Path(base or Path.cwd()).expanduser().resolve()))
+
+    @classmethod
+    def model_catalog(cls, context):
+        """Read-only suggestions; unsupported providers retain exact text entry."""
+        from .model_catalog import unavailable
+        return unavailable('此后端不提供模型目录；请填写精确模型 ID。')
+
     @property
     @abstractmethod
     def name(self): ...
@@ -667,6 +679,50 @@ class Codex(Backend):
 
     @staticmethod
     def default_launcher(): return ['codex']
+
+    @classmethod
+    def model_catalog_context(cls, **declaration):
+        context = super().model_catalog_context(**declaration)
+        launcher = context['launcher']
+        if (not isinstance(launcher, (list, tuple)) or len(launcher) != 1
+                or not isinstance(launcher[0], str) or Path(launcher[0]).name != 'codex'):
+            raise ValueError('自定义启动器未声明 Codex 模型目录。')
+        if '/' in launcher[0] or launcher[0].startswith('~'):
+            context['launcher'] = [str((Path(context['base']) / Path(launcher[0]).expanduser()).resolve())]
+        home = cls.default_home().expanduser()
+        context['home'] = str((Path(context['base']) / home).resolve())
+        return context
+
+    @classmethod
+    def model_catalog(cls, context):
+        """Read the exact inherited Codex cache; never start Codex or a model."""
+        from .model_catalog import unavailable
+        path = Path(context['home']) / 'models_cache.json'
+        try:
+            value = json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return unavailable('未找到 Codex 模型目录；可运行一次所选 Codex 后刷新。')
+        except (OSError, ValueError) as error:
+            return unavailable('Codex 模型目录不可读：' + str(error))
+        rows = value.get('models', []) if isinstance(value, dict) else []
+        if not isinstance(rows, list):
+            return unavailable('Codex 模型目录格式无效。')
+        models = []
+        for item in rows[:4096]:
+            if (not isinstance(item, dict) or not isinstance(item.get('slug'), str)
+                    or item.get('visibility') not in (None, 'list')):
+                continue
+            levels, tiers = item.get('supported_reasoning_levels'), item.get('service_tiers')
+            efforts = [level['effort'] for level in levels if isinstance(level, dict)
+                and isinstance(level.get('effort'), str)] if isinstance(levels, list) else []
+            tiers = [tier['id'] for tier in tiers if isinstance(tier, dict)
+                and isinstance(tier.get('id'), str)] if isinstance(tiers, list) else []
+            models.append(dict(id=item['slug'], label=str(item.get('display_name') or item['slug']),
+                efforts=efforts, default_effort=item.get('default_reasoning_level'),
+                tiers=['default', *[tier for tier in tiers if tier != 'default']]))
+        return dict(models=models, source=str(path), fetched_at=value.get('fetched_at') if isinstance(value, dict) else None,
+            error=None if models else 'Codex 模型目录为空。',
+            warning='模型目录仅显示前 4096 项；可手动填写其余精确 ID。' if len(rows) > 4096 else None)
 
     @staticmethod
     def profile_defaults():

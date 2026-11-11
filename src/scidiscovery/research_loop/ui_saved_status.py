@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 import stat
 
-from . import accepted_search, budget, budget_limits, contracts as c, instance_display as display, native_usage, runtime
+from . import accepted_search, budget, budget_limits, contracts as c, execution_wait_monitor, instance_display as display, native_usage, runtime
 from .ui_view import memo_lock, native_completed
 
 
@@ -149,33 +149,22 @@ def _native_outcome(record, memo=None):
     return outcome
 
 
-def _execution_wait(record):
+def _execution_wait(record, *, source_sink=None):
     """Display-only summary of the original calls a suspended W waits for.
 
     Exact identities and proofs stay with managed_wait; this reports only call
     IDs, the state seen at suspension and whether a verified result exists.
     """
-    path = record / 'execution-wait.json'
-    try:
-        value = c.read(path)
-        since = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec='seconds')
-    except (OSError, ValueError):
+    acquired = execution_wait_monitor.read_wait(record)
+    if acquired is None:
         return dict(calls=[], since=None, readable=False)
-    calls = []
-    for item in value.get('calls', []) if isinstance(value, dict) else []:
-        try:
-            accepted = Path(item['accepted']['path'])
-            call_id = accepted.parent.name
-            result = (accepted.parent / 'execution-observation.json').is_file()
-        except (KeyError, TypeError, OSError):
-            continue
-        calls.append(dict(call_id=call_id, external_run_id=str(item.get('external_run_id') or '')[:120],
-            submitted_state=str(item.get('observed_state') or '')[:40], result_ready=result))
-    return dict(calls=calls, since=since, readable=True,
-        all_ready=bool(calls) and all(row['result_ready'] for row in calls))
+    wait, source = acquired
+    if source_sink is not None:
+        source_sink.update(source)
+    return wait
 
 
-def _node(root, step, job, memo=None):
+def _node(root, step, job, memo=None, *, wait_sources=None):
     records = attempts(root, step)
     record = records[-1]
     outcome = _native_outcome(record, memo)
@@ -183,7 +172,10 @@ def _node(root, step, job, memo=None):
     recovery = _read(record / 'automatic-recovery.json')
     execution_wait = None
     if outcome and (record / 'execution-wait.json').exists():
-        execution_wait = _execution_wait(record)
+        source = {} if wait_sources is not None else None
+        execution_wait = _execution_wait(record, source_sink=source)
+        if source:
+            wait_sources[step] = source
     if (records[0] / 'result-identity.json').exists():
         state = 'seal_present_unverified'
     elif outcome:
@@ -397,12 +389,13 @@ def _budget(root, settings, events):
         anchor = start.get('at_boottime') if start is not None else None
         anchored = start is None or (type(anchor) in (int, float) and math.isfinite(anchor)
                                     and anchor >= 0 and bool(start.get('boot_id')))
-        consumed = (durations['advance']
+        consumed = (budget.consumed_seconds(settings, durations, elapsed)
                     if not missing_start and anchored and current_known
                     and durations['advance'] is not None else None)
     else:
         consumed = elapsed
     return dict(limits, original_max_steps=settings['max_steps'], time_budget_basis=basis,
+        waiting_consumes_budget=not budget.waiting_is_free(settings),
         advance_seconds=durations['advance'], waiting_seconds=durations['waiting'], paused_seconds=durations['paused'],
         unclassified_seconds=durations['unclassified'], elapsed_seconds=elapsed, consumed_seconds=consumed,
         seconds_remaining=budget_limits.remaining(limits['max_seconds'], consumed) if consumed is not None else None,
@@ -698,7 +691,7 @@ def portfolio_metrics(root, numbers, usage_value, budget_value, *, memo=None):
         head = None
     return portfolio_metrics_from_head(head, usage_value, budget_value)
 
-def status(root, *, after=0, limit=None, memo=None):
+def status(root, *, after=0, limit=None, memo=None, wait_sources=None):
     settings = display.settings(root)
     numbers = steps(root)
     paths = sorted((root / 'control-ledger').glob('*.json'))
@@ -711,7 +704,7 @@ def status(root, *, after=0, limit=None, memo=None):
     if limit is not None:
         selected = selected[:limit]
     jobs={step:c.read(root/'jobs'/f'{step:03d}.json') for step in selected if step in numbers}
-    nodes = [_node(root, step, jobs[step], memo) if step in numbers else
+    nodes = [_node(root, step, jobs[step], memo, wait_sources=wait_sources) if step in numbers else
         dict(step=step, role=originals.source_job(originals.node(root, step))['role'],
              state='seal_present_unverified', inherited=True) for step in selected]
     last = selected[-1] if selected else after

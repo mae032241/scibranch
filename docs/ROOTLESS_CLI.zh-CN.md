@@ -1070,7 +1070,7 @@ scid-research continue --root /absolute/path/new-instance
 实际模型提交前再查预算；已确证未提交时记录 `native_not_submitted` 和零用量。
 控制层保留该节点及原意图；预算修订或重试不自动删除这些记录。普通 reentry 或 automatic recovery 已接受意图、尚无任何执行回执时，恢复沿用同一 attempt；已有执行回执则核对原调用，不另起替代调用。
 暂停只阻止新节点，恢复时也允许原已接受节点完成和封存。
-科学角色的 `wait` 仍表示停止等待。W 已接受且同一 external execution 明确 running 时，控制在科学封存前保留原 checkpoint 并进入 `waiting`；默认 `run` 自动监控原 call，终态后 reconcile 并在合格的原会话中续接 W 消费原件，再封存。等待不调用模型、不增加 native dispatch 或 `advance_seconds`，`waiting_seconds` 只作记录，不消耗研究时间预算（active 口径的 `consumed_seconds` 只计 `advance_seconds`，服务退避等待同样不计）；旧 elapsed 口径继续按总经过时间计量。外部调用自身的单实验时长限制仍有效。因此等待只在结果出来、暂停、推进时间耗尽或原调用终止时结束；控制进程不在时网页显示“当前无人监视”，点击唤醒（`run`）只核对同一原调用并在终态后唤醒 W，不重新提交。暂停阻止唤醒的新 native turn，允许核对原终态；控制进程同 boot 重启后从原 waiting 恢复，未知提交不重放。续接仍受原预算/有限次数与冻结 launcher/session 能力约束；能力不足保留 checkpoint 并报告 unavailable。
+科学角色的 `wait` 仍表示停止等待。W 已接受且同一 external execution 明确 running 时，控制在科学封存前保留原 checkpoint 并进入 `waiting`；默认 `run` 自动监控原 call，终态后 reconcile 并在合格的原会话中续接 W 消费原件，再封存。等待不调用模型、不增加 native dispatch 或 `advance_seconds`。新建实例冻结 `active_waiting_policy="excluded"`，active 口径的 `consumed_seconds` 只计 `advance_seconds`，`waiting_seconds` 与服务退避等待只作记录；已有 active 实例缺少该冻结标记时仍计推进与等待，不返还历史消费，配置编辑不补入标记。旧 elapsed 口径继续按总经过时间计量。外部调用自身的单实验时长限制与服务退避累计等待上限仍有效。因此等待只在结果出来、暂停、适用的时间额度耗尽或原调用终止时结束；控制进程不在时网页显示“当前无人监视”，点击唤醒（`run`）只核对同一原调用并在终态后唤醒 W，不重新提交。暂停阻止唤醒的新 native turn，允许核对原终态；控制进程同 boot 重启后从原 waiting 恢复，未知提交不重放。续接仍受原预算/有限次数与冻结 launcher/session 能力约束；能力不足保留 checkpoint 并报告 unavailable。
 
 旧 W 已 sealed unknown 的事实保持不变。`scid-research execution-recover --root /absolute/path/instance --step N` 可对同 call 追加已验证终态；后继新 job 冻结其恢复事实前缀与材料，已准备 job 仍只读原输入。该动作不把旧科学结论改为 screened，也不重计机会、grant 或原 slice。
 
@@ -1079,7 +1079,7 @@ scid-research continue --root /absolute/path/new-instance
 身份或终态无法核实时保守计时，后续核实从当前时刻停表，不回填旧终态时间返还消费。
 若原回执确认模型未启动、没有 native 子进程或活动且原执行已结束，宿主准备故障退出后停止推进计时；原意图、已消费额度和未知账单保留，不自动重提。仍在运行、效果未知或清理未知的原调用继续按原规则计时。
 `status.budget` 分别报告 `advance_seconds / waiting_seconds / paused_seconds / elapsed_seconds`，并显示有效上限、
-`consumed_seconds / seconds_remaining` 和计时口径。`status` 只读，不追加计时事件；启动时钟倒退时拒绝推进和修订。
+`consumed_seconds / seconds_remaining`、`waiting_consumes_budget` 和计时口径。`status` 只读，不追加计时事件；启动时钟倒退时拒绝推进和修订。
 新计时事实绑定系统启动标识与 `CLOCK_BOOTTIME`，同次启动的开放区间按该单调时钟计量；
 新 active 实例的 UTC 仅是展示时间，调速或回拨不停止计量，也不返还已按启动时钟消费的额度；账本按序号及同启动的单调时间排序。
 CLI `status` 对已记录暂停终点的 active 实例只汇总已闭合消费，不采样当前时钟；尚未闭合的

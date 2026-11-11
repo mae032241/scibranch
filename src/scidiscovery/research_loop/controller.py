@@ -308,6 +308,16 @@ def prepare(root: Path, objective: Path, public_root: Path, launcher: list[str],
         max_output_item_bytes=max_output_item_bytes,
         max_output_total_bytes=max_output_total_bytes,
         storage_policy=storage_limits)
+    if _existing_settings is None:
+        settings['active_waiting_policy'] = 'excluded'
+    else:
+        # Operational edits retain the original accounting interpretation,
+        # including absent legacy markers. They cannot refund consumed time.
+        settings.pop('time_budget_basis')
+        for key in ('time_budget_basis', 'active_waiting_policy'):
+            if key in _existing_settings:
+                settings[key] = _existing_settings[key]
+    budget.waiting_is_free(settings)
     settings.update(backend_settings)
     if frozen_project is not None:
         settings['project'] = frozen_project
@@ -679,7 +689,9 @@ def _wait_automatic_recovery(root, step, decision, *, inventory):
                 job=contracts.read(contracts.regular(root/'jobs'/f'{step:03d}.json'))
                 final_transport=budget.final_a_return(root,job,original) is not None
         active = limits['time_budget_basis'] == 'active'
-        shared_until = stamp['at_boottime' if active else 'at_unix'] + limits['seconds_remaining']
+        remaining_seconds = limits['seconds_remaining']
+        shared_until = (None if remaining_seconds is None else
+            stamp['at_boottime' if active else 'at_unix'] + remaining_seconds)
         while True:
             if (root / 'pause.request').exists():
                 saved.update(status='paused', limitation='User pause prevents automatic continuation')
@@ -689,7 +701,10 @@ def _wait_automatic_recovery(root, step, decision, *, inventory):
             # BOOTTIME includes same-boot suspend; service wait below deliberately
             # uses MONOTONIC and only counts this controller's actual waiting.
             shared_now = time.clock_gettime(time.CLOCK_BOOTTIME) if active else time.time()
-            shared_left = max(0., shared_until - shared_now)
+            # New active policies hold their shared balance during waiting.
+            # Existing charged waits and elapsed budgets keep their deadline.
+            shared_left = (float('inf') if shared_until is None else
+                max(0., remaining_seconds if not limits['waiting_consumes_budget'] else shared_until - shared_now))
             if shared_left <= 0 and not final_transport:
                 saved.update(status='stopped', next_attempt_at=None, limitation='wall_limit')
                 contracts.write(path, saved)

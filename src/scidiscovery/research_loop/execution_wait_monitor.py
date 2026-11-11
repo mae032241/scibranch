@@ -8,8 +8,10 @@ stale file only degrades what the overview can show.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -42,10 +44,11 @@ def record_poll(root, step, states):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(dict(step=step, pid=os.getpid(), polled_at=now, states=states),
+        owner = runtime.process_identity(os.getpid(), dict(step=step))
+        temporary.write_text(json.dumps(dict(step=step, pid=os.getpid(), owner=owner, polled_at=now, states=states),
                                         sort_keys=True), encoding='utf-8')
         temporary.replace(path)
-    except OSError:
+    except (OSError, ValueError, IndexError):
         return
     _written[key] = (now, dict(states))
 
@@ -55,11 +58,65 @@ def _heartbeat(root, step):
         value = json.loads(heartbeat_path(root, step).read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return None
-    if not isinstance(value, dict) or type(value.get('polled_at')) not in (int, float):
+    if (not isinstance(value, dict) or value.get('step') != step
+            or type(value.get('polled_at')) not in (int, float)
+            or not math.isfinite(value['polled_at']) or value['polled_at'] > time.time()):
         return None
     states = value.get('states') if isinstance(value.get('states'), dict) else {}
-    return dict(polled_at=float(value['polled_at']),
+    return dict(polled_at=float(value['polled_at']), owner=value.get('owner'),
                 states={str(k): str(v)[:40] for k, v in states.items()})
+
+
+def process_observation(identity, binding):
+    """Optional local identity probe; unavailable PID namespaces stay unknown."""
+    keys = ('pid', 'start_ticks', 'pgid', 'sid')
+    if (not isinstance(identity, dict) or identity.get('task_ref') != binding
+            or not isinstance(identity.get('boot_id'), str) or not identity['boot_id']
+            or any(type(identity.get(key)) is not int or identity[key] <= 0 for key in keys)):
+        return None
+    try:
+        current = runtime.process_identity(identity['pid'], binding)
+    except (OSError, ValueError, IndexError, KeyError, TypeError):
+        return None
+    if (not isinstance(current, dict) or not isinstance(current.get('state'), str)
+            or not current['state'] or any(key not in current for key in (*keys, 'boot_id'))):
+        return None
+    return (current['state'] not in {'Z', 'X', 'x'}
+            and all(current[key] == identity[key] for key in (*keys, 'boot_id')))
+
+
+def controller_observation(root, operations, live=None):
+    """Read-only host writer and exact owner observations; no control reconciliation."""
+    locked = None
+    descriptor = None
+    path = Path(root) / 'host-run.lock'
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        before = os.fstat(descriptor)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = False
+        except BlockingIOError:
+            locked = True
+        after = path.stat(follow_symlinks=False)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            locked = None
+    except OSError:
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    owners = []
+    for operation in operations:
+        if operation.get('kind') == 'controller' and operation.get('status') in {'accepted', 'running'}:
+            alive = process_observation(operation.get('process'), operation.get('operation_id'))
+            if alive is True:
+                owners.append(operation['operation_id'])
+    heartbeat_alive = (live or {}).get('owner_alive')
+    monitoring = (False if locked is False else
+                  True if locked is True and (owners or heartbeat_alive is True)
+                  else None)
+    return dict(monitoring=monitoring, host_locked=locked, exact_owner=bool(owners))
 
 
 def _tail(path):
@@ -82,17 +139,17 @@ def _tail(path):
     return '\n'.join(lines[-LOG_TAIL_LINES:])
 
 
-def _call(directory, heartbeat, now, include_logs, clean):
-    row = dict(call_id=directory.name, result_ready=(directory / 'execution-observation.json').is_file(),
-               finished=(directory / 'completed.json').is_file(), process=None, last_output_age=None,
+def _call(directory, flags, heartbeat, now, include_logs, clean):
+    row = dict(call_id=directory.name, result_ready=flags['result_ready'],
+               finished=flags['finished'], process=None, last_output_age=None,
                queried_state=(heartbeat or {}).get('states', {}).get(directory.name), logs=[])
     try:
         identity = json.loads((directory / 'process.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         identity = None
     if isinstance(identity, dict) and type(identity.get('pid')) is int:
-        alive = runtime.process_live(identity, dict(path=str(directory / 'accepted.json')))
-        row['process'] = dict(pid=identity['pid'], alive=bool(alive))
+        alive = process_observation(identity, dict(path=str(directory / 'accepted.json')))
+        row['process'] = dict(pid=identity['pid'], alive=alive)
     newest = None
     for name in LOG_NAMES:
         path = directory / name
@@ -111,23 +168,50 @@ def _call(directory, heartbeat, now, include_logs, clean):
     return row
 
 
-def observe(root, record, step, *, include_logs=False, clean=None):
-    """Read-only observation for one suspended W record; None when not waiting."""
+def read_wait(record):
+    """Acquire a suspended wait once, keeping original paths out of public data."""
     path = Path(record) / 'execution-wait.json'
     try:
         value = c.read(path)
         since = path.stat().st_mtime
     except (OSError, ValueError):
         return None
-    now = time.time()
-    heartbeat = _heartbeat(root, step)
     calls = []
+    local_calls = []
     for item in value.get('calls', []) if isinstance(value, dict) else []:
         try:
             directory = Path(item['accepted']['path']).parent
         except (KeyError, TypeError):
             continue
-        calls.append(_call(directory, heartbeat, now, include_logs, clean))
+        result_ready = (directory / 'execution-observation.json').is_file()
+        local_calls.append(dict(directory=directory, result_ready=result_ready,
+                               finished=(directory / 'completed.json').is_file()))
+        calls.append(dict(call_id=directory.name, external_run_id=str(item.get('external_run_id') or '')[:120],
+            submitted_state=str(item.get('observed_state') or '')[:40],
+            result_ready=result_ready))
+    wait = dict(calls=calls, since=datetime.fromtimestamp(since, timezone.utc).isoformat(timespec='seconds'),
+                readable=True, all_ready=bool(calls) and all(row['result_ready'] for row in calls))
+    return wait, dict(since=since, local_calls=local_calls)
+
+
+def observe(root, record, step, *, include_logs=False, clean=None):
+    """Standalone read-only producer for one suspended wait."""
+    acquired = read_wait(record)
+    if acquired is None:
+        return None
+    _, source = acquired
+    return observe_acquired(root, step, source, include_logs=include_logs, clean=clean)
+
+
+def observe_acquired(root, step, source, *, include_logs=False, clean=None):
+    """Produce local observations from explicit, already acquired wait facts."""
+    since = source['since']
+    now = time.time()
+    heartbeat = _heartbeat(root, step)
+    calls = []
+    for item in source['local_calls']:
+        calls.append(_call(item['directory'], item, heartbeat, now, include_logs, clean))
     return dict(waited_seconds=max(0., now - since), since=datetime.fromtimestamp(since).astimezone().isoformat(timespec='seconds'),
                 heartbeat_age=None if heartbeat is None else max(0., now - heartbeat['polled_at']),
+                owner_alive=None if heartbeat is None else process_observation(heartbeat.get('owner'), dict(step=step)),
                 stale_after=STALE_AFTER_SECONDS, calls=calls)

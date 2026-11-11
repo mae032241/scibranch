@@ -41,6 +41,25 @@ def clock_stamp():
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
 
 
+def waiting_is_free(settings):
+    """Consume the frozen policy; an absent marker retains historical charges."""
+    if 'active_waiting_policy' in settings and settings['active_waiting_policy'] != 'excluded':
+        raise ValueError('Unknown frozen active waiting policy')
+    return settings.get('time_budget_basis', 'elapsed') == 'active' and settings.get('active_waiting_policy') == 'excluded'
+
+
+def consumed_seconds(settings, durations, elapsed):
+    """Project recorded durations without refunding old waits or guessing unknowns."""
+    free_waiting = waiting_is_free(settings)
+    if settings.get('time_budget_basis', 'elapsed') != 'active':
+        return elapsed
+    advance = durations['advance']
+    if free_waiting:
+        return advance
+    waiting = durations['waiting']
+    return advance + waiting if advance is not None and waiting is not None else None
+
+
 def _duration(before, after, *, legacy_elapsed=False, exclude_downtime=False):
     if 'at_boottime' not in before:  # Legacy elapsed startup has no monotonic anchor.
         wall = after['at_unix'] - before['at_unix']
@@ -911,10 +930,9 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
             legacy_elapsed=clock['basis'] == 'elapsed') if start is not None else 0.)
         if clock['basis'] == 'elapsed' and start is not None:
             elapsed = _duration(dict(at_unix=start['at_unix']), now)
-        # Waiting for an original external execution or a service backoff is
-        # not research activity; only advancing work consumes the time budget.
-        consumed = durations['advance'] if clock['basis'] == 'active' else elapsed
+        consumed = consumed_seconds(settings, durations, elapsed)
         return dict(state['ceilings'], original_max_steps=settings['max_steps'], time_budget_basis=clock['basis'],
+            waiting_consumes_budget=not waiting_is_free(settings),
             advance_seconds=durations['advance'], waiting_seconds=durations['waiting'],
             paused_seconds=durations['paused'], unclassified_seconds=durations['unclassified'],
             elapsed_seconds=elapsed, consumed_seconds=consumed,
@@ -945,8 +963,9 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
     elapsed = None if bridged else interval(start, now) if start is not None else 0.
     if basis == 'elapsed' and start is not None:
         elapsed = _duration(dict(at_unix=start['at_unix']), now)
-    consumed = advance if basis == 'active' else elapsed  # Waiting is not consumed.
+    consumed = consumed_seconds(settings, durations, elapsed)
     return dict(**limits, max_steps=max_steps, original_max_steps=settings['max_steps'], time_budget_basis=basis, advance_seconds=advance, waiting_seconds=waiting,
+                waiting_consumes_budget=not waiting_is_free(settings),
                 paused_seconds=paused, unclassified_seconds=unclassified, elapsed_seconds=elapsed, consumed_seconds=consumed,
                 seconds_remaining=budget_limits.remaining(limits['max_seconds'], consumed), clock_phase=phase,
                 ledger_events=len(events), historical_time='unknown_before_ledger' if basis == 'elapsed' else

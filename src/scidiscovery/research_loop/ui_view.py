@@ -863,6 +863,11 @@ def _ago(seconds):
 def _monitor_line(monitoring, live):
     age = (live or {}).get('heartbeat_age')
     stale = (live or {}).get('stale_after', 30.)
+    if monitoring is None:
+        line = '监视进程状态未知；请核对宿主机上的原控制进程'
+        if age is not None:
+            line += '（最后一次核对在 ' + _ago(age) + '）'
+        return line
     if monitoring:
         if age is None:
             return '控制进程正在监视，尚未记录核对时间'
@@ -884,7 +889,9 @@ def _call_line(row, live_row):
         parts = []
         process = live_row.get('process')
         if process is not None:
-            if process['alive']:
+            if process['alive'] is None:
+                parts.append('实验进程 PID ' + str(process['pid']) + ' 的本机存活状态未知')
+            elif process['alive']:
                 parts.append('实验进程 PID ' + str(process['pid']) + ' 正在运行')
             elif live_row.get('finished'):
                 parts.append('实验进程已结束，结果待核对')
@@ -902,7 +909,7 @@ def _call_line(row, live_row):
     return value
 
 
-def execution_wait_facts(wait, *, monitoring, stop_reason=None, live=None):
+def execution_wait_facts(wait, *, monitoring, stop_reason=None, live=None, waiting_consumes_budget=None):
     """Which original calls a suspended W waits for; display only."""
     facts = [dict(label='监视状态', value=_monitor_line(monitoring, live))]
     if stop_reason and not monitoring:
@@ -911,7 +918,10 @@ def execution_wait_facts(wait, *, monitoring, stop_reason=None, live=None):
         facts.append(dict(label='已等待', value=fmt_duration(live['waited_seconds']) + '（自 ' + live['since'] + ' 起）'))
     elif wait.get('since'):
         facts.append(dict(label='开始等待（UTC）', value=wait['since']))
-    facts.append(dict(label='等待计时', value='等待外部实验不消耗研究时间预算'))
+    cost = ('等待外部实验不消耗研究时间预算' if waiting_consumes_budget is False else
+            '等待外部实验计入研究时间预算' if waiting_consumes_budget is True else
+            '等待预算计时策略未知；请核对原冻结配置')
+    facts.append(dict(label='等待计时', value=cost))
     rows = {row['call_id']: row for row in (live or {}).get('calls', [])}
     for row in wait.get('calls', []):
         facts.append(dict(label='原调用 ' + row['call_id'], value=_call_line(row, rows.get(row['call_id']))))
@@ -1015,8 +1025,10 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
                 headline = 'W 在等待 ' + str(count) + ' 个外部实验' + waited_text(wait) + '；出结果后自动唤醒'
             elif wait.get('all_ready'):
                 headline = '外部实验已出结果，等待唤醒 W'
-            else:
+            elif monitoring is False:
                 headline = 'W 在等待 ' + str(count) + ' 个外部实验' + waited_text(wait) + '；当前无人监视，需点击唤醒'
+            else:
+                headline = 'W 在等待 ' + str(count) + ' 个外部实验' + waited_text(wait) + '；监视进程状态待核对'
         if state == 'unsealed' and native_completed(current):
             headline = native_state_label(current)
     elif state == 'unknown':

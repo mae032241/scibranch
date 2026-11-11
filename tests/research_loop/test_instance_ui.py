@@ -2598,10 +2598,17 @@ def test_saved_native_wait_and_stops_never_dispatch_from_get_or_sse(tmp_path, mo
     ui, cookie = session(root, key)
     monkeypatch.setattr(control, 'start_background', lambda *a, **k: pytest.fail('GET dispatched research'))
     page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
-    hero = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-hero']
+    fragments = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']
+    hero = fragments['live-hero']
+    actions = fragments['live-actions']
     assert expected in page and expected in hero
-    assert 'class="primary"' in hero and 'href="/progress"' in hero
     assert 'action="/control/start"' not in hero and 'action="/control/pause"' not in hero
+    if kind == 'external':
+        assert 'action="/control/start"' in actions and '恢复监视' in actions
+        assert 'action="/control/pause"' not in actions
+    else:
+        assert 'class="primary"' in actions and 'href="/progress"' in actions
+        assert 'action="/control/start"' not in actions and 'action="/control/pause"' not in actions
     ui.translation.close()
 
 
@@ -2683,7 +2690,7 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
 
 
 @pytest.mark.parametrize('manager', [True, False])
-def test_external_wait_attention_shows_elapsed_liveness_and_manager_only_log_tail(tmp_path, manager):
+def test_external_wait_attention_shows_elapsed_liveness_and_manager_only_log_tail(tmp_path, monkeypatch, manager):
     import json as json_module
     from scidiscovery.research_loop import contracts as c, execution_wait_monitor
     root, key = prepare(tmp_path, enabled=False)
@@ -2702,10 +2709,55 @@ def test_external_wait_attention_shows_elapsed_liveness_and_manager_only_log_tai
     node = dict(step=2, role='W', state='waiting', execution_wait=wait)
     snapshot.update(conclusion=None, final=None, operation=None)
     snapshot['view'].update(nodes=[node], paused=False, correction={})
+    snapshot['execution_wait_live'] = execution_wait_monitor.observe(root, record, 2, include_logs=True)
+    snapshot['controller'] = dict(monitoring=False, host_locked=False)
+    monkeypatch.setattr(ui, '_execution_wait_live', lambda *a, **k: pytest.fail('render reopened execution wait'))
     status = ui._status(snapshot, {})
     assert status['state'] == 'external_wait' and '已等待' in status['headline']
     attention = str(ui._attention(ui._browser(cookie), manager, snapshot, status)[0]['form'])
     assert '当前没有进程在监视' in attention and '最后一次核对在' in attention
-    assert '已不在运行，结果尚未记录' in attention and '最近查询状态：运行中' in attention
+    assert '本机存活状态未知' in attention and '最近查询状态：运行中' in attention
     assert ('step 9 loss=0.12' in attention) is manager
     assert ('实验日志 · stdout' in attention) is manager
+    assert '恢复监视（出结果后自动唤醒 W）' in str(ui._primary(ui._browser(cookie), True, snapshot, status))
+    ui.translation.close()
+
+
+def test_stale_running_receipt_does_not_hide_wait_recovery_or_claim_active(tmp_path):
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    snapshot = ui._snapshot()
+    receipt = dict(kind='controller', status='running', operation_id='a' * 32)
+    wait = dict(calls=[dict(call_id='original', result_ready=False)], readable=True, all_ready=False)
+    node = dict(step=2, role='W', state='waiting', execution_wait=wait)
+    snapshot.update(conclusion=None, final=None, operation=receipt,
+        controller=dict(monitoring=False, host_locked=False))
+    snapshot['view'].update(nodes=[node], paused=False, correction={})
+    status = ui._status(snapshot, receipt)
+    assert '当前无人监视' in status['headline']
+    assert '恢复监视' in str(ui._primary(ui._browser(cookie), True, snapshot, status))
+    snapshot['view']['nodes'] = [dict(step=2, role='W', state='prepared')]
+    assert ui._presentation(snapshot, receipt)['active'] is False
+    ui.translation.close()
+
+
+def test_saved_wait_single_producer_keeps_private_paths_out_of_status(tmp_path, monkeypatch):
+    import json
+    from scidiscovery.research_loop import contracts as c, execution_wait_monitor, ui_saved_status
+    root, key = prepare(tmp_path, enabled=False)
+    c.build_job(root, 1, 'H', [])
+    record = root / 'native-evidence/001'; record.mkdir(exist_ok=True)
+    call = root / 'private-original-call'; call.mkdir()
+    c.write(record / 'native-outcome.json', dict(native_started=True, returncode=0))
+    c.write(record / 'execution-wait.json', dict(calls=[dict(accepted=dict(path=str(call / 'accepted.json')))]))
+    reads = []
+    original = execution_wait_monitor.read_wait
+    def acquired(record):
+        reads.append(record)
+        return original(record)
+    monkeypatch.setattr(execution_wait_monitor, 'read_wait', acquired)
+    sources = {}
+    view = ui_saved_status.status(root, wait_sources=sources)
+    assert reads == [record] and set(sources) == {1}
+    execution_wait_monitor.observe_acquired(root, 1, sources[1])
+    assert reads == [record] and str(call / 'accepted.json') not in json.dumps(view)

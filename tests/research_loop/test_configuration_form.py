@@ -628,36 +628,40 @@ def test_backend_switch_consumes_rendered_controls_and_preserves_each_provider_d
 
 
 def test_model_catalog_reads_codex_cache_and_pi_listing(tmp_path, monkeypatch):
-    import json, os
-    from scidiscovery.research_loop import model_catalog
+    import json
+    from scidiscovery.research_loop import model_catalog, pi_backend
     home = tmp_path / 'codex'
     home.mkdir()
     (home / 'models_cache.json').write_text(json.dumps(dict(fetched_at='2026-11-11T00:00:00Z', models=[
         dict(slug='visible-model', display_name='Visible', visibility='list', default_reasoning_level='low',
              supported_reasoning_levels=[dict(effort='low'), dict(effort='high')], service_tiers=[dict(id='priority')]),
         dict(slug='hidden-model', visibility='hide')])))
-    script = tmp_path / 'bin' / 'pi'
-    script.parent.mkdir()
-    script.write_text('#!/bin/sh\nprintf "provider model context max-out thinking images\\nacme fast-1 1M 8K yes no\\nacme plain 1M 8K no no\\n"\n')
-    script.chmod(0o755)
+    calls = []
+    def listing(argv, **context):
+        calls.append((argv, context))
+        return 'provider model context max-out thinking images\nacme fast-1 1M 8K yes no\nacme plain 1M 8K no no\n'
+    monkeypatch.setattr(pi_backend, '_catalog_output', listing)
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
     monkeypatch.setenv('CODEX_HOME', str(home))
-    monkeypatch.setenv('PATH', str(script.parent) + os.pathsep + os.environ['PATH'])
     monkeypatch.setattr(model_catalog, '_CACHE', {})
     codex = model_catalog.load('codex')
     assert [model['id'] for model in codex['models']] == ['visible-model']
     assert codex['models'][0]['efforts'] == ['low', 'high'] and codex['models'][0]['tiers'] == ['default', 'priority']
-    pi = model_catalog.load('pi')
+    pi = model_catalog.load('pi', launcher=['./custom-pi'], base=tmp_path)
     assert [model['id'] for model in pi['models']] == ['acme/fast-1', 'acme/plain']
     assert pi['models'][0]['efforts'][-1] == 'max' and pi['models'][1]['efforts'] == ['off']
+    assert calls[0][0][0] == str(tmp_path / 'custom-pi')
+    assert calls[0][0][-1] == '--list-models' and '--offline' in calls[0][0] and '--no-extensions' in calls[0][0]
+    assert calls[0][1]['env']['PI_CODING_AGENT_DIR'] == str(tmp_path / 'pi-agent')
     assert model_catalog.load('protocol')['models'] == []
     monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'missing'))
-    monkeypatch.setattr(model_catalog, '_CACHE', {})
     assert model_catalog.load('codex')['error'].startswith('未找到 Codex 模型目录')
 
 
 def test_model_pickers_offer_catalog_choices_and_keep_exact_typed_values(tmp_path):
     draft = complete(tmp_path)
     draft['document']['agent'].update(model='not-in-catalog', reasoning_effort='high')
+    draft['document']['agent']['roles'] = dict(W=dict(model='acme/custom:model[exact]', reasoning_effort='low'))
     catalogs = dict(codex=dict(models=[dict(id='listed', label='Listed', efforts=['low', 'high'], tiers=['default'])],
                                source='fixture', fetched_at=None, error=None),
                     pi=dict(models=[], source=None, fetched_at=None, error='no pi'))
@@ -667,6 +671,7 @@ def test_model_pickers_offer_catalog_choices_and_keep_exact_typed_values(tmp_pat
     assert html.index('name="cfg.agent.backend"') < html.index('name="cfg.agent.model"')
     fields = Controls(html).fields
     assert fields['cfg.agent.model'] == 'not-in-catalog'
+    assert fields['cfg.agent.roles.W.model'] == 'acme/custom:model[exact]'
     assert form.declaration(form.parse(fields, base=tmp_path)) == form.declaration(draft)
 
 
@@ -686,3 +691,17 @@ def test_supervision_mode_select_writes_a_complete_policy(tmp_path):
     # An existing default policy shows only the select, not a TOML copy.
     html = form.render(form.imported(form.declaration(parsed), base=tmp_path), edit=True)
     assert '[policies.supervision]' not in html and '<option value="notice" selected>' in html
+
+
+@pytest.mark.parametrize('advanced_mode', ['off', 'notice'])
+def test_supervision_mode_rejects_duplicate_advanced_declaration(tmp_path, advanced_mode):
+    draft = complete(tmp_path)
+    fields = submitted(draft)
+    fields['cfg.policies.supervision.mode'] = 'notice'
+    fields['advanced_toml'] += '\n[policies.supervision]\nmode = "' + advanced_mode + '"\n'
+    with pytest.raises(form.FormError, match='policies.supervision.mode.*重复') as caught:
+        form.parse(fields, base=tmp_path)
+    # Both edited controls remain available for correction after the error.
+    assert caught.value.draft['document']['policies']['supervision']['mode'] == 'notice'
+    assert 'mode = "' + advanced_mode + '"' in caught.value.draft['advanced_text']
+    assert not (tmp_path / 'instance').exists()
