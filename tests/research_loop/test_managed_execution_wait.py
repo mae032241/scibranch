@@ -692,12 +692,16 @@ def test_uncertain_execution_is_not_running_or_replayed(tmp_path,composed_regist
     assert len(e.Records(config).calls())==1
 
 
-def test_wait_deadline_is_finite_without_native_wake_or_submission_replay(tmp_path,composed_registry):
+def test_waiting_longer_than_time_budget_consumes_nothing_and_pause_stops_without_replay(tmp_path,composed_registry):
     root=instance(tmp_path,dict(collect=False),seconds=4,node_seconds=1)
-    reply=run_cli(root);result=json.loads(reply.stdout)
-    assert result['status']=='waiting_execution' and result['reason']=='managed_execution_wait_deadline',result
+    def outlast_budget_then_pause(record,config,call):
+        # Wait past the whole 4 s time budget: waiting is not research activity.
+        time.sleep(5.);(root/'pause.request').write_text('')
+    reply=run_cli(root,on_wait=outlast_budget_then_pause);result=json.loads(reply.stdout)
+    assert result['status']=='waiting_execution' and result['reason']=='paused_before_execution_wake',result
     report=budget.snapshot(root)
-    assert report['waiting_seconds']>0 and report['seconds_remaining']==0 and report['advance_seconds']<report['consumed_seconds']
+    assert report['waiting_seconds']>=5 and report['consumed_seconds']==report['advance_seconds']<4
+    assert report['seconds_remaining']>0
     assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
     assert len(execution.records(root,2))==1 and not (execution.origin(root,2)/'result-identity.json').exists()
 

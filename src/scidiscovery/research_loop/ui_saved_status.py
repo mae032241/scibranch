@@ -1,9 +1,11 @@
 """Display saved control records without invoking scientific admission readers."""
 import copy
+from datetime import datetime, timezone
 import json
 import math
 import os
 import re
+from pathlib import Path
 import stat
 
 from . import accepted_search, budget, budget_limits, contracts as c, instance_display as display, native_usage, runtime
@@ -147,16 +149,45 @@ def _native_outcome(record, memo=None):
     return outcome
 
 
+def _execution_wait(record):
+    """Display-only summary of the original calls a suspended W waits for.
+
+    Exact identities and proofs stay with managed_wait; this reports only call
+    IDs, the state seen at suspension and whether a verified result exists.
+    """
+    path = record / 'execution-wait.json'
+    try:
+        value = c.read(path)
+        since = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec='seconds')
+    except (OSError, ValueError):
+        return dict(calls=[], since=None, readable=False)
+    calls = []
+    for item in value.get('calls', []) if isinstance(value, dict) else []:
+        try:
+            accepted = Path(item['accepted']['path'])
+            call_id = accepted.parent.name
+            result = (accepted.parent / 'execution-observation.json').is_file()
+        except (KeyError, TypeError, OSError):
+            continue
+        calls.append(dict(call_id=call_id, external_run_id=str(item.get('external_run_id') or '')[:120],
+            submitted_state=str(item.get('observed_state') or '')[:40], result_ready=result))
+    return dict(calls=calls, since=since, readable=True,
+        all_ready=bool(calls) and all(row['result_ready'] for row in calls))
+
+
 def _node(root, step, job, memo=None):
     records = attempts(root, step)
     record = records[-1]
     outcome = _native_outcome(record, memo)
     intent = _read(record / 'native-intent.json', {})
     recovery = _read(record / 'automatic-recovery.json')
+    execution_wait = None
+    if outcome and (record / 'execution-wait.json').exists():
+        execution_wait = _execution_wait(record)
     if (records[0] / 'result-identity.json').exists():
         state = 'seal_present_unverified'
     elif outcome:
-        state = ('waiting' if (record / 'execution-wait.json').exists() else
+        state = ('waiting' if execution_wait is not None else
                  'native_not_submitted' if outcome.get('native_started') is False else 'native_outcome_unsealed')
     elif not intent:
         state = 'prepared'
@@ -256,6 +287,7 @@ def _node(root, step, job, memo=None):
         **(dict(technical_diagnostic=technical_diagnostic) if technical_diagnostic is not None else {}),
         **(dict(technical_stop=technical_stop) if technical_stop is not None else {}),
         **(dict(automatic_recovery=shown) if shown is not None else {}),
+        **(dict(execution_wait=execution_wait) if execution_wait is not None and state == 'waiting' else {}),
         stop_reason=outcome.get('stop_reason'), returncode=outcome.get('returncode'),
         terminal_observed=outcome.get('terminal_observed'), cleanup=outcome.get('cleanup'),
         native_failure=failure,
@@ -365,9 +397,9 @@ def _budget(root, settings, events):
         anchor = start.get('at_boottime') if start is not None else None
         anchored = start is None or (type(anchor) in (int, float) and math.isfinite(anchor)
                                     and anchor >= 0 and bool(start.get('boot_id')))
-        consumed = (durations['advance'] + durations['waiting']
+        consumed = (durations['advance']
                     if not missing_start and anchored and current_known
-                    and durations['advance'] is not None and durations['waiting'] is not None else None)
+                    and durations['advance'] is not None else None)
     else:
         consumed = elapsed
     return dict(limits, original_max_steps=settings['max_steps'], time_budget_basis=basis,

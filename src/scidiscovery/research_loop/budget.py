@@ -911,7 +911,9 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
             legacy_elapsed=clock['basis'] == 'elapsed') if start is not None else 0.)
         if clock['basis'] == 'elapsed' and start is not None:
             elapsed = _duration(dict(at_unix=start['at_unix']), now)
-        consumed = durations['advance']+durations['waiting'] if clock['basis'] == 'active' else elapsed
+        # Waiting for an original external execution or a service backoff is
+        # not research activity; only advancing work consumes the time budget.
+        consumed = durations['advance'] if clock['basis'] == 'active' else elapsed
         return dict(state['ceilings'], original_max_steps=settings['max_steps'], time_budget_basis=clock['basis'],
             advance_seconds=durations['advance'], waiting_seconds=durations['waiting'],
             paused_seconds=durations['paused'], unclassified_seconds=durations['unclassified'],
@@ -943,7 +945,7 @@ def _snapshot(root, settings, events, *, sample_stamp=None):
     elapsed = None if bridged else interval(start, now) if start is not None else 0.
     if basis == 'elapsed' and start is not None:
         elapsed = _duration(dict(at_unix=start['at_unix']), now)
-    consumed = advance + waiting if basis == 'active' else elapsed
+    consumed = advance if basis == 'active' else elapsed  # Waiting is not consumed.
     return dict(**limits, max_steps=max_steps, original_max_steps=settings['max_steps'], time_budget_basis=basis, advance_seconds=advance, waiting_seconds=waiting,
                 paused_seconds=paused, unclassified_seconds=unclassified, elapsed_seconds=elapsed, consumed_seconds=consumed,
                 seconds_remaining=budget_limits.remaining(limits['max_seconds'], consumed), clock_phase=phase,

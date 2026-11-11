@@ -77,8 +77,9 @@ def test_open_reboot_uses_recorded_old_uptime_and_new_uptime(clocked, phase, new
     originals = {path: path.read_bytes() for path in original_paths}
     stamp.update(at_unix=new_unix, at_boottime=3., boot_id='second-boot')
     value = budget.snapshot(root)
-    assert value['consumed_seconds'] == 10
-    assert value['seconds_remaining'] == 90
+    consumed = 10 if phase == 'advance' else 0  # Waiting is not consumed.
+    assert value['consumed_seconds'] == consumed
+    assert value['seconds_remaining'] == 100 - consumed
     assert value['unmeasured_shutdown_tail'] is True
     events = display_events(root)
     shown = ui_saved_status._budget(root, c.settings(root), events)
@@ -88,10 +89,10 @@ def test_open_reboot_uses_recorded_old_uptime_and_new_uptime(clocked, phase, new
     transition(root, 'paused')
     assert c.read(root / 'control-ledger/000003.json')['uptime_accounting'] is True
     stamp.update(at_unix=new_unix + 500, at_boottime=503.)
-    assert budget.snapshot(root)['consumed_seconds'] == 10
-    assert budget.status_snapshot(root)['consumed_seconds'] == 10
+    assert budget.snapshot(root)['consumed_seconds'] == consumed
+    assert budget.status_snapshot(root)['consumed_seconds'] == consumed
     events = display_events(root)
-    assert ui_saved_status._budget(root, c.settings(root), events)['consumed_seconds'] == 10
+    assert ui_saved_status._budget(root, c.settings(root), events)['consumed_seconds'] == consumed
     assert all(path.read_bytes() == data for path, data in originals.items())
 
 

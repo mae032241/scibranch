@@ -408,14 +408,14 @@ class InstanceUI:
             raise ui_errors.InputError('root', '独立实例页面正在持有此研究的维护锁。',
                 '先关闭此独立实例网页服务，再从工作台按完整目录加载该研究并执行删除或分支。')
 
-    def _control_form(self, browser_token, action, *, correction_trigger=None):
+    def _control_form(self, browser_token, action, *, correction_trigger=None, label=None):
         fields = ''
         if action == 'continue':
             fields = '<input type="hidden" name="ack_correction" value="' + html.escape(correction_trigger or '', quote=True) + '">'
             fields += ('<label>说明为什么继续本次研究 <textarea name="authorization_note" required></textarea></label>'
                 if correction_trigger else '<input type="hidden" name="authorization_note" value="">')
         return self._form(browser_token, action, fields,
-            {'start': '开始研究', 'pause': '本阶段结束后暂停', 'continue': '继续研究'}[action])
+            label or {'start': '开始研究', 'pause': '本阶段结束后暂停', 'continue': '继续研究'}[action])
 
     def _continue(self, **options):
         self.control_result = control.start_background(self.root, continue_run=True, **options)
@@ -1351,7 +1351,8 @@ class InstanceUI:
             final_phase=closeout is not None and not display['completed'],
             exhausted=ui_view.exhausted_limits(view, used if isinstance(used, int) else None),
             waiting_reason=waiting_reason, current_round=rounds[0]['index'] if rounds else None,
-            completed_line=completed_line, elapsed=elapsed, clean=clean)
+            completed_line=completed_line, elapsed=elapsed, clean=clean,
+            monitoring=self._monitoring(receipt))
         technical=self._technical_stop(snapshot,receipt)
         if technical is not None and not display['active']:
             failed=technical.get('phase')=='native_failure'
@@ -1360,6 +1361,11 @@ class InstanceUI:
                     '原任务在模型启动前停止，尚未进入科学评审；请修复本机配置后核对同一原任务。'))
             display['active']=False
         return dict(status, display=display)
+
+    @staticmethod
+    def _monitoring(receipt):
+        """A live controller request owns waiting; a finished one watches nothing."""
+        return receipt.get('kind') == 'controller' and receipt.get('status') in {'accepted', 'running'}
 
     @staticmethod
     def _technical_stop(snapshot,receipt=None):
@@ -1464,7 +1470,19 @@ class InstanceUI:
                 item['form'] = ui.Safe('<p class="note">确认后继续研究，将由综合评估助手重新判断下一步；原结论与已用预算保留。</p>'
                     + self._control_form(token, 'continue', correction_trigger=(view['correction'].get('current_pause') or {}).get('trigger_id')))
             items.append(item)
-        if status['state'] in {'external_wait', 'unsealed', 'not_submitted'} or (
+        if status['state'] == 'external_wait' and not (display['current'] or {}).get('native_failure'):
+            current = display['current']
+            receipt = self._receipt(snapshot)
+            monitoring = self._monitoring(receipt)
+            stop_reason = ((receipt.get('result') or {}).get('reason')
+                if (receipt.get('result') or {}).get('status') == 'waiting_execution' else None)
+            items.append(dict(text=status['headline'] + '。原调用不会被重新提交；唤醒只核对同一原调用的结果。',
+                href='/nodes/' + str(current['step']), action='查看本阶段原任务',
+                form=ui.Safe('<details class="execution-wait" data-details-key="overview-execution-wait" open>'
+                    '<summary>等待中的外部实验</summary>' + str(ui.facts(ui_view.execution_wait_facts(
+                        current.get('execution_wait') or {}, monitoring=monitoring, stop_reason=stop_reason)))
+                    + '</details>')))
+        elif status['state'] in {'external_wait', 'unsealed', 'not_submitted'} or (
                 display['current'] and display['current'].get('native_failure')
                 and display['current']['state'] not in ui_view.SEALED):
             current = display['current']
@@ -1549,12 +1567,23 @@ class InstanceUI:
             if manager and not view.get('paused'):
                 return ui.Safe(self._form(token, 'pause', '', '暂停研究'))
             return ui.link('查看错误与处理方式', '/nodes/' + str(current['step']), cls='primary')
+        if state == 'external_wait':
+            if not manager:
+                return ui.Safe('<span class="readonly-note">只读查看</span>')
+            if self._monitoring(self._receipt(snapshot)):
+                return ui.Safe(self._control_form(token, 'pause'))
+            ready = ((current or {}).get('execution_wait') or {}).get('all_ready')
+            label = '唤醒 W 继续研究' if ready else '恢复监视（出结果后自动唤醒 W）'
+            if view.get('paused'):
+                # A pause request would stop the wait loop at once; continue clears it first.
+                trigger = (view['correction'].get('current_pause') or {}).get('trigger_id')
+                return ui.Safe(self._control_form(token, 'continue', correction_trigger=trigger, label=label))
+            return ui.Safe(self._control_form(token, 'start', label=label))
         if state == 'unsealed' and manager and ui_view.native_completed(current):
             return ui.Safe(self._form(token, 'resume', '<input type="hidden" name="step" value="'
                 + str(current['step']) + '">', '收集封存并继续研究'))
         links = {'waiting': ('/results/' + str((status['display']['current'] or {}).get('step')), '查看等待原因'),
                  'unknown': ('/progress', '查看原任务进度'),
-                 'external_wait': ('/progress', '核对原实验进度'),
                  'unsealed': ('/progress', '核对原任务与未封存结论'),
                  'not_submitted': ('/progress', '核对原提交意图'), 'completed': ('/final-results', '查看结果'),
                  'budget_exhausted': ('/budget-recovery#budget', '恢复前追加预算'), 'final': ('/budget-recovery#budget', '恢复前追加预算')}
@@ -1617,7 +1646,7 @@ class InstanceUI:
                     'output_repair_required': '本次控制请求已停止推进：原任务输出待修复（output_repair_required）。请核对原任务。',
                     'output_repair_unavailable': '本次控制请求已停止推进：原任务输出暂无法修复（output_repair_unavailable）。请核对原任务。',
                     'closeout_native_unsealed': '本次控制请求已停止推进：原收尾任务尚未封存（closeout_native_unsealed）。请核对同一原任务，勿重复提交。',
-                    'waiting_execution': '本次控制请求已结束，正在等待原实验执行（waiting_execution）。请核对原任务，勿重复提交。',
+                    'waiting_execution': '本次控制请求已结束，正在等待原实验执行；控制进程已停止监视（waiting_execution），实验本身不受影响。可在总览点击唤醒 W，勿重复提交。',
                 }
                 notice = stopped.get(result.get('status'), notice)
                 technical=self._technical_stop(snapshot,receipt)

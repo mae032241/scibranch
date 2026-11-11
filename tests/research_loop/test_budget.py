@@ -149,7 +149,8 @@ def test_status_excludes_downtime_from_active_and_retains_legacy_elapsed(clocked
     stamp = budget.clock_stamp(); stamp.update(boot_id='next-boot', at_boottime=1.)
     monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(stamp))
     value = status(root)['budget']
-    consumed = 1 if basis == 'active' else 10
+    # Active time counts only advance; waiting and paused downtime are free.
+    consumed = (1 if phase == 'advance' else 0) if basis == 'active' else 10
     assert value['consumed_seconds'] == consumed
     assert value['seconds_remaining'] == 20 - consumed
     assert value['max_seconds'] == 20

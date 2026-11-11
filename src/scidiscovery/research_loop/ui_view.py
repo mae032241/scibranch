@@ -837,6 +837,36 @@ def native_facts(node, clean):
     return facts
 
 
+WAIT_STOP_REASONS = {
+    'paused_before_execution_wake': '你请求了暂停；撤销暂停或点击唤醒后继续',
+    'managed_execution_wait_deadline': '研究时间预算已用完，停止监视；追加时间预算后再唤醒',
+    'managed_execution_terminal_wake_deadline': '实验已出结果，但研究时间预算已用完；追加时间预算后再唤醒',
+    'managed_execution_query_unavailable': '执行插件不支持查询状态，无法自动判断是否完成；请按原调用 ID 核对',
+    'managed_execution_status_unknown': '查询到的实验状态不明；请按原调用 ID 核对，不要重新提交',
+    'managed_execution_terminal_unverified': '实验结果未通过核验；请按原调用 ID 核对，不要重新提交',
+    'managed_execution_pending': '实验仍在运行',
+}
+
+
+def execution_wait_facts(wait, *, monitoring, stop_reason=None):
+    """Which original calls a suspended W waits for; display only."""
+    facts = [dict(label='监视状态', value=('控制进程正在监视，实验出结果后会自动唤醒 W' if monitoring else
+        '当前没有进程在监视；点击“唤醒 W”会核对结果，已完成则唤醒，未完成则继续监视'))]
+    if stop_reason and not monitoring:
+        facts.append(dict(label='上次停止原因', value=WAIT_STOP_REASONS.get(stop_reason, stop_reason)))
+    if wait.get('since'):
+        facts.append(dict(label='开始等待（UTC）', value=wait['since']))
+    facts.append(dict(label='等待计时', value='等待外部实验不消耗研究时间预算'))
+    for row in wait.get('calls', []):
+        value = ('已出结果，待唤醒 W' if row.get('result_ready') else '运行中或尚未核对')
+        if row.get('external_run_id'):
+            value += '；外部 ID ' + row['external_run_id']
+        facts.append(dict(label='原调用 ' + row['call_id'], value=value))
+    if not wait.get('readable', True):
+        facts.append(dict(label='等待记录', value='暂不可读；请核对实例记录'))
+    return facts
+
+
 def recovery_facts(recovery, clean):
     """Present saved recovery limits without implying permission to replay."""
     facts = [dict(label='自动接续范围', value='仅原任务和已核对的原 session；未知外部调用只核对，不重提')]
@@ -852,7 +882,7 @@ def recovery_facts(recovery, clean):
 
 
 def status_summary(presentation, view, *, final_phase=False, exhausted=None, waiting_reason=None,
-                   current_round=None, completed_line=None, elapsed=None, clean=None):
+                   current_round=None, completed_line=None, elapsed=None, clean=None, monitoring=False):
     current = presentation['current']
     recovery = (current or {}).get('automatic_recovery')
     failure_help = native_failure_guidance(current)
@@ -914,6 +944,17 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
     elif state in {'external_wait', 'unsealed', 'not_submitted'}:
         headline = {'external_wait': '等待原外部执行结果', 'unsealed': '原生工作已结束，阶段结论尚未封存',
             'not_submitted': '原任务尚未提交，需先核对原意图'}[state]
+        if state == 'external_wait':
+            wait = (current or {}).get('execution_wait') or {}
+            count = len(wait.get('calls', []))
+            if not count:
+                pass  # No readable wait summary: keep the generic headline.
+            elif monitoring:
+                headline = 'W 在等待 ' + str(count) + ' 个外部实验；出结果后自动唤醒'
+            elif wait.get('all_ready'):
+                headline = '外部实验已出结果，等待唤醒 W'
+            else:
+                headline = 'W 在等待 ' + str(count) + ' 个外部实验；当前无人监视，需点击唤醒'
         if state == 'unsealed' and native_completed(current):
             headline = native_state_label(current)
     elif state == 'unknown':

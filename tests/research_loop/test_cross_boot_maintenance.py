@@ -57,7 +57,7 @@ def test_paused_clock_bridge_preserves_consumption_grants_and_old_history(tmp_pa
         budget.snapshot(root)
     assert budget.reanchor_paused_checkpoint(root, checkpoint, transfer)['status'] == 'clock_reanchored'
     value = budget.snapshot(root)
-    assert (value['advance_seconds'], value['waiting_seconds'], value['consumed_seconds'], value['seconds_remaining']) == (2., 3., 5., 995.)
+    assert (value['advance_seconds'], value['waiting_seconds'], value['consumed_seconds'], value['seconds_remaining']) == (2., 3., 2., 998.)
     assert value['elapsed_seconds'] is None and value['unmeasured_paused_gap'] is True
     assert budget.execution_accounting(root) == resources
     assert budget.execution_reservation(root, reservation)['budget'] == dict(wall_time_seconds=2, max_storage_bytes=20)

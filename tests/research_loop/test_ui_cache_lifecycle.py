@@ -352,10 +352,12 @@ def test_saved_budget_uses_control_clock_intervals(tmp_path, monkeypatch, basis,
             budget._snapshot(tmp_path, settings, events, sample_stamp=now)
     else:
         authority = budget._snapshot(tmp_path, settings, events, sample_stamp=now)
-        assert value['time_status'] == 'recorded' and value['consumed_seconds'] == expected
+        # `expected` is the measured advance+waiting span; waiting is not consumed.
+        consumed = 5. if basis == 'active' else expected
+        assert value['time_status'] == 'recorded' and value['consumed_seconds'] == consumed
         assert value['advance_seconds'] == 5.
         assert value['waiting_seconds'] == (expected - 5. if now['boot_id'] == 'new' else 5.)
-        assert value['seconds_remaining'] == 1000. - expected
+        assert value['seconds_remaining'] == 1000. - consumed
         for key in ('consumed_seconds', 'seconds_remaining', 'advance_seconds', 'waiting_seconds'):
             assert value[key] == authority[key]
 
