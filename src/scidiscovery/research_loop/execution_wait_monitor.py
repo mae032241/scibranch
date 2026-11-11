@@ -9,12 +9,12 @@ stale file only degrades what the overview can show.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import fcntl
 import json
 import math
 import os
 from pathlib import Path
 import re
+import stat
 import time
 
 from . import contracts as c, runtime
@@ -26,6 +26,10 @@ LOG_TAIL_LINES = 40
 LOG_NAMES = ('stdout.raw', 'stderr.raw')
 _ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]')
 _CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+_LOCK_ROW = re.compile(
+    r'\d+:\s+(?P<blocked>->\s+)?(?P<kind>FLOCK|POSIX|OFDLCK|LEASE)\s+[A-Z]+\s+'
+    r'(?:READ|WRITE)\s+-?\d+\s+(?P<major>[0-9a-fA-F]+):(?P<minor>[0-9a-fA-F]+):'
+    r'(?P<inode>\d+)\s+\d+\s+(?:\d+|EOF)')
 _written = {}
 
 
@@ -85,24 +89,36 @@ def process_observation(identity, binding):
             and all(current[key] == identity[key] for key in (*keys, 'boot_id')))
 
 
+def _observed_flock(info):
+    """Passive Linux snapshot, limited to the proc mount's PID namespace."""
+    locked = False
+    for line in Path('/proc/locks').read_text(encoding='ascii').splitlines():
+        row = _LOCK_ROW.fullmatch(line.strip())
+        if row is None:
+            return None
+        if (row['kind'] == 'FLOCK' and row['blocked'] is None
+                and (int(row['major'], 16), int(row['minor'], 16), int(row['inode']))
+                == (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)):
+            locked = True
+    return locked
+
+
 def controller_observation(root, operations, live=None):
-    """Read-only host writer and exact owner observations; no control reconciliation."""
+    """Display-only local lock/owner snapshots; never acquire a writer lock."""
     locked = None
     descriptor = None
     path = Path(root) / 'host-run.lock'
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
         before = os.fstat(descriptor)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = False
-        except BlockingIOError:
-            locked = True
-        after = path.stat(follow_symlinks=False)
-        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-            locked = None
-    except OSError:
-        pass
+        if stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+            locked = _observed_flock(before)
+            after = path.stat(follow_symlinks=False)
+            if (not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
+                    or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
+                locked = None
+    except (OSError, UnicodeError, ValueError):
+        locked = None
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -113,7 +129,9 @@ def controller_observation(root, operations, live=None):
             if alive is True:
                 owners.append(operation['operation_id'])
     heartbeat_alive = (live or {}).get('owner_alive')
-    monitoring = (False if locked is False else
+    # A live exact owner with no visible lock can reflect a different proc
+    # namespace or an observation race; it does not establish stopped monitoring.
+    monitoring = (False if locked is False and not owners and heartbeat_alive is not True else
                   True if locked is True and (owners or heartbeat_alive is True)
                   else None)
     return dict(monitoring=monitoring, host_locked=locked, exact_owner=bool(owners))

@@ -1,6 +1,8 @@
 import json
 import os
+from pathlib import Path
 import subprocess
+import threading
 import time
 
 import pytest
@@ -104,6 +106,119 @@ def test_foreground_controller_fresh_heartbeat_needs_no_detached_operation(tmp_p
         assert unknown['monitoring'] is None
         missing_pid = monitor.controller_observation(tmp_path, [], dict(heartbeat_age=1., stale_after=30., owner_alive=None))
         assert missing_pid['monitoring'] is None
+
+
+def test_controller_observer_does_not_block_real_writer_at_observation_boundary(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import controller
+
+    public = tmp_path / 'public'; public.mkdir()
+    objective = public / 'objective.md'; objective.write_text('Observe one local controller.')
+    root = tmp_path / 'instance'
+    controller.prepare(root, objective, public, ['fixture'], max_tokens=4000,
+        max_seconds=60, max_steps=7, model='fixture', reasoning_effort='high',
+        search_policy=None, experiment_mode='external',
+        source_restrictions=[dict(source=str(objective), restriction='clear')])
+    lock_path = root / 'host-run.lock'; lock_path.touch()
+    base = c.settings(root)
+    paused, resume = threading.Event(), threading.Event()
+    results, errors = [], []
+    original_stat = Path.stat
+
+    def pause_after_observation(path, *args, **kwargs):
+        if path == lock_path and threading.current_thread() is observer:
+            paused.set()
+            if not resume.wait(10):
+                raise TimeoutError('observer was not released')
+        return original_stat(path, *args, **kwargs)
+
+    def observe():
+        try:
+            results.append(monitor.controller_observation(root, []))
+        except BaseException as error:
+            errors.append(error)
+
+    observer = threading.Thread(target=observe)
+    monkeypatch.setattr(Path, 'stat', pause_after_observation)
+    observer.start()
+    try:
+        assert paused.wait(10), 'observer did not reach its final inode check'
+        # Separate open file descriptions contend even inside this process.
+        with controller._local_writer_from_base(root, base=base):
+            operation = dict(kind='controller', status='running', operation_id='a' * 32)
+            operation['process'] = runtime.process_identity(os.getpid(), operation['operation_id'])
+            assert monitor.controller_observation(root, [operation]) == dict(
+                monitoring=True, host_locked=True, exact_owner=True)
+            with pytest.raises(RuntimeError, match='already has a running controller'):
+                with controller._local_writer_from_base(root, base=base):
+                    pytest.fail('a held controller lock admitted another writer')
+    finally:
+        resume.set()
+        observer.join(10)
+    assert not observer.is_alive() and not errors
+    assert results == [dict(monitoring=False, host_locked=False, exact_owner=False)]
+
+
+def test_controller_observation_is_passive_and_only_counts_granted_flocks(tmp_path, monkeypatch):
+    import fcntl
+
+    lock_path = tmp_path / 'host-run.lock'; lock_path.touch()
+    info = lock_path.stat()
+    device = f'{os.major(info.st_dev):x}:{os.minor(info.st_dev):x}:{info.st_ino}'
+    table = (f'1: -> FLOCK ADVISORY WRITE 42 {device} 0 EOF\n'
+             f'2: POSIX ADVISORY WRITE 42 {device} 0 EOF\n'
+             f'3: FLOCK ADVISORY WRITE 42 {device}0 0 EOF\n')
+    original_read = Path.read_text
+
+    def read_table(path, *args, **kwargs):
+        return table if path == Path('/proc/locks') else original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read_table)
+    monkeypatch.setattr(fcntl, 'flock', lambda *args: pytest.fail('display observer acquired a lock'))
+    assert monitor.controller_observation(tmp_path, [])['host_locked'] is False
+    assert monitor.controller_observation(tmp_path, [], dict(owner_alive=True)) == dict(
+        monitoring=None, host_locked=False, exact_owner=False)
+    unrelated = table
+    for mode in ('READ', 'WRITE'):
+        table = unrelated + f'4: FLOCK ADVISORY {mode} 42 {device} 0 EOF\n'
+        assert monitor.controller_observation(tmp_path, [], dict(owner_alive=True)) == dict(
+            monitoring=True, host_locked=True, exact_owner=False)
+
+
+def test_controller_observation_keeps_unavailable_or_malformed_lock_table_unknown(tmp_path, monkeypatch):
+    (tmp_path / 'host-run.lock').touch()
+    original_read = Path.read_text
+    table = 'malformed lock row\n'
+
+    def read_table(path, *args, **kwargs):
+        if path == Path('/proc/locks'):
+            if table is None:
+                raise PermissionError('unavailable lock table')
+            return table
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read_table)
+    for table in ('malformed lock row\n', None):
+        assert monitor.controller_observation(tmp_path, [], dict(owner_alive=True)) == dict(
+            monitoring=None, host_locked=None, exact_owner=False)
+
+
+def test_controller_observation_rejects_replaced_symlink_and_nonregular_lock(tmp_path, monkeypatch):
+    lock_path = tmp_path / 'host-run.lock'; lock_path.touch()
+    original_read = Path.read_text
+
+    def replace_during_observation(path, *args, **kwargs):
+        if path == Path('/proc/locks'):
+            lock_path.rename(tmp_path / 'original.lock')
+            lock_path.touch()
+            return ''
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', replace_during_observation)
+    assert monitor.controller_observation(tmp_path, [])['host_locked'] is None
+    lock_path.unlink(); lock_path.symlink_to(tmp_path / 'original.lock')
+    assert monitor.controller_observation(tmp_path, [])['host_locked'] is None
+    lock_path.unlink(); lock_path.mkdir()
+    assert monitor.controller_observation(tmp_path, [])['host_locked'] is None
 
 
 def test_process_observation_preserves_unknown_and_detects_exact_dead_identity(monkeypatch):
