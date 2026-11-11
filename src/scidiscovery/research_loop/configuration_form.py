@@ -831,7 +831,7 @@ def render(draft, *, edit=False, catalogs=None):
         for name, value in catalogs.items())
     rows.append(heading + '<fieldset class="config-group"><legend>模型</legend><div class="config-grid config-grid-four model-fields">'+fields(model_paths)+'</div>'+catalog_note+'</fieldset>'
         '<fieldset class="config-group" id="budget-settings"><legend>研究总上限</legend><div class="budget-fields">'+fields(budget_paths)+'</div>'
-        '<p class="note">三项都必须填写，达到任一上限研究就会停下来等你决定。tokens 是模型用量，不是金额；时间按实际研究活动累计，不算暂停等待；步数统计研究阶段及恢复、审计等控制动作。</p></fieldset>')
+        '<p class="note">三项都必须填写，达到任一上限研究就会停下来等你决定。tokens 是模型用量，不是金额；时间按研究活动累计，等待外部实验的时间也计入，暂停期间不计；步数统计研究阶段及恢复、审计等控制动作。</p></fieldset>')
     role_paths = [f'agent.roles.{role}.{key}' for role in 'HWAE' for key in ('model','reasoning_effort')]
     configured = any(_get(document, path) is not None for path in role_paths)
     rows.append('<details class="role-settings config-group" data-config-group="agent.roles"'+(' open' if configured else '')+'><summary>按角色指定模型'
