@@ -1431,7 +1431,8 @@ def _validate_stopped_report(root, value):
                     {'native-intent.json', 'native-outcome.json', 'usage-observation.json', 'usage.json'})):
         raise ValueError('Final report requires the exact stopped original')
     path = Path(root) / 'jobs' / f'{value["step"]:03d}.json'
-    job = contracts.read(contracts.regular(path))
+    job = (contracts.read_job(path) if not value['records']
+           else contracts.read(contracts.regular(path)))
     record = contracts.host_record(contracts.workspace(root, value['step']))
     if (contracts.record_ref(path) != value['job_ref']
             or (record / 'result-identity.json').exists()

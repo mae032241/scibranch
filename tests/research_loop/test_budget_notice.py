@@ -16,7 +16,7 @@ def published(*, role='A', dimension=None, shared=False, target=True, near=False
     value=dict(scope=notice.SCOPE,updated_at_unix=123.,inflight_usage_unknown=True,
         shared_observed_tokens_remaining_upper_bound=0 if shared else 800,
         shared_active_seconds_remaining=0. if expired else 20.,target_state='reached' if target else 'near' if near else 'within')
-    alert=notice.closeout_notice(dict(role=role),intent or {},dimension=dimension,target_reached=target,target_near=near,
+    alert=notice.closeout_notice(dict(role=role,research_strategy_version=3,advisory_scope_version=1),intent or {},dimension=dimension,target_reached=target,target_near=near,
         shared_reached=shared or expired,shared_risk=shared_risk,shared_expired=expired,**options)
     if alert is not None:value['closeout_notices']={dimension:alert}
     return value
@@ -51,12 +51,11 @@ def hook_metadata(work,*,declared=None):
     return dict(data=[dict(cwd=str(work),hooks=hooks,warnings=[],errors=[])])
 
 
-def assert_ordinary_a_risk_keeps_normal_routing(text):
-    assert 'end this assessment' in text and 'retain unmet goals' in text
-    assert 'normal next_action' in text and 'evidence/shared balance' in text
-    assert 'Soft targets do not end research' in text
-    assert 'deliver' not in text and 'finish with gaps' not in text
-    assert 'No H/W/E' not in text and 'conclude now' not in text
+def assert_ordinary_a_returns_advice(text):
+    assert 'continue_w' in text and 'decision_request=null' in text
+    assert 'W judges it' in text and 'no direct work or finalization' in text
+    assert 'permissions hold' in text and 'unknown usage != 0' in text
+    assert 'deliver' not in text and 'conclude now' not in text
 
 
 @pytest.mark.parametrize('first_dimension',['token','time'])
@@ -68,7 +67,7 @@ def test_each_dimension_emits_once_per_logical_node_across_causes_and_attempts(t
     value=c.read(path);value['updated_at_unix']=124.;save(tmp_path,value)
     assert notice.hook_output(tmp_path,0) is None
     text=first['hookSpecificOutput']['additionalContext']
-    assert_ordinary_a_risk_keeps_normal_routing(text)
+    assert_ordinary_a_returns_advice(text)
     value=published(dimension=first_dimension,target=False,shared=True,expired=first_dimension=='time')
     save(tmp_path,value)
     assert notice.hook_output(tmp_path,0) is None
@@ -152,27 +151,17 @@ def test_closeout_notice_preserves_repair_author_and_final_scope(options,require
     if options.get('intent'):assert 'final scientific judgment' not in text
 
 
-@pytest.mark.parametrize('role','HWAE')
-@pytest.mark.parametrize('dimension,risk',[('token','node'),('token','shared'),('time','node'),('time','shared'),('time','expired')])
+@pytest.mark.parametrize('role,dimension,risk',[
+    ('H','token','node'),('H','time','shared'),('W','time','node'),
+    ('W','time','expired'),('E','token','shared'),
+    ('A','token','node'),('A','token','shared'),('A','time','expired')])
 def test_first_risk_notice_is_bounded_and_keeps_scientific_permissions(role,dimension,risk):
     value=published(role=role,dimension=dimension,target=False,near=risk=='node',shared_risk=risk=='shared',expired=risk=='expired')
     text=value['closeout_notices'][dimension]['text']
     assert len(text.encode())<=notice.MAX_NOTICE_BYTES and 'permissions hold' in text
     assert notice.published_notices(value)==value['closeout_notices']
     assert dimension in text.lower()
-    if role=='A':
-        if risk=='expired':
-            assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text
-            assert 'No H/W/E/extra FINAL' in text
-        else:
-            assert_ordinary_a_risk_keeps_normal_routing(text)
-
-
-def test_exhausted_shared_token_budget_requires_ordinary_a_to_conclude_now():
-    text=published(target=False,shared=True)['closeout_notices']['token']['text']
-    assert 'Shared token budget reached' in text and 'conclude now' in text
-    assert 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
-    assert 'normal next_action' not in text and len(text.encode())<=notice.MAX_NOTICE_BYTES
+    if role=='A':assert_ordinary_a_returns_advice(text)
 
 
 @pytest.mark.parametrize('options,required',[
@@ -192,74 +181,69 @@ def test_expired_formal_review_keeps_independent_verdict_scope():
     assert 'deliver' not in alert['text'] and len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
 
 
-@pytest.mark.parametrize('maximum,started,ratio,expected',[(1,1,.84,False),(1,1,.85,False),
-    (2,1,.99,False),(2,2,.85,False),(2,3,.1,True)])
-def test_worker_context_cadence_counts_completed_compactions_without_fullness(maximum,started,ratio,expected):
-    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,
-        max_context_windows=maximum,context_observation=dict(
-            context_windows=dict(coverage='live',windows_started=started,peak_ratio=ratio),context=dict(ratio=ratio)))
-    assert notice.worker_progress_due(dict(role='W'),{},**facts) is expected
-    alert=notice.worker_progress_notice(dict(role='W'),{},**facts)
-    assert (alert is not None) is expected
-    if alert:
-        assert 'context' in alert['text'] and 'overshoot' in alert['text']
-        assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
-
-
-def test_worker_context_unknown_requests_reconciliation_but_initial_awaiting_does_not():
-    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,max_context_windows=2)
-    observation=dict(context_windows=dict(coverage='awaiting',windows_started=0))
-    assert not notice.worker_progress_due(dict(role='W'),{},context_observation=observation,**facts)
-    observation['context_windows'].update(coverage='unknown',windows_started=1)
-    alert=notice.worker_progress_notice(dict(role='W'),{},context_observation=observation,**facts)
-    assert 'lower bound' in alert['text'] and 'never replay' in alert['text']
-    assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
-    assert notice.worker_progress_due(dict(role='W'),{},active_seconds=901,target_seconds=900,fragment_enabled=True)
-
-
-def test_absent_optional_provider_capability_does_not_schedule_context_handoffs():
-    observation=dict(context_windows=dict(coverage='unknown',windows_started=0,
-        reason='context_capability_unavailable'),context=dict(status='unavailable'))
-    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,
-        max_context_windows=2,context_observation=observation)
-    assert notice.worker_context_reason(2,observation) is None
-    assert notice.worker_progress_notice(dict(role='W'),{},**facts) is None
-    observation['context_windows']['windows_started']=3
-    assert notice.worker_context_reason(2,observation)=='worker_context_review_due'
-
-
-@pytest.mark.parametrize('started,used,current,expected',[
-    (1,99,True,False),(2,84,True,False),(2,85,True,True),
-    (2,99,False,False),(2,None,True,False)])
-def test_current_context_fullness_is_only_early_advice(started,used,current,expected):
-    observation=dict(context_windows=dict(coverage='live',windows_started=started),
+@pytest.mark.parametrize('started,used,current,coverage,near,due',[
+    (1,89,True,'live',False,False),(1,90,True,'live',True,False),
+    (2,99,True,'live',True,False),(3,70,True,'live',False,False),
+    (3,71,True,'live',False,True),(3,99,False,'live',False,False),
+    (3,None,True,'live',False,False),(3,99,True,'unknown',False,False),
+])
+def test_context_advice_and_handoff_use_current_occupancy_after_compaction(started,used,current,coverage,near,due):
+    observation=dict(context_windows=dict(coverage=coverage,windows_started=started),
         context=dict(status='last_reported',total_tokens=used,model_context_window=100,
             current_window=current,observed_at=123.))
-    facts=dict(active_seconds=10,target_seconds=900,fragment_enabled=True,
-        max_context_windows=2,context_observation=observation)
-    assert notice.worker_context_reason(2,observation) is None
-    assert not notice.worker_progress_due(dict(role='W'),{},**facts)
+    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,
+        max_context_windows=2,context_observation=observation,context_handoff_version=2)
+    assert notice.worker_context_near(2,observation,version=2) is near
+    assert notice.worker_progress_due(dict(role='W'),{},**facts) is due
     alert=notice.worker_progress_notice(dict(role='W'),{},**facts)
-    assert (alert is not None) is expected
+    assert (alert is not None) is (near or due)
     if alert:
-        assert alert['text']==notice.WORKER_CONTEXT_NEAR_TEXT
+        assert alert['text']==(notice.WORKER_CONTEXT_TEXT if due else notice.WORKER_CONTEXT_90_TEXT)
         assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
     for job,intent,extra in [(dict(role='A'),{},{}),(dict(role='W'),dict(output_repair=True),{}),
-            (dict(role='W'),{},dict(author=True)),(dict(role='W'),{},dict(final_return=True))]:
+            (dict(role='W'),dict(work_repair=True),{}),(dict(role='W'),{},dict(author=True)),
+            (dict(role='W'),{},dict(final_return=True))]:
         assert notice.worker_progress_notice(job,intent,**dict(facts,**extra)) is None
 
 
-def test_early_context_advice_reuses_once_per_logical_worker_marker(tmp_path):
-    alert=dict(cause='node',text=notice.WORKER_CONTEXT_NEAR_TEXT)
+def test_absent_optional_provider_capability_does_not_schedule_context_handoffs():
+    observation=dict(context_windows=dict(coverage='unknown',windows_started=3,
+        reason='context_capability_unavailable'),context=dict(status='unavailable'))
+    facts=dict(active_seconds=10000,target_seconds=900,fragment_enabled=True,
+        max_context_windows=2,context_observation=observation,context_handoff_version=2)
+    assert notice.worker_context_reason(2,observation,version=2) is None
+    assert notice.worker_progress_notice(dict(role='W'),{},**facts) is None
+
+
+def test_current_90_percent_context_notice_reaches_the_hook(tmp_path):
+    observation=dict(context_windows=dict(coverage='live',windows_started=2),
+        context=dict(status='last_reported',total_tokens=90,model_context_window=100,
+            current_window=True,observed_at=123.))
+    alert=notice.worker_progress_notice(dict(role='W'),{},active_seconds=10,
+        target_seconds=900,fragment_enabled=True,max_context_windows=2,
+        context_observation=observation,context_handoff_version=2)
     value=dict(scope=notice.SCOPE,updated_at_unix=123.,inflight_usage_unknown=True,
         target_state='near',closeout_notices=dict(progress=alert))
     save(tmp_path,value)
-    assert notice.hook_output(tmp_path,0)['hookSpecificOutput']['additionalContext']==alert['text']
-    assert notice.hook_output(tmp_path,0) is None
-    value['target_state']='reached'
-    value['closeout_notices']['progress']=dict(cause='node',text=notice.WORKER_CONTEXT_TEXT)
-    save(tmp_path,value)
+    assert notice.hook_output(tmp_path,0)==dict(hookSpecificOutput=dict(
+        hookEventName='PostToolUse',additionalContext=notice.WORKER_CONTEXT_90_TEXT))
     assert notice.hook_output(tmp_path,1) is None
+
+
+def test_shared_time_handoff_without_context_telemetry_retains_originals():
+    alert=notice.worker_progress_notice(dict(role='W'),{},active_seconds=901,
+        target_seconds=900,fragment_enabled=True)
+    assert alert==dict(cause='node',text=notice.WORKER_PROGRESS_TEXT)
+    assert 'never replay unknown calls' in alert['text']
+
+
+def test_exhausted_final_a_retains_exact_delivery_judgment():
+    alert=notice.closeout_notice(dict(role='A',research_strategy_version=3,
+        evidence_return=dict(kind='delivery_review')),{},dimension='time',
+        target_reached=False,shared_reached=True,shared_expired=True)
+    assert 'exact deliver or reject all with finish' in alert['text']
+    assert 'No correction/new W/E/extra FINAL' in alert['text']
+    assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
 
 
 def test_followup_notice_does_not_copy_unbounded_configured_numbers():
@@ -463,7 +447,8 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     expected_tool='get_goal'
     expected_result=dict(goal=None,remainingTokens=None,completionBudgetReport=None)
     final=dict(summary='Fixture completed',scientific_result='Tool output and closeout context received',limitations=['Transport fixture'],
-        next_action='finish' if role=='A' else 'wait',route_reason='No scientific claim')
+        next_action='continue_w' if role=='A' else 'wait',route_reason='No scientific claim')
+    if role=='A':final['decision_request']=None
     if role=='W':
         final.pop('next_action');final.pop('route_reason');final['stage_intent']='handoff'
 
@@ -534,7 +519,7 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     root=tmp_path/'instance'
     controller.prepare(root,goal,public,[codex],native_options=dict(workspace='workspace-write',network=False,web='disabled',subagents=False),
         model='fixture',reasoning_effort='high',max_tokens=10000,max_seconds=60,max_steps=3,search_policy=None,
-        experiment_mode='local' if role=='W' else 'external',node_budget_policy={role:dict(max_observed_tokens=1,max_seconds=30) for role in 'HWAE'})
+        experiment_mode='external',node_budget_policy={role:dict(max_observed_tokens=1,max_seconds=30) for role in 'HWAE'})
     job=c.build_job(root,1,role,[])
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','Local provider fixture')
     anchor=budget.accept_node(root,job)
@@ -598,7 +583,7 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     outputs=[item for item in packet['input'] if item.get('type')=='function_call_output']
     assert len(outputs)==1 and isinstance(outputs[0]['output'],str) and outputs[0]['output'].strip(),outputs
     assert json.loads(outputs[0]['output'])==expected_result and text not in outputs[0]['output'],outputs
-    if role=='A':assert 'conclude now' in text and 'eligible existing candidate or finish with gaps' in text and 'No H/W/E/extra FINAL' in text
+    if role=='A':assert_ordinary_a_returns_advice(text)
     assert c.read(record/'science-output.json')==final
     assert (home/'config.toml').read_text()==original_config
     assert observation['tokens']['input_tokens']+observation['tokens']['output_tokens']==24

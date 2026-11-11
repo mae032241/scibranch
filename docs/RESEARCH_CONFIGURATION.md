@@ -792,9 +792,10 @@ New preparations for capable Backends, including standard single-executable Code
 and Pi, supply `resume_policy.automatic_recovery` through the same defaults used
 by TOML, CLI and the webpage. TOML declares it as `[policies.resume.automatic_recovery]`;
 the existing CLI `--worker-resume-policy /absolute/resume.json` accepts it inside
-the complete resume object. In the webpage, use More research settings → independent
-review and original-call recovery → retry settings. The visible retry count controls
-the total automatic recovery cap; advanced settings retain the per-action limits.
+the complete resume object. In the webpage, edit the same
+`[policies.resume.automatic_recovery]` table under Advanced settings (TOML).
+`max_attempts` controls the total automatic recovery cap; the same table retains
+the per-action limits.
 Saved changes affect future nodes, preserving the current accepted task and its receipts.
 Output repair and recovery of unfinished work remain separate permissions.
 
@@ -804,6 +805,23 @@ CLI 的既有 `--worker-resume-policy /absolute/resume.json` 在完整恢复对�
 网页在“高级设置（TOML）”中编辑同一 `[policies.resume.automatic_recovery]` 表。
 运行中保存仅影响未来节点，不改写当前任务与原回执；
 输出补填与未完成任务接续仍是不同许可。
+
+TOML and form normalization fill omitted `protocol` and `usage_scope` from the
+selected Backend in a partial `[policies.resume]` object. Its `max_attempts` is
+still required; explicit protocol conflicts are rejected. These defaults do not
+qualify an unsupported launcher or change an existing frozen task.
+
+TOML 与表单共用的规范化会为部分填写的 `[policies.resume]` 对象，按所选 Backend 补齐省略的
+`protocol` 与 `usage_scope`。该对象仍须明确填写 `max_attempts`；显式协议冲突会拒绝。
+这些默认值不为不受支持的启动器授予能力，也不修改已有冻结任务。
+
+Changing Backend in the webpage refreshes only the selected provider's model
+suggestions and option schema, retaining the draft without previewing or creating
+research. An exact built-in launcher spelling follows the new Backend; custom
+launcher arguments remain explicit and are validated separately.
+
+网页切换 Backend 时，只按需刷新所选后端的模型建议与选项，保留草稿，不预览或创建研究。
+精确使用内置默认拼写的启动命令随新后端切换；自定义启动参数保持显式声明，另行校验。
 
 | Field / 字段 | Default / 默认 | Meaning / 含义 |
 | --- | --- | --- |

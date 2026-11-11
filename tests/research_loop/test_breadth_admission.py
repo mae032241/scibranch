@@ -1,198 +1,191 @@
-"""Shared registered-call opportunities through real local subprocesses."""
+"""Current catalog admission keeps identity and scope without trial quotas.
+
+Accepted tables are explicit mechanical originals; no process or model runs.
+"""
 import copy
-import json
-from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import breadth, experiments as e
-from test_registered_experiments import managed
+from scidiscovery.research_loop import accepted_budget, accepted_search, breadth, contracts as c, search
 from execution_fixtures import execution_registry
 
 
-def combination(*,ambiguous=False,grant=None,baseline=None,prior_unknown=False):
-    rows=[dict(mechanism_ref=f'h001.m{index}',label='same' if ambiguous else label,source_step=1,
-        source_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),minimal_test='A distinguishable scientific prediction',status='pending')
-        for index,label in enumerate(('P','Q'),1)]
-    return dict(version=1,initial_calls=1,mechanisms=rows,
-        baseline=baseline or [dict(mechanism_ref=row['mechanism_ref'],accepted_count=0) for row in rows],
-        grant=grant,prior_unknown=prior_unknown)
+@pytest.fixture
+def catalog(tmp_path, monkeypatch):
+    root = tmp_path / 'instance'
+    summary = accepted_search.empty()
+    for number, role in enumerate(('W', 'H'), 1):
+        ref = f'{role.lower()}001.m{number}'
+        summary['table']['mechanisms'][ref] = dict(
+            mechanism_ref=ref, label='Same label', minimal_test='A discriminating observation',
+            status='pending', source_step=1, source_role=role,
+            source_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),
+            source_origin_identity=dict(goal_id='fixture'), ordinal=number, accepted_calls=number,
+            origin_ref=dict(goal_id='fixture', source_step=1, source_role=role, mechanism_ref=ref))
+        summary['table']['ordinals'].append(ref)
+    summary.update(mechanism_count=2, owed_count=1, current_h=1,
+        last_science=dict(step=1, role='W'), focus=dict(mechanism_ref='w001.m1', action='screen'))
+    head = dict(prefix=dict(version=1, cutoff=1), search=summary)
+    state = accepted_search.state(root, 2, head=head)
+    search._current_combination(root, state)
+    value = search._breadth(root, state, search.DEFAULT_POLICY, state['focus'])
+    job = dict(step=2, search=dict(breadth=value, focus=state['focus']), history=dict(prefix=head['prefix']))
+    c.write(root / 'jobs/002.json', job)
+    scope = dict(step=2, job_ref=c.record_ref(root / 'jobs/002.json'))
+    monkeypatch.setattr(accepted_budget, 'read', lambda selected: head)
+    return root, head, state, value, scope
 
 
-def configure(lane,value,**changes):
-    config=json.loads(lane.config.read_text());config.pop('execution_interface')
-    config.update(breadth=value,**changes)
-    lane.config.write_text(json.dumps(e.freeze(config,lane.executor,path=lane.config)))
+def test_repeated_calls_keep_exact_binding_without_initial_or_a_grant_quota(catalog):
+    _, head, _, value, scope = catalog
+    ref = head['search']['table']['ordinals'][0]
+    value['grant'] = dict(mechanism_ref=ref, source_a=1, source_a_ref=dict(path='/fixture/a.json'),
+        extra_calls=1, used_calls=1)
+    # The frozen task retains historical advice; it cannot grant execution.
+    root = catalog[0]
+    job = c.read(root / 'jobs/002.json'); job['search']['breadth'] = value
+    c.write(root / 'jobs/002.json', job)
+    accepted = []
+    for _ in range(3):
+        binding = breadth.admit(value, '1', scope, accepted)
+        assert binding['mechanism_ref'] == ref and binding['source_role'] == 'W'
+        assert binding['grant'] is None
+        assert breadth.check_binding(value, binding, scope) == binding
+        accepted.append(dict(mechanism_binding=binding))
+    assert head['search']['table']['mechanisms'][ref]['status'] == 'pending'
+
+
+@pytest.mark.parametrize('choice', [None, 'Same label', '01', '3'])
+def test_invalid_choice_reports_every_available_exact_number(catalog, choice):
+    _, _, _, value, scope = catalog
+    with pytest.raises(breadth.OpportunityRequired) as caught:
+        breadth.admit(value, choice, scope, [])
+    assert caught.value.reason == 'mechanism_choice_required'
+    assert caught.value.available_mechanisms == [dict(number='1', mechanism_ref='w001.m1'),
+        dict(number='2', mechanism_ref='h001.m2')]
+
+
+def test_unknown_original_blocks_every_new_mechanism_without_mutating_accepted_state(catalog):
+    _, head, _, value, scope = catalog
+    head['search']['opportunity_unknown_count'] = 1
+    before = copy.deepcopy(head)
+    for choice in ('1', '2'):
+        with pytest.raises(breadth.OpportunityRequired) as caught:
+            breadth.admit(value, choice, scope, [])
+        assert caught.value.reason == 'original_execution_unknown'
+        assert caught.value.available_mechanisms == []
+    assert head == before
+
+
+@pytest.mark.parametrize('changed', ['source_ref', 'source_role', 'job_ref', 'catalog_binding'])
+def test_accepted_binding_cannot_change_its_original_identity(catalog, changed):
+    _, _, _, value, scope = catalog
+    binding = breadth.admit(value, '1', scope, [])
+    forged = copy.deepcopy(binding)
+    forged[changed] = (dict(path='/another/original.json') if changed in {'source_ref', 'job_ref'}
+        else 'H' if changed == 'source_role' else dict(binding['catalog_binding'], ordinal=2))
+    with pytest.raises(ValueError):
+        breadth.admit(value, '1', scope, [dict(mechanism_binding=forged)])
+
+
+def test_task_advice_and_admission_share_available_numbers_without_reading_originals(catalog, monkeypatch):
+    root, head, state, value, scope = catalog
+    head['search']['table']['mechanisms']['h001.m2']['status'] = 'waived'
+    state['mechanisms']['h001.m2']['status'] = 'waived'
+    monkeypatch.setattr(search.configuration_updates, 'for_new_job', lambda *args: dict(search_policy=search.DEFAULT_POLICY))
+    def forbidden(*args, **kwargs):
+        pytest.fail('Produced task advice must not reload originals')
+    with monkeypatch.context() as no_io:
+        no_io.setattr(c, 'read', forbidden)
+        no_io.setattr(accepted_budget, 'read', forbidden)
+        bound = search.bind(root, 2, 'W', state=state)
+    assert bound['admission_advice'] == dict(available_mechanisms=[dict(number='1', mechanism_ref='w001.m1')],
+        omitted_count=0, focus_reason=None)
+    with pytest.raises(breadth.OpportunityRequired) as caught:
+        breadth.admit(value, '2', scope, [])
+    assert caught.value.reason == 'mechanism_waived'
+    assert caught.value.available_mechanisms == bound['admission_advice']['available_mechanisms']
 
 
 @pytest.fixture
-def lane(managed):
-    configure(managed,combination())
-    return managed
+def recorded_call(catalog, execution_registry):
+    import sys
+    from scidiscovery.research_loop import experiments, protocol
+
+    root, _, _, value, scope = catalog
+    scope = dict(scope, handoff_protocol=protocol.CURRENT, role='W',
+        execution_key=scope['job_ref'], mechanism_ref=None)
+    config = experiments.freeze(dict(admission=dict(version=1, mode='hard'),
+        record_dir=str(root / 'records'), scope=scope, breadth=value,
+        run_argv=[sys.executable], max_seconds=10), 'local_execution:command', path=root / 'config.json')
+    records = experiments.Records(config)
+    accepted = dict(call_id='exact-original', scope=config['scope'], parent=dict(candidate_id=None),
+        mechanism_binding=breadth.admit(value, '1', config['scope'], []))
+    path = records.root / 'calls/exact-original/accepted.json'
+    c.write(path, accepted)
+    assert records.accepted(accepted['call_id']) == accepted
+    return records, accepted, path
 
 
-def originals(lane):
-    return [json.loads(path.read_text()) for path in sorted(lane.records.glob('calls/*/accepted.json'))]
+def test_records_reject_changed_accepted_catalog_original(recorded_call):
+    from scidiscovery.research_loop import experiments
+
+    records, accepted, path = recorded_call
+    changed = copy.deepcopy(accepted)
+    changed['mechanism_binding']['source_ref'] = dict(path='/different/producer/result-identity.json')
+    c.write(path, changed)
+    original = path.read_bytes()
+    with pytest.raises(experiments.IntegrityError, match='scientific mechanism binding changed'):
+        records.accepted(accepted['call_id'])
+    assert path.read_bytes() == original
 
 
-def tree(root):
-    if not root.exists():return {}
-    return {str(path.relative_to(root)):(path.lstat().st_mode,path.read_bytes() if path.is_file() else None)
-        for path in [root,*root.rglob('*')]}
+def test_completed_publication_cannot_replace_accepted_mechanism(recorded_call):
+    from scidiscovery.research_loop import experiments
+
+    records, accepted, path = recorded_call
+    original = path.read_bytes()
+    changed = copy.deepcopy(accepted['mechanism_binding'])
+    changed['catalog_binding']['ordinal'] = 2
+    with pytest.raises(experiments.IntegrityError, match='receipt changed scientific mechanism'):
+        records.publish(accepted['call_id'], 'completed.json', dict(status='known_success', mechanism_binding=changed))
+    assert not (path.parent / 'completed.json').exists()
+    assert path.read_bytes() == original
+    records.publish(accepted['call_id'], 'completed.json', dict(status='known_success'))
+    completed_path = path.parent / 'completed.json'
+    completed = c.read(completed_path)
+    assert completed['mechanism_binding'] == accepted['mechanism_binding']
+    assert records.state(accepted['call_id']) == 'succeeded'
+    completed['scope'] = dict(completed['scope'], job_ref=dict(path='/different/jobs/002.json'))
+    c.write(completed_path, completed)
+    corrupted = completed_path.read_bytes()
+    with pytest.raises(experiments.IntegrityError, match='Completed execution binding changed'):
+        records.state(accepted['call_id'])
+    assert completed_path.read_bytes() == corrupted and path.read_bytes() == original
 
 
-def run(lane,name,mechanism='h001.m1',*,failed=False,expected=0):
-    script=lane.source(name,failed=failed)
-    return lane.cli('run','--script',script,'--mechanism',mechanism,'--new-plan',expected=expected)
+def test_forged_native_attempt_cannot_acquire_new_execution_permission(tmp_path, execution_registry):
+    import sys
+    from scidiscovery.research_loop import controller, execution, experiments
 
-
-def rejected(lane,script,mechanism='h001.m1'):
-    before=tree(lane.records)
-    result=lane.cli('run','--script',script,'--mechanism',mechanism,'--new-plan',expected=2)
-    assert result['status']=='unresolved' and result['accepted'] is False
-    assert result['note']=='Choose an available authorized H mechanism before another request'
-    assert tree(lane.records)==before
-    return result
-
-
-@pytest.mark.process_e2e
-def test_first_branch_second_call_waits_for_another_branch_then_shared_search_continues(lane):
-    first=run(lane,'P-initial')
-    directory=lane.records/'calls'/first['call_id']
-    assert (directory/'process.json').is_file() and (directory/'completed.json').is_file()
-    original=originals(lane)[0]
-    assert original['scope']['mechanism_ref'] is None
-    assert original['mechanism_binding']==dict(mechanism_ref='h001.m1',source_step=1,source_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),
-        job_ref=original['scope']['job_ref'],grant=None)
-    rejected(lane,lane.source('P-extra'))
-    other=run(lane,'Q-initial','h001.m2')
-    assert other['status']=='known_success'
-    third=run(lane,'P-after-Q')
-    assert third['status']=='known_success'
-    assert [item['mechanism_binding']['mechanism_ref'] for item in originals(lane)]==['h001.m1','h001.m2','h001.m1']
-    assert len(list(lane.records.glob('calls/*/process.json')))==3
-    # Opportunity records never acquire an authored scientific screened verdict.
-    assert all('screened' not in item for item in originals(lane))
-
-
-def test_large_combination_preserves_initial_opportunities_and_exact_extra_call_quota():
-    value = combination()
-    value['mechanisms'] = [dict(value['mechanisms'][0], mechanism_ref=f'h001.m{index}', label=f'Mechanism {index}')
-        for index in range(1, 130)]
-    value['baseline'] = [dict(mechanism_ref=row['mechanism_ref'], accepted_count=0) for row in value['mechanisms']]
-    value['initial_calls'] = 2
-    scope = dict(job_ref=dict(path='/fixture/jobs/002.json'))
-    accepted = []
-    for _ in range(2):
-        binding = breadth.admit(value, 'h001.m129', scope, accepted)
-        assert breadth.check_binding(value, binding, scope) == binding
-        accepted.append(dict(mechanism_binding=binding))
-    with pytest.raises(breadth.OpportunityRequired, match='initial call opportunities'):
-        breadth.admit(value, 'h001.m129', scope, accepted)
-    assert breadth.admit(value, 'h001.m1', scope, accepted)['grant'] is None
-    value['grant'] = dict(mechanism_ref='h001.m129', source_a=3, source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'), extra_calls=1, used_calls=0)
-    binding = breadth.admit(value, 'h001.m129', scope, accepted)
-    assert binding['grant'] == dict(source_a=3, source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'))
-    accepted.append(dict(mechanism_binding=binding))
-    with pytest.raises(breadth.OpportunityRequired, match='initial call opportunities'):
-        breadth.admit(value, 'h001.m129', scope, accepted)
-    value['prior_unknown'] = True
-    with pytest.raises(breadth.OpportunityRequired, match='original unknown execution'):
-        breadth.admit(value, 'h001.m1', scope, accepted)
-
-
-@pytest.mark.process_e2e
-def test_failed_call_changed_script_and_forged_native_attempt_do_not_reset_opportunity(lane):
-    first=run(lane,'failed-P',failed=True,expected=1)
-    assert first['status']=='known_failed'
-    original=copy.deepcopy(originals(lane)[0])
-    rejected(lane,lane.source('different-script-P'))
-    original_config=lane.config.read_bytes()
-    configure(lane,combination(),native_attempt=dict(number=1,execution_key=dict(path='/fixture/native-evidence/002/continuations/001/native-intent.json')))
-    before=tree(lane.records)
-    invalid=lane.cli('run','--script',lane.source('unbound-repair-P'),'--mechanism','h001.m1','--new-plan',expected=3)
-    assert invalid['status']=='integrity_error' and invalid['note']=='Execution original integrity check failed; preserve originals and report this call'
-    assert tree(lane.records)==before
-    # A standalone fixture cannot invent a repair's native originals. Restoring
-    # the exact original configuration must still retain its consumed opportunity.
-    lane.config.write_bytes(original_config)
-    rejected(lane,lane.source('restored-original-P'))
-    assert originals(lane)==[original]
-    assert len(list(lane.records.glob('calls/*/process.json')))==1
-    assert run(lane,'Q-after-failed-P','h001.m2')['status']=='known_success'
-
-
-@pytest.mark.process_e2e
-def test_lost_terminal_originals_cannot_be_replayed_under_any_mechanism(lane):
-    result=run(lane,'completed-P')
-    assert result['status']=='known_success'
-    directory=lane.records/'calls'/result['call_id']
-    # Inject loss of the actual call's terminal originals; retained acceptance
-    # and process evidence must not authorize another command under P or Q.
-    (directory/'terminal.json').unlink()
-    (directory/'completed.json').unlink()
-    before=tree(lane.records)
-    assert lane.cli('query','--call-id',result['call_id'])['state']=='unknown'
-    collected=lane.cli('collect','--call-id',result['call_id'],expected=3)
-    assert collected['status']=='integrity_error' and collected['accepted'] is True
-    assert collected['call_id']==result['call_id']
-    assert tree(lane.records)==before
-    for mechanism in ('h001.m1','h001.m2'):
-        retry=lane.source('retry-'+mechanism)
-        reply=lane.cli('run','--script',retry,'--mechanism',mechanism,'--new-plan',expected=3)
-        assert reply['status']=='integrity_error' and reply['accepted'] is True
-        assert reply['call_id']==result['call_id'] and tree(lane.records)==before
-    assert len(originals(lane))==len(list(lane.records.glob('calls/*/process.json')))==1
-
-
-@pytest.mark.process_e2e
-def test_exact_a_extra_one_call_is_consumed_once_and_queries_collect_remain_available(lane):
-    grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'),extra_calls=1,used_calls=0)
-    baseline=[dict(mechanism_ref='h001.m1',accepted_count=1),dict(mechanism_ref='h001.m2',accepted_count=0)]
-    configured=combination(grant=grant,baseline=baseline)
-    configure(lane,configured)
-    result=run(lane,'A-extra-P')
-    binding=originals(lane)[0]['mechanism_binding']
-    assert binding['grant']==dict(source_a=3,source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'))
-    assert binding['mechanism_ref']=='h001.m1' and binding['source_ref']==dict(path='/fixture/native-evidence/001/result-identity.json')
-    rejected(lane,lane.source('do-not-reuse-A-extra'))
-    # Re-loading the same frozen grant does not erase its accepted original.
-    configure(lane,configured)
-    rejected(lane,lane.source('same-A-new-script'))
-    assert lane.cli('query','--call-id',result['call_id'])['state']=='succeeded'
-    assert lane.cli('lookup','--call-id',result['call_id'])['state']=='succeeded'
-    collected=lane.cli('collect','--call-id',result['call_id'])
-    assert collected['status']=='collected' and collected['outputs']
-    assert all(e.proof(item['local_path'])['size_bytes']==item['size_bytes'] for item in collected['outputs'])
-    assert len(originals(lane))==len(list(lane.records.glob('calls/*/process.json')))==1
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('kind',['missing','label','ambiguous','unauthorized'])
-def test_scientific_mechanism_requires_exact_ref_before_accept_or_process(lane,kind):
-    if kind=='ambiguous':configure(lane,combination(ambiguous=True))
-    source=lane.source('unbound-'+kind)
-    args=['run','--script',source,'--new-plan']
-    if kind!='missing':args+=['--mechanism','same' if kind=='ambiguous' else 'P' if kind=='label' else 'not-authorized']
-    reply=lane.cli(*args,expected=2)
-    assert reply['status']=='caller_error' and reply['accepted'] is False
-    assert 'exact mechanism_ref listed in this task' in reply['note']
-    assert 'call_id' not in reply
-    assert originals(lane)==[] and not list(lane.records.glob('calls/*/process.json'))
-    assert not list(lane.records.glob('.prepared-*'))
-    assert not list(lane.records.rglob('starts.log'))
-
-
-@pytest.mark.process_e2e
-def test_completed_receipt_cannot_change_exact_a_authorization(lane):
-    grant=dict(mechanism_ref='h001.m1',source_a=3,source_a_ref=dict(path='/fixture/native-evidence/003/result-identity.json'),extra_calls=1,used_calls=0)
-    configure(lane,combination(grant=grant,baseline=[dict(mechanism_ref='h001.m1',accepted_count=1),
-        dict(mechanism_ref='h001.m2',accepted_count=0)]))
-    result=run(lane,'exact-A-original')
-    path=lane.records/'calls'/result['call_id']/'completed.json'
-    receipt=json.loads(path.read_text());receipt['mechanism_binding']['grant']['source_a_ref']=dict(path='/fixture/native-evidence/005/result-identity.json')
-    path.chmod(0o600)  # Explicit host corruption of a sealed receipt.
-    path.write_text(json.dumps(receipt))
-    reply=lane.cli('query','--call-id',result['call_id'],expected=3)
-    assert reply['status']=='integrity_error'
-    assert len(list(lane.records.glob('calls/*/process.json')))==1
+    public = tmp_path / 'public'; public.mkdir()
+    objective = public / 'objective.md'; objective.write_text('Preserve the original W execution owner')
+    root = tmp_path / 'instance'
+    controller.prepare(root, objective, public, ['never-call-a-model'], model='fixture',
+        reasoning_effort='high', max_tokens=1000, max_seconds=60, max_steps=3, search_policy=None)
+    c.build_job(root, 1, 'W', [])
+    record = execution.record(root, 1)
+    intent_path = record / 'native-intent.json'
+    c.write(intent_path, dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_native(root, 1, record, c.read(intent_path))
+    config = experiments.configure(root, 1, 'local_execution:command',
+        dict(run_argv=[sys.executable], max_seconds=10), c.workspace(root, 1) / 'work/experiment-config.json')
+    experiments._require_new_execution(config)  # The active original passes this attempt-identity gate.
+    originals = [intent_path, root / 'jobs/001.json', root / accepted_budget.HEAD]
+    before = {path: path.read_bytes() for path in originals}
+    forged = copy.deepcopy(config)
+    forged['native_attempt'] = dict(number=1, execution_key=dict(path=str(record / 'continuations/001/native-intent.json')))
+    with pytest.raises(experiments.IntegrityError, match='exact accepted native attempt'):
+        experiments._require_new_execution(forged)
+    assert {path: path.read_bytes() for path in originals} == before
+    assert experiments.Records(config).calls() == []

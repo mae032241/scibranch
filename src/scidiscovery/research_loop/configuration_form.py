@@ -334,7 +334,7 @@ def _skill_picker(fields, document, *, fixed_sets=None):
             raise ValueError('研究技能：请选择支持的角色分配方式')
 
 
-def parse(fields, *, base, _fixed_skill_sets=None):
+def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
     """Parse only typed visible controls, retaining all extra imported data."""
     selected_backend=_single(fields,'cfg.agent.backend') or backends.DEFAULT_BACKEND
     rendered_backend=_single(fields,'rendered_backend',selected_backend)
@@ -489,6 +489,14 @@ def parse(fields, *, base, _fixed_skill_sets=None):
         raise ValueError('结构字段没有有效的父对象')
     _skill_picker(fields, result['document'], fixed_sets=_fixed_skill_sets)
     if selected_backend!=rendered_backend:
+        try:
+            previous_default=backends.provider(rendered_backend).default_launcher()
+        except ValueError:
+            previous_default=None
+        if previous_default is not None and _get(result['document'],'agent.launcher')==previous_default:
+            # An exact built-in spelling follows the newly selected provider.
+            # Custom argv remains an explicit declaration for validation.
+            _delete(result['document'],'agent.launcher')
         # Native extensions belong to the provider whose controls produced
         # them. Switching renders the new schema before any preparation call.
         native_drafts[rendered_backend]=_get(result['document'],'agent.native')
@@ -500,7 +508,8 @@ def parse(fields, *, base, _fixed_skill_sets=None):
             # Regenerate the text so the previous provider's options leave it.
             del result['advanced_text']
             result.pop('advanced_fixed', None)
-        errors.append('后端已切换；原生设置按原后端保留。请检查当前后端的设置后再次提交。')
+        if not refresh_backend:
+            errors.append('后端已切换；原生设置按原后端保留。请检查当前后端的设置后再次提交。')
     elif native_drafts:
         result['native_drafts']=native_drafts
     if errors:
@@ -508,12 +517,13 @@ def parse(fields, *, base, _fixed_skill_sets=None):
     return result
 
 
-def parse_edit(fields, *, base, configuration):
+def parse_edit(fields, *, base, configuration, refresh_backend=False):
     """Keep instance originals and application settings outside node editing."""
     if any(name in {'task_mode', 'task_text'} for name in fields):
         raise ValueError('任务原件不能在研究配置中修改')
     try:
-        result = parse(fields, base=base, _fixed_skill_sets=_get(configuration, 'skills.sets', {}))
+        result = parse(fields, base=base, _fixed_skill_sets=_get(configuration, 'skills.sets', {}),
+            refresh_backend=refresh_backend)
     except FormError as error:
         result = error.draft
         failure = error
@@ -629,14 +639,20 @@ def _fixed_values(raw):
     return value
 
 
+def load_catalogs(draft):
+    """Acquire optional metadata only for the draft's exact selected Backend."""
+    document=draft['document']
+    backend=_get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND
+    return {backend:model_catalog.load(backend,launcher=_get(document,'agent.launcher'),
+        native=_get(document,'agent.native'),base=draft['base'])}
+
+
 def render(draft, *, edit=False, catalogs=None):
     """Render a guided form; hidden steps retain successful, typed controls."""
     document = draft['document']
     current_backend = _get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND
     form_fields=_fields(current_backend)
-    catalogs = {current_backend: model_catalog.load(current_backend,
-        launcher=_get(document, 'agent.launcher'), native=_get(document, 'agent.native'),
-        base=draft['base'])} if catalogs is None else catalogs
+    catalogs = load_catalogs(draft) if catalogs is None else catalogs
     short_hints = {
         'research.root': '服务器上一个尚不存在的目录，用来保存这项研究的全部记录。',
         'research.public_root': '服务器上已存在的目录，研究只能读取其中的文件；没有材料也需要一个空目录。',
@@ -887,6 +903,12 @@ def render(draft, *, edit=False, catalogs=None):
         advanced_note += ('<details class="native-options"><summary>当前后端可用的原生选项（写在 <code>[agent.native]</code> 下）</summary><ul class="note">'
             + ''.join('<li><code>'+escape(field.path.removeprefix('agent.native.'))+'</code>：'+escape(field.description or field.label)+'</li>' for field in native_fields)
             + '</ul></details>')
+    resume_defaults=(backends.provider(current_backend).resume_policy_defaults()
+        if current_backend in backends.names() else None)
+    if resume_defaults:
+        advanced_note += ('<p class="note" data-resume-protocol="'+escape(resume_defaults['protocol'],quote=True)+'">'
+            '默认恢复协议：<code>'+escape(resume_defaults['protocol'])+'</code>，由所选后端自动填写。'
+            '只调整恢复次数或重试选项时无需填写协议；显式协议仍会校验，启动器支持情况在检查配置时验证。</p>')
     if 'advanced_text' in draft:
         advanced_text, fixed = draft['advanced_text'], draft.get('advanced_fixed', [])
     else:
@@ -1025,6 +1047,13 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (event.target === backendSelect) {
+      const form = backendSelect.closest('form');
+      if (form && ['research-config-form','research-config-edit-form'].includes(form.id)) {
+        const refresh = document.createElement('button');
+        refresh.type = 'submit'; refresh.name = 'mode'; refresh.value = 'refresh';
+        refresh.hidden = true; refresh.formNoValidate = true;
+        form.append(refresh); form.requestSubmit(refresh); return;
+      }
       document.querySelectorAll('[data-catalog-note]').forEach(note => { note.hidden = note.dataset.catalogNote !== backend(); });
       all();
     }

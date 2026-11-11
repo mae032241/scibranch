@@ -1,9 +1,39 @@
 """Exact lifecycle handoffs through production collectors, without models."""
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, native, runtime
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, native, runtime
 from test_final_a_completion_contract import complete
-from test_native_transport_stall import _scene
+from test_native_transport_stall import _scene as native_scene
+
+
+def _scene(tmp_path, monkeypatch):
+    root, record = native_scene(tmp_path, monkeypatch)
+    accepted_budget.accept_native(root, 1, record, c.read(record/'native-intent.json'))
+    return root, record
+
+
+def interrupted_original(tmp_path, monkeypatch):
+    from test_reboot_reentry import interrupted_instance
+    from pathlib import Path
+    write = c.write
+    def publish_intent(path, value):
+        result = write(path, value)
+        path = Path(path)
+        if path.name == 'native-intent.json' and path.parent.name == '001':
+            # The closed-clock fixture records ten consumed seconds on its old
+            # boot. Accept the original there, before returning to this boot.
+            root = path.parents[2]
+            started = c.read(root/'host-started.json')
+            stamp = dict(started, at_unix=started['at_unix']+10,
+                at_boottime=started['at_boottime']+10)
+            with monkeypatch.context() as original_clock:
+                original_clock.setattr(budget, 'clock_stamp', lambda: stamp)
+                accepted_budget.accept_native(root, 1, path.parent, value)
+        return result
+    with monkeypatch.context() as publication:
+        publication.setattr(c, 'write', publish_intent)
+        root, saved = interrupted_instance(tmp_path, monkeypatch, closed_clock=True)
+    return root, saved
 
 
 @pytest.mark.parametrize('reason', ['wall_limit', 'token_limit'])
@@ -11,7 +41,7 @@ from test_native_transport_stall import _scene
 def test_prelaunch_budget_refusal_reaches_final_with_original_facts(tmp_path, monkeypatch, reason, entry):
     root, record = _scene(tmp_path, monkeypatch)
     original_intent = (record / 'native-intent.json').read_bytes()
-    snapshot = budget.snapshot
+    snapshot = budget._snapshot
 
     def exhausted(*args, **kwargs):
         value = dict(snapshot(*args, **kwargs))
@@ -22,7 +52,7 @@ def test_prelaunch_budget_refusal_reaches_final_with_original_facts(tmp_path, mo
         pytest.fail('A pre-submission refusal cannot launch native work')
 
     with monkeypatch.context() as patch:
-        patch.setattr(budget, 'snapshot', exhausted)
+        patch.setattr(budget, '_snapshot', exhausted)
         patch.setattr(native.subprocess, 'Popen', forbidden)
         native.run_native(root, 1)
     outcome = c.read(record / 'native-outcome.json')
@@ -99,20 +129,21 @@ def test_incomplete_or_unknown_submission_never_becomes_budget_refusal(tmp_path,
 
 def test_accepted_reentry_prelaunch_refusal_reaches_final_without_refunding_original(tmp_path, monkeypatch):
     from scidiscovery.research_loop import continuation
-    from test_reboot_reentry import interrupted_instance
-    root, saved = interrupted_instance(tmp_path, monkeypatch, closed_clock=True)
+    root, saved = interrupted_original(tmp_path, monkeypatch)
     monkeypatch.setattr(runtime, 'start', lambda *args: None)
-    accepted = continuation.reenter(root, 1)
+    with controller._writer(root):
+        accepted = continuation.reenter(root, 1, explicit=True, expected_attempt=0,
+            native_intent_ref=c.record_ref(execution.origin(root, 1)/'native-intent.json'), new_context=True)
     refused = execution.record(root, 1)
     assert accepted['budget_slice']['previous_tokens'] == 14
-    snapshot = budget.snapshot
+    snapshot = budget._snapshot
 
     def exhausted(*args, **kwargs):
         value = dict(snapshot(*args, **kwargs));value['seconds_remaining'] = 0.
         return value
 
     with monkeypatch.context() as patch:
-        patch.setattr(budget, 'snapshot', exhausted)
+        patch.setattr(budget, '_snapshot', exhausted)
         patch.setattr(native.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('Refused reentry cannot submit'))
         native.run_native(root, 1, 1)
     stopped = budget.stopped_report_original(root, 1)
@@ -141,10 +172,11 @@ def test_accepted_reentry_prelaunch_refusal_reaches_final_without_refunding_orig
 
 def test_prelaunch_refusal_does_not_hide_an_unknown_earlier_attempt(tmp_path, monkeypatch):
     from scidiscovery.research_loop import continuation
-    from test_reboot_reentry import interrupted_instance
-    root, _ = interrupted_instance(tmp_path, monkeypatch, closed_clock=True)
+    root, _ = interrupted_original(tmp_path, monkeypatch)
     monkeypatch.setattr(runtime, 'start', lambda *args: None)
-    continuation.reenter(root, 1)
+    with controller._writer(root):
+        continuation.reenter(root, 1, explicit=True, expected_attempt=0,
+            native_intent_ref=c.record_ref(execution.origin(root, 1)/'native-intent.json'), new_context=True)
     record = execution.record(root, 1)
     c.write(record / 'usage.json', dict(input_tokens=0, cached_input_tokens=0, output_tokens=0))
     c.write(record / 'native-outcome.json', dict(returncode=None, native_started=False, stop_reason='wall_limit',

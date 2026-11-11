@@ -14,9 +14,9 @@ def accepted_comparison(*, compared=('h001.m4', 'h001.m3')):
         identity = dict(goal_id='synthetic-r2', step=1)
         summary['table']['mechanisms'][ref] = dict(
             label=ref, minimal_test='Compare matched target conditions.', status='screened',
-            source_h=1, source_h_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),
+            source_step=1, source_role='H', source_ref=dict(path='/fixture/native-evidence/001/result-identity.json'),
             source_origin_identity=identity, ordinal=number, accepted_calls=1,
-            origin_ref=dict(goal_id='synthetic-r2', source_h=1, mechanism_ref=ref))
+            origin_ref=dict(goal_id='synthetic-r2', source_step=1, source_role='H', mechanism_ref=ref))
         summary['table']['ordinals'].append(ref)
     summary.update(mechanism_count=5, current_h=1, last_science=dict(step=3, role='A'),
         focus=dict(mechanism_ref='h001.m4', action='improve'),

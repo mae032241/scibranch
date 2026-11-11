@@ -278,7 +278,7 @@ def initialize(root, settings, *, search_seed, search_ref, identity_root=None,
 
 
 def _validate_budget_transition(state, event):
-    """Validate the one pending amendment from supplied facts, without reads.
+    """Validate a pending budget transition from supplied facts, without reads.
 
     Redo head/index updates are effects of the declaration, not an independent
     authority to change ceilings, historical grants, or retained consumption.
@@ -288,6 +288,21 @@ def _validate_budget_transition(state, event):
     if event['kind'] != 'budget_amend':
         if owned.intersection(updates):
             raise ValueError('Budget ceiling updates require a budget amendment')
+        if event['kind'] == 'closeout_resume' and 'current_job' in updates:
+            current, begin = state['current_job'], state['closeout']
+            reference = dict(path=str(Path(state['logical_root'])/'control-ledger'/f'{event["seq"]:06d}.json'))
+            expected = dict(closeout=None, final_return=None, current_job=None,
+                resume=dict(source_final=event.get('source_final'), first_step=event.get('first_step'),
+                    seq=event['seq'], kind=event['kind'], ref=reference))
+            if (begin is None or begin['mode'] != 'final' or current is None
+                    or current['step'] != begin['first_step'] or current['role'] != 'A'
+                    or current['job_ref'] != dict(path=str(Path(state['logical_root'])/'jobs'/f'{begin["first_step"]:03d}.json'))
+                    or current['status'] != 'prepared' or current['native_record'] is not None
+                    or state['current_native'] is not None
+                    or event.get('source_final') != dict(seq=begin['seq'], record=begin['ref'])
+                    or type(event.get('first_step')) is not int or event['first_step'] <= current['step']
+                    or updates != expected or event['index_updates'] or event.get('control_files')):
+                raise ValueError('Normal resume can release only its exact unstarted FINAL job')
         return
     for limits, expected_keys in (
             (event.get('before'), {'max_tokens', 'max_seconds'}),
@@ -499,6 +514,13 @@ def append_budget_event(root, events, *, resource_origin=None, **fields):
     elif kind == 'closeout_resume':
         updates.update(closeout=None, final_return=None,
             resume=dict(fields, seq=state['seq']+1, kind=kind, ref=ref))
+        current, begin = state['current_job'], state['closeout']
+        if (begin is not None and begin['mode'] == 'final' and current is not None
+                and current['step'] == begin['first_step'] and current['role'] == 'A'
+                and current['job_ref'] == dict(path=str(Path(state['logical_root'])/'jobs'/f'{begin["first_step"]:03d}.json'))
+                and current['status'] == 'prepared' and current['native_record'] is None
+                and state['current_native'] is None):
+            updates['current_job'] = None
     elif kind == 'final_a_return':
         updates['final_return'] = dict(fields, seq=state['seq']+1, kind=kind, ref=ref)
     elif kind == 'action_intent':

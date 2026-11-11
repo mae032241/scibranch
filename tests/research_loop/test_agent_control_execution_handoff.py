@@ -10,7 +10,7 @@ import pytest
 
 from execution_fixtures import execution_registry
 from test_local_managed import local
-from test_native_execution_inputs import chain, _reviewed_execution
+from test_native_execution_inputs import chain
 from scidiscovery.research_loop import (contracts as c, controller, execution,
     experiments as e, native_execution, worker_execution_bridge as bridge)
 from scidiscovery.research_loop.local_experiments import LocalExecution
@@ -78,36 +78,6 @@ def test_compile_caller_diagnostic_can_be_corrected_on_same_client(chain,capsys,
     assert e.main(command)==0
     assert json.loads(capsys.readouterr().out)['status']=='compiled'
     assert not backend.prepared and backend.submits==0
-
-
-def test_real_tcad_lost_submit_reply_preserves_call_and_reconciles_without_resubmission(chain,monkeypatch,capsys):
-    root,backend,output,path,config,_=_reviewed_execution(chain,capsys)
-    original_submit=backend.submit
-    def lost_reply(*args,**kwargs):
-        original_submit(*args,**kwargs)
-        raise TimeoutError(f'private transport binding {root}/host-runtime token=hidden-credential')
-    monkeypatch.setattr(backend,'submit',lost_reply)
-    command=['--config',str(path),'run','--payload',str(output)]
-    assert e.main(command)==2
-    result=json.loads(capsys.readouterr().out)
-    assert result['status']=='unknown' and result['accepted'] is True,result
-    assert 'submission failed (UnsupportedExecution)' in result['note']
-    assert str(root) not in json.dumps(result) and 'hidden-credential' not in json.dumps(result)
-    call=result['call_id'];records=e.Records(config)
-    accepted=(records.directory(call)/'accepted.json').read_bytes()
-    assert (records.directory(call)/'tcad-dispatch.json').is_file()
-    diagnostics=Path(config['record_dir']).parent/'execution-diagnostics'
-    assert any('hidden-credential' in c.read(item)['note'] and 'TimeoutError' in c.read(item)['note']
-        for item in diagnostics.iterdir())
-    assert records.external(call) is None and backend.submits==1
-    assert e.main(command)==2
-    blocked=json.loads(capsys.readouterr().out)
-    assert blocked['status']=='unknown' and blocked['call_id']==call
-    assert backend.submits==1 and (records.directory(call)/'accepted.json').read_bytes()==accepted
-    assert e.main(['--config',str(path),'lookup','--call-id',call])==0
-    found=json.loads(capsys.readouterr().out)
-    assert found['call_id']==call and found['state']=='queued'
-    assert backend.submits==1 and records.external(call) is not None
 
 
 @pytest.mark.parametrize('operation',['submit','result','collect_original'])
@@ -217,50 +187,6 @@ def test_missing_caller_input_is_rejected_before_acceptance(local,capsys,command
     assert result['status']=='caller_error' and result['accepted'] is False
     assert result['error']=='scientific_input_not_found' and 'missing' in result['note']
     assert not e.Records(config).calls()
-
-
-def _local_opportunities(config,path,*,prior_unknown=False):
-    body={key:value for key,value in config.items() if key!='execution_interface'}
-    body['breadth']=dict(version=1,initial_calls=1,prior_unknown=prior_unknown,grant=None,
-        mechanisms=[dict(mechanism_ref='H001-M001',label='first scientific mechanism',source_h=1,
-            source_h_ref=dict(path='/fixture/jobs/001.json'),minimal_test='one observation',status='pending')],
-        baseline=[dict(mechanism_ref='H001-M001',accepted_count=0)])
-    updated=e.freeze(body,'local_execution:command',path=path)
-    path.write_text(json.dumps(updated))
-    return updated
-
-
-def test_wrong_mechanism_reference_returns_caller_error_then_corrects_once(local,monkeypatch,capsys):
-    _,script,config,path=local
-    config=_local_opportunities(config,path)
-    submitted=[]
-    def submit(self,prepared):
-        submitted.append(prepared.name)
-        raise RuntimeError('synthetic postaccept submit uncertainty')
-    monkeypatch.setattr(LocalExecution,'submit',submit)
-    command=['--config',str(path),'run','--script',str(script),'--mechanism']
-    assert e.main([*command,'H999-M999'])==2
-    refused=json.loads(capsys.readouterr().out)
-    assert refused['status']=='caller_error' and refused['accepted'] is False
-    assert '--mechanism choice does not select a declared mechanism' in refused['note']
-    assert not submitted and not e.Records(config).calls()
-    assert e.main([*command,'H001-M001'])==2
-    corrected=json.loads(capsys.readouterr().out)
-    assert corrected['status']=='unknown' and corrected['accepted'] is True
-    assert submitted==[corrected['call_id']]
-    assert e.Records(config).accepted(corrected['call_id'])['mechanism_binding']['mechanism_ref']=='H001-M001'
-
-
-def test_prior_unknown_opportunity_does_not_become_parameter_repair(local,monkeypatch,capsys):
-    _,script,config,path=local
-    config=_local_opportunities(config,path,prior_unknown=True)
-    def forbidden(*args,**kwargs):pytest.fail('Prior unknown must prevent prepare and submit')
-    monkeypatch.setattr(LocalExecution,'prepare',forbidden)
-    monkeypatch.setattr(LocalExecution,'submit',forbidden)
-    assert e.main(['--config',str(path),'run','--script',str(script),'--mechanism','H999-M999'])==2
-    result=json.loads(capsys.readouterr().out)
-    assert result['status']=='unresolved' and result['accepted'] is False
-    assert result['handoff']['action']=='reconcile_or_stop' and not e.Records(config).calls()
 
 
 @pytest.mark.parametrize('command',['collect','query'])

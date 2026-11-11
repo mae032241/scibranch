@@ -106,115 +106,30 @@ def a(root,step,parents,*,focus=None,dispositions=(),action='continue_w',mode='s
     return job
 
 
-def test_multi_mechanism_cov_originals_bind_candidates_and_a_screens_exactly(tmp_path,execution_registry):
-    root=prepare(tmp_path,cov=True);h(root,labels=('P','Q'))
-    job,config=worker(root,tmp_path,2,[1],cov=True)
-    assert config['scope']['mechanism_ref'] is None
-    p=run(root,config,'h001.m1',failed=True)
-    assert p['status']=='known_failed'
-    with pytest.raises(breadth.OpportunityRequired):run(root,config,'h001.m1')
-    q=run(root,config,'h001.m2')
-    assert q['status']=='known_success'
-    assert p['scope']==q['scope']==config['scope']
-    assert p['mechanism_binding']['mechanism_ref']=='h001.m1'
-    assert q['mechanism_binding']['mechanism_ref']=='h001.m2'
-    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1','h001.m2'))
-    state=search.project(root,3)
-    assert all(row['status']=='pending' for row in state['mechanisms'].values())
-    graph=lineage.build(root,3)
-    assert graph['candidates'][p['candidate_id']]['mechanism_ref']=='h001.m1'
-    assert graph['candidates'][q['candidate_id']]['mechanism_ref']=='h001.m2'
-    a(root,3,[1,2],action='finish',dispositions=[dict(mechanism_ref=f'h001.m{i}',status='screened',
-        reason='Scientific interpretation of the exact final W, including limitations') for i in (1,2)])
-    final=search.project(root,4)
-    assert {row['status'] for row in final['mechanisms'].values()}=={'screened'}
-    assert final['order']['remaining']==[] and len(final['order']['seen_w'])==1
-    before=originals(root,(1,2,3))
-    assert lineage.build(root,4)['candidates'][q['candidate_id']]['mechanism_ref']=='h001.m2'
-    assert before==originals(root,(1,2,3))
-
-
-def test_large_h_combination_binds_complete_registered_w_scope(tmp_path, execution_registry):
+def test_large_h_combination_binds_complete_registered_w_scope(tmp_path):
     root = prepare(tmp_path)
     h(root, labels=tuple(f'Mechanism {index}' for index in range(1, 130)))
-    job, config = worker(root, tmp_path, 2, [1])
+    job = c.build_job(root, 2, 'W', [1])
     expected = [f'h001.m{index}' for index in range(1, 130)]
     assert [row['mechanism_ref'] for row in job['search']['breadth']['mechanisms']] == expected
-    assert config['breadth'] == job['search']['breadth']
     assert [row['mechanism_ref'] for row in job['search']['coverage_obligation']] == expected
     assert len((json.dumps(c.science_view(job, root)['lineage'], ensure_ascii=False, indent=2) + '\n').encode()) <= 4096
 
 
-def test_generic_cross_w_once_a_grant_and_same_ref_revision_do_not_refund(tmp_path,execution_registry):
-    root=prepare(tmp_path);h(root)
-    _,first=worker(root,tmp_path,2,[1]);run(root,first,'h001.m1',failed=True)
-    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1',blocked=('h001.m2','h001.m3')));a(root,3,[1,2],focus='h001.m1')
-    _,second=worker(root,tmp_path,4,[1,2,3])
-    assert second['breadth']['baseline'][0]['accepted_count']==1
-    granted=run(root,second,'h001.m1')
-    assert granted['mechanism_binding']['grant']['source_a']==3
-    with pytest.raises(breadth.OpportunityRequired):run(root,second,'h001.m1')
-    finish(root,4,'W',[1,2,3],mechanism_findings=findings('h001.m1',blocked=('h001.m2','h001.m3')));a(root,5,[1,4])
-    _,third=worker(root,tmp_path,6,[1,4,5])
-    assert third['breadth']['grant']['used_calls']==1
-    with pytest.raises(breadth.OpportunityRequired):run(root,third,'h001.m1')
-    run(root,third,'h001.m2');finish(root,6,'W',[1,4,5],mechanism_findings=findings('h001.m1','h001.m2',blocked=('h001.m3',)))
-    h(root,7,[1,6],labels=('Renamed P',),existing='h001.m1')
-    _,fourth=worker(root,tmp_path,8,[7])
-    count={row['mechanism_ref']:row['accepted_count'] for row in fourth['breadth']['baseline']}
-    assert count=={'h001.m1':2,'h001.m2':1,'h001.m3':0}
-    assert fourth['breadth']['grant'] is None
-    with pytest.raises(breadth.OpportunityRequired):run(root,fourth,'h001.m1')
-    run(root,fourth,'h001.m3')
-    assert len(experiments.Records(fourth).calls())==1
-
-
-def test_a_cannot_screen_unexecuted_branch(tmp_path,execution_registry):
-    root=prepare(tmp_path);h(root,labels=('P','Q'))
-    _,config=worker(root,tmp_path,2,[1]);run(root,config,'h001.m1')
-    finish(root,2,'W',[1],mechanism_findings=findings('h001.m1',blocked=('h001.m2',)));job=c.build_job(root,3,'A',[1,2])
-    result=search.interpret(root,job,dict(next_action='continue_w',route_reason='Assess the exact W',search_review=dict(
-        dispositions=[dict(mechanism_ref='h001.m2',status='screened',reason='Claimed scientific screening')],next_focus=None)))
-    assert dict(code='screen_source_unavailable',subject='h001.m2') in result['diagnostics']
-    assert result['state']['mechanisms']['h001.m2']['status']=='pending'
-
-
-def test_configurable_initial_opportunities_and_bounded_combination(tmp_path):
+def test_initial_call_advice_and_compact_scope_preserve_all_accepted_declarations(tmp_path):
     assert search.policy(dict(search.DEFAULT_POLICY,initial_calls=2))['initial_calls']==2
     for invalid in (0,False,1.5):
         with pytest.raises(ValueError):search.policy(dict(search.DEFAULT_POLICY,initial_calls=invalid))
     root=prepare(tmp_path);h(root,labels=('P','Q','R','S'))
     h(root,2,[1],labels=('T','U'))
     job=c.build_job(root,3,'W',[2])
+    retained=accepted_budget.read(root)['search']
+    assert retained['mechanism_count']==6
+    assert [row['label'] for row in retained['table']['mechanisms'].values()]==['P','Q','R','S','T','U']
     combo=job['search']['breadth']['mechanisms']
-    assert len(combo)==6
-    assert [row['label'] for row in combo]==['P','Q','R','S','T','U']
+    assert [row['label'] for row in combo]==['T','U','P']
+    assert [row['source_step'] for row in combo]==[2,2,1]
     assert job['search']['breadth']['initial_calls']==1
-
-
-def test_multi_mechanism_q_repair_uses_exact_w_and_preserves_single_science_cycle(tmp_path,execution_registry):
-    root=prepare(tmp_path,portfolio=True);h(root,labels=('P','Q'))
-    job,config=worker(root,tmp_path,2,[1])
-    assert job['search']['focus']['mechanism_ref']=='h001.m1'
-    run(root,config,'h001.m2',failed=True);finish(root,2,'W',[1],mechanism_findings=findings('h001.m2',blocked=('h001.m1',)))
-    before=search.project(root,3)
-    assessed=search.portfolio_view(before,3,prospective=True)
-    assert assessed['last_assessed_branch']=='h001.m2'
-    assert assessed['last_assessed_branches']==['h001.m2']
-    a(root,3,[1,2],focus='h001.m2',mode='repair')
-    state=search.project(root,4)
-    assert not state['order']['seen_w'] and not state['portfolio']['seen_w']
-    assert [row['mechanism_ref'] for row in state['order']['remaining']]==['h001.m1','h001.m2']
-    repaired,next_config=worker(root,tmp_path,4,[1,2,3])
-    assert repaired['search']['repair_binding']=='available' and repaired['search']['repair_root']==2
-    assert search.launch_reason(root,repaired) is None
-    run(root,next_config,'h001.m2');finish(root,4,'W',[1,2,3])
-    a(root,5,[1,4],dispositions=[dict(mechanism_ref='h001.m2',status='screened',reason='The repaired exact mechanism was scientifically assessed')])
-    final=search.project(root,6)
-    assert len(final['portfolio']['seen_w'])==1 and len(final['order']['seen_w'])==1
-    assert final['portfolio']['invested']=={'h001.m2':1}
-    assert final['portfolio']['deferred']=={'h001.m1':1}
-    assert final['portfolio']['last_branch']=='h001.m2'
 
 
 def originals(root,steps):

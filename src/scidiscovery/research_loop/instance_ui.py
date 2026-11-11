@@ -313,13 +313,14 @@ class InstanceUI:
                 reconcile=action == 'fork-create')
         if action == 'configuration-update':
             state = configuration_updates.status(self.root)
-            fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'expected_revision', 'authorization_note'}}
+            fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'expected_revision', 'authorization_note', 'mode'}}
             draft = configuration_form.imported(state['configuration'], base=self.root)
             try:
-                draft = configuration_form.parse_edit(fields, base=self.root, configuration=state['configuration'])
+                draft = configuration_form.parse_edit(fields, base=self.root, configuration=state['configuration'],
+                    refresh_backend=form.get('mode')=='refresh')
             except Exception as parse_error:
                 draft = getattr(parse_error, 'draft', draft)
-            return self._configuration_page(token, draft=draft, problem=problem,
+            return self._configuration_page_from_state(token, state=state, draft=draft, problem=problem,
                 expected_revision=form.get('expected_revision', str(state['revision'])),
                 authorization_note=form.get('authorization_note', ''))
         if action in {'configure', 'create', 'load-config'}:
@@ -667,11 +668,24 @@ class InstanceUI:
         if self.workspace:
             return self._new_research_page(token)
         state = configuration_updates.status(self.root)
+        return self._configuration_page_from_state(token, state=state, text=text, path=path, result=result, draft=draft, problem=problem,
+            expected_revision=expected_revision, authorization_note=authorization_note)
+
+    def _configuration_page_from_state(self, token, *, state, text='', path='', result=None, draft=None, problem=None, expected_revision=None, authorization_note=''):
+        if draft is None:
+            draft=configuration_form.imported(state['configuration'],base=self.root)
+        catalogs=configuration_form.load_catalogs(draft)
+        original_settings=display.settings(self.root)
+        current_budget=self._guarded(budget.ceilings, self.root)
+        return self._render_configuration_page(token, state=state, original_settings=original_settings,
+            current_budget=current_budget, catalogs=catalogs, text=text, path=path, result=result, draft=draft, problem=problem,
+            expected_revision=expected_revision, authorization_note=authorization_note)
+
+    def _render_configuration_page(self, token, *, state, original_settings, current_budget, catalogs, draft, text='', path='', result=None, problem=None, expected_revision=None, authorization_note=''):
         settings = state['active_settings']
         view = public_output.settings_view(settings)
-        original_view = public_output.settings_view(display.settings(self.root))
+        original_view = public_output.settings_view(original_settings)
         clean = public_output.cleaner(self.root, settings=settings)
-        current_budget = self._guarded(budget.ceilings, self.root)
 
         def text(value):
             return html.escape(clean(value, limit=64000))
@@ -680,8 +694,6 @@ class InstanceUI:
             return '<dl class="configuration-facts">' + ''.join(
                 '<div><dt>' + label + '</dt><dd>' + text(value) + '</dd></div>' for label, value in rows) + '</dl>'
 
-        if draft is None:
-            draft = configuration_form.imported(state['configuration'], base=self.root)
         revision = state['revision'] if expected_revision is None else expected_revision
         status_note = ('已保存的配置等待下一个新节点生效。下方表单显示待生效配置；当前节点继续使用原配置。'
             if state['pending'] else '下方表单显示当前配置。修改并保存后，从下一个新节点生效。')
@@ -692,7 +704,7 @@ class InstanceUI:
             body += problem.markup()
         fields = ('<input type="hidden" name="expected_revision" value="' + html.escape(str(revision), quote=True) + '">'
             + '<p class="note">相对路径基准：<code>' + html.escape(str(draft['base'])) + '</code>；推荐填写绝对路径。导入 TOML 时相对其所在目录。</p>'
-            + configuration_form.render(draft, edit=True)
+            + configuration_form.render(draft, edit=True, catalogs=catalogs)
             + '<label>调整说明<textarea name="authorization_note" rows="2">' + html.escape(authorization_note)
             + '</textarea></label><p class="note">调整总预算时请填写原因；其他配置可留空。</p>')
         body += self._form(token, 'configuration-update', fields, '保存，从下一个节点生效').replace(
@@ -780,13 +792,13 @@ class InstanceUI:
         body += '</section>' + workspaces + '<details><summary>工作台信息</summary><p class="note">工作台目录：' + html.escape(str(self.root)) + '</p></details>'
         return 200, self._page('研究工作台', body), {}
 
-    def _new_research_page(self, token, *, draft=None, selection='', preview=None, notice='', frozen='', config_path='', save_path=''):
+    def _new_research_page(self, token, *, draft=None, selection='', preview=None, notice='', frozen='', config_path='', save_path='', start_step=1):
         self._admin(token)
         if draft is None:
             draft = configuration_form.blank(base=self.root)
         body = ('<nav class="setup-nav"><a href="/">← 研究工作台</a><a href="/instances">打开已有研究</a></nav>'
             '<p class="setup-intro">把问题交给研究助手之前，先明确任务、材料和用量。创建后，由你另行开始研究。</p>'
-            '<div class="setup-flow" data-start-step="'+('3' if preview is not None else '1')+'">'
+            '<div class="setup-flow" data-start-step="'+('3' if preview is not None else str(start_step))+'">'
             '<ol class="setup-progress" aria-label="创建研究的步骤">'
             '<li data-setup-marker="1"><span>1</span>任务与材料</li>'
             '<li data-setup-marker="2"><span>2</span>模型与预算</li>'
@@ -2776,23 +2788,28 @@ class InstanceUI:
             return self._import_config(browser_token, form['config_path'])
         elif action == 'configure':
             mode = form.get('mode')
-            if mode not in {'preview', 'export', 'save'}:
+            if mode not in {'preview', 'export', 'save', 'refresh'}:
                 raise ValueError('Select an explicit configuration action')
             fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'selection', 'save_path', 'mode'}}
             selected = self._selected_config(browser_token, form['selection']) if form.get('selection') else None
             source = selected['source'] if selected else None
-            if self._config_changed(source):
+            if mode!='refresh' and self._config_changed(source):
                 return self._import_config(browser_token, source['path'], notice='原配置或任务已变化，请重新检查并确认。')
             base = selected['draft']['base'] if selected else self.root
             draft = selected['draft'] if selected else configuration_form.blank(base=base)
             try:
-                draft = configuration_form.parse(fields, base=base)
-                self._draft_task(draft)
+                draft = configuration_form.parse(fields, base=base, refresh_backend=mode=='refresh')
+                if mode!='refresh':self._draft_task(draft)
             except Exception as error:
                 draft = getattr(error, 'draft', draft)
                 selection = self._remember_config(browser_token, draft, source=source)
                 return self._new_research_page(browser_token, draft=draft, selection=selection,
-                    notice=self._problem(error, context='configuration', record=True), save_path=form.get('save_path', ''))
+                    notice=self._problem(error, context='configuration', record=True), save_path=form.get('save_path', ''),
+                    start_step=2 if mode=='refresh' else 1)
+            if mode=='refresh':
+                selection = self._remember_config(browser_token, draft, source=source)
+                return self._new_research_page(browser_token, draft=draft, selection=selection,
+                    save_path=form.get('save_path', ''), start_step=2)
             if mode == 'export':
                 text = configuration_form.export_toml(draft)
                 return 200, text.encode('utf-8'), {'Content-Type': 'application/toml; charset=utf-8',
@@ -2838,8 +2855,18 @@ class InstanceUI:
             location = '/instances/' + str(index) + '/manage?token=' + child.management_token
         elif action == 'configuration-update':
             state = configuration_updates.status(self.root)
-            fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'expected_revision', 'authorization_note'}}
-            draft = configuration_form.parse_edit(fields, base=self.root, configuration=state['configuration'])
+            mode=form.get('mode','save')
+            if mode not in {'save','refresh'}:
+                raise ValueError('Select an explicit configuration action')
+            if mode=='refresh' and integer('expected_revision')!=state['revision']:
+                raise ui_errors.InputError('expected_revision','研究配置已变化，请重新打开当前配置。',
+                    '刷新配置页面，保留需要的修改，再切换后端或保存。')
+            fields = {key: value for key, value in form.items() if key not in {'nonce', 'csrf', 'expected_revision', 'authorization_note', 'mode'}}
+            draft = configuration_form.parse_edit(fields, base=self.root, configuration=state['configuration'],
+                refresh_backend=mode=='refresh')
+            if mode=='refresh':
+                return self._configuration_page_from_state(browser_token, state=state, draft=draft,
+                    expected_revision=form['expected_revision'], authorization_note=form.get('authorization_note',''))
             configuration_updates.submit(self.root, draft['document'], base=self.root,
                 expected_revision=integer('expected_revision'), authorization_note=form.get('authorization_note', ''))
             self._refresh_approval_host()

@@ -705,3 +705,128 @@ def test_supervision_mode_rejects_duplicate_advanced_declaration(tmp_path, advan
     assert caught.value.draft['document']['policies']['supervision']['mode'] == 'notice'
     assert 'mode = "' + advanced_mode + '"' in caught.value.draft['advanced_text']
     assert not (tmp_path / 'instance').exists()
+
+
+def test_backend_refresh_uses_selected_catalog_and_retains_unfinished_draft(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import model_catalog
+    calls=[]
+    def catalog(name, **context):
+        calls.append((name,context))
+        return dict(models=[dict(id=name+'/listed',label='Listed',efforts=[],tiers=[])],
+            source='selected provider fixture',fetched_at=None,error=None)
+    monkeypatch.setattr(model_catalog,'load',catalog)
+    draft=form.blank(base=tmp_path)
+    draft['task_mode']='file'
+    draft['document']=dict(research=dict(objective='not-yet-present.md'),
+        agent=dict(model='exact/custom:model[1]',native=dict(features=dict(fast_mode=False)),
+            roles=dict(W=dict(model='exact/worker:model[2]'))))
+    fields=submitted(draft)
+    fields['cfg.agent.backend']='protocol'
+    changed=form.parse(fields,base=tmp_path,refresh_backend=True)
+    assert changed['task_mode']=='file' and changed['document']['research']==draft['document']['research']
+    assert changed['document']['agent']['model']=='exact/custom:model[1]'
+    assert changed['document']['agent']['roles']==draft['document']['agent']['roles']
+    assert changed['native_drafts']['codex']==draft['document']['agent']['native']
+    fields=submitted(changed)
+    fields['cfg.agent.backend']='codex'
+    restored=form.parse(fields,base=tmp_path,refresh_backend=True)
+    html=form.render(restored)
+    assert [name for name,_ in calls]==['codex','protocol','codex']
+    assert calls[-1][1]==dict(launcher=None,native=draft['document']['agent']['native'],base=str(tmp_path))
+    assert restored['document']['agent']['native']==draft['document']['agent']['native']
+    assert 'data-resume-protocol="codex_exec_resume"' in html
+    assert 'form.requestSubmit(refresh)' in form.SCRIPT_SOURCE
+    assert 'refresh.formNoValidate = true' in form.SCRIPT_SOURCE
+    assert sorted(path.name for path in tmp_path.iterdir())==[]
+
+
+def test_resume_protocol_defaults_are_displayed_without_resolving_a_launcher(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import backends, model_catalog
+    class Independent(backends.Protocol):
+        @staticmethod
+        def resume_policy_defaults():return dict(protocol='fixture_resume',usage_scope='turn')
+        def default_resume_policy(self):raise AssertionError('Rendering must not qualify a launcher')
+    monkeypatch.setitem(backends._PROVIDERS,'fixture-resume',Independent)
+    monkeypatch.setattr(model_catalog,'load',lambda *a,**kw:model_catalog.unavailable('fixture'))
+    draft=complete(tmp_path)
+    draft['document']['agent']['backend']='fixture-resume'
+    before=form.declaration(draft)
+    html=form.render(draft)
+    assert 'data-resume-protocol="fixture_resume"' in html
+    assert form.declaration(form.parse(Controls(html).fields,base=tmp_path))==before
+
+
+@pytest.mark.parametrize('backend_name,protocol_name',[('codex','codex_exec_resume'),('pi','pi_rpc_v1')])
+def test_partial_resume_policy_inherits_only_backend_protocol_and_usage_scope(tmp_path,backend_name,protocol_name):
+    import sys
+    from scidiscovery.research_loop import continuation
+    options=dict(root=tmp_path/'instance',objective=tmp_path/'objective',public_root=tmp_path,
+        launcher=[sys.executable],native_backend=backend_name,model='acme/exact',reasoning_effort='low',
+        max_tokens=1000,max_seconds=120,max_steps=8,experiment_mode='external',
+        native_options=dict(workspace='workspace-write',network=True,web='disabled',subagents=False),
+        resume_policy=dict(max_attempts=1,automatic_recovery=dict(enabled=False)))
+    expected=dict(options['resume_policy'],protocol=protocol_name,usage_scope='turn')
+    normalized=research_config.normalize(options)
+    assert normalized['resume_policy']==expected
+    assert options['resume_policy']==dict(max_attempts=1,automatic_recovery=dict(enabled=False))
+    continuation.policy(expected,[sys.executable],backend=backend_name)
+    explicit=dict(options, resume_policy=dict(max_attempts=1,protocol='wrong',usage_scope='turn'))
+    with pytest.raises(ValueError,match='protocol|Resume'):
+        normalized=research_config.normalize(explicit)
+        continuation.policy(normalized['resume_policy'],[sys.executable],backend=backend_name)
+    incomplete=dict(options,resume_policy={})
+    with pytest.raises(ValueError,match='finite attempts'):
+        normalized=research_config.normalize(incomplete)
+        continuation.policy(normalized['resume_policy'],[sys.executable],backend=backend_name)
+
+
+@pytest.mark.parametrize('launcher,expected',[(['pi'],None),(['./chosen-pi'],['./chosen-pi'])])
+def test_backend_switch_adapts_only_exact_provider_default_launcher(tmp_path,monkeypatch,launcher,expected):
+    from scidiscovery.research_loop import model_catalog
+    calls=[]
+    def load(name,**context):
+        calls.append((name,context))
+        return model_catalog.unavailable('Exact launcher context fixture')
+    monkeypatch.setattr(model_catalog,'load',load)
+    draft=complete(tmp_path)
+    draft['document']['agent'].update(backend='pi',launcher=launcher,model='acme/exact',reasoning_effort='low')
+    fields=submitted(draft)
+    fields['cfg.agent.backend']='codex'
+    changed=form.parse(fields,base=tmp_path,refresh_backend=True)
+    assert changed['document']['agent'].get('launcher')==expected
+    form.render(changed)
+    assert calls[-1]==('codex',dict(launcher=expected,native=None,base=str(tmp_path)))
+    assert draft['document']['agent']['launcher']==launcher
+
+
+def test_configuration_refresh_owns_one_state_and_renderer_uses_supplied_facts(tmp_path,monkeypatch):
+    from urllib.parse import urlencode
+    from scidiscovery.research_loop import budget,configuration_updates,instance_ui,model_catalog
+    from test_execution_authority import prepare
+    root,key=prepare(tmp_path,enabled=False)
+    ui=instance_ui.InstanceUI(root,secret_file=key,approval_host=False);ui.host='127.0.0.1:18777'
+    _,_,headers=ui.get('/manage?'+urlencode(dict(token=ui.management_token)),host=ui.host)
+    cookie=headers['Set-Cookie'];token=ui._browser(cookie)
+    _,page,_=ui.get('/configuration',host=ui.host,cookie=cookie)
+    fields=Controls(page.decode()).fields
+    fields.update({'mode':'refresh','cfg.agent.backend':'protocol'})
+    original_status=configuration_updates.status
+    observations=[]
+    def status(root):
+        observations.append(True)
+        return original_status(root)
+    monkeypatch.setattr(configuration_updates,'status',status)
+    assert ui._control_post(token,'configuration-update',fields)[0]==200
+    assert observations==[True]
+    state=original_status(root)
+    originals=instance_ui.display.settings(root)
+    ceilings=budget.ceilings(root)
+    draft=form.imported(state['configuration'],base=root)
+    catalogs=form.load_catalogs(draft)
+    def reread(*args,**kwargs):raise AssertionError('Renderer must consume supplied configuration facts')
+    monkeypatch.setattr(configuration_updates,'status',reread)
+    monkeypatch.setattr(instance_ui.display,'settings',reread)
+    monkeypatch.setattr(budget,'ceilings',reread)
+    monkeypatch.setattr(model_catalog,'load',reread)
+    assert ui._render_configuration_page(token,state=state,original_settings=originals,current_budget=ceilings,
+        catalogs=catalogs,draft=draft)[0]==200

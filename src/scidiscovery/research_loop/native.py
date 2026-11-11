@@ -321,12 +321,12 @@ def wait_native(root: Path, step: int, *, _reentry_started=False, inventory=None
                     time.sleep(.1)
                     continue
                 refused = control_budget.prelaunch_budget_reason(root, step, record)
-                if refused is not None:
-                    raise control_budget.NodeBudgetUnavailable(refused)
                 from . import contracts as c
                 if inventory is None:inventory=c.accept_current_inventory(root,step)
                 elif inventory.root!=root or c.job_record(inventory.job)!=job or inventory.record!=record:
                     raise ValueError('Current inventory belongs to another task or attempt')
+                if refused is not None:
+                    raise control_budget.NodeBudgetUnavailable(refused)
                 decision = continuation.automatic_decision(root, step,inventory=inventory)
                 if decision['action'] in {'continue','retry'}:
                     raise continuation.AutomaticRecoveryRequired(decision,inventory=inventory)

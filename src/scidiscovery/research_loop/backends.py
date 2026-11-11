@@ -40,6 +40,11 @@ class Backend(ABC):
         """Optional native capability; older providers remain unsupported."""
         return dict(status='unsupported', reason='native_subagents_unsupported')
 
+    @staticmethod
+    def resume_policy_defaults():
+        """Pure provider grammar; launcher qualification remains a preparation check."""
+        return None
+
     @classmethod
     def model_catalog_context(cls, *, launcher=None, native=None, base=None):
         """Optional edit-time metadata context, independent of invocation state."""
@@ -801,6 +806,11 @@ class Codex(Backend):
     def default_home():
         return Path(os.environ.get('CODEX_HOME', str(Path.home()/'.codex')))
 
+    @staticmethod
+    def resume_policy_defaults():
+        return dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
+            output_repair=True,output_only=True,execution_wake=True)
+
     def default_resume_policy(self):
         if not self.standard:return None
         from . import native_recovery
@@ -809,9 +819,8 @@ class Codex(Backend):
         home=self.default_home()
         if not home.is_absolute():
             raise ValueError('Frozen native output repair requires an absolute inherited CODEX_HOME')
-        return dict(launcher=[str(Path(invoked).absolute())], policy=dict(max_attempts=2,
-            protocol='codex_exec_resume',usage_scope='turn',output_repair=True,output_only=True,
-            execution_wake=True,native_home=str(home.resolve()),automatic_recovery=native_recovery.policy({})))
+        return dict(launcher=[str(Path(invoked).absolute())], policy=dict(self.resume_policy_defaults(),
+            native_home=str(home.resolve()),automatic_recovery=native_recovery.policy({})))
 
     def validate_resume_policy(self,value):
         if value.get('protocol')!='codex_exec_resume' or value.get('usage_scope')!='turn':

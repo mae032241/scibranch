@@ -879,6 +879,8 @@ class Pi(Backend):
     def default_home():
         from .pi_namespace import agent_directory
         return agent_directory()
+    @staticmethod
+    def resume_policy_defaults(): return dict(DEFAULT_RESUME_POLICY)
     def default_resume_policy(self):
         import shutil
         from . import native_recovery
@@ -888,7 +890,7 @@ class Pi(Backend):
         # Preserve the invoked entry point. The existing continuation owner
         # freezes its exact executable originals and validates finite grammar.
         # Private session storage never redirects inherited Pi authentication.
-        return dict(launcher=[str(Path(invoked).absolute())], policy=dict(DEFAULT_RESUME_POLICY,
+        return dict(launcher=[str(Path(invoked).absolute())], policy=dict(self.resume_policy_defaults(),
             automatic_recovery=native_recovery.policy({})))
     def validate_resume_policy(self, value): return validate_resume_policy(value)
     @staticmethod

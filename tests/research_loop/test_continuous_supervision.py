@@ -18,14 +18,6 @@ def review(state=None, fraction=.3, *, job=None, intent=None):
         budget_fraction=fraction, selected_policy=supervision.DEFAULT_POLICY, budget_facts=budget_facts(fraction))
 
 
-
-
-
-
-
-
-
-
 @pytest.mark.parametrize('job,intent',[
     (dict(role='A'),{}), (dict(role='H'),{}),
     (dict(role='W',formal_review=True),{}),
@@ -126,9 +118,9 @@ def test_direction_notice_is_independent_of_early_context_advice_marker(tmp_path
     path=work/'budget-status.json'
     hint=dict(scope=budget_notice.SCOPE,updated_at_unix=123.,inflight_usage_unknown=True,
         target_state='near',closeout_notices=dict(progress=dict(cause='node',
-            text=budget_notice.WORKER_CONTEXT_NEAR_TEXT)))
+            text=budget_notice.WORKER_CONTEXT_90_TEXT)))
     path.write_text(json.dumps(hint))
-    assert budget_notice.hook_output(tmp_path,0)['hookSpecificOutput']['additionalContext']==budget_notice.WORKER_CONTEXT_NEAR_TEXT
+    assert budget_notice.hook_output(tmp_path,0)['hookSpecificOutput']['additionalContext']==budget_notice.WORKER_CONTEXT_90_TEXT
     hint['target_state']='reached'
     hint['direction_review']=review()
     hint['closeout_notices']['review']=budget_notice.worker_direction_notice(hint['direction_review'])

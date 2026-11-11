@@ -295,7 +295,8 @@ def published_notices(value):
             if notice != dict(cause='node',text=WORKER_DIRECTION_TEXT) or value.get('target_state')!='reached':
                 return None
         if dimension == 'progress':
-            early = notice == dict(cause='node', text=WORKER_CONTEXT_NEAR_TEXT)
+            early = notice in [dict(cause='node', text=text)
+                for text in (WORKER_CONTEXT_NEAR_TEXT, WORKER_CONTEXT_90_TEXT)]
             if (not early and (notice not in [dict(cause='node', text=text)
                     for text in (WORKER_PROGRESS_TEXT, WORKER_CONTEXT_TEXT, WORKER_CONTEXT_UNKNOWN_TEXT)]
                     or value.get('target_state') != 'reached')):

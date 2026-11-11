@@ -257,6 +257,11 @@ def normalize(options, *, frozen_skill_selection=None):
     if launcher is None:
         launcher = provider.default_launcher()
         result['launcher'] = launcher
+    resume=result.get('resume_policy')
+    if isinstance(resume,dict):
+        defaults=provider.resume_policy_defaults() or {}
+        for key in ('protocol','usage_scope'):
+            if key in defaults:resume.setdefault(key,copy.deepcopy(defaults[key]))
     # Provider admission sees every explicit policy/profile before plugin or
     # filesystem preparation. Never discard a policy to fit a narrower backend.
     provider.validate_declaration(result)

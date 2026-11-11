@@ -4,7 +4,6 @@ import copy
 import pytest
 
 from scidiscovery.research_loop import contracts as c, history, originals, search
-from test_portfolio_contract import comparison
 
 
 def state():
@@ -17,17 +16,16 @@ def w(value,step,branches,monkeypatch,*,mode='screen',repair_root=None,completed
     job=dict(step=step,role='W',search=dict(focus=dict(mechanism_ref=branches[0],action=mode),
         breadth=True,repair_root=repair_root))
     monkeypatch.setattr(history,'read_observation',lambda *args:dict(managed_calls=[dict(mechanism_binding=dict(mechanism_ref=ref)) for ref in branches]))
-    search._portfolio_update(None,job,dict(stage_intent='review' if completed else 'decision'),
+    search._portfolio_update(None,job,dict(stage_intent='decision' if completed else 'review'),
         dict(observations=True),value,dict(path=f'/exact/seal-{step}'))
 
 
 def a(value,step,w_step,*,main='a',action='continue_w',correction=None,final=False):
-    review=comparison(action=action,main=main);review.update(competitor=None,no_competitor_reason='No viable fixture competitor')
     job=dict(step=step,role='A',direct_refs=[dict(path=f'inputs/parents/{w_step:03d}/conclusion.json')] if w_step else [],
         scientific_response_fields=['portfolio_review'])
     if correction:job['author_correction']=dict(root=dict(step=correction))
     if final:job['final_report']=dict(source_cutoff=step-1)
-    search._portfolio_update(None,job,dict(portfolio_review=review,next_action=action,scientific_result='Fixture judgment'),
+    search._portfolio_update(None,job,dict(next_action=action,scientific_result='Fixture judgment'),
         dict(control_outcome=dict(search_status='applied',selection_status='applied',decision_status='applied')),value,dict(path=f'/exact/seal-{step}'))
     return job
 
@@ -44,8 +42,7 @@ def test_overlapping_cycles_pending_and_prospective_are_separate(monkeypatch):
     assert sum(row['participation_fraction'] for row in shares.values())==2
     assert actual['pending_assessment'] and actual['pending_w']['source_step']==6
     assert prospective['completed_cycle_count']==2 and prospective['cycles_if_assessed']==3
-    assert actual['main_line']=='a' and actual['mainline_streak']==2
-    assert actual['mainline_source']==dict(source_step=5,pointer='/portfolio_review/main_line')
+    assert actual['last_assessed_branches']==['a']
     assert value==before
     a(value,7,None,main='a',action='finish',final=True)
     assert search.portfolio_view(value,2)['completed_cycle_count']==3
@@ -65,7 +62,6 @@ def test_repairs_and_author_corrections_keep_one_cycle_and_exclude_cost_sample(m
     monkeypatch.setattr(history,'_source',lambda root,step:(original,{}, {}, {}))
     a(value,4,2,correction=3)
     assert len(value['portfolio']['seen_w'])==1 and value['portfolio']['cycles'][0]['sample_exclusion']=='author_correction_cycle_consumption_incomplete'
-    assert search.portfolio_view(value,2)['mainline_streak']==1
     identity=tmp_path/'result-identity.json';identity.write_text('{}')
     value['portfolio']['cycles'][0]['w_identity']=(2,str(identity))
     value['portfolio']['seen_w']={(2,str(identity))}
@@ -84,16 +80,6 @@ def test_first_author_correction_closes_one_cycle_but_excludes_incomplete_cost(m
     a(value,4,2,correction=3)
     assert len(value['portfolio']['seen_w'])==1
     assert value['portfolio']['cycles'][0]['sample_exclusion']=='author_correction_cycle_consumption_incomplete'
-
-
-def test_authored_mainline_ignores_w_branch_and_null_interrupts_streak(monkeypatch):
-    value=state();w(value,2,['b','c'],monkeypatch);a(value,3,2,main='a',action='extract')
-    assert not value['portfolio']['seen_w']
-    assert search.portfolio_view(value,2)['mainline_streak']==1
-    a(value,4,2,main=None,action='extract')
-    assert search.portfolio_view(value,2)['mainline_streak']==0
-    a(value,5,2,main='a')
-    assert search.portfolio_view(value,2)['mainline_streak']==1
 
 
 def test_inherited_repair_uses_origin_identity_not_archive_location(monkeypatch,tmp_path):

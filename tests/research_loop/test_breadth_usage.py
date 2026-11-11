@@ -1,80 +1,60 @@
-"""Strict advisory samples; authored fake terminal meters are mechanical fixtures."""
+"""Accepted-token advice and current balances; no native process runs."""
 import copy
-from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, execution, fork_runtime, native, ui_saved_status
+from scidiscovery.research_loop import accepted_budget, accepted_search, contracts as c, execution, native, ui_saved_status
 
 
-def sample(tmp_path,monkeypatch):
-    root=tmp_path/'instance';(root/'jobs').mkdir(parents=True)
-    records={}
-    for step in range(1,6):
-        c.write(root/'jobs'/f'{step:03d}.json',dict(step=step))
-        record=root/'native-evidence'/f'{step:03d}';record.mkdir(parents=True);records[step]=[record]
-        c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json')))
-        c.write(record/'usage.json',dict(input_tokens=8,cached_input_tokens=5,output_tokens=2))
-        c.write(record/'native-outcome.json',dict(returncode=0,native_started=False,
-            metering=dict(coverage='terminal',reporting_delay_unmeasured=False,inflight_usage_unknown=False)))
-    monkeypatch.setattr(fork_runtime,'local_steps',lambda *args,**kwargs:list(records))
-    monkeypatch.setattr(execution,'records',lambda root,step:records[step])
-    monkeypatch.setattr(execution,'origin',lambda root,step:records[step][0])
-    state=dict(portfolio=dict(cycles=[dict(w_step=2,a_steps=[3]),dict(w_step=4,a_steps=[5])]))
-    return root,state,records
+@pytest.fixture
+def accepted_advice(monkeypatch):
+    head=dict(dispatch_count=5,search=accepted_search.empty())
+    head['search']['portfolio']['token_advice']=dict(complete_sample_count=2,excluded_sample_count=1,
+        reported_tokens_sum=40,samples=[dict(w_step=2,a_step=3,reported_tokens=20),
+            dict(w_step=4,a_step=5,reported_tokens=20)])
+    monkeypatch.setattr(accepted_budget,'read',lambda root:head)
+    def forbidden(*args,**kwargs):
+        pytest.fail('Accepted cycle advice must not reopen native originals')
+    monkeypatch.setattr(c,'read',forbidden)
+    monkeypatch.setattr(execution,'records',forbidden)
+    return head
 
 
-def advice(root,state,**kwargs):
-    return native.cycle_token_advice(root,state,usage_snapshot=dict(observed_tokens=50,accounted_tokens=50,unknown_steps=[]),
-        budget_snapshot=dict(max_tokens=250),**kwargs)
+def test_accepted_samples_recompute_current_balance_without_reopening_history(accepted_advice):
+    head=accepted_advice;before=copy.deepcopy(head)
+    # Legacy caller-supplied cycle locations cannot import parent costs.
+    state=dict(portfolio=dict(cycles=[dict(w_step=98,a_steps=[99])]))
+    result=native.cycle_token_advice(None,state,usage_snapshot=dict(accounted_tokens=50,unknown_steps=[]),budget_snapshot=dict(max_tokens=250))
+    assert result['mean_reported_tokens']==20 and result['reference_cycles']==10
+    assert result['excluded_sample_count']==1 and result['accepted_attempt_count']==5
+    amended=native.cycle_token_advice(None,state,usage_snapshot=dict(accounted_tokens=60,unknown_steps=[]),budget_snapshot=dict(max_tokens=560))
+    assert amended['reference_cycles']==25
+    assert head==before and all(row['w_step']<98 for row in result['samples'])
 
 
-def test_two_complete_local_cycles_count_cached_once_and_amendment_changes_balance(tmp_path,monkeypatch):
-    root,state,records=sample(tmp_path,monkeypatch)
-    result=advice(root,state)
-    assert result['status']=='available' and result['mean_reported_tokens']==20 and result['reference_cycles']==10
-    later=records[3][0]/'repair';later.mkdir()
-    for name in ('native-intent.json','native-outcome.json','usage.json'):
-        c.write(later/name,c.read(records[3][0]/name))
-    records[3].append(later)
-    result=advice(root,state)
-    assert result['complete_sample_count']==2 and result['mean_reported_tokens']==25
-    assert result['samples'][0]['reported_tokens']==30  # both accepted A attempts, no duplicate cached input
-    amended=native.cycle_token_advice(root,state,usage_snapshot=dict(observed_tokens=60,unknown_steps=[]),budget_snapshot=dict(max_tokens=560))
-    assert amended['reference_cycles']==20
-    assert len(state['portfolio']['cycles'])==2
+@pytest.mark.parametrize('damage,reason', [('one','insufficient_complete_local_cycles'),
+    ('zero','nonpositive_sample_mean'), ('unknown','usage_unknown'), ('balance','current_balance_unavailable')])
+def test_unavailable_accepted_advice_never_invents_a_cycle_reference(accepted_advice,damage,reason):
+    advice=accepted_advice['search']['portfolio']['token_advice']
+    usage=dict(accounted_tokens=50,unknown_steps=[])
+    if damage=='one':advice['complete_sample_count']=1
+    elif damage=='zero':advice['reported_tokens_sum']=0
+    elif damage=='unknown':usage['unknown_steps']=[6]
+    else:usage['accounted_tokens']=None
+    result=native.cycle_token_advice(None,{},usage_snapshot=usage,budget_snapshot=dict(max_tokens=250))
+    assert result['status']=='unavailable' and result['reference_cycles'] is None
+    assert reason in result['reasons']
 
 
-@pytest.mark.parametrize('damage',['missing','unknown','lag','inflight','one','zero'])
-def test_incomplete_or_insufficient_samples_never_fill_missing_usage_with_zero(tmp_path,monkeypatch,damage):
-    root,state,records=sample(tmp_path,monkeypatch)
-    if damage=='missing':(records[3][0]/'usage.json').unlink()
-    elif damage=='unknown':c.write(records[3][0]/'native-outcome.json',dict(returncode=0,metering=dict(coverage='unknown')))
-    elif damage=='lag':c.write(records[3][0]/'native-outcome.json',dict(returncode=0,metering=dict(coverage='terminal')))
-    elif damage=='inflight':(records[3][0]/'native-outcome.json').unlink()
-    elif damage=='one':state['portfolio']['cycles'].pop()
-    elif damage=='zero':
-        for row in records.values():c.write(row[0]/'usage.json',dict(input_tokens=0,cached_input_tokens=0,output_tokens=0))
-    result=advice(root,state)
-    assert result['status']=='unavailable' and result['reference_cycles'] is None and result['reasons']
-    if damage in {'missing','unknown','lag','inflight'}:assert result['complete_sample_count']==1 and result['excluded_sample_count']==1
-
-
-def test_repair_and_author_correction_are_excluded_from_token_samples(tmp_path,monkeypatch):
-    root,state,_=sample(tmp_path,monkeypatch)
-    for cycle,reason in zip(state['portfolio']['cycles'],('repair_cycle_consumption_incomplete','author_correction_cycle_consumption_incomplete')):
-        cycle['sample_exclusion']=reason
-    result=advice(root,state)
-    assert result['complete_sample_count']==0 and result['excluded_sample_count']==2
-    assert {row['reason'] for row in result['excluded_samples']}=={'repair_cycle_consumption_incomplete','author_correction_cycle_consumption_incomplete'}
-
-
-def test_inherited_cycles_do_not_charge_parent_tokens_to_child_sample(tmp_path,monkeypatch):
-    root,state,records=sample(tmp_path,monkeypatch)
-    state['portfolio']['cycles'].insert(0,dict(w_step=98,a_steps=[99]))
-    result=advice(root,state)
-    assert result['complete_sample_count']==2 and result['remaining_reported_tokens']==200
-    assert all(row['w_step']<98 for row in result['samples'])
+def test_corrected_cycle_exclusion_updates_accepted_sum_once(accepted_advice):
+    summary=accepted_advice['search']
+    summary['current_facts'][accepted_search.key('cycle',2)]=dict(w_step=2,sample_complete=True,reported_tokens=20)
+    delta=accepted_search._Delta(summary,lambda key:None)
+    accepted_search._exclude_cycle(delta,2)
+    accepted_search._exclude_cycle(delta,2)
+    advice=delta.summary['portfolio']['token_advice']
+    assert advice['complete_sample_count']==1 and advice['excluded_sample_count']==2
+    assert advice['reported_tokens_sum']==20 and [row['w_step'] for row in advice['samples']]==[4]
 
 
 def test_saved_metrics_keep_counts_and_invalidate_new_inflight_or_unknown_usage(tmp_path):

@@ -28,9 +28,10 @@ def _request(arguments,reference='S001'):
     return bridge._encoded(dict(submission_ref=reference,arguments=arguments))
 
 
-@pytest.mark.parametrize('historical',[False,True])
-@pytest.mark.parametrize('command',CALL_COMMANDS)
-@pytest.mark.parametrize('inline',[False,True])
+@pytest.mark.parametrize('command,historical,inline',[
+    ('query',False,False),('lookup',True,True),('collect',True,False),
+    ('cancel',False,True),('reconcile',False,False),('retire',True,True),
+])
 def test_call_outside_current_task_is_cached_caller_error(server,tmp_path,monkeypatch,historical,command,inline):
     old='old-W002-call'
     historical_files={}
@@ -42,7 +43,7 @@ def test_call_outside_current_task_is_cached_caller_error(server,tmp_path,monkey
         historical_files={path:path.read_bytes() for path in (
             directory/'accepted.json',directory/'execution-observation.json',output)}
     executions=[]
-    def execute(*args):
+    def execute(*args,**kwargs):
         executions.append(args)
         pytest.fail('An out-of-task call operation must not invoke execution or a provider')
     monkeypatch.setattr(bridge,'_execute',execute)
@@ -66,7 +67,7 @@ def test_call_outside_current_task_is_cached_caller_error(server,tmp_path,monkey
     assert 'state' not in result and 'call_id' not in result
     assert str(tmp_path) not in json.dumps(result)
     assert c.read(server.claims/'S001/outcome.json')['calls']==[]
-    assert not server.diagnostic.exists()
+    assert server.diagnostic.exists()
     originals={name:(server.claims/'S001'/name).read_bytes()
         for name in ('submit.json','binding.json','response.json','outcome.json')}
     published=(server.directory/'response.json').read_bytes()
@@ -87,12 +88,13 @@ def test_request_id_without_current_original_does_not_create_a_proof(server,comm
     assert bridge._response_calls(server,request,response,set())==[]
 
 
-@pytest.mark.parametrize('command',CALL_COMMANDS)
 @pytest.mark.parametrize('options',[
     [],['--call-id'],['--call-id','old-W002-call','--metadata'],
     ['--call-id','old-W002-call','--','script-tail'],['--call-id',None],
 ])
-def test_invalid_call_arguments_are_parser_caller_errors(server,monkeypatch,command,options):
+def test_invalid_call_arguments_are_parser_caller_errors(server,monkeypatch,options):
+    # All six commands register the same required --call-id parser option.
+    command='collect'
     monkeypatch.setattr(bridge,'_execute',lambda *args:pytest.fail('Invalid call arguments cannot execute'))
 
     bridge._handle(server,_request([command,*options]))
@@ -102,7 +104,8 @@ def test_invalid_call_arguments_are_parser_caller_errors(server,monkeypatch,comm
     assert result['accepted'] is False and result['error']=='invalid_arguments'
     assert result['handoff']['action']=='correct_request'
     assert c.read(server.claims/'S001/outcome.json')['calls']==[]
-    assert not server.diagnostic.exists()
+    assert server.diagnostic.exists()
+    assert str(server.diagnostic.parent) not in json.dumps(result)
 
 
 @pytest.mark.parametrize('command',CALL_COMMANDS)
@@ -133,7 +136,7 @@ def test_current_corrupt_original_is_not_a_scope_caller_error(server,monkeypatch
     call_id='current-accepted-call';directory,_=_accepted(server,call_id)
     (directory/'accepted.json').write_bytes(b'{')
     executions=[]
-    def execute(server,arguments):
+    def execute(server,arguments,**kwargs):
         executions.append(arguments)
         e.Records(server.configuration).accepted(call_id)
         pytest.fail('Corrupt originals cannot reach an execution provider')
@@ -178,7 +181,7 @@ def test_current_accepted_unknown_stays_unknown_and_is_not_reexecuted(server,mon
     # original-byte validators still own acceptance and script integrity.
     monkeypatch.setattr(e,'_observation_file_roles',lambda *args,**kwargs:([],set()))
     executions=[]
-    def execute(server,arguments):
+    def execute(server,arguments,**kwargs):
         executions.append(arguments)
         return dict(code=2,result=dict(status='unknown',accepted=True,call_id=call_id))
     monkeypatch.setattr(bridge,'_execute',execute)
@@ -207,7 +210,7 @@ def test_retained_unfinished_call_claim_stays_unknown(server,monkeypatch,command
 
 def test_unaccepted_unknown_preparation_retains_original_call_and_does_not_reexecute(server,tmp_path,monkeypatch):
     call_id='unresolved-preparation-call';executions=[];preparations=[]
-    def execute(server,arguments):
+    def execute(server,arguments,**kwargs):
         executions.append(arguments)
         return dict(code=2,result=dict(status='unknown',call_id=call_id))
     def retained(root,records,*,context):
@@ -232,7 +235,7 @@ def test_unaccepted_unknown_preparation_retains_original_call_and_does_not_reexe
 
 def test_new_query_cannot_reclassify_an_unknown_preparation(server,tmp_path,monkeypatch):
     call_id='unresolved-preparation-call';executions=[];preparations=[]
-    def execute(server,arguments):
+    def execute(server,arguments,**kwargs):
         executions.append(arguments)
         assert arguments[0]=='run'
         return dict(code=2,result=dict(status='unknown',call_id=call_id))

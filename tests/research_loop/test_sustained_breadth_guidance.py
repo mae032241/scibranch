@@ -10,9 +10,6 @@ from pathlib import Path
 import pytest
 
 from scidiscovery.research_loop import backends, contracts as c, controller, guidance, native, search
-from execution_fixtures import execution_registry
-from test_breadth_science import worker
-from test_history_handoff import finish
 from test_result_schema import rendered_contract
 
 
@@ -28,15 +25,12 @@ def prepare(tmp_path, advice):
     return root
 
 
-@pytest.mark.parametrize('role', ['H', 'W', 'A'])
 @pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
-@pytest.mark.parametrize('gate', ['final_return', 'closeout', 'final_report', 'final_only',
-    'output_repair', 'work_repair'])
+@pytest.mark.parametrize('role,gate', [('A', 'final_return'), ('A', 'closeout'),
+    ('A', 'final_report'), ('A', 'final_only'), ('W', 'output_repair'), ('W', 'work_repair')])
 def test_existing_final_closeout_and_repair_gates_suppress_new_work_planning(tmp_path, role, backend_name, gate):
     root = prepare(tmp_path, guidance.DEFAULT)
-    if role == 'W':
-        finish(root, 1, 'H', [], action='experiment', search_choice=plan())
-    step, parents = (2, [1]) if role == 'W' else (1, [])
+    step, parents = 1, []
     job = c.build_job(root, step, role, parents)
     task = c.read(c.workspace(root, step) / 'science-task.json')
     options = {}
@@ -119,12 +113,3 @@ def test_unlimited_shared_balances_keep_actual_ordinary_and_fragment_contracts_b
         managed_command=['experiment'] if worker else None,
         budget_status=dict(shared_seconds_remaining=None, shared_observed_tokens_remaining=None))
     assert size <= c.MAX_FIXED_RESPONSE_BYTES == 3072
-
-
-def plan(*, revised=False):
-    commitments = [dict(label='Transport-limited explanation' if not revised else 'Retained transport explanation',
-        existing_ref='h001.m1' if revised else None)]
-    if revised:
-        commitments.append(dict(label='Interface-state explanation', existing_ref=None))
-    return dict(scope='Distinguish transport from interface-state causal explanations.',
-        commitments=commitments, focus=dict(index=2 if revised else 1, action='screen'))

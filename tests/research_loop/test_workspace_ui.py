@@ -467,3 +467,75 @@ def test_workspace_delete_uses_exact_service_and_reconciles_original_mount_after
         assert (sibling / 'settings.json').read_bytes() == sibling_original
         _, remaining, _ = request(connection, 'GET', '/', cookie=cookie)
         assert b'/instances/2/manage?token=' in remaining and b'/instances/1/manage?token=' not in remaining
+
+
+@pytest.mark.process_e2e
+def test_backend_refresh_reloads_selected_catalog_without_previewing_task(tmp_path, monkeypatch):
+    workspace=tmp_path/'workspace';workspace.mkdir()
+    home=tmp_path/'codex-home';home.mkdir()
+    (home/'models_cache.json').write_text(json.dumps(dict(models=[dict(slug='codex-listed-model',visibility='list')])))
+    monkeypatch.setenv('CODEX_HOME',str(home))
+    key=operator_key(tmp_path)
+    with host(workspace,key,workspace=True) as (connection,url,endpoint):
+        cookie=login(connection,url);origin='http://'+url.netloc
+        _,page,_=request(connection,'GET','/new',cookie=cookie)
+        fields=controls(page)
+        fields.update({'mode':'refresh','task_mode':'file',
+            'cfg.research.objective':'missing-task.md','cfg.agent.backend':'protocol',
+            'cfg.agent.model':'custom/exact:model[1]','cfg.agent.roles.W.model':'custom/worker:model[2]',
+            'advanced_toml':'[agent.native.features]\nfast_mode = false\n'})
+        assert request(connection,'POST','/control/configure',cookie=cookie,fields=fields,origin='null')[0]==403
+        status,page,_=request(connection,'POST','/control/configure',cookie=cookie,fields=fields,origin=origin)
+        assert status==200 and b'data-start-step="2"' in page
+        assert b'action="/control/create"' not in page
+        assert '未找到'.encode() not in page and b'codex-listed-model' not in page
+        fields=controls(page)
+        assert fields['cfg.research.objective']=='missing-task.md'
+        assert fields['cfg.agent.model']=='custom/exact:model[1]'
+        assert fields['cfg.agent.roles.W.model']=='custom/worker:model[2]'
+        assert json.loads(fields['native_drafts'])['codex']==dict(features=dict(fast_mode=False))
+        fields.update({'mode':'refresh','cfg.agent.backend':'codex'})
+        status,page,_=request(connection,'POST','/control/configure',cookie=cookie,fields=fields,origin=origin)
+        assert status==200 and b'data-start-step="2"' in page
+        assert b'codex-listed-model' in page and b'action="/control/create"' not in page
+        restored=controls(page)
+        assert restored['cfg.agent.model']=='custom/exact:model[1]'
+        assert restored['cfg.agent.roles.W.model']=='custom/worker:model[2]'
+        assert 'fast_mode = false' in restored['advanced_toml']
+        assert b'data-resume-protocol="codex_exec_resume"' in page
+        assert not (workspace/'missing-task.md').exists()
+
+
+@pytest.mark.process_e2e
+def test_edit_backend_refresh_keeps_revision_originals_and_unsaved_fields(tmp_path):
+    from scidiscovery.research_loop import configuration_updates
+    root,key=prepare(tmp_path,enabled=False)
+    state=configuration_updates.status(root)
+    originals={path:path.read_bytes() for path in (root/'settings.json',tmp_path/'public/objective.md')}
+    with host(root,key,workspace=False) as (connection,url,endpoint):
+        cookie=login(connection,url);origin='http://'+url.netloc
+        _,page,_=request(connection,'GET','/configuration',cookie=cookie)
+        fields=controls(page,action='configuration-update')
+        revision=fields['expected_revision']
+        fields.update({'mode':'refresh','cfg.agent.backend':'protocol',
+            'cfg.agent.model':'exact/unsaved:model[1]','authorization_note':'Retain this unsaved adjustment reason.'})
+        status,page,_=request(connection,'POST','/control/configuration-update',cookie=cookie,fields=fields,origin=origin)
+        assert status==200,page.decode(errors='replace')
+        retained=controls(page,action='configuration-update')
+        assert retained['expected_revision']==revision
+        assert retained['cfg.agent.backend']=='protocol' and retained['rendered_backend']=='protocol'
+        assert retained['cfg.agent.model']=='exact/unsaved:model[1]'
+        assert retained['authorization_note']=='Retain this unsaved adjustment reason.'
+        retained.update({'mode':'refresh','cfg.agent.backend':'codex'})
+        status,page,_=request(connection,'POST','/control/configuration-update',cookie=cookie,fields=retained,origin=origin)
+        assert status==200,page.decode(errors='replace')
+        retained=controls(page,action='configuration-update')
+        assert retained['rendered_backend']=='codex'
+        assert retained['cfg.agent.model']=='exact/unsaved:model[1]'
+        assert retained['authorization_note']=='Retain this unsaved adjustment reason.'
+        retained.update({'mode':'refresh','expected_revision':str(int(revision)+1),'cfg.agent.backend':'protocol'})
+        status,stale,_=request(connection,'POST','/control/configuration-update',cookie=cookie,fields=retained,origin=origin)
+        assert status==422 and '此表单绑定的原身份已变化'.encode() in stale
+    assert configuration_updates.status(root)==state
+    assert all(path.read_bytes()==content for path,content in originals.items())
+    assert not (root/'jobs/001.json').exists()

@@ -8,40 +8,31 @@ from test_node_budget import instance, policy, target
 from test_soft_node_budget import start_clock
 
 
-def assert_a_risk_keeps_evidence_based_routing(text):
-    assert 'end this assessment' in text and 'retain unmet goals' in text
-    assert 'normal next_action' in text and 'evidence/shared balance' in text
-    assert 'Soft targets do not end research' in text
-    assert 'deliver' not in text and 'finish with gaps' not in text
-    assert 'No H/W/E' not in text and 'conclude now' not in text
+def assert_a_notice_retains_advisory_scope(text):
+    assert 'A: return advice with continue_w and decision_request=null.' in text
+    assert 'W judges it; no direct work or finalization.' in text
+    assert 'original permissions hold; unknown usage != 0.' in text
+    assert 'conclude now' not in text
 
 
-def assert_a_instruction_scopes_global_closeout(text):
-    assert ('Finish the current assessment by evidence/shared balance; node targets do not end research. '
-        'Existing productive work may continue with continue_w and decision_request=null.') in text
-    assert ('At exhausted shared budgets, summarize existing results and gaps and use finish/deliver '
-        'to request the protected final A. Ordinary A does not authorize adapter submission; '
-        'no new H/W/E is authorized at exhaustion.') in text
+def assert_a_instruction_retains_advisory_scope(text):
+    assert 'Return fallible advice with continue_w and decision_request=null' in text
+    assert 'W judges the concern and chooses its response.' in text
+    assert ('Shared exhaustion is handled by control admission and separate Final A; '
+        'ordinary advice grants no new work or delivery.') in text
     assert 'without terminating this accepted node for a soft target' in text
-
-
-def assert_a_exhaustion_requires_protected_final(text):
-    assert ('A: conclude now; deliver/finish requests protected Final A. '
-        'No new H/W/E; permissions hold; unknown usage != 0.') in text
-    assert 'eligible existing candidate' not in text and 'No H/W/E/extra FINAL' not in text
 
 
 @pytest.fixture
 def advice(tmp_path, monkeypatch):
-    def make(*, mode='soft', node=True, delivery=False, node_tokens=100, role='H',
-            role_targets=None, thinking_target=None, max_tokens=1000, max_seconds=120, strategy=3):
+    def make(*, node=True, delivery=False, node_tokens=100, role='H',
+            role_targets=None, thinking_target=None, max_tokens=1000, max_seconds=120):
         public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Bounded scientific question.')
         root=tmp_path/'instance'
         reserve=(dict(closeout_a=dict(max_observed_tokens=10,max_seconds=1),inflight_tokens=5,
             cleanup_seconds=2,submit_seconds=0,confirm_seconds=0,adapter=None) if delivery else None)
         controller.prepare(root,objective,public,['never-launch'],max_tokens=max_tokens,max_seconds=max_seconds,max_steps=6,
-            model='fixture',reasoning_effort='high',search_policy=None,node_budget_mode=mode,
-            research_strategy_version=strategy,
+            model='fixture',reasoning_effort='high',search_policy=None,node_budget_mode='soft',
             node_budget_policy=(role_targets or policy(tokens=node_tokens,seconds=30)) if node else None,delivery_policy=reserve,
             role_budget_policy=dict(version=1,min_w_share=.65,max_thinking_share=.35,
                 thinking_node_target_tokens=thinking_target) if thinking_target is not None else None)
@@ -113,7 +104,7 @@ def test_unreported_continuation_keeps_previous_consumption_and_unknown(advice):
 
 
 def test_soft_target_remains_advisory_and_shared_balance_is_not_a_fresh_grant(advice):
-    root,_,_,_,shared,published,publish=advice(mode='soft')
+    root,_,_,_,shared,published,publish=advice()
     frozen=c.settings(root)
     assert budget.delivery_reserve(frozen)==dict(tokens=0,seconds=0.,steps=0)
     shared.update(observed_tokens=250,accounted_tokens=250)
@@ -135,12 +126,12 @@ def test_a_node_target_with_r15_shared_balance_does_not_end_research(advice):
     assert hint['shared_active_seconds_remaining']==9341.
     assert set(hint['closeout_notices'])=={'token'}
     assert hint['closeout_notices']['token']['cause']=='node'
-    assert_a_risk_keeps_evidence_based_routing(hint['closeout_notices']['token']['text'])
-    assert_a_instruction_scopes_global_closeout(hint['instruction'])
+    assert_a_notice_retains_advisory_scope(hint['closeout_notices']['token']['text'])
+    assert_a_instruction_retains_advisory_scope(hint['instruction'])
     assert budget.stop_node(root,job,intent,limits,meter) is None
 
 
-def test_a_shared_token_exhaustion_requires_immediate_conclusion(advice):
+def test_a_shared_token_exhaustion_preserves_advice_and_separate_final_authority(advice):
     _,_,_,_,shared,_,publish=advice(role='A')
     shared.update(observed_tokens=1000,accounted_tokens=1000)
     hint=publish()
@@ -149,13 +140,12 @@ def test_a_shared_token_exhaustion_requires_immediate_conclusion(advice):
     assert hint['reserve_state']=='reached'
     text=hint['closeout_notices']['token']['text']
     assert hint['closeout_notices']['token']['cause']=='shared'
-    assert 'Shared token budget reached' in text and 'conclude now' in text
-    assert_a_exhaustion_requires_protected_final(text)
+    assert_a_notice_retains_advisory_scope(text)
+    assert_a_instruction_retains_advisory_scope(hint['instruction'])
 
 
-@pytest.mark.parametrize('mode',['soft'])
-def test_author_advice_uses_verified_attempt_allowance_not_reused_w_cap(advice,mode):
-    root,_,intent,_,shared,_,publish=advice(mode=mode,node_tokens=200)
+def test_author_advice_uses_verified_attempt_allowance_not_reused_w_cap(advice):
+    root,_,intent,_,shared,_,publish=advice(node_tokens=200)
     frozen=c.settings(root)
     assert budget.delivery_reserve(frozen)==dict(tokens=0,seconds=0.,steps=0)
     assert intent['budget_slice']['limits']['max_observed_tokens']==200
@@ -181,16 +171,15 @@ def test_missing_author_allowance_is_unavailable_and_never_shows_original_w_cap(
     assert hint['current_work_active_seconds_available'] is None
 
 
-@pytest.mark.parametrize('mode,prior,expected,state',[('soft',85,905,'within'),('soft',95,895,'within')])
-def test_author_balance_preserves_actual_shared_usage_past_soft_targets(advice,mode,prior,expected,state):
-    _,_,intent,_,shared,_,publish=advice(mode=mode)
+def test_author_balance_preserves_actual_shared_usage_past_soft_targets(advice):
+    _,_,intent,_,shared,_,publish=advice()
     intent.update(continuation_kind='author_closeout')
-    intent['budget_slice'].update(previous_tokens=prior,previous_seconds=2.)
-    shared.update(observed_tokens=prior+10,accounted_tokens=prior+10)
+    intent['budget_slice'].update(previous_tokens=95,previous_seconds=2.)
+    shared.update(observed_tokens=105,accounted_tokens=105)
     hint=publish(dict(input_tokens=7,cached_input_tokens=6,output_tokens=3),
         author_limits=dict(max_observed_tokens=20,max_seconds=8))
-    assert hint['current_work_observed_tokens_remaining_upper_bound']==expected
-    assert hint['target_state']==state and hint['targets']['max_observed_tokens']==20
+    assert hint['current_work_observed_tokens_remaining_upper_bound']==895
+    assert hint['target_state']=='within' and hint['targets']['max_observed_tokens']==20
 
 
 def test_no_node_policy_does_not_invent_a_node_allowance(advice):
@@ -281,16 +270,12 @@ def test_shared_time_risk_is_strictly_below_ten_percent(advice,seconds,alert):
     assert hint['current_work_active_seconds_available']==max(0.,seconds)
     assert hint['reserve_state']==('reached' if seconds<=0 else 'within')
     assert ('closeout_notices' in hint) is alert
-    assert_a_instruction_scopes_global_closeout(hint['instruction'])
+    assert_a_instruction_retains_advisory_scope(hint['instruction'])
     if alert:
         text=hint['closeout_notices']['time']['text']
         assert set(hint['closeout_notices'])=={'time'}
         assert hint['closeout_notices']['time']['cause']=='shared'
-        if seconds<=0:
-            assert_a_exhaustion_requires_protected_final(text)
-        else:
-            assert_a_risk_keeps_evidence_based_routing(text)
-        assert ('Shared time expired' in text) is (seconds<=0)
+        assert_a_notice_retains_advisory_scope(text)
         assert budget_notice.published_notices(hint)==hint['closeout_notices']
 
 
@@ -312,50 +297,39 @@ def test_producer_keeps_token_and_time_risks_independent_through_resume(advice,f
     remaining='token' if selected=='time' else 'time'
     output=budget_notice.hook_output(work,2)['hookSpecificOutput']['additionalContext']
     assert output==both['closeout_notices'][remaining]['text']
-    if remaining=='time':assert 'Shared time expired' in output
+    assert_a_notice_retains_advisory_scope(output)
     for attempt in (0,1,2,999):assert budget_notice.hook_output(work,attempt) is None
 
 
-def test_later_token_notice_concludes_when_shared_time_expired_after_its_notice(advice):
-    root,_,_,limits,_,_,publish=advice(role='A')
-    limits['seconds_remaining']=11.
-    first=publish()
-    assert set(first['closeout_notices'])=={'time'}
-    work=c.workspace(root,1)
-    assert_a_risk_keeps_evidence_based_routing(budget_notice.hook_output(work,0)['hookSpecificOutput']['additionalContext'])
-    limits['seconds_remaining']=0.
-    expired=publish()
-    assert set(expired['closeout_notices'])=={'time'}  # Time expiry does not invent a token-risk trigger.
-    assert budget_notice.hook_output(work,1) is None
-    both=publish(dict(input_tokens=80,cached_input_tokens=0,output_tokens=0))
-    assert set(both['closeout_notices'])=={'time','token'}
-    text=budget_notice.hook_output(work,2)['hookSpecificOutput']['additionalContext']
-    assert text==both['closeout_notices']['token']['text'] and both['closeout_notices']['token']['cause']=='shared'
-    assert 'Token budget risk' in text and 'Shared budget exhausted' in text
-    assert 'Shared token budget reached' not in text
-    assert_a_exhaustion_requires_protected_final(text)
-    assert budget_notice.hook_output(work,3) is None
-
-
-def test_later_time_notice_concludes_when_shared_tokens_exhausted_after_their_notice(advice):
+@pytest.mark.parametrize('first_dimension',['time','token'])
+def test_other_dimension_exhaustion_does_not_retrigger_advice_or_change_its_scope(advice,first_dimension):
     root,_,intent,limits,shared,_,publish=advice(role='A')
-    meter=dict(input_tokens=80,cached_input_tokens=0,output_tokens=0)
+    meter=dict(input_tokens=25,cached_input_tokens=0,output_tokens=0)
+    if first_dimension=='time':limits['seconds_remaining']=11.
+    else:meter['input_tokens']=80
     first=publish(meter)
-    assert set(first['closeout_notices'])=={'token'}
+    assert set(first['closeout_notices'])=={first_dimension}
     work=c.workspace(root,1)
-    assert_a_risk_keeps_evidence_based_routing(budget_notice.hook_output(work,0)['hookSpecificOutput']['additionalContext'])
-    shared.update(observed_tokens=1000,accounted_tokens=1000)
+    assert_a_notice_retains_advisory_scope(budget_notice.hook_output(work,0)['hookSpecificOutput']['additionalContext'])
+
+    if first_dimension=='time':limits['seconds_remaining']=0.
+    else:shared.update(observed_tokens=1000,accounted_tokens=1000)
     exhausted=publish(meter)
-    assert set(exhausted['closeout_notices'])=={'token'}  # Token exhaustion does not invent a time-risk trigger.
+    assert set(exhausted['closeout_notices'])=={first_dimension}
+    assert exhausted['closeout_notices'][first_dimension]['cause']=='shared'
     assert budget_notice.hook_output(work,1) is None
-    limits['advance_seconds']=intent['budget_slice']['advance_seconds']+24.
+
+    # Exhaustion in one dimension cannot invent a trigger in the other.
+    # Its later node risk still returns advice within the same frozen A scope.
+    if first_dimension=='time':meter['input_tokens']=80
+    else:limits['advance_seconds']=intent['budget_slice']['advance_seconds']+24.
     both=publish(meter)
+    remaining='token' if first_dimension=='time' else 'time'
     assert set(both['closeout_notices'])=={'time','token'}
+    assert both['closeout_notices'][remaining]['cause']=='node'
     text=budget_notice.hook_output(work,2)['hookSpecificOutput']['additionalContext']
-    assert text==both['closeout_notices']['time']['text'] and both['closeout_notices']['time']['cause']=='shared'
-    assert 'Time budget risk' in text and 'Shared budget exhausted' in text
-    assert 'Shared time expired' not in text and 'Shared time budget reached' not in text
-    assert_a_exhaustion_requires_protected_final(text)
+    assert text==both['closeout_notices'][remaining]['text']
+    assert_a_notice_retains_advisory_scope(text)
     assert budget_notice.hook_output(work,3) is None
 
 
@@ -383,20 +357,6 @@ def test_negative_node_time_is_rejected_without_replacing_the_last_hint(advice):
     assert path.read_bytes()==original
 
 
-def test_explicit_legacy_a_exhaustion_retains_direct_candidate_or_gaps_contract(advice):
-    _,job,_,_,shared,_,publish=advice(role='A',strategy=None)
-    assert job.get('research_strategy_version') is None
-    shared.update(observed_tokens=1000,accounted_tokens=1000)
-    hint=publish()
-    assert hint['closeout_notices']['token']['cause']=='shared'
-    assert hint['closeout_notices']['token']['text']==(
-        'Shared token budget reached. A: conclude now; deliver an eligible existing candidate or finish with gaps. '
-        'No H/W/E/extra FINAL; permissions hold; unknown usage != 0.')
-    assert ('If shared tokens remaining<=0 or shared time remaining<=0, ordinary A must conclude now: '
-        'summarize existing results and deliver an eligible existing candidate or finish with gaps, '
-        'with no new H/W/E or extra FINAL; permissions hold.') in hint['instruction']
-
-
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('role','HWAE')
 def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
@@ -410,8 +370,11 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
         "(work/'work/prelaunch-budget-hint.json').write_text(json.dumps(hint))\n"
         "assert hint['mode']=='soft' and hint['inflight_usage_unknown'] is True\n"
         "task=json.loads((work/'science-task.json').read_text())")
+    # This transport fixture needs a complete W finding and ordinary A advice.
+    code=code.replace("stage_intent='review'", "stage_intent='decision'")
+    code=code.replace("next_action='finish'", "next_action='continue_w'")
     launcher.write_text(code)
-    step=target(root,role);job=c.build_job(root,step,role,[1] if step==2 else [])
+    step=target(root,role);c.build_job(root,step,role,[1] if step==2 else [])
     previous=native.usage(root)
     reserve=budget.delivery_reserve(c.settings(root))
     start_clock(root,'soft native stdin fixture');native.execute_native(root,step)
@@ -430,16 +393,11 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     assert ordinary['token_usage_unknown']  # This current native task has no outcome or usage before submission.
     assert 'unknown_usage' not in ordinary
     for text in ('Targets soft; limits/permissions bind.','work/budget-status.json','input has cache',
-            'unknown!=0','no grant','no wrappers/hashes'):
+            'unknown!=0','no grant'):
         assert text in prompt
     if role in 'HW':
         assert 'Follow-up targets advise; no grant/required handoff.' in prompt
     if role=='A':
-        if job.get('research_strategy_version') in {1,2,3}:
-            assert ('Complete the requested judgment; follow role_contract. Soft targets do not end research. '
-                'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.') in prompt
-        else:
-            assert ('Complete the requested judgment; bounded further work needs decision_request. '
-                'Soft targets do not end research. Shared tokens<=0 or time<=0: deliver eligible candidate '
-                'or finish with gaps from originals; no new H/W/E/extra FINAL; permissions hold.') in prompt
+        assert ('Complete the requested judgment; follow role_contract. Soft targets do not end research. '
+            'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.') in prompt
     assert c.read(execution.record(root,step)/'native-outcome.json')['stop_reason'] is None
