@@ -45,10 +45,11 @@ def original_install(tmp_path):
         environment.pop(name, None)
     result = shell(environment, '''thin_cli_wrapper scidiscovery.research_loop.cli > "$CLI_ROOT/scid-research"
 thin_cli_wrapper scidiscovery.research_loop.experiments > "$CLI_ROOT/scid-experiment"
-chmod 755 "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"
+thin_cli_wrapper scidiscovery.app_cli > "$CLI_ROOT/scid"
+chmod 755 "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment" "$CLI_ROOT/scid"
 ''')
     assert result.returncode == 0, result.stderr
-    for name in ("scid-research", "scid-experiment"):
+    for name in ("scid", "scid-research", "scid-experiment"):
         path = binary / name
         original_files[path] = (path.read_bytes(), 0o755)
     unrelated = home / "science-instance/original.csv"
@@ -110,7 +111,7 @@ def test_reinstall_repeats_at_original_home_prefix_without_package_backups(origi
         for relative in ("site/scidiscovery/module.py", "skills/skill/SKILL.md"):
             assert (prefix / relative).read_text() == revision + "\n"
         for path, (raw, mode) in original_files.items():
-            if path.name.startswith("scid-"):
+            if path.name in ("scid", "scid-research", "scid-experiment"):
                 assert path.read_bytes() == raw
                 assert path.stat().st_mode & 0o777 == mode
         assert_clean(environment, prefix)
@@ -137,7 +138,7 @@ def test_reinstall_publication_and_installed_probe_failure_restore_exact_origina
     environment, prefix, original_files = original_install
     publication_failure = '''eval "$(declare -f publish_thin_cli | sed '1s/publish_thin_cli/publish_original_cli/')"
 publish_thin_cli() {
-    [[ "$1" != scid-experiment ]] || return 44
+    [[ "$1" != scid ]] || return 44
     publish_original_cli "$@"
 }
 ''' if failure == "publication" else ""
@@ -179,7 +180,7 @@ remove_install_tree() {
     assert len(completed) == 1
     assert json.loads((completed[0] / "manifest.json").read_bytes())["state"] == "complete"
     for path, (raw, mode) in original_files.items():
-        if path.name.startswith("scid-"):
+        if path.name in ("scid", "scid-research", "scid-experiment"):
             assert path.read_bytes() == raw
             assert path.stat().st_mode & 0o777 == mode
 
@@ -216,14 +217,15 @@ def test_reinstall_directory_move_failure_restores_exact_originals(original_inst
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize("mutation", ["foreign-wrapper", "missing-wrapper", "linked-wrapper",
+                                    "foreign-app-wrapper", "linked-app-wrapper",
                                     "missing-site", "linked-site", "missing-skills", "linked-skills",
                                     "missing-identity", "linked-identity", "missing-core", "linked-core"])
 def test_reinstall_refuses_foreign_or_incomplete_originals_before_staging(original_install, mutation):
     environment, prefix, original_files = original_install
     binary = Path(environment["HOME"]) / ".local/bin"
     if mutation.endswith("wrapper"):
-        path = binary / "scid-experiment"
-        if mutation == "foreign-wrapper":
+        path = binary / ("scid" if "app-wrapper" in mutation else "scid-experiment")
+        if mutation.startswith("foreign"):
             path.write_bytes(b"foreign owner\n")
         elif mutation == "missing-wrapper":
             path.unlink()
@@ -265,6 +267,46 @@ main reinstall
         assert (saved / "module.py").stat().st_mode & 0o777 == saved_module_mode == 0o444
     assert not [path for path in prefix.iterdir() if path.name.startswith(".")]
     assert not (Path(environment["HOME"]) / ".local/state/scidiscovery/install").exists()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize("failure", [None, "installed-probe"])
+def test_reinstall_adds_scid_to_owned_two_command_installation(original_install, failure):
+    environment, prefix, original_files = original_install
+    app_wrapper = Path(environment["HOME"]) / ".local/bin/scid"
+    del original_files[app_wrapper]
+    app_wrapper.unlink()
+    result = shell({**environment, "FAIL_AT": failure or ""}, STAGED_UPDATE + "main reinstall\n")
+    if failure is None:
+        assert result.returncode == 0, result.stderr
+        assert "-m scidiscovery.app_cli " in app_wrapper.read_text()
+    else:
+        assert result.returncode == 43, result.stderr
+        assert not app_wrapper.exists()
+        assert_original(original_files)
+    assert_clean(environment, prefix)
+
+
+@pytest.mark.process_e2e
+def test_reinstall_preserves_foreign_scid_appearing_during_publication(original_install):
+    environment, prefix, original_files = original_install
+    app_wrapper = Path(environment["HOME"]) / ".local/bin/scid"
+    del original_files[app_wrapper]
+    app_wrapper.unlink()
+    interference = '''mv() {
+    command mv "$@" || return
+    if [[ "$*" == *"$SKILL_ROLLBACK" ]]; then
+        printf 'foreign command appeared\\n' > "$CLI_ROOT/scid"
+    fi
+}
+'''
+    result = shell(environment, STAGED_UPDATE + interference + "main reinstall\n")
+    assert result.returncode == 1, result.stderr
+    assert "thin command appeared during publication: scid" in result.stderr
+    assert "unexpected command owner was preserved" in result.stderr
+    assert app_wrapper.read_bytes() == b"foreign command appeared\n"
+    assert_original(original_files)
+    assert_clean(environment, prefix)
 
 
 def test_seal_rename_failure_keeps_transaction_rollbackable(tmp_path, monkeypatch):

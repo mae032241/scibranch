@@ -2,6 +2,7 @@
 import json
 import os
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
 
@@ -25,8 +26,11 @@ def test_start_response_loss_replays_original_operation_and_new_form_is_new_inte
     original = ui.control_result
     assert post(ui, cookie, 'start', fields)[0] == 303
     assert ui.control_result == original and len(launches) == 1
-    # Reopening a form explicitly starts a new intent; a response retry does not.
-    fresh = form(ui, cookie, 'start')
+    _, page, _ = ui.get('/', host=ui.host, cookie=cookie)
+    assert b'action="/control/pause"' in page and b'action="/control/start"' not in page
+    # Distinct issued intents get distinct nonces. The accepted request remains
+    # active, so its overview offers pause instead of another start action.
+    fresh = control_fields(ui, cookie, 'start')
     assert fresh['nonce'] != fields['nonce']
     assert len(list((root / 'host-control/operations').glob('*.json'))) == 1
     ui.translation.close()
@@ -85,7 +89,7 @@ def test_standalone_locked_maintenance_is_disabled_before_nonce_or_effect(tmp_pa
     ui.translation.close()
 
 
-def test_loaded_same_path_replacement_gets_fresh_instance_and_session(tmp_path, monkeypatch):
+def test_loaded_same_path_replacement_preserves_registered_identity_and_rejects_control(tmp_path, monkeypatch):
     root, key = prepare(tmp_path, enabled=False)
     workspace = tmp_path / 'workspace'; workspace.mkdir()
     host = instance_ui.InstanceUI(workspace, secret_file=key, workspace=True, instance_roots=[root])
@@ -99,13 +103,20 @@ def test_loaded_same_path_replacement_gets_fresh_instance_and_session(tmp_path, 
     replacement_base = tmp_path / 'replacement'; replacement_base.mkdir()
     replacement, _ = prepare(replacement_base, enabled=False)
     replacement.rename(root)
-    current = host._child(1)
-    assert current is not original and current.instance != original.instance
-    with pytest.raises(PermissionError):
-        current.get('/', host=host.host, cookie=old_cookie)
+    with pytest.raises(ValueError, match='identity changed'):
+        host._child(1)
+    assert host.children[1] is original
+    restarted = instance_ui.InstanceUI(workspace, secret_file=key, workspace=True)
+    with pytest.raises(ValueError, match='identity changed'):
+        restarted._child(1)
     monkeypatch.setattr(instance_ui.control, 'start_background', lambda *a, **k: pytest.fail('Old identity dispatched new work'))
+    with pytest.raises(ValueError, match='identity changed'):
+        host.post('/instances/1/control/start', host=host.host, origin='http://' + host.host,
+            cookie=old_cookie, content_type='application/x-www-form-urlencoded',
+            body=urlencode(start).encode())
     assert post(original, old_cookie, 'start', start)[0] == 422
     original.translation.close()
+    restarted.translation.close()
 
 
 def test_current_project_and_sets_only_declaration_round_trip_without_legacy_roots(tmp_path):
@@ -152,9 +163,11 @@ def test_live_budget_navigation_follows_closeout_without_replacing_forms(tmp_pat
     ui, cookie = session(root, key)
     token = ui._browser(cookie)
     snapshot = ui._snapshot()
-    original = ui._more_actions(token, snapshot)
-    original_forms = re.findall(r'<form\b.*?</form>', original, re.S)
-    assert original_forms and 'id="live-budget-navigation"' in original
+    original_actions = str(ui._dashboard_parts(token, snapshot)['live-actions'])
+    original_forms = re.findall(r'<form\b.*?</form>', original_actions, re.S)
+    assert original_forms and 'action="/control/start"' in original_actions
+    original_tools = ui._more_actions(token, snapshot)
+    assert '<form' not in original_tools and 'id="live-budget-navigation"' in original_tools
     assert 'href="/configuration#budget-settings"' in ui._budget_navigation(snapshot)
     closing = copy.deepcopy(snapshot)
     closing['view']['closeout'] = dict(status='final_a_completed')
@@ -163,8 +176,12 @@ def test_live_budget_navigation_follows_closeout_without_replacing_forms(tmp_pat
     navigation = fragments['live-budget-navigation']
     assert 'href="/instances/7/budget-recovery#budget"' in navigation
     assert '<form' not in navigation and 'nonce' not in navigation and 'more-actions' not in navigation
-    changed = ui._more_actions(token, closing)
-    assert re.findall(r'<form\b.*?</form>', changed, re.S) == original_forms
+    assert '<form' not in ui._more_actions(token, closing)
+    assert 'action="/instances/7/control/start"' not in str(fragments['live-actions'])
+    # Updating the navigation does not consume or change the original action
+    # credentials; lifecycle controls stay in their own live action row.
+    unchanged_actions = str(ui._dashboard_parts(token, snapshot)['live-actions'])
+    assert re.findall(r'<form\b.*?</form>', unchanged_actions, re.S) == original_forms
     # Returning to an ordinary state restores the canonical configuration link.
     monkeypatch.setattr(ui, '_snapshot_or_error', lambda **options: snapshot)
     restored = ui._live_snapshot(token, '/instances/7', force=True)['fragments']['live-budget-navigation']

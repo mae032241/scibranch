@@ -34,10 +34,9 @@ exact experiments and validation contracts.
   calls, or create a paused branch from one exact historical logical task with new
   finite budgets.
 
-The supported commands are `scid-research` for research instances and
-`scid-experiment` for managed experiments. `scid-research serve-ui` exposes the same
-instance controls and results through an optional webpage; detached research can
-continue after the webpage service exits.
+Use `scid web` for workspace management, `scid-research` for research instances and
+`scid-experiment` for managed experiments. The webpage uses the same instance
+controls and results; independent research can continue after the Web process exits.
 
 ## Install
 
@@ -56,10 +55,10 @@ then install offline as the current user:
 SCID_PYTHON=/absolute/python bash deploy/install.sh --dry-run
 SCID_PYTHON=/absolute/python bash deploy/install.sh install
 export PATH="$HOME/.local/bin:$PATH"
-scid-research --help
+scid web --help
 ```
 
-The installer publishes the two commands and bundled runtime Skills. Defaults
+The installer publishes the three commands and bundled runtime Skills. Defaults
 remain `$HOME/.local/share/scidiscovery` for code and Skills,
 `$HOME/.local/bin` for commands, and `$HOME/.local/state/scidiscovery/install`
 for installation transactions. The Python package is still `scidiscovery`;
@@ -67,6 +66,14 @@ these technical identifiers are unchanged by the SciBranch project name.
 Use `reinstall` to update an existing installation after stopping its controllers,
 Workers and UI. See the [installation guide](docs/INSTALL.md) for dependencies,
 optional plugins, update and removal.
+
+Run `scid web` to start workspace management in the background and print its actual
+URL. Repeating the command returns the running service's URL. The default workspace
+is prepared automatically; workspaces added through the webpage persist across
+restarts, and instances are listed only from each workspace's explicit records.
+Use `scid web status`, `scid web stop` or `scid web --foreground` as needed. Paths,
+ports and the complete command reference are in the [CLI guide](docs/ROOTLESS_CLI.zh-CN.md#web-工作区管理).
+Stopping Web leaves independent research runners running.
 
 ## Start a research instance
 

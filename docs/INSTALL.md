@@ -4,7 +4,7 @@
 
 The supported host platform is Linux with POSIX filesystem/locking behavior. Native Windows is unsupported and WSL2 is unverified. No Windows adaptation is installed.
 
-The SciBranch installer builds and publishes `scid-research`, `scid-experiment` and selected
+The SciBranch installer builds and publishes `scid`, `scid-research`, `scid-experiment` and selected
 plugins offline. Operators must provide dependencies beforehand. Installation does
 not contact a model, create a research instance or start services.
 `SCID_DEPLOY_MODE` accepts only `thin`; other values fail before filesystem changes.
@@ -45,7 +45,7 @@ SCID_PYTHON="$HOME/.local/share/scidiscovery-python/bin/python" \
 SCID_PYTHON="$HOME/.local/share/scidiscovery-python/bin/python" \
   SCID_PLUGINS=cov_execution bash deploy/install.sh install
 export PATH="$HOME/.local/bin:$PATH"
-scid-research --help
+scid web --help
 ```
 
 Omit `SCID_PLUGINS` for the core alone. Persist the PATH export in your shell
@@ -74,7 +74,7 @@ The defaults are `SCID_INSTALL_ROOT=$HOME/.local/share/scidiscovery` (containing
 `site/` and `skills/`), `SCID_BIN_ROOT=$HOME/.local/bin`, and
 `SCID_BACKUP_ROOT=$HOME/.local/state/scidiscovery/install`. Installation creates
 the command directory if needed; `--dry-run` only checks and writes nothing.
-The Python package remains `scidiscovery`; its name, the `scid-*` commands and
+The Python package remains `scidiscovery`; its name, the `scid` / `scid-*` commands and
 these installation paths remain stable under the SciBranch project name.
 Override these `SCID_*` settings explicitly with canonical absolute paths when
 needed, choosing directories writable by the current user.
@@ -102,7 +102,7 @@ Poppler `pdfimages` is required only for PDF image extraction. Installation does
 licenses or real solvers. See the [transport contract](tcad_transport_contract.md)
 for the independently deployed remote runner.
 
-Installation publishes only `scid-research` and `scid-experiment`. It creates no
+Installation publishes `scid`, `scid-research` and `scid-experiment`. It creates no
 instance, budget, credential, platform profile or service. Fresh `install` refuses
 existing package roots or command wrappers. To update the existing installation,
 stop its research controllers, Workers and UI processes, then use `reinstall`
@@ -122,6 +122,10 @@ existing installation transaction retains small wrapper evidence. No new permane
 installation prefix is required. Unknown files beside the managed trees, scientific
 Python environments and research instances are preserved. An incomplete deployment,
 symlink target or command owned by another configuration is refused.
+An older owned thin installation with the original two matching wrappers can gain
+the new `scid` wrapper when that path is absent. An existing foreign `scid`, including
+a retired legacy command, is preserved and blocks publication; the installer does
+not adopt or delete it.
 The installer does not discover or stop live writers; stopping them is an operator
 step, not a guarantee supplied by the deployment lock.
 Scientific configuration, original identities and frozen Skill selections and
@@ -130,12 +134,17 @@ Changing shared implementation code is a separate upgrade and provides no
 compatibility guarantee for old protocols.
 
 `bash deploy/install.sh status` checks wrapper ownership. `bash deploy/install.sh uninstall`
-removes only the two matching wrappers, retaining code and instance originals.
+removes only the three matching wrappers, retaining code and instance originals.
 Publication failure uses the existing transaction; foreign command owners are
 preserved and reported. These commands do not stop or modify
 leftover host services or delete databases and historical results.
 
-See the [CLI guide](ROOTLESS_CLI.zh-CN.md) for research, UI, approval and recovery.
+After installation, `scid web` starts workspace management in the background and
+prints its actual URL. Its default workspace is prepared on first use; known
+workspaces and each workspace's explicit instance list persist across Web restarts.
+`scid web stop` stops Web while independent research runners continue.
+See the [CLI guide](ROOTLESS_CLI.zh-CN.md#web-工作区管理) for Web lifecycle, paths and
+ports, and the rest of the guide for research, approval and recovery.
 See the [configuration reference](RESEARCH_CONFIGURATION.md) for model, execution
 environment and permission requirements. Successful installation does not qualify
 a real model, browser or solver. Prepare model/bootstrap access, Cov training data

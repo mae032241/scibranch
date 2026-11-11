@@ -15,7 +15,7 @@ SCID_PYTHON=/absolute/python SCID_PLUGINS=cov_execution bash deploy/install.sh i
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-`--dry-run` 只预检，不写文件。安装离线使用 `--no-deps` 发布 `scid-research` /
+`--dry-run` 只预检，不写文件。安装离线使用 `--no-deps` 发布 `scid` / `scid-research` /
 `scid-experiment`，本身不创建 venv、不解析联网依赖；仅需核心时省略 `SCID_PLUGINS`。
 默认 `SCID_INSTALL_ROOT=$HOME/.local/share/scidiscovery`（含 `site/` 和 `skills/`），
 `SCID_BIN_ROOT=$HOME/.local/bin`，`SCID_BACKUP_ROOT=$HOME/.local/state/scidiscovery/install`。
@@ -27,11 +27,48 @@ MCP/Root 角色、systemd 服务或默认实例。首次 `install` 拒绝已有 
 `reinstall` 在原路径先暂存验证后替换包和 Skill，发布失败恢复旧目录及命令。
 更新前须停止使用该安装的控制进程、Worker 和 UI；安装器不停止旧 live 服务，
 也不更新已冻结实例。`status` 只核本配置 wrapper 归属；
-`uninstall` 仅删除匹配本配置的两个 wrapper，保留代码 prefix、实例及旧状态，
+`uninstall` 仅删除匹配本配置的三个 wrapper，保留代码 prefix、实例及旧状态，
 不能把卸载命令等同于所有 native/外部作业已停止。`reinstall.sh` 默认无 sudo 执行原目录更新，
 无需更换 HOME 安装目录；参数、归属检查和失败回退见[安装指南](INSTALL.zh-CN.md)。
 
 `SCID_DEPLOY_MODE=legacy` 已退役并在修改文件前拒绝。当前不提供旧 SQL reader 或协议迁移。安装不会自动运行以下命令或增加任何预算。
+
+## Web 工作区管理
+
+```sh
+scid web
+scid web status
+scid web stop
+scid web --foreground
+```
+
+`scid web` 默认启动独立后台 Web 进程，待其就绪后打印实际管理 URL 并返回终端。
+再次执行时，若同一状态目录的服务仍在运行，就打印该服务的实际管理 URL 并立即返回。
+打开打印的 URL 即可选择工作区和实例；默认端口为 `0`，由系统分配空闲端口，勿猜测固定端口。
+`status` 查看服务状态及运行中的管理 URL；`stop` 停止该 Web 进程。
+`--foreground` 供需要前台日志和终端管理的情况使用。
+
+首次启动自动准备默认工作区 `$XDG_DATA_HOME/scidiscovery/workspace`；未设置
+`XDG_DATA_HOME` 时为 `$HOME/.local/share/scidiscovery/workspace`。
+Web 运行状态默认保存在 `$XDG_STATE_HOME/scidiscovery/web`；未设置 `XDG_STATE_HOME`
+时为 `$HOME/.local/state/scidiscovery/web`。需要明确路径或端口时可指定：
+
+```sh
+scid web --workspace /absolute/workspace --state-dir /absolute/web-state --port 0
+scid web status --state-dir /absolute/web-state
+scid web stop --state-dir /absolute/web-state
+```
+
+网页可以添加准确路径的已有工作区，并在重启后保留已知工作区清单。
+每个工作区仅显示其显式登记的实例，不扫描目录寻找实例；默认工作区初始化不创建科研实例、
+不启动模型或计算。新实例仍须明确目标、原件、权限、预算与配置。
+当前只接受协议 **33**，旧格式不支持且不迁移。
+
+Web 与科研控制器、原生会话及计算进程分离；关闭页面或执行 `scid web stop` 后，
+独立研究 runner 仍可继续。暂停或中断研究须使用该实例的显式控制。
+Codex 与 Pi 继续使用同一公共 `Backend`、原有角色流程与各自声明的权限和限制；
+Web 不新增角色或执行授权。单实例 `serve-ui` 仍可使用，完整用法见下文。
+源码中的对应入口为 `PYTHONPATH=src python -m scidiscovery.app_cli web`。
 
 ## 创建与运行
 
@@ -623,7 +660,8 @@ config_file = "./tcad.toml"
 
 新实例冻结有效配置；之后修改或删除顶层插件配置文件不会修改既有实例，也不会在启动/检查既有实例时重新读取它。既有嵌套传输原件和科学原件继续遵循各自的完整性规则。框架、插件及工具源码可正常升级，不再按安装包或工具源码哈希拒绝启动、查询、交付或恢复。任务、输入和成果原件、声明权限、预算及原调用身份保持精确校验；升级不重置消费，也不自动重放未知调用。
 
-实例页面复用同一控制状态：
+实例页面复用同一控制状态。日常工作区管理使用前述 [`scid web`](#web-工作区管理)，
+由该命令管理 Web 进程和浏览凭据。需要自行管理前台 host 与密钥时，也可使用原有显式入口：
 
 ```sh
 scid-research serve-ui --workspace /absolute/path/workspace \
@@ -644,7 +682,7 @@ scid-research serve-ui --root /absolute/path/instance \
 workspace 本身没有科学身份、预算或启动/恢复控件；准备新实例仍须显式给齐预算等必要输入。
 `--root` 与 `--workspace` 二选一，既有 `--root` 用法保持不变。
 
-密钥由操作者提供，须为现有普通文件、权限0600且至少32字节。命令监听 loopback 并输出独立只读/管理链接，重启后旧浏览凭据失效。普通本地实例无需启用正式审查或执行审批，也能查看节点状态、请求暂停和继续。暂停只阻止下一节点；已接受工作继续完成。继续复用原实例写锁，推进由 detached 控制进程拥有；关闭网页服务不停止已接受推进。页面提供实例状态、精确封存科学原文和成果入口，不提供任意路径或完整私有会话读取。
+上述 `serve-ui` 的密钥由操作者提供，须为现有普通文件、权限0600且至少32字节。命令监听 loopback 并输出独立只读/管理链接，重启后旧浏览凭据失效。普通本地实例无需启用正式审查或执行审批，也能查看节点状态、请求暂停和继续。暂停只阻止下一节点；已接受工作继续完成。继续复用原实例写锁，推进由 detached 控制进程拥有；关闭网页服务不停止已接受推进。页面提供实例状态、精确封存科学原文和成果入口，不提供任意路径或完整私有会话读取。
 
 v3 的“W 实验执行状态”同时展示机制声明、原调用投入，以及每次实验绑定的准确机制版本、问题和改变判断的条件。投入只表示接受过的原调用，不是科学轮次、研究深度或认可；缺失视图不代表零投入。封存机制历史与实时声明分列，后续改名或修订不会改写旧调用。候选证据记忆展示 W 选择的数据、评价口径、支持/反对/未知证据、失败条件、开放问题和限制，并链接既有原件；它与候选提名、A 推荐和资格分开。
 

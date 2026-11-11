@@ -6,8 +6,11 @@ SciBranch 从明确目标、选中的原始输入、声明的原生权限和有�
 W 拥有持续研究及结论；宿主保留准确身份、执行准入并记录实际发生的事实。
 证据、科学资格和执行权限分别成立。
 
-`scid-research` 是应用核心，`scid-experiment` 是受管执行入口。可选实例 UI
-复用相同公共控制与读取视图，不增加调度器或状态权威。不存在 LLM Root 或 MCP 调度器。
+`scid web` 管理可选工作区网页及其独立 Web 进程；`scid-research` 是研究应用核心，
+`scid-experiment` 是受管执行入口。网页复用相同公共控制与读取视图；
+已知工作区及各自显式登记的实例清单持久保留，不扫描目录。
+停止 Web 后独立科研 runner 继续运行。UI 不增加调度器或科学状态权威。
+不存在 LLM Root 或 MCP 调度器。
 
 <a id="责任与数据流"></a>
 
@@ -108,12 +111,13 @@ fork 与删除按明确身份及静止门槛操作，不新增资格，也不恢
 
 | 边界 | 主要 owner |
 | --- | --- |
+| Web 命令与进程生命周期 | `../app_cli.py`、`web_service.py` |
 | 准备、路由与推进 | `research_config.py`、`controller.py`、`runtime.py`、`instance_control.py` |
 | 原生生命周期与恢复 | `backends.py`、`native.py`、`execution.py`、`continuation.py`、`native_recovery.py` |
 | 科学合同与指导 | `contracts.py`、`semantic.py`、`guidance.py`、`instance_science.py` |
 | 调用、代码与执行权限 | `experiments.py`、`local_experiments.py`、`code_versions.py`、`execution_inputs.py`、`execution_authority.py` |
 | 资格与交付 | `qualification.py`、`formal_review.py`、`selection.py`、`delivery.py` |
-| 控制、生命周期及 UI | `control_operations.py`、`configuration_updates.py`、`user_guidance.py`、`fork_service.py`、`instance_delete.py`、`instance_ui.py` |
+| 控制、生命周期及 UI | `control_operations.py`、`configuration_updates.py`、`user_guidance.py`、`fork_service.py`、`instance_delete.py`、`instance_ui.py`、`workspace_catalog.py` |
 
 - [研究循环合同](RESEARCH_LOOP_CONTRACTS.zh-CN.md)：准确路由、材料、身份、预算、最终报告、fork／删除和恢复规则。
 - [研究配置](RESEARCH_CONFIGURATION.md)：声明、后端 profile、权限限制、工程、Skills 和恢复字段。

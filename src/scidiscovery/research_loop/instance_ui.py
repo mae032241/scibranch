@@ -32,6 +32,7 @@ from . import backends, budget, configuration_form, configuration_updates, progr
 from . import ui_components as ui
 from . import ui_mechanisms, ui_view, ui_translation, ui_errors, ui_guidance
 from . import fork_ui
+from . import protocol, workspace_catalog
 
 
 _ENTRY_SCRIPT = "location.replace('./');"
@@ -54,15 +55,34 @@ def _host_lock(root, *, workspace=False):
 
 
 class InstanceUI:
-    def __init__(self, root, *, secret_file, instance_roots=(), approval_host=True, workspace=False, translation_service=None, translation_config=None):
-        self.root = Path(root).resolve()
-        self.workspace = workspace
-        if workspace and not self.root.is_dir():
+    def __init__(self, root, *, secret_file, instance_roots=(), approval_host=True, workspace=False, multi_workspace=False, translation_service=None, translation_config=None):
+        root = Path(root).resolve()
+        if workspace and not root.is_dir():
             raise ValueError('UI workspace must be an existing explicit directory')
+        settings = {} if workspace else display.settings(root)
+        self._initialize(root, settings=settings, secret_file=secret_file, instance_roots=instance_roots,
+            approval_host=approval_host, workspace=workspace, multi_workspace=multi_workspace,
+            translation_service=translation_service, translation_config=translation_config)
+
+    @classmethod
+    def _from_settings(cls, root, *, settings, secret_file, translation_service):
+        instance = cls.__new__(cls)
+        instance._initialize(root, settings=settings, secret_file=secret_file,
+            approval_host=False, translation_service=translation_service)
+        return instance
+
+    def _initialize(self, root, *, settings, secret_file, instance_roots=(), approval_host=True,
+                    workspace=False, multi_workspace=False, translation_service=None, translation_config=None):
+        self.root = root
+        self.workspace = workspace
         self.secret_file = Path(secret_file).resolve()
-        self.instance_roots = list(dict.fromkeys([self.root, *(Path(item).expanduser().resolve() for item in instance_roots)]))
+        self.instance_roots = [self.root]
+        self.instance_identities = {}
+        self.catalog_errors = []
+        self.multi_workspace = bool(multi_workspace and workspace)
+        self.workspace_roots = [self.root]
+        self.workspaces = {}
         self.children = {}
-        settings = {} if workspace else display.settings(self.root)
         self.error_settings = settings
         self.approval_host = bool(approval_host and not workspace)
         self.approvals_configured = False
@@ -107,6 +127,93 @@ class InstanceUI:
         self._refresh_approval_host()
         self.translation = translation_service or ui_translation.TranslationService(self.root / ".scid-ui", config=translation_config)
         self.translation_nonce = secrets.token_urlsafe(32)
+        if workspace:
+            for item in self._catalog('instances'):
+                try:
+                    selected = workspace_catalog.record(item, 'instances')
+                    if selected == self.root:
+                        raise ValueError('Workspace cannot also be its registered instance')
+                    if selected not in self.instance_roots:
+                        self.instance_roots.append(selected)
+                        self.instance_identities[selected] = item['goal_id']
+                except Exception as error:
+                    self.catalog_errors.append(str(error))
+        for item in instance_roots:
+            selected = Path(item).expanduser().resolve()
+            try:
+                settings = display.settings(selected)
+                self._register_instance(selected, settings)
+            except Exception as error:
+                if selected not in self.instance_roots:
+                    self.instance_roots.append(selected)
+                self.catalog_errors.append(str(error))
+        if self.multi_workspace:
+            for item in self._catalog('workspaces'):
+                try:
+                    selected = workspace_catalog.record(item, 'workspaces')
+                    if selected not in self.workspace_roots:
+                        self.workspace_roots.append(selected)
+                except Exception as error:
+                    self.catalog_errors.append(str(error))
+
+    def _catalog(self, kind):
+        try:
+            return workspace_catalog.load(self.root, kind)
+        except Exception as error:
+            self.catalog_errors.append(str(error))
+            return []
+
+    def _remember(self, kind, value, *, remove=False):
+        try:
+            workspace_catalog.remember(self.root, kind, value, remove=remove)
+        except Exception as error:
+            # Publishing research succeeded already. Preserve its navigation and
+            # report this optional navigation persistence failure on the home page.
+            self.catalog_errors.append('目录列表未保存：' + str(error))
+
+    def _register_instance(self, root, settings):
+        protocol.require_settings_format(settings)
+        self._remember_instance(root, settings)
+
+    def _remember_instance(self, root, settings):
+        goal_id = settings['goal_id']
+        with self.control_lock:
+            if root in self.instance_identities and self.instance_identities[root] != goal_id:
+                raise ValueError('Registered instance identity changed; refusing to rebind its root')
+            self.instance_identities[root] = goal_id
+            if root not in self.instance_roots:
+                self.instance_roots.append(root)
+            self.deleted_roots.discard(root)
+        owner = self if self.workspace else self.workspace_host
+        if owner is not None:
+            if owner is not self:
+                owner._remember_instance(root, settings)
+            else:
+                self._remember('instances', dict(root=str(root), goal_id=goal_id))
+
+    def _forget_instance(self, root, goal_id):
+        self.deleted_roots.add(root)
+        if self.workspace:
+            self._remember('instances', dict(root=str(root), goal_id=goal_id), remove=True)
+        elif self.workspace_host is not None:
+            self.workspace_host._forget_instance(root, goal_id)
+
+    def _workspace_child(self, index):
+        if not self.multi_workspace or not 0 < index < len(self.workspace_roots):
+            raise ValueError('Select an explicitly registered workspace')
+        with self.control_lock:
+            root = self.workspace_roots[index]
+            if not root.is_dir() or root.resolve() != root:
+                raise ValueError('Registered workspace directory is unavailable or changed')
+            if index not in self.workspaces:
+                self.workspaces[index] = InstanceUI(root, secret_file=self.secret_file, workspace=True,
+                    approval_host=False, translation_service=self.translation)
+                self.workspaces[index].global_workspace = self
+            child = self.workspaces[index]
+            child.host = self.host
+            child.live_stop = self.live_stop
+            child.live_gate = self.live_gate
+            return child
 
     def _refresh_approval_host(self):
         """Prepare the explicit UI host without changing any job permission."""
@@ -220,8 +327,8 @@ class InstanceUI:
             return self._new_research_page(token, draft=draft, selection=selection, notice=problem,
                 config_path=form.get('config_path', ''), save_path=form.get('save_path', ''))
         fields = ''
-        if action == 'open':
-            fields = '<label>实例目录<input name="root" required value="' + html.escape(form['root'], quote=True) + '"></label>'
+        if action in {'open', 'workspace-open'}:
+            fields = '<label>' + ('工作区目录' if action == 'workspace-open' else '实例目录') + '<input name="root" required value="' + html.escape(form['root'], quote=True) + '"></label>'
         elif action == 'budget':
             for key, label in [('max_tokens', '新的 tokens 总上限'), ('max_seconds', '新的时间总上限（秒）'),
                     ('max_steps', '新的阶段总上限'), ('authorization_note', '调整说明')]:
@@ -378,18 +485,36 @@ class InstanceUI:
     def _child(self, index):
         if not 0 < index < len(self.instance_roots) or self.instance_roots[index] in self.deleted_roots:
             raise ValueError('Select an explicitly opened instance')
+        root = self.instance_roots[index]
+        if root.resolve() != root:
+            raise ValueError('Registered instance root changed')
+        settings = protocol.require_settings_format(display.settings(root))
+        return self._materialize_child(index, settings)
+
+    def _materialize_child(self, index, settings):
+        """Produce a browser child from this operation's accepted settings."""
         with self.control_lock:
             root = self.instance_roots[index]
-            settings = display.settings(root)
-            if index not in self.children or self.children[index].instance != settings['goal_id']:
-                source = settings.get('ui', {}).get('approval_secret_file') or self.secret_file
-                self.children[index] = InstanceUI(root, secret_file=source, approval_host=False, translation_service=self.translation)
-                self.children[index].workspace_host = self
-            child = self.children[index]
-            child.host = self.host
-            child.live_stop = self.live_stop
-            child.live_gate = self.live_gate
-        return child
+            candidate = self.children.get(index)
+            if candidate is None:
+                candidate = InstanceUI._from_settings(root, settings=settings,
+                    secret_file=self.secret_file, translation_service=self.translation)
+            return self._child_from_settings(index, settings, candidate)
+
+    def _child_from_settings(self, index, settings, candidate):
+        """Consume accepted facts without reopening settings or probing paths."""
+        root = self.instance_roots[index]
+        expected = self.instance_identities.get(root)
+        if expected is not None and expected != settings['goal_id']:
+            raise ValueError('Registered instance identity changed; refusing to rebind its root')
+        if candidate.instance != settings['goal_id']:
+            raise ValueError('Opened instance identity changed; reopen requires its original identity')
+        self.children[index] = candidate
+        candidate.workspace_host = self
+        candidate.host = self.host
+        candidate.live_stop = self.live_stop
+        candidate.live_gate = self.live_gate
+        return candidate
 
     def _routed_child(self, index, route, cookie):
         retained = self.deleted_children.get(index) if route in {'delete', 'control/delete'} else None
@@ -406,21 +531,26 @@ class InstanceUI:
 
     @staticmethod
     def _mounted(result, index):
+        return InstanceUI._mount(result, '/instances/' + str(index), instance_list=True)
+
+    @staticmethod
+    def _mount(result, prefix, *, instance_list=False):
         status, body, headers = result
-        prefix = '/instances/' + str(index)
         if isinstance(body, live.Stream):
-            body.mount = prefix
+            body.mount = prefix + (getattr(body, 'mount', '') or '')
         if isinstance(body, bytes) and headers.get('Content-Type', 'text/html').startswith('text/html'):
             # Only host-authored HTML links/forms are mounted; scientific bytes
             # and checked download streams are returned exactly as sealed.
-            body = body.replace(b'href="/instances"', b'href="__INSTANCE_LIST__"')
+            if instance_list:
+                body = body.replace(b'href="/instances"', b'href="__INSTANCE_LIST__"')
             body = body.replace(b'href="/', ('href="' + prefix + '/').encode())
             body = body.replace(b'action="/', ('action="' + prefix + '/').encode())
             for attribute in (b'data-live-url', b'data-progress', b'data-translation-url'):
                 body = body.replace(attribute + b'="/', attribute + ('="' + prefix + '/').encode())
             body = body.replace(b'href="__INSTANCE_LIST__"', b'href="/instances"')
+            body = body.replace(b'href="__WORKSPACE_HOME__"', b'href="/"')
         headers = dict(headers)
-        if headers.get('Location', '').startswith('/') and headers['Location'] != '/instances':
+        if headers.get('Location', '').startswith('/') and not (instance_list and headers['Location'] == '/instances'):
             headers['Location'] = prefix + headers['Location']
         return status, body, headers
 
@@ -614,12 +744,27 @@ class InstanceUI:
 
     def _workspace_page(self, token):
         self._admin(token)
-        body = ('<p class="setup-intro">准备一项新研究，或继续已有的工作。每个研究单独保存任务、预算、进度和结果。</p>'
+        body = ''
+        if getattr(self, 'global_workspace', None) is not None:
+            body += '<nav><a href="__WORKSPACE_HOME__">← 全部工作区</a></nav>'
+        if self.multi_workspace:
+            body += '<section><h2>工作区</h2><p>默认工作区：' + html.escape(str(self.root)) + '</p><ul>'
+            for index, root in enumerate(tuple(self.workspace_roots)[1:], 1):
+                try:
+                    child = self._workspace_child(index)
+                    link = '/workspaces/' + str(index) + '/manage?token=' + child.management_token
+                    body += '<li><a href="' + html.escape(link, quote=True) + '">' + html.escape(str(root)) + '</a> · ' + str(len(child.instance_roots) - 1) + ' 个已登记实例</li>'
+                except Exception as error:
+                    body += '<li>' + html.escape(str(root)) + ' · ' + html.escape(str(error)) + '</li>'
+            body += '</ul>' + self._form(token, 'workspace-open', '<label>工作区目录<input name="root" required placeholder="已有工作区的完整目录"></label>', '添加工作区') + '</section>'
+        if self.catalog_errors:
+            body += '<p class="note" role="alert">' + '<br>'.join(html.escape(item) for item in dict.fromkeys(self.catalog_errors)) + '</p>'
+        body += ('<p class="setup-intro">准备一项新研究，或继续已有的工作。每个研究单独保存任务、预算、进度和结果。</p>'
             '<div class="cards"><section><h2>从一个研究问题开始</h2><p>写下任务，指定材料，再决定模型和用量上限。创建后，由你开始研究。</p>'
             '<a class="primary" href="/new">创建新研究 →</a></section>'
             '<section><h2>加载已有实例</h2><p>填写已有实例的完整目录，加载后即可进入管理。</p>')
         body += self._form(token, 'open', '<label>实例目录<input name="root" required placeholder="已有实例的完整目录"></label>', '加载实例')
-        body += '</section></div><section><h2>已加载的实例</h2><p class="note">列表保留于本次工作台会话；重启后可按目录重新加载，研究文件和已用预算仍保留。</p>'
+        body += '</section></div><section><h2>已加载的实例</h2><p class="note">显式加载的实例目录保存在此工作区；重启后可继续访问。不会搜索其他目录。</p>'
         body += '<div id="live-instances">' + self._loaded_instances() + '</div>'
         body += '</section><details><summary>工作台信息</summary><p class="note">工作台目录：' + html.escape(str(self.root)) + '</p></details>'
         return 200, self._page('研究工作台', body), {}
@@ -1131,7 +1276,7 @@ class InstanceUI:
 
     def _loaded_instances(self, *, force=False):
         rows = []
-        for index, root in enumerate(tuple(self.instance_roots)[:100]):
+        for index, root in enumerate(tuple(self.instance_roots)):
             if root in self.deleted_roots or not index and self.workspace:
                 continue
             heading = '实例 ' + str(index) + ' · ' + root.name
@@ -1632,6 +1777,8 @@ class InstanceUI:
         manager = 'maintenance' in self.browser.verify(token, instance_id=self.instance).scopes
         fragments = {}
         current = None
+        list_mount = mount if self.workspace else re.sub(r'/instances/[1-9][0-9]*$', '', mount)
+        instances_url = list_mount + '/instances'
         if self.workspace:
             self._admin(token)
             fragments['live-instances'] = self._loaded_instances(force=force)
@@ -1655,8 +1802,8 @@ class InstanceUI:
                 value = value.replace('href="/instances"', 'href="__WORKSPACE__"')
                 for attribute in ('href', 'action', 'data-progress'):
                     value = value.replace(attribute + '="/', attribute + '="' + mount + '/')
-                fragments[key] = value.replace('href="__WORKSPACE__"', 'href="/instances"')
-        return dict(fragments=fragments, mount=mount,
+                fragments[key] = value.replace('href="__WORKSPACE__"', 'href="' + instances_url + '"')
+        return dict(fragments=fragments, mount=mount, instances_url=instances_url,
             current=dict(step=current['step'], role=self._role(current['role']), attempt=current.get('continuations',0),
                 url=mount + '/nodes/' + str(current['step']) + '/events?attempt=' + str(current.get('continuations',0))) if current else None)
 
@@ -2085,6 +2232,13 @@ class InstanceUI:
         parsed = urlsplit(target)
         if parsed.scheme or parsed.netloc or parsed.fragment:
             raise PermissionError('Local relative request target required')
+        if parsed.path.startswith('/workspaces/'):
+            parts = parsed.path.split('/', 3)
+            if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
+                raise ValueError('Exact explicit workspace route required')
+            child = self._workspace_child(int(parts[2]))
+            return self._mount(child.get('/' + parts[3] + ('?' + parsed.query if parsed.query else ''),
+                host=host, cookie=cookie), '/workspaces/' + parts[2])
         if parsed.path.startswith('/instances/'):
             parts = parsed.path.split('/', 3)
             if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
@@ -2310,6 +2464,13 @@ class InstanceUI:
         parsed = urlsplit(target)
         if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
             raise ValueError('Exact instance control or decision form required')
+        if parsed.path.startswith('/workspaces/'):
+            parts = parsed.path.split('/', 3)
+            if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
+                raise ValueError('Exact explicit workspace route required')
+            child = self._workspace_child(int(parts[2]))
+            return self._mount(child.post('/' + parts[3], host=host, origin=origin, cookie=cookie,
+                content_type=content_type, body=body), '/workspaces/' + parts[2])
         if parsed.path.startswith('/instances/'):
             parts = parsed.path.split('/', 3)
             if len(parts) != 4 or not parts[2].isascii() or not parts[2].isdecimal():
@@ -2331,7 +2492,7 @@ class InstanceUI:
                 'pause': set(), 'interrupt': {'step', 'expected_attempt', 'native_intent_ref'},
                 'start': set(), 'resume': {'step'}, 'continue': {'ack_correction', 'authorization_note'},
                 'create': {'selection'}, 'load-config': {'config_path'}, 'configure': None, 'configuration-update': None,
-                'open': {'root'}, 'configuration': {'config_path', 'config_text', 'mode'},
+                'open': {'root'}, 'workspace-open': {'root'}, 'configuration': {'config_path', 'config_text', 'mode'},
                 'budget': {'max_tokens', 'max_seconds', 'max_steps', 'authorization_note'},
                 'guidance-submit': {'text', 'target', 'kind', 'scope', 'effective_step'},
                 'guidance-edit': {'guidance_id', 'expected_revision', 'text'},
@@ -2340,9 +2501,16 @@ class InstanceUI:
             }
             if action not in schemas:
                 raise ValueError('Unknown instance UI path')
-            if self.workspace and action not in {'open', 'configuration', 'create', 'load-config', 'configure'}:
+            if self.workspace and action not in {'open', 'workspace-open', 'configuration', 'create', 'load-config', 'configure'}:
                 raise PermissionError('Open an explicit instance to use research controls')
             form = parse_qs(body.decode('utf-8'), keep_blank_values=True, strict_parsing=True)
+            if any(len(form.get(key, [])) != 1 for key in ('nonce', 'csrf')):
+                raise ValueError('Control form contains missing or duplicate credentials')
+            # Authenticate the action before interpreting its other fields.
+            # A configure form cannot become create permission by changing its
+            # action URL, even when the original form has extra hidden fields.
+            if not hmac.compare_digest(form['csrf'][0], self._csrf(browser_token, action, form['nonce'][0])):
+                raise PermissionError('Instance control CSRF or nonce mismatch')
             expected = schemas[action]
             if action == 'budget' and 'authorization_statement' in form:
                 expected = expected | {'authorization_statement'}
@@ -2356,9 +2524,6 @@ class InstanceUI:
                     any(len(values) != 1 for values in form.values())):
                 raise ValueError('Control form contains missing or duplicate fields')
             form = {key: values[0] for key, values in form.items()}
-            # Forged cross-session/action credentials remain a hard rejection.
-            if not hmac.compare_digest(form['csrf'], self._csrf(browser_token, action, form['nonce'])):
-                raise PermissionError('Instance control CSRF or nonce mismatch')
             try:
                 self._require_maintenance_handoff(action)
                 # Export is read-only and leaves its source form visible. The
@@ -2425,7 +2590,7 @@ class InstanceUI:
                     if child is self:
                         parent.deleted_children[index] = parent.children.pop(index)
                 if not self.root.exists():
-                    parent.deleted_roots.add(self.root)
+                    parent._forget_instance(self.root, self.instance)
                 for cache in (parent.summary_cache, parent.live_cache):
                     with cache.lock:
                         cache.value = None
@@ -2442,9 +2607,10 @@ class InstanceUI:
             self.fork_attempts[browser_token] = {key: form[key] for key in fork_ui.FIELDS}
             receipt = fork_service.create(self.root, step, child_root, **options,
                 expected_preview_id=form['expected_preview_id'], operation_id=form['operation_id'])
-            if child_root not in self.instance_roots:
-                self.instance_roots.append(child_root)
-            child = self._child(self.instance_roots.index(child_root))
+            child_root = child_root.resolve()
+            settings = display.settings(child_root)
+            self._register_instance(child_root, settings)
+            child = self._materialize_child(self.instance_roots.index(child_root), settings)
             link = '/instances/' + str(self.instance_roots.index(child_root)) + '/manage?token=' + child.management_token
             return 200, self._page('新分支已创建并暂停', '<p>新分支已创建；开始研究须进入新实例后显式操作。</p>'
                 + '<p><a href="' + html.escape(link, quote=True) + '">打开新实例</a></p><pre>'
@@ -2504,16 +2670,28 @@ class InstanceUI:
             else:
                 user_guidance.revoke(self.root, form['guidance_id'], expected_revision=integer('expected_revision'))
             location = '/guidance'
+        elif action == 'workspace-open':
+            if not self.multi_workspace:
+                raise PermissionError('Workspace registration requires the global workbench')
+            selected = Path(form['root']).expanduser().resolve()
+            if not selected.is_dir():
+                raise ValueError('UI workspace must be an existing explicit directory')
+            self._remember('workspaces', dict(root=str(selected)))
+            with self.control_lock:
+                if selected not in self.workspace_roots:
+                    self.workspace_roots.append(selected)
+                index = self.workspace_roots.index(selected)
+            if index:
+                child = self._workspace_child(index)
+                location = '/workspaces/' + str(index) + '/manage?token=' + child.management_token
         elif action == 'open':
             selected = Path(form['root']).expanduser().resolve()
             selected.stat()  # A missing chosen instance is a 404, not a type error.
-            display.settings(selected)  # Explicit existing root, never an inferred directory choice.
-            self.deleted_roots.discard(selected)
-            if selected not in self.instance_roots:
-                self.instance_roots.append(selected)
+            settings = display.settings(selected)
+            self._register_instance(selected, settings)
             index = self.instance_roots.index(selected)
             if index:
-                child = self._child(index)
+                child = self._materialize_child(index, settings)
                 location = '/instances/' + str(index) + '/manage?token=' + child.management_token
             else:
                 location = '/'
@@ -2576,10 +2754,10 @@ class InstanceUI:
             root = Path(selected['draft']['document']['research']['root']).expanduser()
             selected_root = (Path(selected['draft']['base']) / root).resolve() if not root.is_absolute() else root.resolve()
             self.config_selections.pop(browser_token, None)
-            if selected_root not in self.instance_roots:
-                self.instance_roots.append(selected_root)
+            settings = display.settings(selected_root)
+            self._register_instance(selected_root, settings)
             index = self.instance_roots.index(selected_root)
-            child = self._child(index)
+            child = self._materialize_child(index, settings)
             location = '/instances/' + str(index) + '/manage?token=' + child.management_token
         elif action == 'configuration-update':
             state = configuration_updates.status(self.root)
@@ -2618,8 +2796,7 @@ class InstanceUI:
             elif mode == 'prepare':
                 prepared = research_config.prepare(**options)
                 selected = Path(options['root']).resolve()
-                if selected not in self.instance_roots:
-                    self.instance_roots.append(selected)
+                self._register_instance(selected, prepared)
                 result = dict(status='prepared', goal_id=prepared['goal_id'])
             return self._configuration_page(browser_token, text=text, path=str(path), result=result)
         if action in {'start', 'resume', 'continue', 'pause', 'interrupt', 'budget'}:
@@ -2632,10 +2809,12 @@ class InstanceUI:
         return 303, b'', {'Location': location}
 
 
-def serve(root, *, secret_file, port=None, instance_roots=(), workspace=False, translation_config=None):
+def serve(root, *, secret_file, port=None, instance_roots=(), workspace=False, multi_workspace=False,
+          approval_host=True, translation_config=None, on_ready=None, stop_event=None):
     root = Path(root).resolve()
     options = dict(workspace=True) if workspace else {}
-    ui = InstanceUI(root, secret_file=secret_file, instance_roots=instance_roots, translation_config=translation_config, **options)
+    ui = InstanceUI(root, secret_file=secret_file, instance_roots=instance_roots,
+        multi_workspace=multi_workspace, approval_host=approval_host, translation_config=translation_config, **options)
     if port is None:
         port = 0 if workspace else display.settings(root).get('ui', {}).get('port', 0)
 
@@ -2712,17 +2891,34 @@ def serve(root, *, secret_file, port=None, instance_roots=(), workspace=False, t
         ui.host = '127.0.0.1:' + str(server.server_port)
         ui._serving = True
         ui._refresh_approval_host()
-        print(json.dumps(dict(status='ui_listening', instance=ui.instance,
+        endpoint = dict(status='ui_listening', instance=ui.instance,
             management_url='http://' + ui.host + '/manage?token=' + ui.management_token,
-            read_url='http://' + ui.host + '/view?token=' + ui.read_token), ensure_ascii=False), flush=True)
+            read_url='http://' + ui.host + '/view?token=' + ui.read_token)
+        watcher_stop = threading.Event()
+        def watch_stop():
+            while not watcher_stop.wait(.1):
+                if stop_event.is_set():
+                    server.shutdown()
+                    return
+        watcher = None
         try:
+            if on_ready is None:
+                print(json.dumps(endpoint, ensure_ascii=False), flush=True)
+            else:
+                on_ready(endpoint)
+            if stop_event is not None:
+                watcher = threading.Thread(target=watch_stop, daemon=True, name='scid-ui-stop')
+                watcher.start()
             server.serve_forever(poll_interval=.5)
         except KeyboardInterrupt:
             pass
         finally:
             ui._serving = False
+            watcher_stop.set()
             ui.live_stop.set()
             ui.translation.close()
+            if watcher is not None:
+                watcher.join(timeout=2)
             if ui._approval_endpoint_origin:
                 (root / 'execution-authority/ui-endpoint.json').unlink(missing_ok=True)
     return dict(status='ui_stopped')

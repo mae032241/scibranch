@@ -8,9 +8,12 @@ research and conclusions; the host preserves identity, enforces admission and
 records what actually happened. Evidence, scientific qualification and execution
 permission are separate facts.
 
-`scid-research` is the application core. `scid-experiment` is the managed execution
-entry point. The optional instance UI uses the same public controls and read views;
-it adds no scheduler or state authority. There is no LLM Root or MCP scheduler.
+`scid web` manages the optional workspace webpage and its separate Web process.
+`scid-research` is the research application core; `scid-experiment` is the managed
+execution entry point. The webpage uses the same public controls and read views.
+Known workspaces and their explicit instance lists persist without directory scans;
+stopping Web leaves independent research runners running. The UI adds no scheduler
+or scientific state authority. There is no LLM Root or MCP scheduler.
 
 <a id="ownership-and-flow"></a>
 
@@ -135,12 +138,13 @@ Files below are in `src/scidiscovery/research_loop/` unless stated otherwise.
 
 | Boundary | Main owners |
 | --- | --- |
+| Web command and process lifecycle | `../app_cli.py`, `web_service.py` |
 | Preparation, routing and advancement | `research_config.py`, `controller.py`, `runtime.py`, `instance_control.py` |
 | Native lifecycle and recovery | `backends.py`, `native.py`, `execution.py`, `continuation.py`, `native_recovery.py` |
 | Scientific contracts and guidance | `contracts.py`, `semantic.py`, `guidance.py`, `instance_science.py` |
 | Calls, code and execution authority | `experiments.py`, `local_experiments.py`, `code_versions.py`, `execution_inputs.py`, `execution_authority.py` |
 | Qualification and delivery | `qualification.py`, `formal_review.py`, `selection.py`, `delivery.py` |
-| Controls, lifecycle and UI | `control_operations.py`, `configuration_updates.py`, `user_guidance.py`, `fork_service.py`, `instance_delete.py`, `instance_ui.py` |
+| Controls, lifecycle and UI | `control_operations.py`, `configuration_updates.py`, `user_guidance.py`, `fork_service.py`, `instance_delete.py`, `instance_ui.py`, `workspace_catalog.py` |
 
 - [Research-loop contracts](RESEARCH_LOOP_CONTRACTS.md): exact routing, materials,
   identity, budgets, final reporting, fork/delete and recovery rules.

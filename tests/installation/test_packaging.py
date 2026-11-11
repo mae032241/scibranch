@@ -35,6 +35,7 @@ for module in (scidiscovery, plugin_configuration, ui_errors, jsonschema, pydant
     assert Path(module.__file__).resolve().is_relative_to(prefix), module.__file__
 package = distribution("scidiscovery")
 for script, target in {
+    "scid": "scidiscovery.app_cli:main",
     "scid-research": "scidiscovery.research_loop.cli:main",
     "scid-experiment": "scidiscovery.research_loop.experiments:main",
 }.items():
@@ -45,6 +46,9 @@ for script, target in {
     result = subprocess.run([str(prefix / "bin" / script), "--help"],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0 and "usage:" in result.stdout, result.stderr
+result = subprocess.run([str(prefix / "bin/scid"), "web", "--help"],
+                        capture_output=True, text=True, timeout=10)
+assert result.returncode == 0 and "--foreground" in result.stdout, result.stderr
 execution = entry_points().select(group="scidiscovery.execution_interfaces")
 execution_names = {"local_execution"}
 if cohort == "cov":
@@ -57,7 +61,7 @@ for entry in execution:
 assert not tuple(entry_points().select(group="scidiscovery.plugins"))
 from scidiscovery import browser_access
 from scidiscovery.research_loop import instance_ui
-assert {entry.name for entry in package.entry_points if entry.group == "console_scripts"} == {"scid-research", "scid-experiment"}
+assert {entry.name for entry in package.entry_points if entry.group == "console_scripts"} == {"scid", "scid-research", "scid-experiment"}
 assert not resources.files("scidiscovery.artifact_agent").joinpath("interfaces").is_dir()
 assert not resources.files("scidiscovery.artifact_agent").joinpath("approval_ui").is_dir()
 assert not resources.files("scidiscovery.artifact_agent").joinpath("service").is_dir()

@@ -49,7 +49,9 @@ def encode_snapshot(value):
         if len(encoded) <= MAX_EVENT_BYTES:
             return encoded
         href = links.get(key, '/results')
-        if href != '/instances':
+        if href == '/instances':
+            href = value.get('instances_url', '/instances')
+        else:
             href = value.get('mount', '') + href
         fragments[key] = '<p>此组件超出实时传输范围；<a href="' + href + '">打开完整页面</a>。</p>'
     encoded = encode()

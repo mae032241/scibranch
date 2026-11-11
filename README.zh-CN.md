@@ -25,9 +25,8 @@ SciBranch 将研究目标推进为一个迭代循环：探索多条假设路线�
 - **有依据地继续或分支。** 暂停和续接实例、恢复已知调用，或从精确历史逻辑任务创建暂停分支，
   并为新分支声明新的有限预算。
 
-受支持命令为管理研究实例的 `scid-research` 与管理实验的 `scid-experiment`。
-`scid-research serve-ui` 通过可选网页提供同一实例的控制与结果读取；网页服务退出后，
-detached 研究仍可继续。
+使用 `scid web` 管理工作区，`scid-research` 管理研究实例，`scid-experiment` 管理实验。
+网页复用相同实例控制和结果读取；Web 进程退出后，独立研究仍可继续。
 
 ## 安装
 
@@ -45,14 +44,20 @@ cd scibranch
 SCID_PYTHON=/absolute/python bash deploy/install.sh --dry-run
 SCID_PYTHON=/absolute/python bash deploy/install.sh install
 export PATH="$HOME/.local/bin:$PATH"
-scid-research --help
+scid web --help
 ```
 
-安装器发布两个命令与随附的运行时 Skill。默认代码与 Skill 前缀仍为
+安装器发布三个命令与随附的运行时 Skill。默认代码与 Skill 前缀仍为
 `$HOME/.local/share/scidiscovery`，命令目录为 `$HOME/.local/bin`，安装事务目录为
 `$HOME/.local/state/scidiscovery/install`。Python 包名仍为 `scidiscovery`；
 这些技术标识不随 SciBranch 项目名称改变。更新已有安装时，先停止其控制进程、Worker 和 UI，
 再使用 `reinstall`。依赖、可选插件、更新与卸载见[安装指南](docs/INSTALL.zh-CN.md)。
+
+运行 `scid web` 即在后台启动工作区管理并打印实际 URL；重复执行会返回运行中服务的 URL。
+默认工作区自动准备，网页添加的已知工作区在重启后保留；每个工作区只列出显式登记的实例。
+按需使用 `scid web status`、`scid web stop` 或 `scid web --foreground`；
+路径、端口与完整命令说明见 [CLI 指南](docs/ROOTLESS_CLI.zh-CN.md#web-工作区管理)。
+停止 Web 后，独立科研 runner 继续运行。
 
 ## 开始研究
 

@@ -9,6 +9,8 @@ import re
 import select
 import subprocess
 import sys
+import queue
+import threading
 from urllib.parse import urlencode, urlsplit
 
 import pytest
@@ -61,14 +63,14 @@ def login(connection, url):
     return headers['Set-Cookie'].split(';', 1)[0]
 
 
-def form(page, action):
-    original = re.search(r'<form\b[^>]*\baction="/control/' + re.escape(action) + r'"[^>]*>(.*?)</form>',
+def form(page, action, *, prefix=''):
+    original = re.search(r'<form\b[^>]*\baction="' + re.escape(prefix) + r'/control/' + re.escape(action) + r'"[^>]*>(.*?)</form>',
         page.decode(), re.S).group(1)
     return {html.unescape(key): html.unescape(value) for key, value in
         re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', original)}
 
 
-def controls(page, action='configure'):
+def controls(page, action='configure', *, prefix=''):
     """Collect successful HTML controls as a browser submits the form."""
     from html.parser import HTMLParser
 
@@ -80,7 +82,7 @@ def controls(page, action='configure'):
         def handle_starttag(self, tag, attrs):
             attrs = dict(attrs)
             if tag == 'form':
-                self.active = attrs.get('action') == '/control/' + action
+                self.active = attrs.get('action') == prefix + '/control/' + action
             if not self.active:
                 return
             if tag == 'input' and attrs.get('name') and attrs.get('type') not in {'submit', 'button'}:
@@ -257,6 +259,160 @@ def test_workspace_home_and_new_do_not_read_implicit_research_config(tmp_path, m
         status, page, _ = ui.get(route, host=ui.host, cookie=headers['Set-Cookie'])
         assert status == 200 and b'Cov invalid' not in page
     assert not (workspace / 'settings.json').exists()
+
+
+@contextmanager
+def multiple_workspaces(root, key):
+    ready = queue.Queue()
+    stop = threading.Event()
+    failures = []
+    def run():
+        try:
+            instance_ui.serve(root, secret_file=key, workspace=True, multi_workspace=True,
+                approval_host=False, on_ready=ready.put, stop_event=stop)
+        except Exception as error:
+            failures.append(error)
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    connection = None
+    try:
+        endpoint = ready.get(timeout=5)
+        url = urlsplit(endpoint['management_url'])
+        connection = http.client.HTTPConnection(url.hostname, url.port, timeout=5)
+        yield connection, url, endpoint
+    finally:
+        if connection is not None:
+            connection.close()
+        stop.set(); worker.join(timeout=5)
+        assert not worker.is_alive(), 'UI did not stop'
+        assert not failures
+
+
+def test_multiple_workspaces_open_create_and_restart_keep_exact_registered_roots(tmp_path):
+    default = tmp_path / 'default'; default.mkdir()
+    other = tmp_path / 'chosen-workspace'; other.mkdir()
+    public = other / 'public'; public.mkdir()
+    (public / 'input.txt').write_text('A fixed public input.')
+    deep = tmp_path / 'known' / 'deep' / 'selected'; deep.mkdir(parents=True)
+    existing, _ = prepare(deep, enabled=False)
+    original = (existing / 'settings.json').read_bytes()
+    key = operator_key(tmp_path)
+    prefix = '/workspaces/1'
+    with multiple_workspaces(default, key) as (connection, url, endpoint):
+        cookie = login(connection, url); origin = 'http://' + url.netloc
+        _, home, _ = request(connection, 'GET', '/', cookie=cookie)
+        reader = login(connection, urlsplit(endpoint['read_url']))
+        assert request(connection, 'POST', '/control/workspace-open', cookie=reader,
+            fields=dict(form(home, 'workspace-open'), root=str(other)), origin=origin)[0] == 403
+        assert request(connection, 'POST', '/control/workspace-open', cookie=cookie,
+            fields=dict(form(home, 'workspace-open'), root=str(other)), origin='null')[0] == 403
+        status, _, headers = request(connection, 'POST', '/control/workspace-open', cookie=cookie,
+            fields=dict(form(home, 'workspace-open'), root=str(other)), origin=origin)
+        assert status == 303 and headers['Location'].startswith(prefix + '/manage?token=')
+        _, _, headers = request(connection, 'GET', headers['Location'])
+        other_cookie = headers['Set-Cookie'].split(';', 1)[0]
+        _, page, _ = request(connection, 'GET', prefix + '/', cookie=other_cookie)
+        assert b'href="/"' in page and b'action="/workspaces/1/control/open"' in page
+        assert request(connection, 'POST', prefix + '/control/open', cookie=cookie,
+            fields=dict(form(page, 'open', prefix=prefix), root=str(existing)), origin=origin)[0] == 403
+        status, _, headers = request(connection, 'POST', prefix + '/control/open', cookie=other_cookie,
+            fields=dict(form(page, 'open', prefix=prefix), root=str(existing)), origin=origin)
+        assert status == 303 and headers['Location'].startswith(prefix + '/instances/1/manage?token=')
+        _, _, headers = request(connection, 'GET', headers['Location'])
+        instance_cookie = headers['Set-Cookie'].split(';', 1)[0]
+        status, page, _ = request(connection, 'GET', prefix + '/instances/1/', cookie=instance_cookie)
+        assert status == 200 and b'action="/workspaces/1/instances/1/control/start"' in page
+        assert b'data-live-url="/workspaces/1/instances/1/live"' in page
+        _, page, _ = request(connection, 'GET', prefix + '/new', cookie=other_cookie)
+        fields = controls(page, prefix=prefix)
+        created = other / 'created'
+        fields.update({'task_text': 'Create within the selected workspace.',
+            'cfg.research.root': str(created), 'cfg.research.public_root': str(public),
+            'cfg.agent.launcher': 'never-launched', 'cfg.agent.model': 'form-model',
+            'cfg.budget.max_tokens': '100', 'cfg.budget.max_seconds': '10', 'cfg.budget.max_steps': '2'})
+        status, page, _ = request(connection, 'POST', prefix + '/control/configure', cookie=other_cookie,
+            fields=fields, origin=origin)
+        assert status == 200
+        status, _, headers = request(connection, 'POST', prefix + '/control/create', cookie=other_cookie,
+            fields=form(page, 'create', prefix=prefix), origin=origin)
+        assert status == 303 and headers['Location'].startswith(prefix + '/instances/2/manage?token=')
+        assert not (default / 'settings.json').exists()
+    with multiple_workspaces(default, key) as (connection, url, _):
+        cookie = login(connection, url)
+        _, page, _ = request(connection, 'GET', '/', cookie=cookie)
+        match = re.search(rb'href="(/workspaces/1/manage\?token=[^"]+)"', page)
+        assert match
+        _, _, headers = request(connection, 'GET', match.group(1).decode())
+        other_cookie = headers['Set-Cookie'].split(';', 1)[0]
+        status, page, _ = request(connection, 'GET', prefix + '/', cookie=other_cookie)
+        assert status == 200 and str(existing).encode() in page and str(created).encode() in page
+        assert b'/workspaces/1/instances/1/manage?' in page and b'/workspaces/1/instances/2/manage?' in page
+    assert (existing / 'settings.json').read_bytes() == original
+    assert c.settings(created)['objective'] == 'Create within the selected workspace.'
+
+
+def test_registered_identity_and_unsupported_instance_are_isolated_without_directory_scan(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import workspace_catalog
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    first_dir = tmp_path / 'first'; first_dir.mkdir()
+    second_dir = tmp_path / 'second'; second_dir.mkdir()
+    first, _ = prepare(first_dir, enabled=False)
+    second, _ = prepare(second_dir, enabled=False)
+    settings = {first: c.settings(first), second: c.settings(second)}
+    for root in (first, second):
+        workspace_catalog.remember(workspace, 'instances', dict(root=str(root), goal_id=settings[root]['goal_id']))
+    unsupported = dict(settings[first], handoff_protocol=-1)
+    monkeypatch.setattr(instance_ui.display, 'settings', lambda root: unsupported if root == first else settings[root])
+    # Startup loads only registries and exact originals; it never enumerates a
+    # workspace to guess which child directory might be a research instance.
+    monkeypatch.setattr(Path, 'iterdir', lambda *args: pytest.fail('UI must not discover directories'))
+    ui = instance_ui.InstanceUI(workspace, secret_file=operator_key(tmp_path), workspace=True)
+    ui.host = '127.0.0.1:18753'
+    assert ui.instance_roots == [workspace, first, second]
+    with pytest.raises(instance_ui.protocol.UnsupportedProtocol):
+        ui._child(1)
+    assert ui._child(2).instance == settings[second]['goal_id']
+    unsupported = dict(settings[first], goal_id='replacement-identity')
+    with pytest.raises(ValueError, match='identity changed'):
+        ui._child(1)
+    assert workspace_catalog.load(workspace, 'instances')[0]['goal_id'] == settings[first]['goal_id']
+    ui.translation.close()
+
+
+def test_nested_live_mount_composes_prefixes(tmp_path):
+    from scidiscovery.research_loop import instance_live
+    stream = instance_live.Stream(lambda *args, **kwargs: {}, stop=threading.Event(), gate=threading.BoundedSemaphore(1))
+    result = (200, stream, {'Content-Type': 'text/event-stream; charset=utf-8'})
+    mounted = instance_ui.InstanceUI._mounted(result, 2)
+    instance_ui.InstanceUI._mount(mounted, '/workspaces/1')
+    assert stream.mount == '/workspaces/1/instances/2'
+
+
+def test_open_loads_settings_once_for_registration_and_child_initialization(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    selected = tmp_path / 'selected'; selected.mkdir()
+    root, _ = prepare(selected, enabled=False)
+    ui = instance_ui.InstanceUI(workspace, secret_file=operator_key(tmp_path), workspace=True)
+    ui.host = '127.0.0.1:18753'
+    _, _, headers = ui.get('/manage?token=' + ui.management_token, host=ui.host)
+    cookie = headers['Set-Cookie']
+    _, page, _ = ui.get('/', host=ui.host, cookie=cookie)
+    original = instance_ui.display.settings
+    reads = []
+    def settings(selected_root):
+        reads.append(selected_root)
+        return original(selected_root)
+    monkeypatch.setattr(instance_ui.display, 'settings', settings)
+    status, _, headers = ui.post('/control/open', host=ui.host, origin='http://' + ui.host,
+        cookie=cookie, content_type='application/x-www-form-urlencoded',
+        body=urlencode(dict(form(page, 'open'), root=str(root))).encode())
+    assert status == 303 and headers['Location'].startswith('/instances/1/manage?token=')
+    assert reads == [root]
+    # A later request refreshes the mutable source; initialization did not
+    # turn the settings into another long-lived authoritative cache.
+    ui._child(1)
+    assert reads == [root, root]
+    ui.translation.close()
 
 
 @pytest.mark.process_e2e

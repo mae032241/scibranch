@@ -16,7 +16,6 @@ def scene(tmp_path):
     (state/'database.sqlite3').write_bytes(b'Existing SQL must never be opened or changed.')
     project=tmp_path/'old-project';(project/'.codex').mkdir(parents=True)
     (project/'.codex/config.toml').write_text('Existing Root configuration stays unchanged.')
-    (binary/'scid').write_text('Existing legacy CLI stays unchanged.')
     environment={**os.environ,'SCID_PYTHON':sys.executable,
         'SCID_BIN_ROOT':str(binary),'SCID_INSTALL_ROOT':str(tmp_path/'prefix'),
         'SCID_STATE_ROOT':str(state),'SCID_WORKSPACE':str(tmp_path/'missing-workspace'),
@@ -24,7 +23,7 @@ def scene(tmp_path):
         'SCID_BACKUP_ROOT':str(tmp_path/'backups')}
     environment.pop('SCID_DEPLOY_MODE',None)
     environment.pop('SCID_PLUGINS',None)
-    return environment, {path:path.read_bytes() for path in (state/'database.sqlite3',project/'.codex/config.toml',binary/'scid')}
+    return environment, {path:path.read_bytes() for path in (state/'database.sqlite3',project/'.codex/config.toml')}
 
 
 def shell(environment, body):
@@ -96,7 +95,7 @@ main install
     assert result.returncode == 0, result.stderr
     binary = home / '.local/bin'
     prefix = home / '.local/share/scidiscovery'
-    for name in ('scid-research', 'scid-experiment'):
+    for name in ('scid', 'scid-research', 'scid-experiment'):
         wrapper = (binary / name).read_text()
         assert 'PYTHONPATH=' + str(prefix / 'site') in wrapper
     transactions = home / '.local/state/scidiscovery/install/transactions'
@@ -104,11 +103,12 @@ main install
     transaction = json.loads(manifest.read_text())
     assert transaction['state'] == 'complete'
     assert {entry['path'] for entry in transaction['entries']} == {
-        str(binary / 'scid-research'), str(binary / 'scid-experiment')}
+        str(binary / 'scid'), str(binary / 'scid-research'), str(binary / 'scid-experiment')}
     result = shell(environment, 'main uninstall')
     assert result.returncode == 0, result.stderr
     assert not (binary / 'scid-research').exists()
     assert not (binary / 'scid-experiment').exists()
+    assert not (binary / 'scid').exists()
     assert (prefix / 'site/fixture').read_text() == 'retained package\n'
     assert (prefix / 'skills/SKILL.md').read_text() == 'retained skill\n'
 
@@ -168,6 +168,26 @@ def test_thin_refuses_existing_prefix_and_foreign_wrapper(tmp_path):
 
 
 @pytest.mark.process_e2e
+@pytest.mark.parametrize('mode', ['install', 'uninstall'])
+def test_thin_refuses_foreign_scid_without_changing_commands(tmp_path, mode):
+    environment, originals = scene(tmp_path)
+    binary = Path(environment['SCID_BIN_ROOT'])
+    foreign = binary / 'scid'
+    foreign.write_bytes(b'foreign legacy command must stay unchanged\n')
+    result = shell(environment, '''thin_cli_wrapper scidiscovery.research_loop.cli > "$CLI_ROOT/scid-research"
+thin_cli_wrapper scidiscovery.research_loop.experiments > "$CLI_ROOT/scid-experiment"
+''' + ('main uninstall' if mode == 'uninstall' else '''rm "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"
+validate_thin_targets'''))
+    assert result.returncode != 0 and 'scid' in result.stderr
+    assert foreign.read_bytes() == b'foreign legacy command must stay unchanged\n'
+    assert not Path(environment['SCID_INSTALL_ROOT']).exists()
+    if mode == 'uninstall':
+        assert (binary / 'scid-research').exists()
+        assert (binary / 'scid-experiment').exists()
+    assert_preserved(originals)
+
+
+@pytest.mark.process_e2e
 def test_thin_publication_failure_rolls_back_only_new_wrappers(tmp_path):
     environment, originals=scene(tmp_path)
     prepared=tmp_path/'prepared-site';prepared.mkdir();(prepared/'retained').write_bytes(b'Prepared fixture bytes, not a package.')
@@ -188,13 +208,13 @@ install_all
 ''')
     assert result.returncode==43,result.stderr
     binary=Path(environment['SCID_BIN_ROOT'])
-    assert not (binary/'scid-research').exists() and not (binary/'scid-experiment').exists()
+    assert not any((binary / name).exists() for name in ('scid', 'scid-research', 'scid-experiment'))
     assert (Path(environment['SCID_INSTALL_ROOT'])/'site/retained').read_bytes()==b'Prepared fixture bytes, not a package.'
     import json
     manifest=next(Path(environment['SCID_BACKUP_ROOT']).glob('.transaction-*/manifest.json'))
     transaction=json.loads(manifest.read_text())
     assert transaction['state']=='rolled_back'
-    assert {row['path'] for row in transaction['entries']}=={str(binary/'scid-research'),str(binary/'scid-experiment')}
+    assert {row['path'] for row in transaction['entries']}=={str(binary/'scid'),str(binary/'scid-research'),str(binary/'scid-experiment')}
     assert all(row['kind']=='path' for row in transaction['entries'])
     assert_preserved(originals)
 
@@ -207,6 +227,7 @@ def test_thin_status_and_uninstall_preserve_foreign_commands_and_package(tmp_pat
     (prefix/'retained').write_bytes(b'Do not remove code used by existing processes.')
     result=shell(environment,'''thin_cli_wrapper scidiscovery.research_loop.cli > "$CLI_ROOT/scid-research"
 thin_cli_wrapper scidiscovery.research_loop.experiments > "$CLI_ROOT/scid-experiment"
+thin_cli_wrapper scidiscovery.app_cli > "$CLI_ROOT/scid"
 printf 'foreign modification\n' >> "$CLI_ROOT/scid-experiment"
 systemctl() { exit 91; }
 status
@@ -220,7 +241,7 @@ systemctl() { exit 91; }
 uninstall_services
 ''')
     assert result.returncode==0,result.stderr
-    assert not (binary/'scid-research').exists() and not (binary/'scid-experiment').exists()
+    assert not any((binary / name).exists() for name in ('scid', 'scid-research', 'scid-experiment'))
     assert (prefix/'retained').read_bytes()==b'Do not remove code used by existing processes.'
     assert_preserved(originals)
 
@@ -308,4 +329,6 @@ activate_packages
     assert (prefix / 'skills/fixture/SKILL.md').read_text() == 'frozen fixture bytes'
     wrapper = (Path(environment['SCID_BIN_ROOT']) / 'scid-research').read_text()
     assert 'PYTHONPATH=' + str(prefix / 'site') in wrapper
+    app_wrapper = (Path(environment['SCID_BIN_ROOT']) / 'scid').read_text()
+    assert '-m scidiscovery.app_cli ' in app_wrapper
     assert_preserved(originals)

@@ -31,6 +31,7 @@ test = [
 ]
 
 [project.scripts]
+scid = "scidiscovery.app_cli:main"
 scid-research = "scidiscovery.research_loop.cli:main"
 scid-experiment = "scidiscovery.research_loop.experiments:main"
 

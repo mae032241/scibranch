@@ -4,7 +4,7 @@
 
 支持宿主为 Linux，依赖 POSIX 文件系统和锁语义。原生 Windows 不支持，WSL2 未验证；安装器不提供 Windows 适配。
 
-SciBranch 安装器支持 `scid-research` 与 `scid-experiment`，离线构建并发布应用与选定插件。
+SciBranch 安装器支持 `scid`、`scid-research` 与 `scid-experiment`，离线构建并发布应用与选定插件。
 依赖须由操作员预先提供；安装不连接模型、创建科研实例或启动服务。
 `SCID_DEPLOY_MODE` 仅接受 `thin`，其他值在修改文件前失败。
 
@@ -40,7 +40,7 @@ SCID_PYTHON="$HOME/.local/share/scidiscovery-python/bin/python" \
 SCID_PYTHON="$HOME/.local/share/scidiscovery-python/bin/python" \
   SCID_PLUGINS=cov_execution bash deploy/install.sh install
 export PATH="$HOME/.local/bin:$PATH"
-scid-research --help
+scid web --help
 ```
 
 仅需核心时省略 `SCID_PLUGINS`；按需将 PATH export 保存到 shell 配置。
@@ -59,7 +59,7 @@ namespace launcher 只读挂载声明的 runtime 路径。新实例仍有明确�
 默认 `SCID_INSTALL_ROOT=$HOME/.local/share/scidiscovery`（包含 `site/` 和 `skills/`），
 `SCID_BIN_ROOT=$HOME/.local/bin`，`SCID_BACKUP_ROOT=$HOME/.local/state/scidiscovery/install`。
 安装时按需创建命令目录；`--dry-run` 只预检，不写文件。
-Python 包名仍为 `scidiscovery`；包名、`scid-*` 命令与这些安装路径不随 SciBranch 项目名称改变。
+Python 包名仍为 `scidiscovery`；包名、`scid` / `scid-*` 命令与这些安装路径不随 SciBranch 项目名称改变。
 这些 `SCID_*` 路径可显式覆盖，须为规范绝对路径，并选择当前用户可写的目录。
 核心提供 `local_execution:command`，不安装 Cov。需要 Cov 时选择
 `SCID_PLUGINS=cov_execution`，安装独立发行包 `scidiscovery-cov-execution`；
@@ -76,7 +76,7 @@ pip 临时源码不是安装资源。发布 Skill 不会启用它们，须按角
 核心不要求图像依赖。
 插件安装不证明 SSH、许可证或真实 solver 资格；远端 runner 的独立部署见[传输合同](tcad_transport_contract.md)。
 
-安装只发布 `scid-research` 和 `scid-experiment`，不创建实例、预算、凭据、平台配置或服务。
+安装发布 `scid`、`scid-research` 和 `scid-experiment`，不创建实例、预算、凭据、平台配置或服务。
 首次 `install` 仍拒绝已有的包目录或命令。更新原安装时，先停止使用该安装的研究控制进程、
 Worker 和 UI，再使用相同 Python、安装路径及明确的插件选择执行：
 
@@ -87,16 +87,22 @@ SCID_PYTHON="$HOME/.local/share/scidiscovery-python/bin/python" \
 
 `bash deploy/reinstall.sh` 无参数默认执行同一原目录更新；显式传 `install` 仍表示首次安装。
 更新先在临时目录构建并验证包和 Skill，再替换原来的 `site/`、`skills/` 及匹配本配置的命令。
-发布失败恢复旧目录和两个命令，成功删除临时旧包；既有安装事务仅保留小型 wrapper 证据，
+发布失败恢复旧目录和命令，成功删除临时旧包；既有安装事务仅保留小型 wrapper 证据，
 不要求新的永久安装目录。包目录旁的其他文件、科学 Python 环境和研究实例保持原样。
 不完整安装、符号链接目标或其他配置拥有的命令会拒绝更新。
+原有两个 wrapper 均匹配的薄安装可在 `scid` 路径不存在时补发新命令；
+已有其他 owner 的 `scid`（含退役的旧命令）会保留并阻止发布，安装器不接管或删除它。
 安装器不查找或停止运行中的写者；停止进程是操作步骤，部署锁不提供这一保证。
 
-`bash deploy/install.sh status` 检查 wrapper 归属；`bash deploy/install.sh uninstall` 仅删除匹配当前配置的两个 wrapper，
+`bash deploy/install.sh status` 检查 wrapper 归属；`bash deploy/install.sh uninstall` 仅删除匹配当前配置的三个 wrapper，
 保留包前缀和实例原件。发布失败沿既有事务回滚新 wrapper；意外出现的其他命令 owner 保留并报告。
 这些命令不停止或修改用户主机上残存的旧服务，不删除数据库或历史成果。
 
-运行实例、UI、批准与恢复见[CLI 指南](ROOTLESS_CLI.zh-CN.md)。
+安装后，`scid web` 在后台启动工作区管理并打印实际 URL；默认工作区在首次使用时准备。
+已知工作区及各工作区显式登记的实例清单在 Web 重启后保留；
+`scid web stop` 停止 Web，独立科研 runner 继续运行。
+Web 生命周期、路径与端口见 [CLI 指南](ROOTLESS_CLI.zh-CN.md#web-工作区管理)，
+实例、批准与恢复见同一指南的对应章节。
 模型、执行环境与权限的准备见[配置参考](RESEARCH_CONFIGURATION.md)；
 安装成功不证明真实模型、浏览器或求解器资格。模型/bootstrap 访问、Cov 训练数据和科学执行环境须另行准备；
 安装不启动研究。

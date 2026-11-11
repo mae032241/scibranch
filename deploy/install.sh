@@ -47,7 +47,7 @@ validate_thin_paths() {
 require_thin_sources() {
     local path plugin_ids plugin_distributions
     validate_thin_paths
-    for path in pyproject.toml README.md deploy/plugin_selection.py deploy/python_dependencies.py deploy/install_transaction.py src/scidiscovery/research_loop/cli.py skills/sentaurus-tcad-code/SKILL.md skills/curve-analysis/SKILL.md skills/scientific-paper-evidence/SKILL.md; do
+    for path in pyproject.toml README.md deploy/plugin_selection.py deploy/python_dependencies.py deploy/install_transaction.py src/scidiscovery/app_cli.py src/scidiscovery/research_loop/cli.py skills/sentaurus-tcad-code/SKILL.md skills/curve-analysis/SKILL.md skills/scientific-paper-evidence/SKILL.md; do
         [[ -f "$SOURCE_ROOT/$path" ]] || die "missing thin source: ${path}"
     done
     if [[ -n "$PLUGIN_SPECIFICATION" ]]; then
@@ -65,14 +65,19 @@ validate_thin_targets() {
             [[ -d "$path" && ! -L "$path" ]] || die "reinstall requires the original ordinary package and skill directories: ${path}"
         done
         [[ -f "$SITE_ROOT/runtime-identity.json" && ! -L "$SITE_ROOT/runtime-identity.json" && -d "$SITE_ROOT/scidiscovery" && ! -L "$SITE_ROOT/scidiscovery" ]] || die "reinstall requires the original package layout"
-        for name in scid-research scid-experiment; do
+        for name in scid-research scid-experiment scid; do
             module=scidiscovery.research_loop.cli
             [[ "$name" != scid-experiment ]] || module=scidiscovery.research_loop.experiments
+            [[ "$name" != scid ]] || module=scidiscovery.app_cli
+            # Older owned thin installs have the original two wrappers only.
+            if [[ "$name" == scid && ! -e "$CLI_ROOT/$name" && ! -L "$CLI_ROOT/$name" ]]; then
+                continue
+            fi
             [[ -f "$CLI_ROOT/$name" && ! -L "$CLI_ROOT/$name" ]] && cmp -s <(thin_cli_wrapper "$module") "$CLI_ROOT/$name" || die "reinstall refuses a missing or foreign command: ${name}"
         done
         return
     fi
-    for path in "$SITE_ROOT" "$SKILL_ROOT" "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"; do
+    for path in "$SITE_ROOT" "$SKILL_ROOT" "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment" "$CLI_ROOT/scid"; do
         [[ ! -e "$path" && ! -L "$path" ]] || die "thin target already exists; preserve the existing deployment: ${path}"
     done
 }
@@ -93,7 +98,7 @@ validate_source() {
     for plugin in "${SELECTED_PLUGINS[@]}"; do
         pythonpath+=":${SOURCE_ROOT}/plugins/${plugin}"
     done
-    PYTHONNOUSERSITE=1 PYTHONPATH="$pythonpath" "$PYTHON" -c 'import scidiscovery.research_loop.cli, scidiscovery.research_loop.experiments, scidiscovery.browser_access, scidiscovery.research_loop.instance_ui'
+    PYTHONNOUSERSITE=1 PYTHONPATH="$pythonpath" "$PYTHON" -c 'import scidiscovery.app_cli, scidiscovery.research_loop.cli, scidiscovery.research_loop.experiments, scidiscovery.browser_access, scidiscovery.research_loop.instance_ui'
 }
 
 validate_base_python() {
@@ -103,7 +108,7 @@ validate_base_python() {
 }
 
 preview() {
-    printf 'Thin deployment: stage packages at %s; publish scid-research/scid-experiment at %s.\n' "$SITE_ROOT" "$CLI_ROOT"
+    printf 'Thin deployment: stage packages at %s; publish scid/scid-research/scid-experiment at %s.\n' "$SITE_ROOT" "$CLI_ROOT"
     printf 'Source: %s\nPython: %s\nExecution adapters: %s\nSkill source: %s\nInstall evidence: %s\n' "$SOURCE_ROOT" "$PYTHON" "${PLUGIN_SPECIFICATION:-none}" "$SKILL_ROOT" "$BACKUP_ROOT"
     printf 'No instance, budget, database, platform profile or service is created.\n'
 }
@@ -213,9 +218,10 @@ from importlib.metadata import distribution
 import scidiscovery.browser_access
 import scidiscovery.research_loop.instance_ui
 scripts = [entry for entry in distribution('scidiscovery').entry_points if entry.group == 'console_scripts']
-if {entry.name for entry in scripts} != {'scid-research', 'scid-experiment'}:
+if {entry.name for entry in scripts} != {'scid', 'scid-research', 'scid-experiment'}:
     raise SystemExit('unexpected console entry point in thin package')
-for name, target in (('scid-research', 'scidiscovery.research_loop.cli:main'),
+for name, target in (('scid', 'scidiscovery.app_cli:main'),
+                     ('scid-research', 'scidiscovery.research_loop.cli:main'),
                      ('scid-experiment', 'scidiscovery.research_loop.experiments:main')):
     matches = [entry for entry in scripts if entry.name == name]
     if len(matches) != 1 or matches[0].value != target or not callable(matches[0].load()):
@@ -248,8 +254,12 @@ publish_thin_cli() {
 }
 
 activate_packages() {
+    local app_wrapper_existed=0
     [[ -n "$PACKAGE_STAGE" && -d "$PACKAGE_STAGE" ]] || die "validated package stage is unavailable"
     validate_thin_targets
+    if [[ -e "$CLI_ROOT/scid" || -L "$CLI_ROOT/scid" ]]; then
+        app_wrapper_existed=1
+    fi
     [[ -n "$SKILL_STAGE" && -d "$SKILL_STAGE" ]] || die "validated skill stage is unavailable"
     if [[ "$INSTALL_MODE" == reinstall ]]; then
         # Same-parent renames preserve even read-only directory roots unchanged.
@@ -258,6 +268,10 @@ activate_packages() {
         mv -T -- "$SITE_ROOT" "$SITE_ROLLBACK"
         mv -T -- "$SKILL_ROOT" "$SKILL_ROLLBACK"
         rm -- "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"
+        if [[ "$app_wrapper_existed" -eq 1 ]]; then
+            [[ -f "$CLI_ROOT/scid" && ! -L "$CLI_ROOT/scid" ]] && cmp -s <(thin_cli_wrapper scidiscovery.app_cli) "$CLI_ROOT/scid" || die "reinstall command owner changed: scid"
+            rm -- "$CLI_ROOT/scid"
+        fi
     fi
     mv -T -n -- "$SKILL_STAGE" "$SKILL_ROOT"
     [[ ! -e "$SKILL_STAGE" ]] || die "skill source appeared during publication; preserve it: ${SKILL_ROOT}"
@@ -270,6 +284,7 @@ activate_packages() {
     chmod -R a+rX,a-w -- "$SITE_ROOT"
     publish_thin_cli scid-research scidiscovery.research_loop.cli
     publish_thin_cli scid-experiment scidiscovery.research_loop.experiments
+    publish_thin_cli scid scidiscovery.app_cli
 }
 
 begin_install_transaction() {
@@ -279,7 +294,8 @@ begin_install_transaction() {
     [[ -d "$BACKUP_ROOT" ]] || install -d -m 0700 "$BACKUP_ROOT"
     "$PYTHON" "${SOURCE_ROOT}/deploy/install_transaction.py" begin --root "$TRANSACTION_ROOT" \
         --target "scid-research=${CLI_ROOT}/scid-research" \
-        --target "scid-experiment=${CLI_ROOT}/scid-experiment"
+        --target "scid-experiment=${CLI_ROOT}/scid-experiment" \
+        --target "scid=${CLI_ROOT}/scid"
     arm_install_rollback
 }
 
@@ -319,9 +335,10 @@ rollback_install() {
     local name module safe=1
     restore_install_tree "$SITE_ROLLBACK" "$SITE_ROOT" "$REINSTALL_SITE_PUBLISHED" "$PACKAGE_STAGE" || printf 'Package rollback needs inspection: %s\n' "$SITE_ROLLBACK" >&2
     restore_install_tree "$SKILL_ROLLBACK" "$SKILL_ROOT" "$REINSTALL_SKILLS_PUBLISHED" "$SKILL_STAGE" || printf 'Skill rollback needs inspection: %s\n' "$SKILL_ROLLBACK" >&2
-    for name in scid-research scid-experiment; do
+    for name in scid-research scid-experiment scid; do
         module=scidiscovery.research_loop.cli
         [[ "$name" != scid-experiment ]] || module=scidiscovery.research_loop.experiments
+        [[ "$name" != scid ]] || module=scidiscovery.app_cli
         if [[ -e "$CLI_ROOT/$name" || -L "$CLI_ROOT/$name" ]]; then
             [[ -f "$CLI_ROOT/$name" && ! -L "$CLI_ROOT/$name" ]] && cmp -s <(thin_cli_wrapper "$module") "$CLI_ROOT/$name" || safe=0
         fi
@@ -372,15 +389,16 @@ install_all() {
     activate_packages
     probe_thin_package "$SITE_ROOT"
     complete_install_transaction
-    printf 'Thin commands installed: %s/scid-research and %s/scid-experiment\nNo instance, budget, database or service was created.\nUse scid-research prepare with an explicit root, objective and budgets, then run/serve-ui for that root.\n' "$CLI_ROOT" "$CLI_ROOT"
+    printf 'Thin commands installed: %s/scid, %s/scid-research and %s/scid-experiment\nNo instance, budget, database or service was created.\nUse scid web to open workspace management, or scid-research prepare with an explicit root, objective and budgets.\n' "$CLI_ROOT" "$CLI_ROOT" "$CLI_ROOT"
 }
 
 status() {
     validate_thin_paths
     local name module
-    for name in scid-research scid-experiment; do
+    for name in scid-research scid-experiment scid; do
         module=scidiscovery.research_loop.cli
         [[ "$name" != scid-experiment ]] || module=scidiscovery.research_loop.experiments
+        [[ "$name" != scid ]] || module=scidiscovery.app_cli
         if [[ -f "$CLI_ROOT/$name" && ! -L "$CLI_ROOT/$name" ]] && cmp -s <(thin_cli_wrapper "$module") "$CLI_ROOT/$name"; then
             printf '%s: wrapper matches configured prefix %s\n' "$name" "$SITE_ROOT"
         else
@@ -397,14 +415,15 @@ uninstall_services() {
     fi
     thin_deployment_lock
     local name module
-    for name in scid-research scid-experiment; do
+    for name in scid-research scid-experiment scid; do
         module=scidiscovery.research_loop.cli
         [[ "$name" != scid-experiment ]] || module=scidiscovery.research_loop.experiments
+        [[ "$name" != scid ]] || module=scidiscovery.app_cli
         if [[ -e "$CLI_ROOT/$name" || -L "$CLI_ROOT/$name" ]]; then
             [[ -f "$CLI_ROOT/$name" && ! -L "$CLI_ROOT/$name" ]] && cmp -s <(thin_cli_wrapper "$module") "$CLI_ROOT/$name" || die "refusing to remove another deployment's command: $name"
         fi
     done
-    rm -f -- "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment"
+    rm -f -- "$CLI_ROOT/scid-research" "$CLI_ROOT/scid-experiment" "$CLI_ROOT/scid"
     printf 'Thin command wrappers removed. Package prefix retained for existing processes; instance data was untouched.\n'
 }
 

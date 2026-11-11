@@ -47,7 +47,8 @@ def test_http_sse_initial_change_reconnect_and_exact_read_scope(tmp_path):
         try:
             initial = snapshot(response)
             assert initial['current'] is None
-            assert '未开始' in initial['fragments']['live-hero'] and 'action="/control/start"' in initial['fragments']['live-hero']
+            assert '未开始' in initial['fragments']['live-hero']
+            assert 'action="/control/start"' in initial['fragments']['live-actions']
             finish(root, 1, 'H', [], action='analyze', summary='First retained finding')
             changed = snapshot(response)
             assert changed['current']['step'] == 1
@@ -59,15 +60,25 @@ def test_http_sse_initial_change_reconnect_and_exact_read_scope(tmp_path):
         finally:
             response.close(); client.close()
         finish(root, 2, 'A', [1], summary='Needs a missing measurement')
-        # A fresh connection always receives authoritative complete state;
-        # Last-Event-ID/history replay is not required to recover a dashboard.
+        # A fresh connection receives complete snapshots and refreshes the
+        # brief shared cache without Last-Event-ID/history replay.
         client, response = stream(url, '/live', cookie)
         try:
-            resumed = snapshot(response)
+            # Reconnect may initially reuse the brief shared cache. Require
+            # the new exact node within three snapshot frames; socket timeout
+            # and the finite SSE connection also bound a missing update.
+            for _ in range(3):
+                resumed = snapshot(response)
+                if (resumed.get('current') or {}).get('step') == 2:
+                    break
             assert resumed['current']['step'] == 2
-            assert '等待条件' in resumed['fragments']['live-hero'] and '需要你处理' in resumed['fragments']['live-hero']
-            assert 'action="/control/start"' not in resumed['fragments']['live-hero']
-            assert 'action="/control/continue"' in resumed['fragments']['live-hero']
+            assert resumed['current']['url'] == '/nodes/2/events?attempt=0'
+            assert 'Needs a missing measurement' in resumed['fragments']['live-trail']
+            assert 'href="/results/2"' in resumed['fragments']['live-trail']
+            # The current W-first A fixture diagnoses a return to W. It is
+            # idle, so the ordinary start action continues this same study.
+            assert 'action="/control/start"' in resumed['fragments']['live-actions']
+            assert 'action="/control/pause"' not in resumed['fragments']['live-actions']
         finally:
             response.close(); client.close()
         read_url = urlsplit(endpoint['read_url'])
@@ -75,8 +86,9 @@ def test_http_sse_initial_change_reconnect_and_exact_read_scope(tmp_path):
         client, response = stream(url, '/live', read_cookie)
         try:
             readonly = snapshot(response)
-            assert readonly['csrf'] == {} and readonly['nonce'] is None
             assert all('action="/control/' not in value for value in readonly['fragments'].values())
+            assert all('name="csrf"' not in value and 'name="nonce"' not in value
+                for value in readonly['fragments'].values())
         finally:
             response.close(); client.close()
 
@@ -100,7 +112,7 @@ def test_workspace_loaded_state_and_mounted_stream(tmp_path):
         client, response = stream(url, '/instances/1/live', child_cookie)
         try:
             initial = snapshot(response)
-            assert 'action="/instances/1/control/start"' in initial['fragments']['live-hero']
+            assert 'action="/instances/1/control/start"' in initial['fragments']['live-actions']
             assert 'href="/instances/1/' in initial['fragments']['live-trail'] or initial['current'] is None
             finish(root, 1, 'H', [], action='analyze')
             changed = snapshot(response)
@@ -259,3 +271,25 @@ def test_stream_disconnection_releases_slot_and_has_bounded_transport(tmp_path, 
     assert sum(map(len, sink.values)) < 100
     assert gate.acquire(blocking=False)
     gate.release()
+
+
+@pytest.mark.parametrize(('workspace', 'mount', 'expected'), [
+    (True, '/workspaces/1', '/workspaces/1/instances'),
+    (False, '/workspaces/1/instances/2', '/workspaces/1/instances'),
+    (False, '/instances/2', '/instances'),
+])
+def test_oversized_instance_fragment_keeps_its_workspace_navigation(tmp_path, workspace, mount, expected):
+    from scidiscovery.research_loop.instance_ui import InstanceUI
+    root, key = prepare(tmp_path, enabled=False)
+    if workspace:
+        root = tmp_path / 'workspace'; root.mkdir()
+    ui = InstanceUI(root, secret_file=key, workspace=workspace, approval_host=False)
+    token = ui.browser.issue(ui.instance, maintenance=True)
+    value = ui._live_snapshot(token, mount)
+    value['fragments']['live-instances'] = '完整实例列表' * live.MAX_EVENT_BYTES
+    encoded = live.encode_snapshot(value)
+    assert len(encoded) <= live.MAX_EVENT_BYTES
+    fallback = json.loads(encoded)['fragments']['live-instances']
+    assert 'href="' + expected + '"' in fallback
+    assert value['instances_url'] == expected
+    ui.translation.close()

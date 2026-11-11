@@ -684,7 +684,10 @@ def test_ordinary_instance_status_pages_and_browser_bound_controls(tmp_path):
     _, _, read_headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
     read_cookie = read_headers['Set-Cookie']
     assert b'action="/control/' not in ui.get('/', host=ui.host, cookie=read_cookie)[1]
-    value = form(ui, cookie, 'pause')
+    assert b'action="/control/pause"' not in ui.get('/', host=ui.host, cookie=cookie)[1]
+    # This saved study is inactive. Exercise the pause authorization boundary
+    # directly without requiring an unavailable lifecycle action on its page.
+    value = control_fields(ui, cookie, 'pause')
     with pytest.raises(PermissionError):
         post(ui, read_cookie, 'pause', value)
     with pytest.raises(PermissionError, match='Origin'):
