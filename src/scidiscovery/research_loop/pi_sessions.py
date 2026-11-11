@@ -1,7 +1,7 @@
-"""Exact-path Pi v3 accounting, composed from the original Pi session engine.
+"""Exact-path Pi v3 accounting, composed from the native Pi session engine.
 
 No discovery, authentication reads or context-to-billing conversion. Resume uses
-one exact private original and a frozen append baseline, never historical debit.
+one exact private runtime session and a current append baseline, never historical debit.
 Live and persisted records overlap; terminal reconciliation is post-exit.
 """
 from datetime import datetime
@@ -123,17 +123,13 @@ def validate_session_event(event, thread):
 
 
 def validate_resume_binding(session, workspace, home):
-    """Pure lexical/original proof validation; filesystem acquisition is separate."""
+    """Validate stable runtime identity; historical byte observations are optional."""
     path = session_path(home, workspace, session)
     from .pi_backend import validate_profile
     validate_profile(session.get('profile'))
-    validate_header(session.get('header'), session.get('thread_id'), workspace)
-    identity, size, digest = session.get('identity'), session.get('size_bytes'), session.get('sha256')
-    if (not isinstance(identity, list) or len(identity) != 2
-            or any(type(n) is not int or n < 0 for n in identity)
-            or type(size) is not int or size <= 0
-            or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)):
-        raise ValueError('Original Pi session proof changed')
+    if (not isinstance(session.get('thread_id'), str)
+            or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9._-]{0,254}[A-Za-z0-9])?', session['thread_id'])):
+        raise ValueError('Original Pi session identity changed')
     return path
 
 
@@ -283,37 +279,24 @@ def open_original(home, path):
 
 
 def load_resume_original(session, workspace, home, *, resource_mode='closed'):
-    """One chunked producer acquisition retained by the attempt owner for its meter."""
+    """Acquire the current native cursor without inspecting historical context.
+
+    Session bodies belong to the SDK. Old inode, size and digest observations
+    are neither a context admission policy nor authority to debit old usage.
+    """
+    from .pi_backend import resource_mode as validate_resource_mode
+    resource_mode = validate_resource_mode(resource_mode)
     path = validate_resume_binding(session, workspace, home)
-    validator = ResumeEntries(session['profile'], resource_mode=resource_mode); digest = hashlib.sha256()
     with open_original(home, path) as stream:
         info = os.fstat(stream.fileno())
-        if (list((info.st_dev, info.st_ino)) != session['identity']
-                or info.st_size != session['size_bytes']):
-            # Only this retained cursor belongs to the previous attempt's debit.
-            # An otherwise valid append has no accounting owner here: refusing
-            # it preserves that unknown, rather than forgiving or rebilling it.
-            raise ValueError('Pi resume original replaced, resized or has unaccounted append')
         header = stream.readline(LINE_BYTES + 1)
         validate_header(header, session['thread_id'], workspace)
-        if header.decode('utf-8') != session['header']:raise ValueError('Pi resume header changed')
-        digest.update(header)
-        for line in original_records(stream, info.st_size - stream.tell()):
-            digest.update(line); validator.entry(decode(line))
-        if digest.hexdigest() != session['sha256']:raise ValueError('Pi resume original changed')
-        if not header.endswith(b'\n') or not validator.conversation or validator.tools:
-            raise ValueError('Pi resume empty or unsettled context')
+        if not header.endswith(b'\n'):raise ValueError('Pi resume header incomplete')
         stream.seek(max(0, info.st_size - ANCHOR_BYTES)); anchor = stream.read(ANCHOR_BYTES)
-        after = os.fstat(stream.fileno())
-        if _signature(info) != _signature(after):
-            raise ValueError('Pi resume original changed during admission')
-    current = path.lstat()
-    if (_signature(current) != _signature(info)
-            or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1):
-        raise ValueError('Pi resume original changed during admission')
     return dict(session=dict(session), info=info, header=header, anchor=anchor,
-        digest=digest, seen=set(validator.seen), leaf=validator.leaf,
-        resource_mode=validator.resource_mode)
+        digest=None, seen=set(), leaf=None, resource_mode=resource_mode,
+        history_changed=(session.get('identity') != [info.st_dev, info.st_ino]
+            or session.get('size_bytes') != info.st_size))
 
 
 def _signature(info):
@@ -322,47 +305,17 @@ def _signature(info):
 
 
 def recheck_prefix(original, *, phase='prelaunch'):
-    """Rehash the admitted original; only the authorized child may append setup.
+    """Recheck stable native identity, leaving mutable context to the SDK.
 
-    This check never advances the owner's proof or meter cursor. Native setup
-    bytes remain in this attempt's tail for normal accounting/reconciliation.
+    This does not advance the owner's billing cursor. SDK startup and later
+    append bytes still belong to this invocation's normal reconciliation.
     """
     if phase not in {'prelaunch', 'native_setup'}:raise ValueError('Pi resume check phase invalid')
-    session, expected = original['session'], original['info']
+    session = original['session']
     with open_original(session['home'], session['path']) as stream:
-        info = os.fstat(stream.fileno())
-        if ((info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino)
-                or info.st_size < expected.st_size
-                or phase == 'prelaunch' and info.st_size != expected.st_size):
-            raise ValueError('Pi resume original replaced, resized or has unaccounted append')
-        digest = hashlib.sha256(); remaining = expected.st_size
-        while remaining:
-            chunk = stream.read(min(READ_BYTES, remaining))
-            if not chunk:raise ValueError('Pi resume original truncated')
-            digest.update(chunk); remaining -= len(chunk)
-        if digest.digest() != original['digest'].digest():
-            raise ValueError('Pi resume original changed')
-        if phase == 'native_setup':
-            validator = ResumeEntries(session['profile'], resource_mode=original['resource_mode'])
-            validator.seen = set(original['seen']); leaf = original['leaf']
-            fields = {'model_change': {'provider', 'modelId'},
-                'thinking_level_change': {'thinkingLevel'}}
-            if validator.resource_mode == 'configured':fields['custom'] = {'customType'}
-            for line in original_records(stream, info.st_size - stream.tell()):
-                value = decode(line)
-                if (not isinstance(value, dict) or not isinstance(value.get('type'), str)
-                        or value['type'] not in fields
-                        or set(value) != {'type', 'id', 'parentId', 'timestamp'} | fields[value['type']]
-                            | ({'data'} if value['type'] == 'custom' and 'data' in value else set())
-                        or any(not isinstance(value[key], str) for key in fields[value['type']])
-                        or value.get('parentId') != leaf):
-                    raise ValueError('Pi resume work or unknown metadata before binding')
-                validator.entry(value); leaf = validator.leaf
-        current = Path(session['path']).lstat()
-        after = os.fstat(stream.fileno())
-        if (_signature(current) != _signature(info)
-                or _signature(after) != _signature(info)):
-            raise ValueError('Pi resume original changed')
+        header = stream.readline(LINE_BYTES + 1)
+        validate_header(header, session['thread_id'], session['workspace'])
+        if not header.endswith(b'\n'):raise ValueError('Pi resume header incomplete')
 
 
 def usage_tokens(value):
@@ -480,7 +433,7 @@ class UsageEvents:
 
 
 class SessionUsage:
-    """One append-only original; finite post-stat reads, no historical lookup."""
+    """Current invocation's append delta; finite reads, no historical billing."""
     def __init__(self, home, workspace, session=None, *, context_state=None, resume_original=None):
         self.home, self.workspace = exact_path(home), exact_path(workspace)
         self.path = session_path(home, workspace, session)
@@ -502,6 +455,8 @@ class SessionUsage:
         # Keep this sticky across later reports: unknown historical debits must
         # neither disappear nor be charged again as a manufactured baseline.
         self.usage_reason = None
+        self.runtime_history_gap = False
+        self.gap_parent_pending = False
         self.known = _zeros()
         self.observed = self.finished = False
         self.persisted = {key: _zeros() for key in CATEGORIES}
@@ -514,31 +469,39 @@ class SessionUsage:
         self.metadata_callback = None
         self.original_leaf = resume_original['leaf'] if resume_original is not None else None
         self.original_count = len(resume_original['seen']) if resume_original is not None else 0
+        self.initial_parent = None
         if self.resumed:
             if resume_original is None or resume_original['session'] != session:
                 raise ValueError('Pi resume meter requires the owner-acquired original')
             info = resume_original['info']
-            self.offset = self.baseline_offset = session['size_bytes']
+            self.offset = self.baseline_offset = info.st_size
             self.identity = (info.st_dev, info.st_ino)
             self.header, self.anchor = resume_original['header'], resume_original['anchor']
             self.mtime = info.st_mtime_ns
-            self.digest = resume_original['digest'].copy()
+            # No whole-history proof is acquired for mutable runtime sessions.
+            self.digest = None
             self.seen = set(resume_original['seen'])
             self.reason = 'token_counter_unreported'
+            if resume_original['history_changed']:
+                self.usage_reason = 'pi_resume_unattributed_history'
 
     def _open(self):
         return open_original(self.home, self.path)
 
     def session_binding(self):
-        # Only stopped-writer, rehashed bytes can become a reusable proof.
-        # Live incremental hashes/anchors alone cannot attest an early prefix.
-        if (self.verified_offset != self.offset or self.identity is None
-                or self.header is None or self.profile is None or self.fault or self.reason or self.usage_reason
-                or self.pending):
+        # Reusable native identity is independent of optional accounting and
+        # authorship coverage. Missing usage must not destroy the next retry's
+        # session. A full hash is published only when it was actually verified.
+        if (not self.finished or self.identity is None or self.header is None
+                or self.profile is None or self.thread is None):
             return None
-        return dict(backend='pi', home=str(self.home), workspace=str(self.workspace), path=str(self.path),
+        result = dict(backend='pi', home=str(self.home), workspace=str(self.workspace), path=str(self.path),
             thread_id=self.thread, profile=dict(self.profile), header=self.header.decode('utf-8'),
-            identity=list(self.identity), size_bytes=self.offset, sha256=self.digest.hexdigest())
+            identity=list(self.identity), size_bytes=self.offset)
+        if (self.digest is not None and self.verified_offset == self.offset
+                and not (self.fault or self.reason or self.usage_reason or self.pending)):
+            result['sha256'] = self.digest.hexdigest()
+        return result
 
     def bind_thread(self, thread):
         if (not isinstance(thread, str) or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9._-]{0,254}[A-Za-z0-9])?', thread)):
@@ -565,8 +528,13 @@ class SessionUsage:
                 or entry_id in self.seen or len(self.seen) >= MAX_ENTRIES
                 or not _stamp(value.get('timestamp')) or 'parentId' not in value
                 or value['parentId'] is not None and (not isinstance(value['parentId'], str)
-                    or value['parentId'] not in self.seen)):
+                    or value['parentId'] not in self.seen and not ((self.resumed or self.runtime_history_gap) and (
+                        not self.seen or self.gap_parent_pending
+                        or value['parentId'] in {self.initial_parent, self.original_leaf})))):
             raise ValueError('invalid_session_entry_identity')
+        if self.resumed and not self.seen or self.gap_parent_pending:
+            self.initial_parent = value['parentId']
+            self.gap_parent_pending = False
         self.seen.add(entry_id)
         if self.observation is not None: self.observation.entry(value)
         kind = category = value.get('type')
@@ -603,27 +571,35 @@ class SessionUsage:
             with self._open() as stream:
                 info = os.fstat(stream.fileno())
                 identity = (info.st_dev, info.st_ino)
-                if self.identity is not None and (identity != self.identity or info.st_size < self.offset):
-                    raise ValueError('session_log_replaced_or_truncated')
                 line = stream.readline(min(LINE_BYTES + 1, info.st_size))
                 if not line.endswith(b'\n') or len(line) > LINE_BYTES:
                     self.reason = 'session_partial_header'; return
                 header = decode(line)
                 thread = self.thread if self.thread is not None else header.get('id') if isinstance(header, dict) else None
                 validate_header(line, thread, self.workspace)
-                if self.header is not None and line != self.header: raise ValueError('session_header_changed')
                 if self.identity is None:
                     self.identity, self.header = identity, line
                     self.bind_thread(thread)
                     self.offset = len(line)
                     self.digest.update(line)
-                elif self.anchor:
-                    stream.seek(self.offset - len(self.anchor))
-                    if stream.read(len(self.anchor)) != self.anchor: raise ValueError('session_log_changed')
-                    if info.st_size == self.offset and self.mtime != info.st_mtime_ns: raise ValueError('session_log_changed')
+                else:
+                    changed = identity != self.identity or info.st_size < self.offset
+                    if not changed and self.anchor:
+                        stream.seek(self.offset - len(self.anchor))
+                        changed = stream.read(len(self.anchor)) != self.anchor
+                    if changed:
+                        # Preserve every already observed debit. The new native
+                        # cursor cannot attribute replaced bytes to this call.
+                        self.usage_reason = self.usage_reason or 'pi_session_mutated_usage_unknown'
+                        self.runtime_history_gap = True
+                        self.gap_parent_pending = True
+                        self.digest = None
+                        self.identity, self.header = identity, line
+                        self.offset = info.st_size
+                        self.framing.pending.clear()
                 stream.seek(self.offset)
                 data = stream.read(min(READ_BYTES, info.st_size - self.offset))
-                self.digest.update(data)
+                if self.digest is not None:self.digest.update(data)
                 self.offset += len(data)
                 for line in self.framing.feed(data):
                     try: self._entry(line)
@@ -669,20 +645,27 @@ class SessionUsage:
                 info = os.fstat(stream.fileno())
                 if ((info.st_dev, info.st_ino) != self.identity or info.st_size != self.offset):
                     raise ValueError('session_terminal_snapshot_unavailable')
-                digest = hashlib.sha256(); remaining = self.offset
-                while remaining:
-                    chunk = stream.read(min(READ_BYTES, remaining))
-                    if not chunk:raise ValueError('session_terminal_snapshot_truncated')
-                    digest.update(chunk); remaining -= len(chunk)
+                if self.digest is not None:
+                    digest = hashlib.sha256(); remaining = self.offset
+                    while remaining:
+                        chunk = stream.read(min(READ_BYTES, remaining))
+                        if not chunk:raise ValueError('session_terminal_snapshot_truncated')
+                        digest.update(chunk); remaining -= len(chunk)
+                    if digest.digest() != self.digest.digest():
+                        raise ValueError('session_terminal_snapshot_changed')
+                else:
+                    stream.seek(self.offset - len(self.anchor))
+                    if stream.read(len(self.anchor)) != self.anchor:
+                        raise ValueError('session_terminal_snapshot_changed')
                 after = os.fstat(stream.fileno())
                 current = self.path.lstat()
-                if (digest.digest() != self.digest.digest()
-                        or _signature(info) != _signature(after)
+                if (_signature(info) != _signature(after)
                         or _signature(info) != _signature(current)):
                     raise ValueError('session_terminal_snapshot_changed')
             self.verified_offset = self.offset
         except (OSError, ValueError):
-            self.fault = self.fault or 'session_terminal_original_changed_or_unverified'
+            self.usage_reason = self.usage_reason or 'session_terminal_original_changed_or_unverified'
+            self.digest = None
 
     def terminal(self):
         self.poll()

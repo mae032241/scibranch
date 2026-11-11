@@ -71,7 +71,7 @@ def stream_binding(path):
 
 
 def validate_session_binding(value, thread, workspace, home):
-    """Check the retained native hook identity without reading transcript bytes."""
+    """Check stable native hook identity while allowing session maintenance."""
     if (not isinstance(value, dict) or value.get('source') != 'native_metadata_hooks'
             or value.get('thread_id') != thread or value.get('workspace') != str(workspace)
             or value.get('home') != str(home) or not isinstance(value.get('path'), str)
@@ -83,9 +83,9 @@ def validate_session_binding(value, thread, workspace, home):
     if (Path(home).resolve() != Path(home) or path.resolve() != path
             or not path.is_relative_to(Path(home) / 'sessions')):
         raise ValueError('Native session original path changed')
-    current = stream_binding(path)
-    if current['identity'] != value['identity'] or current['size_bytes'] < value['offset']:
-        raise ValueError('Native session original replaced or truncated')
+    # A native session is mutable: compaction or maintenance can rewrite or
+    # replace it. Retained observation cursors do not freeze its current bytes.
+    stream_binding(path)
     return value
 
 
@@ -331,7 +331,7 @@ class SessionUsage(BasicObservation):
         identity = (info.st_dev, info.st_ino)
         if not stat.S_ISREG(info.st_mode):
             raise ValueError('Native session is not an ordinary file')
-        if self.path is not None and (self.path != path or self.identity != identity or info.st_size < self.offset):
+        if self.path is not None and self.path != path:
             raise ValueError('Native session original changed')
         self.path, self.identity, self.offset = path, identity, info.st_size
 

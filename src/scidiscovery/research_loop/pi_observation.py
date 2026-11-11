@@ -103,8 +103,10 @@ class Observation:
         self.window_fault = self.windows.get('reason') if self.windows['coverage'] == 'unknown' else None
         cursor = retained.get('cursor') if isinstance(retained, dict) else None
         if meter.resumed and (not isinstance(cursor, dict) or cursor.get('thread_id') != meter.thread
-                or cursor.get('source') != SOURCE or cursor.get('leaf') not in meter.seen):
+                or cursor.get('source') != SOURCE or not _id(cursor.get('leaf'))):
             self.window_fault = self.window_fault or 'context_cursor_changed'
+        self.retained_cursor = cursor
+        self.baseline_bound = not meter.resumed
         self.initial_counted = meter.resumed
         self.baseline_leaf = None
         self.last_observed_at = 0
@@ -121,7 +123,8 @@ class Observation:
 
     def entry(self, value):
         """Keep only compact private identities from the original append delta."""
-        row = dict(type=value['type'], parent=value['parentId'], index=len(self.meter.seen))
+        row = dict(type=value['type'], parent=value['parentId'],
+            index=self.meter.original_count + len(self.meter.seen))
         if value['type'] == 'message':
             message = value.get('message') or {}
             row['role'] = message.get('role')
@@ -168,13 +171,62 @@ class Observation:
         if (not self.bound or self.terminal_seen or not isinstance(event, dict) or set(event) != fields
                 or event['session_id'] != meter.thread or event['path'] != str(meter.path)
                 or event['workspace'] != str(meter.workspace) or not _id(event['leaf'])
-                or event['leaf'] not in meter.seen
+                or event['leaf'] not in meter.seen and not (
+                    meter.runtime_history_gap or meter.resumed and event['leaf'] == event['baseline_leaf'])
                 or type(event['baseline_count']) is not int or not 0 <= event['baseline_count'] <= 65536
-                or event['baseline_leaf'] is not None and event['baseline_leaf'] not in meter.seen
+                or event['baseline_leaf'] is not None and not _id(event['baseline_leaf'])
                 or type(event['observed_at']) not in (int, float)
                 or not self.last_observed_at <= event['observed_at'] <= MAX_SAFE_INTEGER):
             raise ValueError('pi_metadata_source_or_scope_invalid')
+        kind = event['kind']
+        if kind not in {'context', 'tool_result', 'turn_end', 'compact_start', 'compact', 'compact_failed', 'terminal'}:
+            raise ValueError('pi_metadata_boundary_invalid')
+        if meter.runtime_history_gap:
+            # A positively observed native rewrite loses ancestry attribution,
+            # not the bound delivery channel. Acknowledge its valid boundary
+            # without manufacturing context windows or response receipts.
+            turn = event['turn_id']
+            if turn is not None:
+                if (not _id(turn) or self.prompt_hash is None or event['prompt_hash'] != self.prompt_hash):
+                    raise ValueError('pi_metadata_native_user_invalid')
+            elif kind not in {'compact_start', 'compact', 'compact_failed'}:
+                raise ValueError('pi_metadata_native_user_missing')
+            if kind == 'turn_end':
+                if not _id(event['assistant_id']) or event['status'] not in {'completed', 'failed', 'cancelled'}:
+                    raise ValueError('pi_metadata_response_receipt_invalid')
+            elif event['assistant_id'] is not None or event['status'] is not None:
+                raise ValueError('pi_metadata_response_boundary_invalid')
+            if kind == 'compact':
+                if not _id(event['compaction_id']) or not _id(event['pre_cursor']):
+                    raise ValueError('pi_metadata_compaction_delta_invalid')
+            elif event['compaction_id'] is not None:
+                raise ValueError('pi_metadata_compaction_boundary_invalid')
+            self.window_fault = self.window_fault or 'context_native_history_changed'
+            self.leaf, self.last_observed_at = event['leaf'], event['observed_at']
+            # The bound native boundary owns the next append's historical
+            # parent. Keep already billed IDs/debits for duplicate detection.
+            meter.initial_parent = event['leaf']
+            meter.gap_parent_pending = False
+            self.compact_pending = False
+            self.invalidate()
+            if kind == 'terminal':self.terminal_seen = True
+            return
         baseline = event['baseline_leaf']
+        if not self.baseline_bound:
+            # The existing bound native metadata supplies a compact baseline;
+            # historical context is mutable and was not reparsed by control.
+            observed_baseline = (self.entries.get(baseline) or {}).get('index', 0)
+            historical_count = event['baseline_count'] - observed_baseline
+            if historical_count < 0:raise ValueError('pi_metadata_baseline_invalid')
+            meter.original_count = historical_count
+            meter.original_leaf = meter.initial_parent if observed_baseline else baseline
+            for row in self.entries.values():row['index'] += meter.original_count
+            self.baseline_bound = True
+            if (isinstance(self.retained_cursor, dict)
+                    and self.retained_cursor.get('leaf') != (meter.initial_parent if meter.seen else baseline)):
+                self.window_fault = self.window_fault or 'context_cursor_changed'
+        if baseline is not None and baseline not in meter.seen and baseline != meter.original_leaf:
+            raise ValueError('pi_metadata_baseline_invalid')
         baseline_index = ((self.entries.get(baseline) or {}).get('index')
             if baseline != meter.original_leaf else meter.original_count)
         if baseline is None: baseline_index = 0
@@ -182,9 +234,6 @@ class Observation:
             raise ValueError('pi_metadata_baseline_invalid')
         if self.turn is not None and baseline != self.baseline_leaf:
             raise ValueError('pi_metadata_baseline_changed')
-        kind = event['kind']
-        if kind not in {'context', 'tool_result', 'turn_end', 'compact_start', 'compact', 'compact_failed', 'terminal'}:
-            raise ValueError('pi_metadata_boundary_invalid')
         turn = event['turn_id']
         if turn is not None:
             row = self.entries.get(turn) or {}
@@ -353,7 +402,7 @@ class Observation:
         Actor completeness is not a census of provider requests. Retain native
         user/branch/response identities without copying text or changing meters.
         """
-        if (not self.available or not self.bound or not self.terminal_seen or self.pending
+        if (self.meter.digest is None or not self.available or not self.bound or not self.terminal_seen or self.pending
                 or self.fault or self.compact_pending or self.turn is None
                 or not self.sequence or self.sequence != self.acknowledged):
             raise ValueError('pi_authorship_delivery_incomplete')

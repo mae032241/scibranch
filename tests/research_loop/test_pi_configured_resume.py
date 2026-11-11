@@ -32,38 +32,36 @@ def append(path, row):
     with path.open('ab') as stream:stream.write((json.dumps(row)+'\n').encode())
 
 
-def test_configured_resume_admits_original_custom_only_from_explicit_owner_mode(tmp_path):
+@pytest.mark.parametrize('mode', ['closed', 'configured'])
+def test_resume_leaves_historical_custom_context_to_the_sdk(tmp_path, mode):
     home, work, path, session = with_state(tmp_path)
     before = path.read_bytes(); retained = copy.deepcopy(session)
-    with pytest.raises(ValueError, match='extension state unsupported'):
-        pi_sessions.load_resume_original(session, work, home)
-    with pytest.raises(ValueError, match='extension state unsupported'):
-        adapter().validate_resume_session(session, work, home)
+    loaded = pi_sessions.load_resume_original(session, work, home, resource_mode=mode)
+    assert loaded['resource_mode'] == mode
+    assert loaded['leaf'] is None and loaded['seen'] == set() and loaded['digest'] is None
+    assert path.read_bytes() == before and session == retained
+    # Resource permissions still come from the declared launch mode, independent
+    # of the SDK's mutable historical context.
     backend = adapter(native_options=CONFIGURED, resume_policy=dict(RESUME))
     assert backend.validate_resume_session(session, work, home) == session
-    assert backend._resume_original['resource_mode'] == 'configured'
-    assert backend._resume_original['leaf'] == 'state'
-    assert backend._resume_original['seen'] == {'user', 'msg', 'state'}
     assert backend.complete_authorship is False
-    assert path.read_bytes() == before and session == retained
 
 
-def test_configured_setup_custom_preserves_prefix_and_charges_only_new_tail(tmp_path, monkeypatch):
+def test_configured_setup_custom_charges_only_new_tail(tmp_path, monkeypatch):
     home, work, path, session = with_state(tmp_path)
     historical = path.read_bytes()
     backend = adapter(native_options=CONFIGURED, resume_policy=dict(RESUME))
     backend.validate_resume_session(session, work, home)
-    loaded = backend._resume_original; digest = loaded['digest'].hexdigest()
+    loaded = backend._resume_original
     backend.bind_attempt(home, work, session)
     args = backend.launch(PROFILE, work, None, None, 'Synthetic continuation')
     backend.resume(args, PROFILE, work, None, None, session)
     append(path, custom('startup-state', 'state'))
-    with pytest.raises(ValueError, match='unaccounted append'):pi_sessions.recheck_prefix(loaded)
+    pi_sessions.recheck_prefix(loaded)
     pi_sessions.recheck_prefix(loaded, phase='native_setup')
-    assert loaded['digest'].hexdigest() == digest and loaded['leaf'] == 'state'
-    assert loaded['session']['size_bytes'] == len(historical)
+    assert loaded['digest'] is None and loaded['leaf'] is None
     monkeypatch.setattr(pi_sessions, 'load_resume_original',
-        lambda *a, **k: pytest.fail('Meter reacquired the owner original'))
+        lambda *a, **k: pytest.fail('Meter reacquired the owner cursor'))
     meter = backend.meter(home, work, session)
     assert meter.poll()['tokens'] == dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
     append(path, dict(type='message', id='next', parentId='startup-state',
@@ -72,42 +70,20 @@ def test_configured_setup_custom_preserves_prefix_and_charges_only_new_tail(tmp_
     observed = backend.finish_observation(meter, required=False)
     assert observed['coverage'] == 'terminal' and observed['tokens'] == TOKENS
     assert observed['baseline_offset'] == len(historical)
-    assert path.read_bytes().startswith(historical)
+    assert 'sha256' not in observed['session_binding'] and path.read_bytes().startswith(historical)
     assert backend.complete_authorship is False
 
 
 @pytest.mark.parametrize('mode', ['closed', 'configured'])
-def test_native_setup_custom_requires_configured_mode(tmp_path, mode):
+def test_native_setup_recheck_does_not_parse_mutable_sdk_records(tmp_path, mode):
     home, work, path, session = original(tmp_path)
     loaded = pi_sessions.load_resume_original(session, work, home, resource_mode=mode)
     append(path, custom())
-    if mode == 'configured':pi_sessions.recheck_prefix(loaded, phase='native_setup')
-    else:
-        with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded, phase='native_setup')
-
-
-@pytest.mark.parametrize('damage', ['rewrite', 'unaccounted_append', 'model', 'thinking',
-    'duplicate', 'orphan', 'timestamp', 'custom_type', 'custom_usage', 'custom_extra'])
-def test_configured_custom_does_not_relax_original_or_setup_binding(tmp_path, damage):
-    home, work, path, session = with_state(tmp_path)
-    loaded = pi_sessions.load_resume_original(session, work, home, resource_mode='configured')
-    row = custom('startup-state', 'state')
-    if damage == 'rewrite':path.write_bytes(path.read_bytes().replace(b'Synthetic task', b'Synthetic edit'))
-    elif damage == 'unaccounted_append':
-        append(path, row)
-        with pytest.raises(ValueError, match='unaccounted append'):
-            pi_sessions.load_resume_original(session, work, home, resource_mode='configured')
-        return
-    elif damage == 'model':row = dict(type='model_change', id='setup', parentId='state', timestamp=STAMP, provider='fixture', modelId='other')
-    elif damage == 'thinking':row = dict(type='thinking_level_change', id='setup', parentId='state', timestamp=STAMP, thinkingLevel='low')
-    elif damage == 'duplicate':row['id'] = 'state'
-    elif damage == 'orphan':row['parentId'] = 'missing'
-    elif damage == 'timestamp':row['timestamp'] = 'invalid'
-    elif damage == 'custom_type':row['customType'] = 7
-    elif damage == 'custom_usage':row['usage'] = AUX
-    else:row['provider'] = 'substituted'
-    if damage != 'rewrite':append(path, row)
-    with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded, phase='native_setup')
+    with path.open('ab') as stream:stream.write(b'{SDK-owned native body}\n')
+    pi_sessions.recheck_prefix(loaded, phase='native_setup')
+    # This check grants no native resources or model substitution. Exact RPC
+    # profile admission below still precedes the only prompt.
+    assert loaded['resource_mode'] == mode and loaded['info'].st_size == session['size_bytes']
 
 
 @pytest.mark.parametrize('damage', ['model', 'thinking', 'virtual_type', 'virtual_api', 'session'])

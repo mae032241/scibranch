@@ -1235,6 +1235,18 @@ reconciliation and cannot be automatically resubmitted. Known completion is neve
 reopened as native failure. Native transport and synthetic-process evidence does
 not qualify real-provider reasoning recovery, complete usage or scientific results.
 
+Native sessions are mutable runtime state. Resume checks the stable session,
+task, workspace, safe path and backend profile through the selected Backend;
+append, compaction, rewriting or native file replacement does not require an old
+whole-session size, inode or hash to remain equal. The latest stopped-writer
+binding takes precedence over the launch intent's older observation. Pi acquires
+the current header and EOF without parsing historical tool bodies; the native
+transport checks its session/model/thinking before prompting. New usage is counted
+from the current attempt's baseline. Unattributed intervals and unavailable full
+authorship proof remain unknown without blocking ordinary continuation or erasing
+accepted charges. Scientific originals and unknown external-call reconciliation
+retain their existing contracts.
+
 A completed turn with incomplete
 required output uses existing output repair, while legal fragments keep their stage semantics.
 A completed W response with valid required JSON can separately need scientific

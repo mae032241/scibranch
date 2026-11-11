@@ -198,7 +198,10 @@ native_calls 不支持，response 计数仅为下界，可选调用者策略也�
 畸形 JSON）完整保留，必需输出走公共有限补填。退出后无条件核对账单，独立于元数据，
 保留辅助用量、下界和未知覆盖，不补零或以占用估计代替。同 session 续接保留旧消费和
 窗口。同一逻辑任务的 fragment／补填／唤醒可按各自门槛追加原 Pi session；当前不支持
-`consultation_resume`，跨 H/A/E 咨询返回明确使用 `new_context`。来源损坏／迁移、未记账追加在新效果前拒绝，PID 死亡不授权重放。caller.unknown
+`consultation_resume`，跨 H/A/E 咨询返回明确使用 `new_context`。会话是可变运行状态，追加、压缩、
+重写及原生文件替换不因旧大小／哈希／inode 被拒绝；仍须绑定正确 session、工作目录、路径及
+后端 profile。Pi 用当前 EOF 作为本次增量计费基线，不重读历史工具正文；无法归属的区间保持
+unknown，已耗预算不重置，缺少完整作者证明不阻断普通接续。PID 死亡不授权重放。caller.unknown
 及任何未知提交须核对同一原调用，不自动重提。
 
 公共正式审查、执行授权、资源、选择、审计、交付及 observer 策略不再被 Pi 一概否决，

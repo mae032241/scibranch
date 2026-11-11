@@ -134,6 +134,10 @@ def _participant_from_facts(outcome, intent, workspace):
             or binding.get('session_id') != outcome.get('thread_id')
             or session.get('thread_id') != outcome.get('thread_id')
             or session.get('workspace') != str(workspace) or session.get('profile') != intent.get('native_profile')
+            or not _hash(session.get('sha256'))
+            or type(session.get('size_bytes')) is not int or session['size_bytes'] <= 0
+            or not isinstance(session.get('identity'), list) or len(session['identity']) != 2
+            or any(type(value) is not int or value < 0 for value in session['identity'])
             or proof.get('intent_sha256') != _digest(intent)
             or proof.get('outcome_sha256') != _digest(_outcome_facts(outcome))
             or proof.get('prefix_verified') is not True or outcome.get('native_backend') != 'pi'
@@ -144,6 +148,7 @@ def _participant_from_facts(outcome, intent, workspace):
             or (outcome.get('shared_inputs') or {}).get('enforcement') != 'kernel_readonly_mounts'):
         raise ValueError('pi_authorship_owner_binding_changed')
     validate_resume_binding(session, workspace, session['home'])  # lexical/original only; NOT live EOF
+    validate_header(session.get('header'), session['thread_id'], workspace)
     event = validate_session_event(outcome.get('native_thread_event'), session['thread_id'])
     if any(event[key] != session[key] for key in ('path', 'workspace', 'profile')):
         raise ValueError('pi_authorship_session_changed')
@@ -172,6 +177,12 @@ def _participant_from_facts(outcome, intent, workspace):
     prior = intent.get('session') if intent.get('context_mode') != 'new_context' else None
     if prior is not None:
         validate_resume_binding(prior, workspace, session['home'])
+        validate_header(prior.get('header'), prior['thread_id'], workspace)
+        if (not _hash(prior.get('sha256'))
+                or type(prior.get('size_bytes')) is not int or prior['size_bytes'] <= 0
+                or not isinstance(prior.get('identity'), list) or len(prior['identity']) != 2
+                or any(type(value) is not int or value < 0 for value in prior['identity'])):
+            raise ValueError('pi_authorship_resume_changed')
         if (prior['thread_id'] != session['thread_id'] or prior['profile'] != session['profile']
                 or prior['path'] != session['path'] or persisted['baseline_offset'] != prior['size_bytes']):
             raise ValueError('pi_authorship_resume_changed')
@@ -854,7 +865,7 @@ class Pi(Backend):
             if path.exists() or path.is_symlink():raise ValueError('Pi requires a fresh exact private session')
         elif self._resume_original is None or self._resume_original['session'] != session:
             # Native's owner calls validate_resume_session before bind_attempt.
-            # Do not reopen its accepted immutable original through a fallback.
+            # Consume the owner's current native cursor without reacquisition.
             raise ValueError('Pi resume requires the owner-validated original')
         self._session = dict(session) if session is not None else None
         sessions.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1066,6 +1077,7 @@ class Pi(Backend):
         try:
             session = binding['session']
             if (session is None or self._meter is None or not self._meter.finished
+                    or self._meter.digest is None
                     or self._meter.verified_offset != self._meter.offset or self._launch_evidence is None
                     or self._controlled_exit is None or not isinstance(process, dict)):
                 raise ValueError('pi_authorship_runtime_proof_unavailable')

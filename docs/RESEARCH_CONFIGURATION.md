@@ -571,8 +571,10 @@ Current response JSON Schema is prompt-only; final original UTF-8, including bad
 JSON, stays intact for common validation/finite repair. Unconditional post-exit
 billing reconciliation retains auxiliary usage, lower bounds and unknown coverage,
 independently of metadata success. Exact-session resume preserves previous spend
-and windows. Corrupt/migrated sources or unaccounted appends refuse before new
-effects; dead PIDs never authorize replay. `caller.unknown` and any unknown external
+and windows. Native session contents may change; stable identity and backend
+bindings govern resume, while accounting gaps remain unknown (see the
+[recovery contract](RESEARCH_LOOP_CONTRACTS.md)). Dead PIDs never authorize replay.
+`caller.unknown` and any unknown external
 submission require same-call reconciliation, never automatic resubmission.
 
 父控制层在确认必需元数据前同步发布既有预算／复核／准入事实；交付故障停止依赖该策略的
@@ -581,8 +583,9 @@ submission require same-call reconciliation, never automatic resubmission.
 如实保留建议不可用。完成须准确 profile、空闲终态、RPC 排空、正常退出及进程组清理。
 当前 JSON Schema 只随 prompt 发送，最终原始 UTF-8（含坏 JSON）完整保留，公共校验与
 有限补填继续生效。退出后无条件核对账单，独立于元数据成功与否，保留辅助用量、下界和
-未知覆盖。同 session 续接保留既有消费和窗口；来源损坏／迁移或未记账追加在新效果前
-拒绝，PID 死亡不授权重放。caller.unknown 与任何未知外部提交须同调用核对，绝不自动重提。
+未知覆盖。同 session 续接保留既有消费和窗口；会话内容可变，按稳定身份及后端绑定接续，
+计费缺口保持 unknown，见[恢复合同](RESEARCH_LOOP_CONTRACTS.zh-CN.md)。PID 死亡不授权重放。
+caller.unknown 与任何未知外部提交须同调用核对，绝不自动重提。
 
 Common formal-review, execution-authority, resource, selection, audit, delivery
 and observer policies are not blanket-vetoed by Pi. Their common owners validate

@@ -133,7 +133,8 @@ def test_explicit_pi_configuration_accepts_roles_resume_and_retains_current_defa
     assert value == before
     assert normalized['native_options']['workspace'] == workspace
     assert normalized['resume_policy'] == RESUME
-    assert normalized['worker_fragment_policy'] == {'context': 'same_session', 'max_context_windows': 1}
+    assert normalized['worker_fragment_policy'] == {
+        'context': 'same_session', 'max_context_windows': 1, 'context_handoff_version': 2}
     assert normalized['experiment_mode'] == 'external'  # Explicit fixture scope, not provider cadence.
     assert adapter().default_experiment_mode() == 'local'
     assert pi.DEFAULT_RESUME_POLICY['protocol'] == 'pi_rpc_v1'
@@ -367,61 +368,134 @@ def test_literal_model_launch_resume_and_session_receipt_preserve_full_identity(
         backend.validate_session_event(dict(event, profile=substituted), session['thread_id'])
 
 
-@pytest.mark.parametrize('fault', ['malformed', 'partial', 'version2', 'wrong_cwd', 'wrong_model',
-    'duplicate_id', 'missing_content', 'deferred', 'unsettled_tool', 'symlink', 'hardlink', 'replaced'])
-def test_resume_rejects_unsafe_native_migration_corruption_and_wrong_binding(tmp_path, fault):
+@pytest.mark.parametrize('fault', ['version2', 'wrong_cwd', 'wrong_id', 'wrong_path', 'symlink', 'hardlink'])
+def test_resume_preserves_stable_native_binding_and_safe_path(tmp_path, fault):
     home, work, path, session = original(tmp_path)
-    rows = [json.loads(line) for line in path.read_bytes().split(b'\n') if line]
-    if fault == 'malformed':path.write_bytes(path.read_bytes()+b'{bad}\n')
-    elif fault == 'partial':path.write_bytes(path.read_bytes()+b'{partial')
-    elif fault == 'symlink':
+    if fault == 'symlink':
         other = home/'other'; path.rename(other); path.symlink_to(other)
     elif fault == 'hardlink':os.link(path, home/'outside-link')
-    elif fault == 'replaced':
-        other = home/'replacement'; other.write_bytes(path.read_bytes()); other.replace(path)
+    elif fault == 'wrong_path':session['path'] = str(home/'different.jsonl')
     else:
-        if fault == 'version2':rows[0]['version'] = 2
-        elif fault == 'wrong_cwd':rows[0]['cwd'] = str(tmp_path/'other-work')
-        elif fault == 'wrong_model':rows[-1]['message']['model'] = 'different'
-        elif fault == 'duplicate_id':rows[-1]['id'] = rows[-2]['id']
-        elif fault == 'missing_content':del rows[-1]['message']['content']
-        elif fault == 'deferred':rows[-1]['message']['stopReason'] = 'deferred'
-        elif fault == 'unsettled_tool':
-            rows[-1]['message']['stopReason'] = 'toolUse'
-            rows[-1]['message']['content'] = [dict(type='toolCall', id='pending', name='bash', arguments={})]
-        data = ''.join(json.dumps(row)+'\n' for row in rows).encode(); path.write_bytes(data)
-        # Even a self-consistent byte proof cannot authorize permissive native
-        # migration, coercion, another working directory or model, or tool replay.
-        session.update(header=json.dumps(rows[0])+'\n', size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
-    before = path.read_bytes()
+        header, body = path.read_bytes().split(b'\n', 1)
+        header = json.loads(header)
+        if fault == 'version2':header['version'] = 2
+        elif fault == 'wrong_cwd':header['cwd'] = str(tmp_path/'different')
+        else:header['id'] = 'different'
+        path.write_bytes((json.dumps(header)+'\n').encode()+body)
     with pytest.raises(ValueError):adapter().validate_resume_session(session, work, home)
-    assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize('kind', ['usage', 'model_change', 'thinking_level_change'])
-def test_resume_refuses_valid_unaccounted_append_without_changing_retained_debit(tmp_path, kind):
+@pytest.mark.parametrize('change', ['append', 'rewrite', 'replace', 'native_body'])
+def test_mutable_resume_admits_append_rewrite_and_atomic_replacement_without_historical_reads(
+        tmp_path, monkeypatch, change):
     home, work, path, session = original(tmp_path)
     retained = copy.deepcopy(session)
-    prior = pi_sessions.SessionUsage(home, work)
-    prior.profile = dict(PROFILE)
-    accounted = prior.terminal()
-    assert accounted['coverage'] == 'terminal'
-    row = dict(type=kind, id='late', parentId='msg', timestamp=STAMP)
-    row.update(dict(usage=AUX) if kind == 'usage' else
-        dict(provider='fixture', modelId='exact-model') if kind == 'model_change' else
-        dict(thinkingLevel='high'))
-    with path.open('ab') as stream:stream.write((json.dumps(row)+'\n').encode())
+    data = path.read_bytes()
+    if change == 'append':data += (json.dumps(dict(type='usage', id='late', parentId='msg', timestamp=STAMP, usage=AUX))+'\n').encode()
+    elif change == 'rewrite':data = data.replace(b'Original task', b'Changed native task')
+    elif change == 'native_body':data = data.split(b'\n', 1)[0]+b'\n{SDK-owned context}'
+    data += b' ' * 32768
+    if change == 'replace':
+        other = home/'replacement'; other.write_bytes(data); other.replace(path)
+    else:path.write_bytes(data)
+    acquire = pi_sessions.open_original
+    reads = []
+    class HeaderAndAnchor:
+        def __enter__(self):self.stream = acquire(home, path); return self
+        def __exit__(self, *args):self.stream.close()
+        def __getattr__(self, name):return getattr(self.stream, name)
+        def read(self, count):
+            assert count <= pi_sessions.ANCHOR_BYTES
+            data = self.stream.read(count); reads.append(len(data)); return data
+        def readline(self, count):
+            data = self.stream.readline(count); reads.append(len(data)); return data
+    monkeypatch.setattr(pi_sessions, 'open_original', lambda *a: HeaderAndAnchor())
+    monkeypatch.setattr(pi_sessions, 'original_records', lambda *a: pytest.fail('Historical body scanned'))
     backend = adapter(resume_policy=dict(RESUME))
-    before = path.read_bytes()
-    with pytest.raises(ValueError, match='unaccounted append'):
-        backend.validate_resume_session(session, work, home)
-    assert backend._resume_original is None
-    assert session == retained and path.read_bytes() == before
-    assert accounted['tokens'] == pi_sessions.usage_tokens(USAGE)
-    assert prior.snapshot()['tokens'] == accounted['tokens']
+    assert backend.validate_resume_session(session, work, home) == retained
+    loaded = backend._resume_original
+    assert loaded['info'].st_size == len(data) and loaded['digest'] is None and loaded['seen'] == set()
+    pi_sessions.recheck_prefix(loaded)
+    pi_sessions.recheck_prefix(loaded, phase='native_setup')
+    assert sum(reads) < len(data) and session == retained
 
 
-def test_live_poll_cannot_reuse_previous_terminal_coverage_or_proof(tmp_path, monkeypatch):
+def test_resume_uses_current_eof_without_rebilling_old_or_unattributed_usage(tmp_path):
+    home, work, path, session = original(tmp_path)
+    prior = pi_sessions.SessionUsage(home, work); prior.profile = dict(PROFILE)
+    charged = prior.terminal()['tokens']
+    with path.open('ab') as stream:
+        stream.write((json.dumps(dict(type='usage', id='unowned', parentId='msg', timestamp=STAMP, usage=AUX))+'\n').encode())
+    current_eof = path.stat().st_size
+    loaded = pi_sessions.load_resume_original(session, work, home)
+    meter = pi_sessions.SessionUsage(home, work, session, resume_original=loaded)
+    assert meter.snapshot()['baseline_offset'] == current_eof > session['size_bytes']
+    with path.open('ab') as stream:
+        stream.write((json.dumps(dict(type='message', id='next', parentId='unowned', timestamp=STAMP,
+            message=message(stamp=2)))+'\n').encode())
+    observed = meter.terminal()
+    assert observed['tokens'] == pi_sessions.usage_tokens(USAGE)
+    assert observed['coverage'] == 'unknown' and observed['reason'] == 'pi_resume_unattributed_history'
+    assert observed['has_observation'] and prior.snapshot()['tokens'] == charged
+    assert observed['session_binding']['thread_id'] == session['thread_id']
+    assert 'sha256' not in observed['session_binding']
+    next_original = pi_sessions.load_resume_original(observed['session_binding'], work, home)
+    assert next_original['info'].st_size == path.stat().st_size
+
+
+def test_missing_usage_still_retains_reusable_session_identity(tmp_path):
+    home, work, path, session = original(tmp_path)
+    loaded = pi_sessions.load_resume_original(session, work, home)
+    meter = pi_sessions.SessionUsage(home, work, session, resume_original=loaded)
+    observed = meter.terminal()
+    assert observed['coverage'] == 'unknown' and not observed['has_observation']
+    binding = observed['session_binding']
+    assert binding['thread_id'] == session['thread_id'] and 'sha256' not in binding
+    backend = adapter(resume_policy=dict(RESUME))
+    backend.validate_resume_session(binding, work, home)
+    backend.bind_attempt(home, work, binding)
+    args = backend.launch(PROFILE, work, None, None, 'same task')
+    backend.resume(args, PROFILE, work, None, None, binding)
+
+
+@pytest.mark.parametrize('setup', [False, True])
+def test_resumed_observer_uses_existing_native_baseline_without_historical_entries(tmp_path, setup):
+    from scidiscovery.research_loop import pi_observation
+    home, work, path, session = original(tmp_path)
+    backend = adapter(resume_policy=dict(RESUME))
+    backend.validate_resume_session(session, work, home)
+    backend.bind_attempt(home, work, session)
+    backend.launch(PROFILE, work, None, None, 'same task')
+    meter = backend.meter(home, work, session)
+    observer = meter.observation
+    observer.prompt_hash = hashlib.sha256(b'next prompt').hexdigest()
+    observer.bind(dict(type=pi_observation.BOUND, **{k: backend._observation_proof[k]
+        for k in ('nonce', 'path', 'workspace')}, session_id=session['thread_id']))
+    with path.open('ab') as stream:
+        if setup:
+            stream.write((json.dumps(dict(type='model_change', id='setup', parentId='msg',
+                timestamp=STAMP, provider='fixture', modelId='exact-model'))+'\n').encode())
+        for row in [dict(type='message', id='next-user', parentId='setup' if setup else 'msg', timestamp=STAMP,
+                message=dict(role='user', content='next prompt', timestamp=1)),
+                dict(type='message', id='next-assistant', parentId='next-user', timestamp=STAMP,
+                    message=message(stamp=2))]:
+            stream.write((json.dumps(row)+'\n').encode())
+    meter.poll()
+    event = dict(kind='turn_end', session_id=session['thread_id'], path=str(path), workspace=str(work),
+        leaf='next-assistant', turn_id='next-user', prompt_hash=observer.prompt_hash,
+        baseline_leaf='setup' if setup else 'msg', baseline_count=3 if setup else 2,
+        compaction_id=None, pre_cursor=None,
+        assistant_id='next-assistant', status='completed', context=None, observed_at=1)
+    observer.accept(event)
+    assert meter.original_leaf == 'msg' and meter.original_count == 2
+    assert observer.entries['next-user']['index'] == (4 if setup else 3)
+    assert observer.entries['next-assistant']['index'] == (5 if setup else 4)
+    assert meter.seen == {'next-user', 'next-assistant'} | ({'setup'} if setup else set())
+    observer.accept(dict(event, kind='terminal', assistant_id=None, status=None, observed_at=2))
+    with pytest.raises(ValueError, match='authorship_delivery_incomplete'):observer.controlled_facts()
+
+
+def test_live_poll_cannot_reuse_previous_terminal_coverage_or_full_proof(tmp_path, monkeypatch):
     home, work, path, session = original(tmp_path)
     meter = pi_sessions.SessionUsage(home, work); meter.profile = dict(PROFILE)
     terminal = meter.terminal()
@@ -433,238 +507,159 @@ def test_live_poll_cannot_reuse_previous_terminal_coverage_or_proof(tmp_path, mo
     assert not meter.finished and live['tokens'] == terminal['tokens']
 
 
+def test_resumed_tail_keeps_parent_chain_checks_after_its_historical_boundary(tmp_path):
+    home, work, path, session = original(tmp_path)
+    loaded = pi_sessions.load_resume_original(session, work, home)
+    meter = pi_sessions.SessionUsage(home, work, session, resume_original=loaded)
+    with path.open('ab') as stream:
+        for row in [dict(type='message', id='next', parentId='msg', timestamp=STAMP,
+                message=message(stamp=2)), dict(type='usage', id='orphan', parentId='unrelated',
+                timestamp=STAMP, usage=AUX)]:
+            stream.write((json.dumps(row)+'\n').encode())
+    observed = meter.terminal()
+    assert observed['reason'] == 'pi_session_usage_invalid'
+    assert observed['tokens'] == pi_sessions.usage_tokens(USAGE)
+    assert observed['session_binding']['thread_id'] == session['thread_id']
+
+
 @pytest.mark.parametrize('resumed', [False, True])
-def test_terminal_rehash_rejects_early_rewrite_with_valid_append_and_retains_debit(tmp_path, resumed):
+@pytest.mark.parametrize('append_before_ack', [False, True])
+def test_native_history_rewrite_acknowledges_bound_metadata_as_unknown_without_forged_identity(
+        tmp_path, resumed, append_before_ack):
+    import time
+    from scidiscovery.research_loop import budget_notice, pi_observation
+    home, work, path, session = original(tmp_path)
+    backend = adapter(resume_policy=dict(RESUME))
+    if resumed:
+        backend.validate_resume_session(session, work, home); backend.bind_attempt(home, work, session)
+    else:
+        data = path.read_bytes(); path.unlink()
+        backend.bind_attempt(home, work); path.write_bytes(data)
+    backend.launch(PROFILE, work, None, None, 'same task')
+    meter = backend.meter(home, work, session if resumed else None,
+        context_state=dict(coverage='unknown', windows_started=4))
+    observer = meter.observation; observer.prompt_hash = 'a'*64
+    observer.configure(1, required=True)
+    observer.bind(dict(type=pi_observation.BOUND, **{k: backend._observation_proof[k]
+        for k in ('nonce', 'path', 'workspace')}, session_id=session['thread_id']))
+    published = []; backend.bind_metadata_callback(meter, published.append)
+    with path.open('ab') as stream:
+        stream.write((json.dumps(dict(type='message', id='previous-billed', parentId='msg',
+            timestamp=STAMP, message=message(stamp=2)))+'\n').encode())
+    before = meter.poll()['tokens']
+    assert before == {key: value*(1 if resumed else 2)
+        for key, value in pi_sessions.usage_tokens(USAGE).items()}
+    header = path.read_bytes().split(b'\n', 1)[0]
+    replacement = path.with_suffix('.replacement')
+    replacement.write_bytes(header+b'\n'+(json.dumps(dict(type='usage', id='replacement-leaf',
+        parentId=None, timestamp=STAMP, usage=AUX))+'\n').encode())
+    replacement.replace(path)
+    def append_response():
+        with path.open('ab') as stream:
+            stream.write((json.dumps(dict(type='message', id='after-rewrite', parentId='replacement-leaf',
+                timestamp=STAMP, message=message(stamp=3)))+'\n').encode())
+    if append_before_ack:
+        meter.poll()  # Detect/skip rewritten history before its next boundary.
+        append_response()
+    event = dict(kind='context', session_id=session['thread_id'], path=str(path), workspace=str(work),
+        leaf='replacement-leaf', turn_id='current-user', prompt_hash=observer.prompt_hash,
+        baseline_leaf='rewritten-baseline', baseline_count=1, compaction_id=None, pre_cursor=None,
+        assistant_id=None, status=None, context=None, observed_at=1)
+    with pytest.raises(ValueError, match='source_or_scope_invalid'):
+        observer.accept(dict(event, session_id='different'))
+    for sequence, kind in enumerate(('context', 'terminal'), 1):
+        if sequence == 2:
+            for changed in (dict(session_id='different'), dict(path=str(home/'different')),
+                    dict(workspace=str(home))):
+                with pytest.raises(ValueError, match='source_or_scope_invalid'):
+                    observer.accept(dict(event, **changed))
+            if not append_before_ack:append_response()
+            event = dict(event, leaf='after-rewrite')
+        value = c.read(observer.path)
+        value.update(sequence=sequence, pending=True, pending_started_at=time.monotonic(),
+            event=dict(event, kind=kind, observed_at=sequence))
+        budget_notice._publish_metadata(observer.path, value)
+        observer.poll()
+        assert observer.fault is None and observer.acknowledged == sequence and not observer.pending
+    observer.finish()
+    assert observer.terminal_seen and meter.runtime_history_gap and observer.fault is None
+    assert all(value['context_windows']['coverage'] == 'unknown' for value in published)
+    assert observer.snapshot()['context_windows']['windows_started'] == 4
+    assert observer.responses == {} and observer.turn is None
+    observed = meter.terminal()
+    assert observed['session_binding']['thread_id'] == session['thread_id'] and meter.fault is None
+    assert observed['tokens'] == {key: value+pi_sessions.usage_tokens(USAGE)[key] for key, value in before.items()}
+    assert meter.seen == {'previous-billed', 'after-rewrite'} | (set() if resumed else {'user', 'msg'})
+
+
+@pytest.mark.parametrize('resumed', [False, True])
+def test_optional_full_history_proof_does_not_gate_mutable_resume(tmp_path, resumed):
     rows = [dict(type='message', id='user', parentId=None, timestamp=STAMP,
         message=dict(role='user', content='Original task'+'x'*8192, timestamp=0)),
         dict(type='message', id='msg', parentId='user', timestamp=STAMP,
             message=message('padding outside the tail anchor'+'y'*8192))]
     home, work, path, session = original(tmp_path, rows)
     loaded = pi_sessions.load_resume_original(session, work, home) if resumed else None
-    meter = pi_sessions.SessionUsage(home, work, session if resumed else None,
-        resume_original=loaded)
-    meter.profile = dict(PROFILE)
-    meter.poll()
-    assert meter.session_binding() is None  # Live anchors are not reusable proof.
+    meter = pi_sessions.SessionUsage(home, work, session if resumed else None, resume_original=loaded)
+    meter.profile = dict(PROFILE); meter.poll()
     previous = path.read_bytes()
     changed = previous.replace(b'Original task', b'Changed! task')
     assert len(previous) == len(changed) and previous[-4096:] == changed[-4096:]
     path.write_bytes(changed+(json.dumps(dict(type='usage', id='late', parentId='msg',
         timestamp=STAMP, usage=AUX))+'\n').encode())
-    # The inexpensive live check intentionally cannot see this early rewrite.
-    live = meter.poll()
-    expected = pi_sessions.usage_tokens(AUX) if resumed else TOKENS
-    assert live['tokens'] == expected and meter.fault is None
     observed = meter.terminal()
-    assert observed['coverage'] == 'unknown'
-    assert observed['reason'] == 'session_terminal_original_changed_or_unverified'
-    assert observed['tokens'] == expected and observed['has_observation']
-    assert observed['session_binding'] is None and meter.session_binding() is None
-    assert adapter().terminal_usage(dict(completed=True, post_exit=True), meter) is None
-
-
-@pytest.mark.parametrize('change', ['append', 'replace', 'rewrite'])
-def test_terminal_rehash_checks_snapshot_before_and_after_read(tmp_path, monkeypatch, change):
-    home, work, path, session = original(tmp_path)
-    meter = pi_sessions.SessionUsage(home, work); meter.profile = dict(PROFILE)
-    meter.poll()
-    original_open = meter._open
-    class ChangingReader:
-        def __enter__(self):
-            self.stream = original_open(); return self
-        def __exit__(self, *args):self.stream.close()
-        def fileno(self):return self.stream.fileno()
-        def read(self, count):
-            data = self.stream.read(count)
-            if change == 'replace':
-                replacement = home/'replacement'; replacement.write_bytes(path.read_bytes()); replacement.replace(path)
-            elif change == 'rewrite':
-                path.write_bytes(path.read_bytes().replace(b'Original task', b'Changed! task'))
-            else:
-                with path.open('ab') as stream:stream.write(b'\n')
-            return data
-    monkeypatch.setattr(meter, '_open', ChangingReader)
-    # Exercise the stopped-writer verifier directly; live polls do not rehash.
-    meter._verify_stopped_original()
-    assert meter.fault == 'session_terminal_original_changed_or_unverified'
-    assert meter.session_binding() is None
-    assert meter.snapshot()['tokens'] == pi_sessions.usage_tokens(USAGE)
-
-
-@pytest.mark.parametrize('change', ['rewrite', 'unaccounted_append'])
-def test_resume_effect_boundary_rechecks_early_prefix_not_just_tail_anchor(tmp_path, change):
-    home, work, path, session = original(tmp_path)
-    loaded = pi_sessions.load_resume_original(session, work, home)
-    data = path.read_bytes()
-    if change == 'rewrite':data = data.replace(b'Original task', b'Changed! task')
-    else:
-        data += (json.dumps(dict(type='usage', id='late', parentId='msg',
-            timestamp=STAMP, usage=AUX))+'\n').encode()
-    path.write_bytes(data)
-    with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded)
-    assert adapter().complete_authorship is True
+    assert observed['tokens'] == (pi_sessions.usage_tokens(AUX) if resumed else TOKENS)
+    assert observed['coverage'] == ('terminal' if resumed else 'unknown')
+    binding = observed['session_binding']
+    assert binding['thread_id'] == session['thread_id'] and 'sha256' not in binding
+    adapter().validate_resume_session(binding, work, home)
 
 
 @pytest.mark.parametrize('setup', [('model_change',), ('thinking_level_change',),
     ('model_change', 'thinking_level_change')])
-def test_resume_post_start_setup_preserves_proof_and_meter_baseline_and_scans_entire_tail(tmp_path, setup):
+def test_resume_sdk_setup_stays_in_current_invocation_tail(tmp_path, setup):
     home, work, path, session = original(tmp_path)
-    historical = path.read_bytes()
     loaded = pi_sessions.load_resume_original(session, work, home)
-    seen = set(loaded['seen']); digest = loaded['digest'].hexdigest()
-    parent = 'msg'; rows = []
-    for kind in setup:
-        row = dict(type=kind, id=kind, parentId=parent, timestamp=STAMP)
-        row.update(dict(provider='fixture', modelId='exact-model') if kind == 'model_change'
-            else dict(thinkingLevel='high'))
-        rows.append(row); parent = kind
+    parent = 'msg'
     with path.open('ab') as stream:
-        for row in rows:stream.write((json.dumps(row)+'\n').encode())
-    with pytest.raises(ValueError, match='unaccounted append'):
-        pi_sessions.recheck_prefix(loaded, phase='prelaunch')
+        for kind in setup:
+            row = dict(type=kind, id=kind, parentId=parent, timestamp=STAMP)
+            row.update(dict(provider='fixture', modelId='exact-model') if kind == 'model_change'
+                else dict(thinkingLevel='high'))
+            stream.write((json.dumps(row)+'\n').encode()); parent = kind
     pi_sessions.recheck_prefix(loaded, phase='native_setup')
-    assert loaded['seen'] == seen and loaded['digest'].hexdigest() == digest
-    assert loaded['info'].st_size == loaded['session']['size_bytes'] == len(historical)
-    # Construct after SDK startup too: current EOF must never become baseline.
     meter = pi_sessions.SessionUsage(home, work, session, resume_original=loaded)
-    setup_observed = meter.poll()
-    assert setup_observed['baseline_offset'] == len(historical)
-    assert setup_observed['offset'] == path.stat().st_size > len(historical)
-    assert set(setup) <= meter.seen
-    assert setup_observed['tokens'] == dict(input_tokens=0, cached_input_tokens=0, output_tokens=0)
+    observed = meter.poll()
+    assert observed['baseline_offset'] == session['size_bytes']
+    assert set(setup) <= meter.seen and observed['offset'] == path.stat().st_size
     with path.open('ab') as stream:
         for row in [dict(type='message', id='msg2', parentId=parent, timestamp=STAMP,
-                message=message(stamp=2)), dict(type='usage', id='shutdown', parentId='msg2',
-                timestamp=STAMP, usage=AUX)]:
+                message=message(stamp=2)), dict(type='usage', id='shutdown', parentId='msg2', timestamp=STAMP, usage=AUX)]:
             stream.write((json.dumps(row)+'\n').encode())
     observed = meter.terminal()
     assert observed['coverage'] == 'terminal' and observed['tokens'] == TOKENS
-    assert observed['baseline_offset'] == len(historical)
-    assert observed['session_binding']['size_bytes'] == path.stat().st_size
-    assert path.read_bytes().startswith(historical)
+    assert 'sha256' not in observed['session_binding']
 
 
-@pytest.mark.parametrize('change', ['early_rewrite_append', 'header_append', 'replace', 'truncate',
-    'unknown', 'usage', 'message', 'wrong_model', 'wrong_thinking', 'duplicate_id',
-    'orphan', 'branch', 'extra_field', 'non_string_model', 'invalid_timestamp', 'invalid_type',
-    'partial', 'malformed'])
-def test_resume_post_start_setup_rejects_mutation_work_and_non_native_metadata(tmp_path, change):
-    rows = [dict(type='message', id='user', parentId=None, timestamp=STAMP,
-        message=dict(role='user', content='Original task'+'x'*8192, timestamp=0)),
-        dict(type='message', id='msg', parentId='user', timestamp=STAMP,
-            message=message('padding beyond anchor'+'y'*8192))]
-    home, work, path, session = original(tmp_path, rows)
-    loaded = pi_sessions.load_resume_original(session, work, home)
-    data = path.read_bytes()
-    row = dict(type='model_change', id='setup', parentId='msg', timestamp=STAMP,
-        provider='fixture', modelId='exact-model')
-    if change == 'early_rewrite_append':
-        changed = data.replace(b'Original task', b'Changed! task')
-        assert len(changed) == len(data) and changed[-4096:] == data[-4096:]
-        data = changed
-    elif change == 'header_append':data = data.replace(b'exact-session', b'other-session')
-    elif change == 'unknown':row['type'] = 'custom'
-    elif change == 'usage':row = dict(type='usage', id='setup', parentId='msg', timestamp=STAMP, usage=AUX)
-    elif change == 'message':row = dict(type='message', id='setup', parentId='msg', timestamp=STAMP, message=message(stamp=2))
-    elif change == 'wrong_model':row['modelId'] = 'different'
-    elif change == 'wrong_thinking':
-        row = dict(type='thinking_level_change', id='setup', parentId='msg', timestamp=STAMP, thinkingLevel='low')
-    elif change == 'duplicate_id':row['id'] = 'msg'
-    elif change == 'orphan':row['parentId'] = 'missing'
-    elif change == 'branch':row['parentId'] = 'user'
-    elif change == 'extra_field':row['usage'] = AUX
-    elif change == 'non_string_model':row['modelId'] = None
-    elif change == 'invalid_timestamp':row['timestamp'] = 0
-    elif change == 'invalid_type':row['type'] = []
-    tail = (json.dumps(row)+'\n').encode()
-    if change == 'partial':tail = tail[:-1]
-    elif change == 'malformed':tail = b'{broken}\n'
-    if change == 'replace':
-        replacement = home/'replacement'; replacement.write_bytes(data+tail); replacement.replace(path)
-    else:path.write_bytes(data[:-1] if change == 'truncate' else data+tail)
-    with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded, phase='native_setup')
-    assert loaded['session'] == session and loaded['info'].st_size == session['size_bytes']
-    assert loaded['digest'].hexdigest() == session['sha256']
-
-
-@pytest.mark.parametrize('limit', ['line', 'snapshot', 'entries'])
-def test_resume_post_start_setup_enforces_finite_read_and_entry_limits(tmp_path, monkeypatch, limit):
-    home, work, path, session = original(tmp_path)
-    loaded = pi_sessions.load_resume_original(session, work, home)
-    tail = (json.dumps(dict(type='model_change', id='setup', parentId='msg',
-        timestamp=STAMP, provider='fixture', modelId='exact-model'))+'\n').encode()
-    with path.open('ab') as stream:stream.write(tail)
-    if limit == 'line':
-        # Compact control-header bounds do not limit native setup records.
-        monkeypatch.setattr(pi_sessions, 'LINE_BYTES', len(tail)-1)
-    elif limit == 'snapshot':
-        # A finite acquisition chunk does not limit the full original snapshot.
-        monkeypatch.setattr(pi_sessions, 'READ_BYTES', len(tail)-1)
-        assert path.stat().st_size > pi_sessions.READ_BYTES
-    else:monkeypatch.setattr(pi_sessions, 'MAX_ENTRIES', len(loaded['seen']))
-    if limit == 'entries':
-        with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded, phase='native_setup')
-    else:pi_sessions.recheck_prefix(loaded, phase='native_setup')
-    assert loaded['info'].st_size == session['size_bytes']
-
-
-@pytest.mark.parametrize('change', ['append', 'replace', 'rewrite'])
-def test_resume_post_start_recheck_requires_stable_bounded_snapshot(tmp_path, monkeypatch, change):
-    home, work, path, session = original(tmp_path)
-    loaded = pi_sessions.load_resume_original(session, work, home)
-    with path.open('ab') as stream:
-        stream.write((json.dumps(dict(type='model_change', id='setup', parentId='msg',
-            timestamp=STAMP, provider='fixture', modelId='exact-model'))+'\n').encode())
-    open_original = pi_sessions.open_original
-    class ChangingReader:
-        def __enter__(self):
-            self.stream = open_original(home, path); self.changed = False; return self
-        def __exit__(self, *args):self.stream.close()
-        def fileno(self):return self.stream.fileno()
-        def tell(self):return self.stream.tell()
-        def readline(self, count):return self.stream.readline(count)
-        def read(self, count):
-            assert 0 < count <= pi_sessions.READ_BYTES
-            data = self.stream.read(count)
-            if not self.changed:
-                self.changed = True
-                if change == 'replace':
-                    replacement = home/'replacement'; replacement.write_bytes(path.read_bytes()); replacement.replace(path)
-                elif change == 'rewrite':path.write_bytes(path.read_bytes().replace(b'Original task', b'Changed! task'))
-                else:
-                    with path.open('ab') as stream:stream.write(b'\n')
-            return data
-    monkeypatch.setattr(pi_sessions, 'open_original', lambda *a: ChangingReader())
-    with pytest.raises(ValueError):pi_sessions.recheck_prefix(loaded, phase='native_setup')
-
-
-@pytest.mark.parametrize('mismatch', ['workspace', 'model', 'thread', 'changed_original',
-    'unaccounted_append', 'unaccounted_model', 'unaccounted_thinking'])
-def test_resume_transport_refuses_wrong_original_before_spawning_or_prompting(tmp_path, monkeypatch, mismatch):
+@pytest.mark.parametrize('mismatch', ['workspace', 'model', 'thread', 'path'])
+def test_resume_transport_refuses_wrong_binding_before_spawning_or_prompting(tmp_path, monkeypatch, mismatch):
     home, work, path, session = original(tmp_path)
     monkeypatch.chdir(work)
     if mismatch == 'workspace':session['workspace'] = str(tmp_path/'different')
     elif mismatch == 'model':session['profile'] = dict(PROFILE, model='fixture/different')
-    elif mismatch == 'thread':session['thread_id'] = 'different'
-    elif mismatch.startswith('unaccounted_'):
-        row = dict(type='usage', id='late', parentId='msg', timestamp=STAMP, usage=AUX)
-        if mismatch == 'unaccounted_model':
-            row = dict(type='model_change', id='late', parentId='msg', timestamp=STAMP,
-                provider='fixture', modelId='exact-model')
-        elif mismatch == 'unaccounted_thinking':
-            row = dict(type='thinking_level_change', id='late', parentId='msg', timestamp=STAMP,
-                thinkingLevel='high')
-        with path.open('ab') as stream:stream.write((json.dumps(row)+'\n').encode())
-    else:path.write_bytes(path.read_bytes().replace(b'Original task', b'Changed! task'))
+    elif mismatch == 'path':session['path'] = str(home/'different')
+    else:session['thread_id'] = 'different'
     argv = ['--resource-policy', json.dumps(pi_transport.resource_policy()),
         '--resume-proof', json.dumps(session), '--', 'never-spawn', '--mode', 'rpc',
         *pi.RESOURCE_FLAGS, '--tools', 'read,bash,edit,write,grep,find,ls',
         '--session', str(path), '--session-dir', str(path.parent), '--provider', 'fixture',
         '--model', 'exact-model', '--thinking', 'high']
     events = []
-    def forbidden(*a, **kw):pytest.fail('Invalid original reached another native process/prompt')
+    def forbidden(*a, **kw):pytest.fail('Invalid binding reached another native process/prompt')
     assert pi_transport.run(argv, 'Same original scope', events.append, popen=forbidden) == 1
-    assert events == [dict(type='pi_transport_fault')]
+    expected = dict(type='pi_transport_fault')
+    if mismatch in {'model', 'path'}:expected['code'] = 'resume_model_or_path_changed'
+    assert events == [expected]
 
 
 @pytest.mark.parametrize('mismatch', ['model', 'thinking', 'thread', 'path', 'pending'])
@@ -1222,3 +1217,116 @@ def test_installed_pi_output_repair_resumes_actual_session_append_only_and_bills
     c.validate(work)
     for original_path, body in originals.items():assert original_path.read_bytes() == body
     assert path.read_bytes() == data
+
+
+@pytest.mark.process_e2e
+def test_actual_rpc_repeated_temporary_failure_resumes_twice_then_completes(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import research_config
+    import test_pi_backend_v2 as pi_fixture
+    require_namespace()
+    agent = tmp_path/'fixture-agent'; agent.mkdir()
+    monkeypatch.delenv('PI_FIXTURE_FAULT', raising=False)
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(agent))
+    monkeypatch.setenv('PI_FIXTURE_FINAL', FINAL)
+    monkeypatch.setenv('PI_FIXTURE_ORIGINAL_HOME', os.environ['HOME'])
+    source = FAKE_RPC.replace('assert not path.exists()', '''attempt_file=pathlib.Path(os.environ['PI_CODING_AGENT_DIR'])/'attempt-count'
+attempt=int(attempt_file.read_text()) if attempt_file.exists() else 0
+attempt_file.write_text(str(attempt+1))
+resumed=path.exists()
+historical_parent=json.loads(path.read_bytes().splitlines()[-1])['id'] if resumed else None''')
+    source = source.replace("def append(v):\n with path.open('ab')", """def append(v):
+ if v['type']=='session':
+  if resumed:return
+ else:
+  v['id']+='-'+str(attempt)
+  v['parentId']=v['parentId']+'-'+str(attempt) if v['parentId'] is not None else historical_parent
+ with path.open('ab')""")
+    source = source.replace("stopReason='stop',usage=usage)", "stopReason='error' if attempt<2 else 'stop',usage=usage)")
+    source = source.replace("  append(dict(type='message',id='msg'", "  if attempt<2:msg['errorMessage']='fetch failed'\n  append(dict(type='message',id='msg'")
+    launcher = tmp_path/'fake-pi'; launcher.write_text(source); launcher.chmod(0o700)
+    automatic = native_recovery.policy(dict(max_attempts=3, initial_backoff_seconds=0, max_backoff_seconds=0))
+    values = options(tmp_path, launcher=[str(launcher)], max_steps=3,
+        resume_policy=dict(RESUME, automatic_recovery=automatic))
+    values['public_root'].mkdir(); values['objective'].write_text('Synthetic repeated native transport failures')
+    research_config.prepare(**values)
+    root = values['root']; c.build_job(root, 1, 'H', [])
+    c.write(root/'host-started.json', budget.clock_stamp())
+    budget.transition(root, 'advance', 'synthetic-repeated-temporary-failure')
+    # Use the production controller consumer in the separate owner process;
+    # native.execute_native deliberately returns a typed scheduling request.
+    monkeypatch.setattr(pi_fixture, 'COLLECTOR', '''import json,sys
+from pathlib import Path
+from scidiscovery.research_loop import controller
+root=Path(sys.argv[1])
+with controller._writer(root):
+ result=controller._native_call(root,1,launch=True)
+print(json.dumps(result))
+''')
+    result = collect_separately(root)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')
+    first = execution.origin(root, 1)
+    records = [first, first/'continuations/001', first/'continuations/002']
+    outcomes = [c.read(record/'native-outcome.json') for record in records]
+    assert (agent/'attempt-count').read_text() == '3'
+    assert budget.used_steps(root) == 3
+    assert [outcome['native_failure']['category'] for outcome in outcomes[:2]] == ['temporary', 'temporary']
+    assert outcomes[2]['terminal_observed'] and outcomes[2]['stop_reason'] is None
+    assert len({outcome['thread_id'] for outcome in outcomes}) == 1
+    assert all(c.read(record/'usage.json') == TOKENS for record in records)
+    for index, record in enumerate(records[1:]):
+        request = c.read(record/'native-intent.json')['automatic_recovery']
+        assert request['action'] == 'retry' and not request['startup_retry']
+        assert request['counters']['retries'] == index
+    assert (records[-1]/'science-output.json').read_bytes() == FINAL.encode()
+    assert (first/'result-identity.json').is_file()
+
+
+@pytest.mark.process_e2e
+@pytest.mark.parametrize('change', ['timestamp', 'thread', 'workspace'])
+def test_rpc_transport_accepts_mutable_header_replacement_but_keeps_stable_identity(tmp_path, change):
+    home, work, path, session = original(tmp_path)
+    peer = tmp_path/'rpc-peer.py'
+    peer.write_text('''#!/usr/bin/env python3
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[sys.argv.index('--session')+1]); commands=[]
+def emit(value):print(json.dumps(value),flush=True)
+state=dict(model=dict(provider='fixture',id='exact-model',api='fixture'),thinkingLevel='high',
+ isStreaming=False,isCompacting=False,pendingMessageCount=0,sessionFile=str(path),sessionId='exact-session')
+for line in sys.stdin:
+ command=json.loads(line); kind=command['type']; commands.append(kind); data=None
+ if kind=='get_state':data=state
+ elif kind=='set_model':data=state['model']
+ elif kind=='get_commands':data=dict(commands=[])
+ elif kind=='get_session_stats':data=dict()
+ elif kind=='prompt':data=dict(disposition='started')
+ emit(dict(type='response',id=command['id'],command=kind,success=True,**(dict(data=data) if data is not None else {})))
+ if kind=='prompt':
+  emit(dict(type='agent_settled',aborted=False))
+header,body=path.read_bytes().split(b'\\n',1); header=json.loads(header)
+change=sys.argv[1]
+if change=='timestamp':header['timestamp']='2026-02-01T00:00:00Z'
+elif change=='thread':header['id']='different'
+else:header['cwd']=str(path.parent)
+replacement=path.with_suffix('.replacement'); replacement.write_bytes((json.dumps(header)+'\\n').encode()+body); replacement.replace(path)
+pathlib.Path('commands.json').write_text(json.dumps(commands))
+'''.replace('change=sys.argv[1]', 'change='+repr(change)))
+    peer.chmod(0o700)
+    argv = ['--resource-policy', json.dumps(pi_transport.resource_policy()), '--resume-proof', json.dumps(session),
+        '--', str(peer), '--mode', 'rpc', *pi.RESOURCE_FLAGS,
+        '--tools', 'read,bash,edit,write,grep,find,ls', '--session', str(path), '--session-dir', str(path.parent),
+        '--provider', 'fixture', '--model', 'exact-model', '--thinking', 'high']
+    driver = '''import json,sys
+from scidiscovery.research_loop import pi_transport
+events=[]
+code=pi_transport.run(json.loads(sys.argv[1]),'same task',events.append)
+print(json.dumps(dict(code=code,events=events)))
+'''
+    env = dict(os.environ)
+    env['PYTHONPATH'] = str(Path(c.__file__).resolve().parents[2])+os.pathsep+env.get('PYTHONPATH', '')
+    result = subprocess.run([sys.executable, '-c', driver, json.dumps(argv)], cwd=work, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+    assert result.returncode == 0, result.stderr.decode(errors='replace')
+    observed = json.loads(result.stdout)
+    assert observed['code'] == (0 if change == 'timestamp' else 1)
+    assert any(row['type'] == 'pi_transport_fault' for row in observed['events']) == (change != 'timestamp')
+    assert json.loads((work/'commands.json').read_text()).count('prompt') == 1

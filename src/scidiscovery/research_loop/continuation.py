@@ -533,7 +533,10 @@ def _automatic_session_from_facts(root, step, outcome, *, original, policy):
     if backend.recovery_capability('resume').get('status')!='supported':
         raise ResumeUnavailable('worker_resume_unsupported_backend')
     retained = original.get('session') or {}
-    if retained and outcome.get('thread_id') == retained.get('thread_id'):
+    # The stopped writer owns the current session facts; a resumed invocation
+    # can advance them beyond the session retained in its launch intent.
+    if (identity.get('session') is None and retained
+            and outcome.get('thread_id') == retained.get('thread_id')):
         backend.validate_resume_session(retained,c.workspace(root,step),retained['home'])
         return retained
     facts=dict(session=identity.get('session'),thread=outcome.get('thread_id'),

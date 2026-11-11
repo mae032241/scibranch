@@ -516,7 +516,6 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
         observation=observation, resource_mode=mode)
     process = popen(child, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     failed = emitted_header = closing = stdout_eof = False
-    accepted_header = accepted_identity = None
     buffered = []
     framing = LFRecords()
     pending = framing.pending
@@ -551,19 +550,16 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
             if len(outgoing) > REQUEST_BYTES + LINE_BYTES: raise TransportFault('rpc_write_limit')
 
     def header(*, final=False):
-        nonlocal emitted_header, accepted_header, accepted_identity
+        nonlocal emitted_header
         if binding.session_id is None or emitted_header and not final: return
-        observed = _header_line(path, with_identity=True)
-        line, identity = observed if observed is not None else (None, None)
-        if emitted_header:
-            if line != accepted_header or identity != accepted_identity: raise TransportFault('session_header_changed')
-            return
+        line = _header_line(path)
         if line is None or not line.endswith(b'\n'):
             if final: raise TransportFault('session_header_incomplete')
             return
         value = validate_header(line, binding.session_id, Path.cwd())
+        if emitted_header:return
         emit(value)
-        emitted_header = True; accepted_header = line; accepted_identity = identity
+        emitted_header = True
         for event in buffered: emit(event)
         buffered.clear()
 
@@ -615,9 +611,8 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
                                     if command is not None and command['type'] == 'prompt':
                                         if original is not None:
                                             from .pi_sessions import recheck_prefix
-                                            # Popen and the exact idle/model/thinking handshake
-                                            # authorize only native append-only setup here;
-                                            # prelaunch admission above still requires exact EOF.
+                                            # The SDK owns mutable context. Recheck stable
+                                            # identity after its exact idle/profile handshake.
                                             recheck_prefix(original, phase='native_setup')
                                         if binding.observer_bound:
                                             publish(binding.observer_start)

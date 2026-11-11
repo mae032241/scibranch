@@ -505,7 +505,7 @@ def test_missing_usage_eligibility_does_not_clear_unknown_or_weaken_cleanup():
         assert recovery.recoverable_source(dict(value, native_failure=failure(code)))
 
 
-def arbiter_instance(tmp_path, monkeypatch, *, role='W', output_only=True):
+def arbiter_instance(tmp_path, monkeypatch, *, role='W', output_only=True, real_session=False):
     root = tmp_path / 'instance';root.mkdir()
     record = root / 'native-evidence' / '001';record.mkdir(parents=True)
     (root / 'jobs').mkdir()
@@ -530,11 +530,154 @@ def arbiter_instance(tmp_path, monkeypatch, *, role='W', output_only=True):
     monkeypatch.setattr(correction, 'gate', lambda *_:None)
     backend = backends.Codex(dict(native_launcher_argv=['codex']))
     monkeypatch.setattr(backends, 'selected', lambda *_:backend)
-    monkeypatch.setattr(continuation, 'automatic_source', lambda *_:c.read(record / 'native-outcome.json'))
-    monkeypatch.setattr(continuation, '_automatic_session', lambda *_:dict(thread_id='original'))
+    monkeypatch.setattr(continuation, 'automatic_source', lambda root, step, record:c.read(record / 'native-outcome.json'))
+    if not real_session:
+        monkeypatch.setattr(continuation, '_automatic_session', lambda *_:dict(thread_id='original'))
     monkeypatch.setattr(execution_recovery, 'pending', lambda *_:False)
     monkeypatch.setattr(history, 'managed_calls', lambda *_:[])
     return root, record
+
+
+def test_repeated_automatic_failure_uses_each_stopped_writers_session(tmp_path, monkeypatch):
+    root, first = arbiter_instance(tmp_path, monkeypatch, real_session=True)
+    paths=[first];selected=[];waited=0.
+    session=dict(thread_id='original',home=str(tmp_path/'home'),path=str(tmp_path/'session'),profile='original')
+    current=dict(session,cursor='turn-1')
+    def validate(value, workspace, home):
+        assert value==current
+        assert workspace==c.workspace(root,1) and home==session['home']
+        selected.append(value)
+    backend=SimpleNamespace(recovery_capability=lambda _:dict(status='supported'),
+        validate_resume_session=validate,
+        validate_session_event=lambda event,thread:None if event==dict(thread=thread) else pytest.fail('Changed thread event'))
+    monkeypatch.setattr(backends,'selected',lambda *_:backend)
+    monkeypatch.setattr(execution,'records',lambda *_:paths)
+    for attempt,delay in enumerate((5,10,20)):
+        record=paths[-1]
+        value=c.read(first/'native-outcome.json')
+        value.update(native_identity=dict(home=session['home'],path=session['path'],session=current),
+            native_thread_event=dict(thread='original'),execution_processes={name:c.record_ref(record/name)
+                for name in ('runner-process.json','native-process.json')})
+        c.write(record/'native-outcome.json',value)
+        originals={name:(record/name).read_bytes() for name in ('native-intent.json','native-outcome.json')}
+        decided=continuation.automatic_decision(root,1)
+        assert decided['action']=='retry' and decided['delay_seconds']==delay
+        assert decided['source_attempt']==attempt and decided['counters']==dict(continues=0,retries=attempt,wait_seconds=waited)
+        assert selected[-1]==current
+        assert all((record/name).read_bytes()==raw for name,raw in originals.items())
+        if attempt==2:break
+        following=first/'continuations'/f'{attempt+1:03d}';following.mkdir(parents=True)
+        c.write(following/'native-intent.json',dict(session=current,continuation_kind='automatic_recovery',
+            automatic_recovery=dict(action='retry',wait_seconds=delay)))
+        for name in ('runner-process.json','native-process.json'):
+            (following/name).write_bytes((first/name).read_bytes())
+        paths.append(following);waited+=delay
+        current=dict(session,cursor=f'turn-{attempt+2}')
+    assert [value['cursor'] for value in selected]==['turn-1','turn-2','turn-3']
+
+
+@pytest.mark.parametrize('changed', ['empty','non_object','thread_id','home','path','profile'])
+def test_present_invalid_outcome_session_cannot_fall_back_to_launch_intent(tmp_path,monkeypatch,changed):
+    retained=dict(thread_id='original',home='original',path='original',profile='original')
+    fresh={} if changed=='empty' else 'invalid' if changed=='non_object' else dict(retained,**{changed:'changed'})
+    validated=[]
+    def validate(value,workspace,home):
+        validated.append(value)
+        if value!=retained:raise ValueError('Backend session binding changed')
+    backend=SimpleNamespace(recovery_capability=lambda _:dict(status='supported'),
+        validate_resume_session=validate,validate_session_event=lambda *_:None)
+    monkeypatch.setattr(backends,'selected',lambda *_:backend)
+    value=dict(thread_id='original',native_identity=dict(session=fresh,home='original',path='original'),
+        native_thread_event=dict(thread='original'))
+    with pytest.raises((continuation.ResumeUnavailable,ValueError)):
+        continuation._automatic_session_from_facts(tmp_path,1,value,original=dict(session=retained),policy={})
+    assert retained not in validated
+
+
+@pytest.mark.parametrize('identity', [{},dict(session=None)])
+def test_legacy_outcome_without_session_validates_retained_launch_session(tmp_path,monkeypatch,identity):
+    retained=dict(thread_id='original',home='original',path='original',profile='original')
+    validated=[]
+    backend=SimpleNamespace(recovery_capability=lambda _:dict(status='supported'),
+        validate_resume_session=lambda value,workspace,home:validated.append((value,workspace,home)))
+    monkeypatch.setattr(backends,'selected',lambda *_:backend)
+    value=dict(thread_id='original',native_identity=identity)
+    assert continuation._automatic_session_from_facts(tmp_path,1,value,original=dict(session=retained),policy={})==retained
+    assert validated==[(retained,c.workspace(tmp_path,1),'original')]
+
+
+@pytest.mark.parametrize('maintenance', ['append','rewrite','truncate','replace'])
+def test_native_session_binding_allows_mutable_session_maintenance(tmp_path,monkeypatch,maintenance):
+    from pathlib import Path
+    from scidiscovery.research_loop.native_usage import stream_binding
+    home=tmp_path/'home';workspace=tmp_path/'workspace';path=home/'sessions'/'original.jsonl'
+    path.parent.mkdir(parents=True);path.write_bytes(b'original private conversation\n')
+    observed=stream_binding(path)
+    session=dict(source='native_metadata_hooks',thread_id='original',workspace=str(workspace),
+        home=str(home),path=str(path),identity=observed['identity'],offset=observed['size_bytes'])
+    original=copy.deepcopy(session)
+    if maintenance=='append':
+        with path.open('ab') as stream:stream.write(b'another turn\n')
+    elif maintenance=='rewrite':path.write_bytes(b'rewritten private conversation\n')
+    elif maintenance=='truncate':path.write_bytes(b'')
+    else:
+        replacement=home/'sessions'/'replacement.jsonl';replacement.write_bytes(b'compacted\n')
+        replacement.replace(path)
+    backend=backends.Codex(dict(native_launcher_argv=['codex']))
+    with monkeypatch.context() as patch:
+        patch.setattr(Path,'open',lambda *_args,**_kwargs:pytest.fail('Resume must not read the conversation'))
+        assert backend.validate_resume_session(session,workspace,home)==session
+    assert session==original
+
+
+@pytest.mark.parametrize('maintenance', ['rewrite','truncate','replace'])
+def test_resumed_session_usage_poll_keeps_accounting_across_mutable_maintenance(tmp_path,monkeypatch,maintenance):
+    from scidiscovery.research_loop import budget_notice
+    from scidiscovery.research_loop.native_usage import SessionUsage,stream_binding
+    home=tmp_path/'home';workspace=tmp_path/'workspace';path=home/'sessions'/'original.jsonl'
+    path.parent.mkdir(parents=True);path.write_bytes(b'original private conversation\n')
+    observed=stream_binding(path)
+    session=dict(source='native_metadata_hooks',thread_id='original',workspace=str(workspace),
+        home=str(home),path=str(path),identity=observed['identity'],offset=observed['size_bytes'])
+    meter=SessionUsage(home,workspace,session=session)
+    meter.configure(tmp_path/'metadata.json',1,available=True)
+    metadata=dict(attempt=1,cwd=str(workspace),session_id='original',transcript_path=str(path),
+        pending=False,fault=None,usage_unknown=False)
+    monkeypatch.setattr(budget_notice,'read_metadata',lambda _:metadata)
+    for observation in (1,2):
+        if maintenance=='rewrite':path.write_bytes(b'compacted\n')
+        elif maintenance=='truncate':path.write_bytes(b'')
+        else:
+            replacement=home/'sessions'/'replacement.jsonl';replacement.write_bytes(b'compacted\n')
+            replacement.replace(path)
+        metadata.update(acknowledged=observation,compactions=observation,
+            calls=dict(completed=observation,failed=0,cancelled=0),reported_calls=observation,
+            tokens=dict(input_tokens=100*observation,cached_input_tokens=20*observation,output_tokens=10*observation))
+        meter.poll()
+        assert meter.binding_verified and meter.delivery_fault is None and meter.fault is None
+        assert meter.known==metadata['tokens'] and meter.high==metadata['tokens']
+        assert meter.compactions==observation and meter.calls==metadata['calls'] and meter.reported_calls==observation
+        current=stream_binding(path)
+        assert meter.identity==tuple(current['identity']) and meter.offset==current['size_bytes']
+    assert session['identity']==observed['identity'] and session['offset']==observed['size_bytes']
+
+
+@pytest.mark.parametrize('changed', ['thread_id','workspace','home','outside_path','symlink','directory'])
+def test_native_session_binding_preserves_stable_identity_and_safe_path(tmp_path,changed):
+    from scidiscovery.research_loop.native_usage import stream_binding,validate_session_binding
+    home=tmp_path/'home';workspace=tmp_path/'workspace';path=home/'sessions'/'original.jsonl'
+    path.parent.mkdir(parents=True);path.write_bytes(b'private conversation\n')
+    observed=stream_binding(path)
+    session=dict(source='native_metadata_hooks',thread_id='original',workspace=str(workspace),
+        home=str(home),path=str(path),identity=observed['identity'],offset=observed['size_bytes'])
+    if changed in {'thread_id','workspace','home'}:session[changed]='changed'
+    elif changed=='outside_path':
+        outside=tmp_path/'outside.jsonl';outside.write_bytes(b'private conversation\n');session['path']=str(outside)
+    elif changed=='symlink':
+        link=home/'sessions'/'link.jsonl';link.symlink_to(path);session['path']=str(link)
+    else:session['path']=str(path.parent)
+    with pytest.raises(ValueError):
+        validate_session_binding(session,'original',workspace,home)
 
 
 def test_independent_automatic_grant_does_not_reinterpret_output_only(tmp_path, monkeypatch):
