@@ -17,8 +17,18 @@ def save_controls(root, changes):
     state = updates.status(root)
     draft = form.imported(state['configuration'], base=root)
     fields = Controls(form.render(draft, edit=True)).fields
+    advanced = form.tomllib.loads(fields['advanced_toml'])
     for path, value in changes.items():
-        fields['cfg.' + path] = str(value)
+        if 'cfg.' + path in fields:
+            fields['cfg.' + path] = str(value)
+        else:
+            # Settings outside the everyday form are edited as TOML.
+            target = advanced
+            *parents, leaf = path.split('.')
+            for key in parents:
+                target = target.setdefault(key, {})
+            target[leaf] = value
+    fields['advanced_toml'] = form.advanced_toml(advanced)[0]
     parsed = form.parse_edit(fields, base=root, configuration=state['configuration'])
     saved = updates.submit(root, parsed['document'], expected_revision=state['revision'])
     assert saved['status'] == 'configuration_saved' and saved['pending']

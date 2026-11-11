@@ -435,8 +435,8 @@ scid-research guidance-revoke --root /absolute/instance --guidance-id ID --expec
 Codex launcher 及 protocol 后端不支持此自动路径，直接 controller API 不隐式添加默认策略。
 
 TOML 对应 `[policies.resume.automatic_recovery]`，CLI 通过原
-`--worker-resume-policy /absolute/resume.json` 在完整恢复对象内声明。网页在“更多研究配置
-→ 独立复核与原调用恢复 → 重试设置”提供最大重试次数及高级字段，运行中保存仅影响未来节点，
+`--worker-resume-policy /absolute/resume.json` 在完整恢复对象内声明。网页在“高级设置（TOML）”
+中编辑同一表，运行中保存仅影响未来节点，
 不改写当前已接受任务或原失败回执。默认 `enabled=true`、总次数 `max_attempts=8`、
 `max_continues=8`、`max_retries=8`、`initial_backoff_seconds=5`、
 `max_backoff_seconds=300`、`jitter_fraction=0`、`max_wait_seconds=1800`。
@@ -673,7 +673,8 @@ scid-research serve-ui --root /absolute/path/instance \
 ```
 
 尚未创建研究实例时，用 `--workspace` 指定已有目录即可打开独立研究工作台。
-“新建研究实例”直接填写任务正文、实例目录、材料目录、模型和有限总预算，其他参数在分组表单中修改。
+“新建研究实例”直接填写任务正文、实例目录、材料目录，从下拉中选择后端、模型和推理力度，并填写有限总预算；
+权限、自动方向复核、角色模型和执行插件在折叠区中可选，其余参数在“高级设置（TOML）”中按研究 TOML 格式编辑。
 第二步的“研究技能”默认折叠，展开后展示已安装 Skill 的名称与说明，可逐项勾选给 H/W/A/E；默认均不启用。
 导入的集合和角色绑定会保留，已有实例只能在已冻结的技能集合中调整角色选择。
 也可明确选择 TOML 导入；首页和新建页不会读取或选择工作区的 `research.toml`。配置文件不是必填项。

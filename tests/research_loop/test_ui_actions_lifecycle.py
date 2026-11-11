@@ -130,9 +130,8 @@ def test_current_project_and_sets_only_declaration_round_trip_without_legacy_roo
     fields.pop('mode')
     parsed = configuration_form.parse(fields, base=tmp_path)
     assert parsed['document'] == document
-    assert b'cfg.project.base_root' in markup and b'cfg.agent.roles.W.skill_set' in markup
-    assert b'@skills.sets' in markup and b'skill_roots' not in markup
-    assert '插件提供的可选技能不会自动启用'.encode() in markup
+    assert b'base_root = &quot;/absolute/project&quot;' in markup and b'cfg.agent.roles.W.skill_set' in markup
+    assert b'[skills.sets.tcad]' in markup and b'skill_roots' not in markup
     exported = configuration_form.export_toml(parsed)
     assert json.loads(json.dumps(parsed['document'])) == document
     import tomllib

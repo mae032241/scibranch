@@ -88,9 +88,10 @@ def controls(page, action='configure', *, prefix=''):
             if tag == 'input' and attrs.get('name') and attrs.get('type') not in {'submit', 'button'}:
                 if attrs.get('type') not in {'checkbox', 'radio'} or 'checked' in attrs:
                     self.values[attrs['name']] = attrs.get('value', 'on' if attrs.get('type') == 'checkbox' else '')
-            if tag in {'textarea', 'select'}:
+            if tag in {'textarea', 'select'} and attrs.get('name'):
+                # Unnamed presentation-only selects are never submitted.
                 self.current = (tag, attrs['name']); self.parts = []; self.options = []
-            if tag == 'option':
+            if tag == 'option' and self.current:
                 self.option = (attrs.get('value', ''), 'selected' in attrs)
 
         def handle_data(self, value):
@@ -98,7 +99,7 @@ def controls(page, action='configure', *, prefix=''):
                 self.parts.append(value)
 
         def handle_endtag(self, tag):
-            if self.active and tag == 'option':
+            if self.active and tag == 'option' and self.current:
                 self.options.append(self.option)
             if self.active and self.current and tag == self.current[0]:
                 self.values[self.current[1]] = (next((value for value, selected in self.options if selected),

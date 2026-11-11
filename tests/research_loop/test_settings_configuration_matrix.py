@@ -38,9 +38,19 @@ def save_form(root, changes=None, *, document=None):
     declaration = copy.deepcopy(state['configuration'] if document is None else document)
     draft = form.imported(declaration, base=root)
     fields = Controls(form.render(draft, edit=True)).fields
+    advanced = form.tomllib.loads(fields['advanced_toml'])
     for path, value in (changes or {}).items():
-        fields['present.' + path] = 'yes'
-        fields['cfg.' + path] = str(value).lower() if type(value) is bool else str(value)
+        if 'cfg.' + path in fields:
+            fields['present.' + path] = 'yes'
+            fields['cfg.' + path] = str(value).lower() if type(value) is bool else str(value)
+        else:
+            # Settings outside the everyday form are edited as TOML.
+            target = advanced
+            *parents, leaf = path.split('.')
+            for key in parents:
+                target = target.setdefault(key, {})
+            target[leaf] = value
+    fields['advanced_toml'] = form.advanced_toml(advanced)[0]
     parsed = form.parse_edit(fields, base=root, configuration=state['configuration'])
     result = updates.submit(root, parsed['document'], expected_revision=state['revision'],
         authorization_note='Bounded settings regression adjustment')

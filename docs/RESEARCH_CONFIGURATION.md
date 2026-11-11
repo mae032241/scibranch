@@ -28,13 +28,16 @@ role `worker`/`skill_set` references. Declaring an optional set does not select 
 an explicit role or Worker selection enables use. Existing-instance edits retain
 the original project and set inventory; operational revisions cannot replace them.
 
-独立工作台从空白结构表单开始，可直接输入任务原文、公开材料目录、新实例目录和有限预算。
-角色、权限、执行、交付与合同策略按用途分组；角色模型与阶段目标合并为紧凑的角色表，
-相关数值并排排列并直接标明单位，详细说明按需展开。角色预算份额及恢复选项使用专用
-控件。插件结构保留可展开的类型编辑器，导入和编辑不会
-丢失未知值。“更多研究配置”内各分类可独立折叠，展开后使用紧凑分组表单，包括角色份额与恢复参数；
-插件扩展按键名、类型和值紧凑排列。无需先写 TOML/JSON，也不自动读取工作区已有任务或配置。检查完整有效
-预览后明确创建，再单独开始研究；修改参数后须重新预览。
+独立工作台从空白表单开始，只显示日常需要的字段：任务原文、公开材料目录、新实例目录、
+后端 → 模型 → 推理力度 / 服务档位（按已安装后端的模型目录给出下拉选项，也可选“自定义”
+填写精确 ID；Codex 读取 `models_cache.json`，Pi 读取 `pi --list-models`，读不到时退回文本框）、
+三项有限预算，以及可选的角色模型、技能勾选、权限、自动方向复核（`policies.supervision.mode`）
+和实验执行插件。模型目录只用于编辑时给出选项，准备、冻结与执行仍只校验写入的精确值。
+其余设置统一在“高级设置（TOML）”文本框中编辑，格式与研究 TOML 文件相同；已有实例预填
+当前生效的这部分配置。表单字段与 TOML 写同一个键时提示冲突；表单上没有的键原样保留。
+TOML 无法表示的空值（null）随表单原样保留，写同名键即可覆盖。无需先写 TOML 文件，
+也不自动读取工作区已有任务或配置。检查完整有效预览后明确创建，再单独开始研究；
+修改参数后须重新预览。
 表单同样支持 `[project]`、`skills.sets`、命名 Worker 与角色 `worker`/`skill_set` 引用的
 导入及导出。声明可选集合本身不启用，须由角色或 Worker 显式选择。已有实例编辑保留
 原工程和集合清单，不能通过运行配置修订替换。
@@ -798,8 +801,8 @@ Output repair and recovery of unfinished work remain separate permissions.
 支持自动恢复的 Backend（包括标准单可执行程序 Codex 和 Pi）新准备入口通过 TOML、CLI、网页共用的默认引擎提供
 `resume_policy.automatic_recovery`。TOML 对应 `[policies.resume.automatic_recovery]`；
 CLI 的既有 `--worker-resume-policy /absolute/resume.json` 在完整恢复对象内接受该字段。
-网页入口为“更多研究配置 → 独立复核与原调用恢复 → 重试设置”，可见的最大重试次数绑定
-自动恢复总次数，高级字段保留分动作上限。运行中保存仅影响未来节点，不改写当前任务与原回执；
+网页在“高级设置（TOML）”中编辑同一 `[policies.resume.automatic_recovery]` 表。
+运行中保存仅影响未来节点，不改写当前任务与原回执；
 输出补填与未完成任务接续仍是不同许可。
 
 | Field / 字段 | Default / 默认 | Meaning / 含义 |

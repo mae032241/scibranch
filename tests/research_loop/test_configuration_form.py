@@ -26,11 +26,13 @@ class Controls(HTMLParser):
             self.textarea = attrs.get('name')
             self.fields[self.textarea] = ''
         if tag == 'select':
+            # Browsers do not submit unnamed presentation-only selects.
             self.select = attrs.get('name')
-            self.fields[self.select] = ''
+            if self.select:
+                self.fields[self.select] = ''
         if tag == 'option':
             self.option = attrs.get('value', '')
-            if 'selected' in attrs:
+            if 'selected' in attrs and self.select:
                 self.fields[self.select] = self.option
 
     def handle_endtag(self, tag):
@@ -40,6 +42,21 @@ class Controls(HTMLParser):
     def handle_data(self, data):
         if self.textarea:
             self.fields[self.textarea] += data
+
+
+def set_setting(fields, path, value):
+    """Edit a setting the way a user would: form control if shown, else TOML."""
+    if 'cfg.' + path in fields:
+        fields['cfg.' + path] = str(value).lower() if type(value) is bool else str(value)
+        return fields
+    advanced = form.tomllib.loads(fields.get('advanced_toml', ''))
+    target = advanced
+    *parents, leaf = path.split('.')
+    for key in parents:
+        target = target.setdefault(key, {})
+    target[leaf] = value
+    fields['advanced_toml'] = form.advanced_toml(advanced)[0]
+    return fields
 
 
 def submitted(draft):
@@ -140,12 +157,11 @@ def test_extensions_are_editable_and_optional_groups_can_be_omitted(tmp_path):
     draft = complete(tmp_path)
     draft['document']['executor'] = dict(config=dict(configuration=dict(flag=True,deep=[dict(value=5)])))
     fields = submitted(draft)
-    flag = next(name[:-4] for name,value in fields.items() if name.endswith('.key') and value=='flag')
-    fields[flag+'.value'] = 'false'
+    assert 'flag = true' in fields['advanced_toml']
+    fields['advanced_toml'] = fields['advanced_toml'].replace('flag = true', 'flag = false')
     parsed = form.parse(fields,base=tmp_path)
-    assert parsed['document']['executor']['config']['configuration']['flag'] is False
-    del fields['enabled.executor.config.configuration']
-    assert 'executor' not in form.parse(fields,base=tmp_path)['document']
+    assert parsed['document']['executor']['config']['configuration'] == dict(flag=False,deep=[dict(value=5)])
+    assert 'executor' not in form.parse(dict(fields, advanced_toml=''),base=tmp_path)['document']
     with pytest.raises(ValueError,match='有效的整数'):
         form.parse(dict(fields, **{'cfg.budget.max_tokens':'not-integer'}),base=tmp_path)
     with pytest.raises(ValueError,match='不支持的表单字段'):
@@ -215,16 +231,15 @@ def test_invalid_edit_retains_all_controls_for_correction(tmp_path):
     fields['task_text'] = 'New exact task'
     fields['cfg.agent.model'] = 'new-model'
     fields['cfg.budget.max_tokens'] = 'oops'
-    key = next(name[:-4] for name,value in fields.items() if name.endswith('.key') and value == 'number')
-    fields[key+'.value'] = 'bad nested number'
-    with pytest.raises(form.FormError) as caught:
+    broken = fields['advanced_toml'].replace('number = 3', 'number = = 3')
+    fields['advanced_toml'] = broken
+    with pytest.raises(form.FormError, match='高级设置（TOML）格式错误') as caught:
         form.parse(fields,base=tmp_path)
     retained = submitted(caught.value.draft)
     assert retained['cfg.budget.max_tokens'] == 'oops'
     assert retained['cfg.agent.model'] == 'new-model'
     assert retained['task_text'] == 'New exact task'
-    assert retained[key+'.kind'] == 'integer'
-    assert retained[key+'.value'] == 'bad nested number'
+    assert retained['advanced_toml'] == broken
     with pytest.raises(ValueError,match='类型错误'):
         form.create(caught.value.draft)
     assert not (tmp_path/'instance').exists()
@@ -234,44 +249,27 @@ def test_configuration_edit_preserves_and_edits_explicit_null_plugin_limits(tmp_
     draft = complete(tmp_path)
     limits = dict.fromkeys(('max_file_bytes', 'max_log_bytes', 'max_result_bytes', 'max_total_bytes'))
     draft['document']['executor'] = dict(config=dict(configuration=limits))
-    fields = Controls(form.render(draft, edit=True)).fields
+    html = form.render(draft, edit=True)
+    assert '包含空值（null）' in html and 'executor.config.configuration.max_file_bytes' in html
+    fields = Controls(html).fields
     parsed = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
     assert parsed['document'] == draft['document']
-    prefix = next(name[:-4] for name, value in fields.items()
-        if name.endswith('.key') and value == 'max_file_bytes')
-    assert fields[prefix+'.kind'] == 'null' and fields[prefix+'.value'] == ''
-
-    fields[prefix+'.kind'] = 'integer'
-    fields[prefix+'.value'] = '1024'
+    # Writing the same key in TOML replaces the retained null.
+    fields['advanced_toml'] = fields['advanced_toml'].replace('[executor.config.configuration]', '[executor.config.configuration]\nmax_file_bytes = 1024')
     parsed = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
     assert parsed['document']['executor']['config']['configuration'] == dict(limits, max_file_bytes=1024)
-    fields = Controls(form.render(parsed, edit=True)).fields
-    prefix = next(name[:-4] for name, value in fields.items()
-        if name.endswith('.key') and value == 'max_file_bytes')
-    fields[prefix+'.kind'] = 'null'
-    fields[prefix+'.value'] = ''
-    restored = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
-    assert restored['document'] == draft['document']
+    fields = Controls(form.render(form.imported(parsed['document'], base=tmp_path), edit=True)).fields
+    assert 'max_file_bytes = 1024' in fields['advanced_toml']
+    assert form.parse_edit(fields, base=tmp_path, configuration=draft['document'])['document'] == parsed['document']
 
 
-@pytest.mark.parametrize('invalid', ['payload', 'child'])
-def test_configuration_null_nodes_reject_payload_and_children(tmp_path, invalid):
+def test_retained_null_records_reject_tampering(tmp_path):
     draft = complete(tmp_path)
     draft['document']['executor'] = dict(config=dict(configuration=dict(max_file_bytes=None)))
     fields = Controls(form.render(draft, edit=True)).fields
-    prefix = next(name[:-4] for name, value in fields.items()
-        if name.endswith('.key') and value == 'max_file_bytes')
-    if invalid == 'payload':
-        fields[prefix+'.value'] = '1024'
-        with pytest.raises(form.FormError) as caught:
-            form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
-        retained = Controls(form.render(caught.value.draft, edit=True)).fields
-        assert retained[prefix+'.kind'] == 'null' and retained[prefix+'.value'] == '1024'
-    else:
-        fields.update({'node.2001.parent': prefix.split('.')[1], 'node.2001.key': 'hidden',
-            'node.2001.kind': 'integer', 'node.2001.value': '1024'})
-        with pytest.raises(ValueError, match='空值字段不能包含子项'):
-            form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
+    assert fields['advanced_fixed'] == '[[["executor", "config", "configuration", "max_file_bytes"], null]]'
+    with pytest.raises(ValueError, match='保留的空值记录无效'):
+        form.parse_edit(dict(fields, advanced_fixed='[["not a path"]]'), base=tmp_path, configuration=draft['document'])
 
 
 @pytest.mark.parametrize('plugin_value', [None, dict(nested=None), [1, None]])
@@ -305,10 +303,10 @@ def test_policy_forms_edit_real_schemas_and_preserve_extra_fields(tmp_path):
         protocol='codex_exec_resume', usage_scope='turn', output_repair=True,
         output_only=False))
     fields = submitted(draft)
-    assert fields['cfg.budget.role_shares.min_w_share'] == '0.65'
-    assert fields['cfg.policies.resume.output_only'] == 'false'
-    fields['cfg.budget.role_shares.min_w_share'] = '0.6'
-    fields['cfg.policies.resume.max_attempts'] = '1'
+    text = fields['advanced_toml']
+    assert '[budget.role_shares]' in text and 'min_w_share = 0.65' in text
+    assert '[policies.resume]' in text and 'output_only = false' in text
+    fields['advanced_toml'] = text.replace('min_w_share = 0.65', 'min_w_share = 0.6').replace('max_attempts = 2', 'max_attempts = 1')
     parsed = form.parse(fields, base=tmp_path)
     assert parsed['document']['budget']['role_shares'] == dict(version=1, min_w_share=.6,
         max_thinking_share=.35, thinking_node_target_tokens=250000,
@@ -316,12 +314,6 @@ def test_policy_forms_edit_real_schemas_and_preserve_extra_fields(tmp_path):
     assert parsed['document']['policies']['resume']['max_attempts'] == 1
     assert parsed['document']['policies']['resume']['output_only'] is False
     assert research_config.tomllib.loads(form.export_toml(parsed))['budget'] == parsed['document']['budget']
-    fields['cfg.policies.resume.max_attempts'] = 'invalid attempts'
-    with pytest.raises(form.FormError) as caught:
-        form.parse(fields, base=tmp_path)
-    assert submitted(caught.value.draft)['cfg.policies.resume.max_attempts'] == 'invalid attempts'
-    del fields['enabled.policies.resume']
-    assert 'policies' not in form.parse(fields, base=tmp_path)['document']
 
 
 @pytest.mark.parametrize('edit', [False, True])
@@ -341,38 +333,28 @@ def test_automatic_recovery_controls_retain_omission_false_and_finite_limits(tmp
         html = form.render(draft, edit=edit)
         fields = Controls(html).fields
         assert (parse(fields)['document'] if edit else form.declaration(parse(fields))) == draft['document']
-    assert fields['cfg.policies.resume.automatic_recovery.enabled'] == 'false'
-    assert html.count('name="cfg.policies.resume.automatic_recovery.max_attempts"') == 1
-    assert 'id="recovery-settings"' in html and '最大重试次数（retry + continue 总计）' in html
-    assert html.index('id="recovery-settings"') < html.index('<details class="advanced-settings">')
-    assert '保存后从下一个新节点生效' in html and '不会清零' in html
-    assert fields['cfg.policies.resume.automatic_recovery.max_attempts'] == str(automatic['max_attempts'])
-    assert '累计服务等待上限（秒）' in html
-    assert '此授权仅允许输出补填' in html
-    fields['cfg.policies.resume.automatic_recovery.max_retries'] = '4'
-    fields['cfg.policies.resume.automatic_recovery.max_attempts'] = '6'
+    assert '[policies.resume.automatic_recovery]' in fields['advanced_toml']
+    assert 'id="advanced-settings"' in html
+    fields['advanced_toml'] = fields['advanced_toml'].replace(
+        'max_retries = '+str(automatic['max_retries']), 'max_retries = 4').replace(
+        'max_attempts = '+str(automatic['max_attempts']), 'max_attempts = 6')
     parsed = parse(fields)
     assert parsed['document']['policies']['resume']['automatic_recovery'] == dict(automatic, max_retries=4, max_attempts=6)
     exported = research_config.tomllib.loads(form.export_toml(parsed))
     assert exported['policies']['resume'] == parsed['document']['policies']['resume']
-    fields['cfg.policies.resume.automatic_recovery.max_retries'] = '1.5'
-    with pytest.raises(form.FormError) as caught:
-        parse(fields)
-    retained = Controls(form.render(caught.value.draft, edit=edit)).fields
-    assert retained['cfg.policies.resume.automatic_recovery.max_retries'] == '1.5'
-    assert retained['cfg.policies.resume.automatic_recovery.initial_backoff_seconds'] == '0.25'
 
 
-@pytest.mark.parametrize('leaf',['max_retries','max_attempts'])
-def test_automatic_recovery_dedicated_fields_reject_duplicate_extension_values(tmp_path,leaf):
+@pytest.mark.parametrize('path', ['agent.model', 'budget.max_tokens'])
+def test_advanced_toml_rejects_keys_also_set_by_form(tmp_path, path):
     draft = complete(tmp_path)
-    draft['document']['policies'] = dict(resume=dict(automatic_recovery=dict(enabled=False, **{leaf:2})))
-    # A retained extension tree cannot supply the same dedicated leaf again.
+    draft['document']['agent']['model'] = 'form-model'
     fields = submitted(draft)
-    fields.update({'node.1900.kind': 'table', 'node.1900.parent': '@policies.resume',
-        'node.1900.key': 'automatic_recovery', 'node.1901.kind': 'integer',
-        'node.1901.parent': '1900', 'node.1901.key': leaf, 'node.1901.value': '4'})
-    with pytest.raises(ValueError, match='专用字段与扩展字段重复'):
+    section, key = path.split('.')
+    line = key+' = '+('"other"' if key == 'model' else '5')
+    text = fields['advanced_toml']
+    fields['advanced_toml'] = (text.replace('['+section+']', '['+section+']\n'+line) if '['+section+']' in text
+        else text+'\n['+section+']\n'+line+'\n')
+    with pytest.raises(form.FormError, match='高级设置与表单字段重复'):
         form.parse(fields, base=tmp_path)
 
 
@@ -386,13 +368,11 @@ def test_collapsed_controls_keep_custom_values_false_empty_and_omission(tmp_path
     fields = Controls(html).fields
     parsed = form.parse(fields, base=tmp_path)
     assert form.declaration(parsed) == form.declaration(draft)
-    assert 'list="config-agent-reasoning_effort-suggestions"' in html
+    assert 'data-picker="effort"' in html and '>推理力度<' in html
     assert 'E · 证据检索与提取' in html
-    assert 'W · 实验与实现' in html
-    assert 'data-config-group="agent.roles"' in html
-    assert '已设置，折叠后仍保留' in html
+    assert 'data-config-group="agent.roles" open' in html
     del fields['present.agent.roles.E.model']
-    del fields['enabled.research.user_updates']
+    fields['advanced_toml'] = ''
     omitted = form.parse(fields, base=tmp_path)['document']
     assert 'roles' not in omitted['agent']
     assert 'user_updates' not in omitted['research']
@@ -448,42 +428,38 @@ def test_compact_role_matrix_shares_rows_and_keeps_accessible_labels(tmp_path, e
 
     matrix = Matrix()
     assert matrix.rows == 4
-    assert len(matrix.controls) == 20
-    assert len({item['name'] for item in matrix.controls}) == 20
+    assert len(matrix.controls) == 8
+    assert len({item['name'] for item in matrix.controls}) == 8
     for item in matrix.controls:
         path = item['name'].removeprefix('cfg.')
         field = next(field for field in form.FIELDS if field.path == path)
         assert matrix.labels[item['id']] == field.label
         assert item['aria-describedby'] == 'role-settings-help'
         assert html.count('name="'+item['name']+'"') == 1
-    assert 'class="role-settings-card"' not in html
     assert 'id="budget-settings"' in html
-    assert '<th scope="col">用量（tokens）</th>' in html
-    assert '<th scope="col">时间（秒）</th>' in html
     fields = Controls(html).fields
+    assert '[budget.node_targets.H]' in fields['advanced_toml']
     parsed = (form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
         if edit else form.parse(fields, base=tmp_path))
     assert (parsed['document'] if edit else form.declaration(parsed)) == draft['document']
 
 
-def test_compact_numeric_groups_keep_units_and_collapsible_help(tmp_path):
+def test_form_shows_only_everyday_fields_with_inline_help(tmp_path):
     html = form.render(complete(tmp_path), edit=True)
-    for group in ('探索切片', '补正阈值', '输出与候选'):
-        assert '<legend>'+group+'</legend>' in html
-    for label in ('模型用量（tokens）', '活动时间（秒）', '节点上限（步）',
-                  'W 时间目标（秒）', '暂停阈值（次）'):
+    for label in ('模型用量（tokens）', '活动时间（秒）', '节点上限（步）', '推理力度', '自动方向复核'):
         assert label in html
     assert 'name="cfg.budget.max_output_item_bytes"' not in html
-    assert 'name="cfg.budget.max_output_total_bytes"' not in html
-    assert '<details class="config-help">' in html
-    assert 'aria-describedby="config-budget-max_seconds-help"' in html
-    assert '<p id="config-budget-max_seconds-help">单位：秒。' in html
-    assert 'name="enabled.budget.role_shares"' in html
-    assert 'name="enabled.policies.resume"' in html
+    assert 'name="cfg.budget.breadth.max_w_seconds"' not in html
+    assert 'name="enabled.policies.resume"' not in html
+    assert 'config-node-key' not in html and '<details class="config-help">' not in html
+    assert '<small class="field-help" id="config-budget-max_seconds-help">' in html
+    assert 'name="advanced_toml"' in html
+    names = set(Controls(html).fields)
+    assert len([name for name in names if name.startswith('cfg.')]) <= 26
 
 
 @pytest.mark.parametrize('edit', [False, True])
-def test_advanced_standard_controls_keep_closed_category_disclosures_and_roundtrip(tmp_path, edit):
+def test_advanced_settings_roundtrip_through_toml(tmp_path, edit):
     draft = complete(tmp_path)
     draft['document']['budget'].update(candidate_extra_slots=0,
         role_shares=dict(version=1, min_w_share=0, max_thinking_share=.35,
@@ -493,53 +469,10 @@ def test_advanced_standard_controls_keep_closed_category_disclosures_and_roundtr
     draft['document']['executor'] = dict(config=dict(configuration=dict(
         enabled=False, count=0, text='', nested=dict(items=[]))))
     html = form.render(draft, edit=edit)
-
-    class DisclosureControls(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.disclosures = []
-            self.categories = []
-            self.controls = {}
-            self.feed(html)
-
-        def handle_starttag(self, tag, attrs):
-            attrs = dict(attrs)
-            if tag == 'details':
-                disclosure = (attrs.get('class', ''), attrs.get('data-config-group'), 'open' in attrs)
-                self.disclosures.append(disclosure)
-                if disclosure[0] == 'advanced-category' and disclosure[1]:
-                    self.categories.append(disclosure)
-            if tag in {'input', 'select', 'textarea'} and attrs.get('name', '').startswith('cfg.'):
-                self.controls[attrs['name']] = tuple(self.disclosures)
-
-        def handle_endtag(self, tag):
-            if tag == 'details':
-                self.disclosures.pop()
-
-    parsed_controls = DisclosureControls()
-    controls = parsed_controls.controls
-    categories = ['agent', 'budget', 'executor', 'delivery', 'policies'] if edit else [
-        'research', 'project', 'skills', 'agent', 'budget', 'executor', 'delivery', 'policies', 'ui', 'version']
-    assert parsed_controls.categories == [('advanced-category', prefix, False) for prefix in categories]
-    for path in ('agent.backend', 'agent.native.features.fast_mode', 'budget.breadth.initial_calls',
-                 'budget.correction.pause_after', 'budget.candidate_extra_slots',
-                 'budget.role_shares.min_w_share', 'executor.mode', 'executor.config.executor',
-                 'policies.formal_review'):
-        assert controls['cfg.'+path] == (('advanced-settings', None, False),
-            ('advanced-category', path.split('.')[0], False))
-        assert html.count('name="cfg.'+path+'"') == 1
-    assert '<details class="advanced-category" data-config-group="budget"><summary>' in html
-    assert '<fieldset class="structured-setting known-settings" data-config-path="budget.role_shares"' in html
-    assert '<fieldset class="structured-setting known-settings" id="recovery-settings" data-config-path="policies.resume"' in html
-    for path in ('policies.resume.output_only','policies.resume.native_home'):
-        assert controls['cfg.'+path] == (('recovery-advanced', None, False),)
-        assert html.count('name="cfg.'+path+'"') == 1
-    assert controls['cfg.policies.resume.automatic_recovery.max_attempts'] == ()
-    assert '<label class="config-node-key">键名 ' in html
-    assert '<label class="config-node-type">类型 ' in html
+    assert '<details class="advanced-settings" id="advanced-settings"><summary>高级设置（TOML）' in html
     fields = Controls(html).fields
-    fields['cfg.budget.candidate_extra_slots'] = '1'
-    fields['cfg.policies.resume.output_only'] = 'true'
+    fields['advanced_toml'] = fields['advanced_toml'].replace('candidate_extra_slots = 0', 'candidate_extra_slots = 1').replace(
+        'output_only = false', 'output_only = true')
     parsed = (form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
         if edit else form.parse(fields, base=tmp_path))
     expected = form.declaration(draft)
@@ -548,16 +481,15 @@ def test_advanced_standard_controls_keep_closed_category_disclosures_and_roundtr
     assert (parsed['document'] if edit else form.declaration(parsed)) == expected
 
 
-def test_list_entry_works_without_script_and_blank_entry_adds_no_value(tmp_path):
+def test_list_settings_are_edited_as_toml_arrays(tmp_path):
     draft = complete(tmp_path)
     fields = submitted(draft)
-    omitted = form.parse(dict(fields, **{'enabled.agent.launcher': ''}), base=tmp_path)
+    assert 'launcher = ["never-launched"]' in fields['advanced_toml']
+    omitted = form.parse(dict(fields, advanced_toml=fields['advanced_toml'].replace('launcher = ["never-launched"]', '')), base=tmp_path)
     assert 'launcher' not in omitted['document'].get('agent', {})
-    fields['cfg.research.user_updates'] = 'one update.md'
+    fields['advanced_toml'] += '\n[research]\nuser_updates = ["one update.md"]\n'
     parsed = form.parse(fields, base=tmp_path)
     assert parsed['document']['research']['user_updates'] == ['one update.md']
-    fields['cfg.research.user_updates'] = ''
-    assert 'user_updates' not in form.parse(fields, base=tmp_path)['document']['research']
 
 
 def test_edit_form_roundtrips_operational_groups_and_keeps_instance_inputs_server_side(tmp_path):
@@ -569,8 +501,9 @@ def test_edit_form_roundtrips_operational_groups_and_keeps_instance_inputs_serve
     fields = Controls(form.render(draft, edit=True)).fields
     assert not any(name.startswith(('cfg.research.', 'cfg.ui.', 'cfg.version', 'task_')) for name in fields)
     assert '/private/operator.key' not in form.render(draft, edit=True)
+    assert '[research]' not in fields['advanced_toml'] and '[ui]' not in fields['advanced_toml']
     assert fields['cfg.permissions.web'] == 'live'
-    assert fields['cfg.executor.mode'] == 'external'
+    assert 'mode = "external"' in fields['advanced_toml']
     parsed = form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
     assert parsed['document'] == draft['document']
     fields['cfg.agent.model'] = 'next-model'
@@ -581,7 +514,7 @@ def test_edit_form_roundtrips_operational_groups_and_keeps_instance_inputs_serve
     assert retry['cfg.budget.max_tokens'] == 'invalid budget'
     assert retry['cfg.agent.model'] == 'next-model'
     assert caught.value.draft['document']['research'] == draft['document']['research']
-    fields['cfg.research.root'] = '/another-instance'
+    fields['advanced_toml'] += '\n[research]\nroot = "/another-instance"\n'
     with pytest.raises(ValueError, match='不能在研究配置中修改'):
         form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
 
@@ -606,7 +539,7 @@ def test_normalized_breadth_seconds_survive_invalid_edit_correction_and_save(tmp
         form.parse_edit(fields, base=root, configuration=state['configuration'])
     assert 'W 软目标秒数' not in str(caught.value)
     retry = Controls(form.render(caught.value.draft, edit=True)).fields
-    assert retry['cfg.budget.breadth.max_w_seconds'] == str(seconds)
+    assert 'max_w_seconds = '+str(seconds) in retry['advanced_toml']
     assert retry['cfg.agent.model'] == 'model-after-correction'
     retry['cfg.budget.max_tokens'] = str(state['configuration']['budget']['max_tokens'])
     corrected = form.parse_edit(retry, base=root, configuration=state['configuration'])
@@ -615,9 +548,7 @@ def test_normalized_breadth_seconds_survive_invalid_edit_correction_and_save(tmp
     assert saved['settings']['model'] == 'model-after-correction'
     assert saved['settings']['search_policy']['max_w_seconds'] == seconds
     assert type(saved['settings']['search_policy']['max_w_observed_tokens']) is int
-    retry['cfg.budget.breadth.max_w_observed_tokens'] = '1.5'
-    with pytest.raises(form.FormError, match='W 软目标 tokens'):
-        form.parse_edit(retry, base=root, configuration=state['configuration'])
+    assert type(corrected['document']['budget']['breadth']['max_w_observed_tokens']) is int
 
 
 def test_registered_provider_describes_native_controls_and_keeps_typed_roundtrip(tmp_path, monkeypatch):
@@ -638,10 +569,9 @@ def test_registered_provider_describes_native_controls_and_keeps_typed_roundtrip
         native=dict(resource='resource.toml',enabled=False,extension=dict(keep=[1,'two'])))
     html=form.render(draft)
     fields=Controls(html).fields
-    assert fields['cfg.agent.native.resource']=='resource.toml'
-    assert fields['cfg.agent.native.enabled']=='false'
+    assert 'resource = "resource.toml"' in fields['advanced_toml']
     assert 'Use the selected provider resource.' in html
-    assert 'cfg.agent.native.features.fast_mode' not in fields
+    assert 'fast_mode' not in html
     assert form.declaration(form.parse(fields,base=tmp_path))==form.declaration(draft)
 
 
@@ -662,12 +592,11 @@ def test_backend_switch_consumes_rendered_controls_and_preserves_each_provider_d
     draft['document']['agent'].update(native=original_native,model='retained-model')
     draft['document']['permissions']=dict(network=False,subagents=False)
     original_permissions=dict(draft['document']['permissions'])
-    def switch(current, backend_name, edits=None):
-        # Submit every successful control from the actual previous rendering,
-        # exactly as a browser does when only the backend select changes.
+    def switch(current, backend_name, native_toml=None):
         fields=submitted(current)
         fields['cfg.agent.backend']=backend_name
-        fields.update(edits or {})
+        if native_toml is not None:
+            fields['advanced_toml']+=native_toml
         with pytest.raises(form.FormError,match='后端已切换') as caught:
             form.parse(fields,base=tmp_path)
         changed=caught.value.draft
@@ -679,25 +608,81 @@ def test_backend_switch_consumes_rendered_controls_and_preserves_each_provider_d
     draft=switch(draft,'protocol')
     assert 'native' not in draft['document']['agent']
     assert draft['native_drafts']['codex']==original_native
-    assert 'cfg.agent.native.features.fast_mode' not in submitted(draft)
-    draft=switch(draft,Independent.name,{'enabled.agent.native':'yes'})
-    assert 'native' not in draft['document']['agent']
-    assert draft['native_drafts']['protocol']=={}
-    assert 'cfg.agent.native.resource' in submitted(draft)
-    draft=switch(draft,'codex',{'cfg.agent.native.resource':'independent-resource.toml',
-        'cfg.agent.native.enabled':'false'})
+    assert 'fast_mode' not in submitted(draft)['advanced_toml']
+    draft=switch(draft,Independent.name)
+    assert draft['native_drafts']['protocol'] is None
+    draft=switch(draft,'codex','\n[agent.native]\nresource = "independent-resource.toml"\nenabled = false\n')
     assert draft['document']['agent']['native']==original_native
     independent_native=dict(resource='independent-resource.toml',enabled=False)
     assert draft['native_drafts'][Independent.name]==independent_native
-    draft=switch(draft,'protocol')
-    assert draft['document']['agent']['native']=={}
+    assert 'original-native-root' in submitted(draft)['advanced_toml']
     draft=switch(draft,Independent.name)
     assert draft['document']['agent']['native']==independent_native
     stable=form.parse(submitted(draft),base=tmp_path)
     assert form.declaration(stable)==form.declaration(draft)
     assert stable['native_drafts']['codex']==original_native
-    assert stable['native_drafts']['protocol']=={}
     exported=form.export_toml(stable)
     assert 'rendered_backend' not in exported and 'native_drafts' not in exported
     assert 'independent-resource.toml' in exported
     assert 'original-native-root' not in exported
+
+
+def test_model_catalog_reads_codex_cache_and_pi_listing(tmp_path, monkeypatch):
+    import json, os
+    from scidiscovery.research_loop import model_catalog
+    home = tmp_path / 'codex'
+    home.mkdir()
+    (home / 'models_cache.json').write_text(json.dumps(dict(fetched_at='2026-11-11T00:00:00Z', models=[
+        dict(slug='visible-model', display_name='Visible', visibility='list', default_reasoning_level='low',
+             supported_reasoning_levels=[dict(effort='low'), dict(effort='high')], service_tiers=[dict(id='priority')]),
+        dict(slug='hidden-model', visibility='hide')])))
+    script = tmp_path / 'bin' / 'pi'
+    script.parent.mkdir()
+    script.write_text('#!/bin/sh\nprintf "provider model context max-out thinking images\\nacme fast-1 1M 8K yes no\\nacme plain 1M 8K no no\\n"\n')
+    script.chmod(0o755)
+    monkeypatch.setenv('CODEX_HOME', str(home))
+    monkeypatch.setenv('PATH', str(script.parent) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr(model_catalog, '_CACHE', {})
+    codex = model_catalog.load('codex')
+    assert [model['id'] for model in codex['models']] == ['visible-model']
+    assert codex['models'][0]['efforts'] == ['low', 'high'] and codex['models'][0]['tiers'] == ['default', 'priority']
+    pi = model_catalog.load('pi')
+    assert [model['id'] for model in pi['models']] == ['acme/fast-1', 'acme/plain']
+    assert pi['models'][0]['efforts'][-1] == 'max' and pi['models'][1]['efforts'] == ['off']
+    assert model_catalog.load('protocol')['models'] == []
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'missing'))
+    monkeypatch.setattr(model_catalog, '_CACHE', {})
+    assert model_catalog.load('codex')['error'].startswith('未找到 Codex 模型目录')
+
+
+def test_model_pickers_offer_catalog_choices_and_keep_exact_typed_values(tmp_path):
+    draft = complete(tmp_path)
+    draft['document']['agent'].update(model='not-in-catalog', reasoning_effort='high')
+    catalogs = dict(codex=dict(models=[dict(id='listed', label='Listed', efforts=['low', 'high'], tiers=['default'])],
+                               source='fixture', fetched_at=None, error=None),
+                    pi=dict(models=[], source=None, fetched_at=None, error='no pi'))
+    html = form.render(draft, catalogs=catalogs)
+    assert 'id="model-catalog"' in html and '"listed"' in html
+    assert 'data-picker="model" data-scope="global"' in html and 'data-picker="effort" data-scope="H"' in html
+    assert html.index('name="cfg.agent.backend"') < html.index('name="cfg.agent.model"')
+    fields = Controls(html).fields
+    assert fields['cfg.agent.model'] == 'not-in-catalog'
+    assert form.declaration(form.parse(fields, base=tmp_path)) == form.declaration(draft)
+
+
+def test_supervision_mode_select_writes_a_complete_policy(tmp_path):
+    from scidiscovery.research_loop import supervision
+    draft = complete(tmp_path)
+    fields = submitted(draft)
+    assert fields['cfg.policies.supervision.mode'] == ''
+    assert 'supervision' not in form.parse(fields, base=tmp_path)['document'].get('policies', {})
+    fields['cfg.policies.supervision.mode'] = 'notice'
+    parsed = form.parse(fields, base=tmp_path)
+    selected = parsed['document']['policies']['supervision']
+    assert selected['mode'] == 'notice'
+    assert supervision.policy(selected)['mode'] == 'notice'
+    checked = form.preview(parsed)
+    assert checked['supervision_policy']['mode'] == 'notice'
+    # An existing default policy shows only the select, not a TOML copy.
+    html = form.render(form.imported(form.declaration(parsed), base=tmp_path), edit=True)
+    assert '[policies.supervision]' not in html and '<option value="notice" selected>' in html

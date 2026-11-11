@@ -12,8 +12,10 @@ from html import escape
 import json
 import math
 from pathlib import Path
+import re
+import tomllib
 
-from . import research_config, skill_supply, backends
+from . import research_config, skill_supply, backends, model_catalog, supervision
 
 
 @dataclass(frozen=True)
@@ -344,7 +346,7 @@ def parse(fields, *, base, _fixed_skill_sets=None):
                 for name,value in native_drafts.items())):
         raise ValueError('后端原生设置草稿无效，请重新打开配置表单')
     scalar_fields = form_fields + [field for group in GROUP_FIELDS.values() for field in group]
-    allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text', 'rendered_backend', 'native_drafts'} | {'cfg.'+f.path for f in form_fields if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}
+    allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text', 'rendered_backend', 'native_drafts', 'advanced_toml', 'advanced_fixed', 'cfg.policies.supervision.mode'} | {'cfg.'+f.path for f in form_fields if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}
     for name in fields:
         parts = name.split('.')
         picker = (len(parts) == 3 and parts[0] == 'skill_picker' and parts[1] in {'choice', 'baseline'} and parts[2] in 'HWAE' and len(parts[2]) == 1) or (len(parts) == 4 and parts[:2] == ['skill_picker', 'item'] and parts[2] in 'HWAE' and len(parts[2]) == 1 and parts[3].isdecimal())
@@ -426,15 +428,45 @@ def parse(fields, *, base, _fixed_skill_sets=None):
             _put(result['document'], field.path, typed(raw, field.kind, field.label))
     # An explicit extra tree preserves empty groups and arbitrary imported keys.
     extras = tree('@extra', 'table')
-    def merge(target, extra):
+    def merge(target, extra, prefix=''):
         for key, value in extra.items():
             if key in target and isinstance(target[key], dict) and isinstance(value, dict):
-                merge(target[key], value)
+                merge(target[key], value, prefix+key+'.')
             elif key in target:
-                raise ValueError(f'{key}：扩展字段与标准字段重复')
+                errors.append(f'{prefix}{key}：高级设置与表单字段重复，请只保留一处')
             else:
                 target[key] = value
     merge(result['document'], extras)
+    # Settings outside the form are edited as TOML and merged losslessly.
+    advanced = _single(fields, 'advanced_toml')
+    result['advanced_text'] = advanced
+    result['advanced_fixed'] = _fixed_values(_single(fields, 'advanced_fixed', '[]'))
+    advanced_valid = True
+    if advanced.strip():
+        try:
+            merge(result['document'], tomllib.loads(advanced))
+        except tomllib.TOMLDecodeError as error:
+            advanced_valid = False
+            errors.append('高级设置（TOML）格式错误：'+str(error))
+    for keys, value in result['advanced_fixed']:
+        target = result['document']
+        for key in keys[:-1]:
+            target = target.setdefault(key, {})
+            if not isinstance(target, dict):
+                errors.append('.'.join(keys)+'：高级设置中的父字段不是对象')
+                break
+        else:
+            if keys[-1] not in target:
+                target[keys[-1]] = copy.deepcopy(value)
+    mode = _single(fields, 'cfg.policies.supervision.mode')
+    if mode:
+        if mode not in {key for key, _ in SUPERVISION_MODES}:
+            errors.append('自动方向复核：请选择支持的选项')
+        else:
+            current = _get(result['document'], 'policies.supervision')
+            selected = copy.deepcopy(current) if isinstance(current, dict) else _default_supervision()
+            selected['mode'] = mode
+            _put(result['document'], 'policies.supervision', selected)
     # Disabled groups' children are deliberately omitted. Reject stray topology.
     allowed = {identity for identity, node in nodes.items() if node['parent'].startswith('@') and
                node['parent'][1:] in {f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}}
@@ -456,6 +488,10 @@ def parse(fields, *, base, _fixed_skill_sets=None):
         restored=native_drafts.pop(selected_backend,None)
         if restored is not None:_put(result['document'],'agent.native',restored)
         result['native_drafts']=native_drafts
+        if advanced_valid:
+            # Regenerate the text so the previous provider's options leave it.
+            del result['advanced_text']
+            result.pop('advanced_fixed', None)
         errors.append('后端已切换；原生设置按原后端保留。请检查当前后端的设置后再次提交。')
     elif native_drafts:
         result['native_drafts']=native_drafts
@@ -501,39 +537,124 @@ def _kind(value):
     raise ValueError('声明包含不支持的字段类型')
 
 
-def render(draft, *, edit=False):
+_BARE_KEY = re.compile(r'[A-Za-z0-9_-]+')
+
+
+def _default_supervision():
+    """The current default table without TOML-incompatible empty values."""
+    return {key: value for key, value in supervision.policy().items() if value is not None}
+SUPERVISION_MODES = (('review', '开启：到期时由独立 A 复核方向'), ('notice', '只提示：到期时提醒 W，不调用 A'),
+                     ('off', '关闭：不做自动方向复核'))
+
+
+def _toml_key(key):
+    key = str(key)
+    return key if _BARE_KEY.fullmatch(key) else json.dumps(key, ensure_ascii=False)
+
+
+def _toml_value(item):
+    kind = _kind(item)
+    if kind == 'null':
+        raise ValueError('数组或内联对象中的空值（null）无法写成 TOML')
+    if kind == 'table':
+        return '{' + ', '.join(_toml_key(k) + ' = ' + _toml_value(v) for k, v in item.items()) + '}'
+    if kind == 'array':
+        return '[' + ', '.join(_toml_value(v) for v in item) + ']'
+    if kind == 'string':
+        return json.dumps(str(item), ensure_ascii=False)
+    if kind == 'boolean':
+        return str(item).lower()
+    if kind in ('datetime', 'date', 'time'):
+        return item.isoformat()
+    if kind == 'number' and not math.isfinite(item):
+        raise ValueError('TOML 需要有限数字')
+    return str(item)
+
+
+def _has_null(value):
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return any(_has_null(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_null(item) for item in value)
+    return False
+
+
+def advanced_toml(document):
+    """Readable TOML for settings outside the form.
+
+    TOML has no null. A value that is null or contains null inside an array
+    or inline table is kept verbatim as a separate fixed entry instead.
+    """
+    fixed = []
+    lines = []
+    def emit(table, keys):
+        simple, nested = [], []
+        for key, value in table.items():
+            if isinstance(value, dict):
+                nested.append((key, value))
+            elif _has_null(value):
+                fixed.append([[*keys, key], value])
+            else:
+                simple.append((key, value))
+        prefix = '.'.join(_toml_key(key) for key in keys)
+        if keys and (simple or not nested):
+            lines.append(('\n' if lines else '') + '[' + prefix + ']')
+        lines.extend(_toml_key(key) + ' = ' + _toml_value(value) for key, value in simple)
+        for key, value in nested:
+            emit(value, [*keys, key])
+    emit(document, [])
+    return '\n'.join(lines) + ('\n' if lines else ''), fixed
+
+
+def _fixed_values(raw):
+    """Values TOML cannot express travel as exact JSON beside the text."""
+    try:
+        value = json.loads(raw) if len(raw) <= 256_000 else None
+    except (ValueError, TypeError, RecursionError):
+        value = None
+    if (not isinstance(value, list) or len(value) > 256 or any(
+            not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], list) or not item[0]
+            or any(not isinstance(key, str) for key in item[0]) for item in value)):
+        raise ValueError('高级设置中保留的空值记录无效，请重新打开表单')
+    return value
+
+
+def render(draft, *, edit=False, catalogs=None):
     """Render a guided form; hidden steps retain successful, typed controls."""
     document = draft['document']
-    form_fields=_fields(_get(document,'agent.backend',backends.DEFAULT_BACKEND))
+    current_backend = _get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND
+    form_fields=_fields(current_backend)
+    catalogs = model_catalog.load_all(backends.names()) if catalogs is None else catalogs
+    short_hints = {
+        'research.root': '服务器上一个尚不存在的目录，用来保存这项研究的全部记录。',
+        'research.public_root': '服务器上已存在的目录，研究只能读取其中的文件；没有材料也需要一个空目录。',
+        'research.objective': '服务器上的文本文件，原文会保存为本次任务。',
+        'agent.backend': '运行研究角色的智能体程序。',
+        'agent.model': '所有角色默认使用的模型。',
+        'budget.max_tokens': '例如 5000000。',
+        'budget.max_seconds': '例如 3600 表示 1 小时。',
+        'budget.max_steps': '例如 40。',
+        'permissions.workspace': '默认：可写工作目录。',
+        'permissions.network': '默认：不允许。',
+        'permissions.web': '默认：禁用。',
+        'permissions.subagents': '默认：不允许。',
+        'executor.config.executor': '已安装插件的绑定名，例如 tcad_execution:tcad。',
+        'executor.config.config_file': '该插件的配置文件，相对路径按声明目录解析。',
+    }
+    short_hints.update({field.path: field.description for field in form_fields
+        if field.description and field.path in ('agent.model', 'agent.reasoning_effort')})
     extras = copy.deepcopy(document)
     _delete(extras, 'research.objective_text')
     if edit:
         for key in ('research', 'ui', 'version', 'project', 'skills'):
             extras.pop(key, None)
-    counter = [0]
-    def tree(value, parent):
-        contents = []
-        items = value.items() if isinstance(value, dict) else enumerate(value)
-        for key, item in items:
-            counter[0] += 1
-            identity = str(counter[0]); kind = _kind(item); prefix = 'node.'+identity+'.'
-            scalar = '' if item is None else (str(item).lower() if type(item) is bool else (item.isoformat() if isinstance(item, (date,time)) else str(item)))
-            contents.append('<div class="config-node" data-node="'+identity+'" data-error-label="'+escape(str(key),quote=True)+'"'+(' data-invalid="true"' if isinstance(item, _Invalid) else '')+'>'
-                '<input type="hidden" name="'+prefix+'parent" value="'+escape(parent, quote=True)+'">'
-                '<label class="config-node-key">键名 <input name="'+prefix+'key" value="'+escape(str(key) if isinstance(value,dict) else '',quote=True)+'"></label>'
-                '<label class="config-node-type">类型 <select name="'+prefix+'kind" class="config-kind">'+''.join(
-                    '<option value="'+k+'"'+(' selected' if k==kind else '')+'>'+label+'</option>'
-                    for k,label in [('string','文本'),('integer','整数'),('number','数字'),('boolean','布尔'),('null','空值（null）'),('table','对象'),('array','数组'),('datetime','日期时间'),('date','日期'),('time','时间')])+'</select></label>'
-                '<label class="config-value">值 <input name="'+prefix+'value" value="'+escape(scalar if kind not in ('table','array') else '',quote=True)+'"></label>'
-                '<button type="button" class="config-remove">删除此项</button>'
-                '<div class="config-children" data-parent="'+identity+'">'+
-                (tree(item, identity) if kind in ('table','array') else '')+'</div>'
-                '<button type="button" class="config-add" data-parent="'+identity+'">添加子项</button></div>')
-        return ''.join(contents)
     labels = {
         'research.root': '新研究保存到哪里', 'research.public_root': '研究可使用的材料目录',
         'research.objective': '任务文件路径', 'agent.model': '研究使用的模型',
-        'agent.reasoning_effort': '留空时采用所选后端声明的默认推理力度。也可填写该模型和后端支持的其他值。',
+        'agent.reasoning_effort': '推理力度', 'agent.service_tier': '服务档位',
+        'agent.backend': '后端',
         'budget.max_tokens': '模型用量（tokens）', 'budget.max_seconds': '活动时间（秒）',
         'budget.max_steps': '节点上限（步）', 'permissions.workspace': '文件读写范围',
         'permissions.network': '允许程序联网', 'permissions.web': '网页检索方式',
@@ -553,86 +674,6 @@ def render(draft, *, edit=False):
         'budget.role_shares.max_thinking_share': 'H / A 最高份额（0–1）',
         'budget.role_shares.thinking_node_target_tokens': 'H / A 单次目标（tokens）',
     }
-    hints = {
-        'research.root': '将在服务器上新建此目录，保存任务、研究记录和结果。请选择尚不存在的目录；不能覆盖已有研究。',
-        'research.public_root': '填写服务器上已存在的目录，放入允许研究使用的文件。即使暂时没有材料，也需先准备一个空目录。这里不会上传浏览器中的文件。',
-        'research.objective': '读取服务器上的现有文本文件；原文会作为本次任务保存。',
-        'agent.model': '留空时采用所选后端声明的默认模型；没有默认值的后端必须填写。各研究角色未单独指定时沿用此模型。',
-        'agent.reasoning_effort': '留空时采用所选后端声明的默认推理力度。也可填写该模型和后端支持的其他值。',
-        'agent.service_tier': '留空时采用所选后端声明的默认服务档位。也可填写该后端支持的其他值。',
-        'budget.max_tokens': '单位：tokens，模型处理文本的用量，不是金额。必须由你填写；实际费用取决于模型及服务计价。',
-        'budget.max_seconds': '单位：秒。累计研究活动时间，不是从创建起计算的日历时间；暂停等待不会自动恢复预算。',
-        'budget.max_steps': '单位：步。约束研究节点及计入预算的恢复、操作、审计等工作；与时间、tokens 分别限制。',
-        'permissions.workspace': '留空声明默认的可写工作目录（workspace-write）。这是后端原生权限；检查时会显示实际权限与限制。',
-        'permissions.network': '留空默认不允许程序联网。与网页检索分别设置；实际能否限制由所选后端决定。',
-        'permissions.web': '留空默认禁用网页检索。需要在线证据时，可按本次研究范围选择缓存或实时检索。',
-        'permissions.subagents': '留空默认不允许创建子助手。这项控制角色内部再委派工作，与 H / W / A / E 分工不同。',
-    }
-    hints.update({
-        'version': '当前声明格式版本为 1；新建时可留空。',
-        'research.user_updates': '服务器上的原文文件路径，每项一个文件；用于保留你对全局任务的补充。留空且不声明列表时省略。',
-        'research.source_restrictions': '声明材料原件的使用限制、定位和摘要。此项需要结构配置；无额外限制时保持未声明。',
-        'project.base_root': '可选：已有普通 Git 工作树的准确绝对根目录，不支持 ~、相对路径或符号链接。创建时冻结 HEAD 身份；已有实例继续保留原工程。',
-        'project.editable': '声明工程时必填非空列表；每项是相对工程根的目录，例如 src。不得含 .、..、.git，不得与其他声明目录交叠。',
-        'project.scratch': '可选的临时工作目录，每项为规范相对目录；不与可修改目录或输出目录交叠。',
-        'project.outputs': '可选的输出目录，每项为规范相对目录；保留原调用的输出采集与封存条件。',
-        'skills.sets': '按集合名称填写对象，每个集合包含 items 文本数组。只有角色或命名研究者用 skill_set 明确选择该集合时才启用。插件提供的可选技能不会自动启用。',
-        'agent.native': '可选：按所选后端说明声明原生扩展选项；键名、类型和相对路径由该后端验证。',
-        'agent.workers': '命名研究者的模型和可选 skill_set 声明；技能集合名称必须来自本次研究已声明的集合。',
-        'agent.backend': '留空使用默认后端。可选择已注册后端；检查时验证其模型、启动程序及能力声明。',
-        'agent.launcher': '留空采用所选后端的默认启动命令；没有默认值时必须填写。第一项是可执行程序，之后每项是一个独立参数；不按空格拆分。',
-        'budget.candidate_extra_slots': '单位：个，限制 W 提名预览中代表候选之外的额外名额，仅在启用搜索机制提名时使用；完整候选池仍保留。留空默认 2。',
-        'budget.portfolio_review_after_cycles': '单位：研究周期，达到次数后提醒重新比较候选组合；不自动决定换路线或触发正式审核。留空不单独声明这项策略。',
-        'budget.role_shares': '为实验保留用量，限制可选的方向讨论与复核占比。启用时须明确四项参数及全部角色阶段预算；不增加总预算。',
-        'budget.role_shares.version': '当前规则要求版本 1。填写版本仅标识规则，不会自动补预算。',
-        'budget.role_shares.min_w_share': '填 0 到 1 之间的小数，例如 0.65 表示 65%。与 H / A 最高份额相加不得超过 1。',
-        'budget.role_shares.max_thinking_share': '填 0 到 1 之间的小数，例如 0.35 表示 35%。限制可选的 H / A 工作；必要复核仍按合同进行。',
-        'budget.role_shares.thinking_node_target_tokens': '单位：tokens。设定一次 H / A 思考工作的目标；不替代角色阶段上限或总预算。',
-        'budget.breadth.max_w_seconds': '单位：秒。一次 W 探索切片的时间软目标；自定义探索策略时需同时填写 tokens 和修复次数。',
-        'budget.breadth.max_w_observed_tokens': '单位：tokens。一次 W 探索切片的用量软目标；留空整组时使用既有探索策略。',
-        'budget.breadth.max_requested_repairs': '单位：次。限制一次探索中请求修复的次数；自定义策略时必须为正整数。',
-        'budget.breadth.initial_calls': '单位：次。首次探索允许的已登记实验调用机会；可选，不能表示科学覆盖已完成。',
-        'budget.correction.review_after': '单位：次。持续未取得进展达到此阈值时复核；需与暂停阈值一起填写。',
-        'budget.correction.pause_after': '单位：次。补正达到此阈值时暂停；需与复核阈值一起填写。',
-        'executor.mode': '留空采用所选后端声明的实验执行归属。指定执行插件时采用本地执行；检查页显示实际配置，实验仍需满足授权与插件条件。',
-        'executor.config.executor': '填写已安装插件公开的绑定名称，例如 plugin:binding。创建配置不会运行实验或安装插件。',
-        'executor.config.config_file': '服务器上的插件配置文件路径。通常优先使用插件提供的配置文件；相对路径按当前声明目录解析。',
-        'executor.config.configuration': '仅对明确支持内联配置的插件使用。键名与类型以该插件说明为准。',
-        'executor.resource_policy': '声明累计实验时间、存储等资源上限；需已配置实验执行授权与宿主执行插件。',
-        'delivery': '仅需通过适配器交付结果时配置；涉及明确目标、输入、阶段预算和外部接口，按对应适配器说明导入。',
-        'policies.formal_review': '是否声明正式独立复核合同。启用不会自动产生审核通过结论。',
-        'policies.execution_authority': '是否要求实验执行授权合同；启用时也必须启用正式独立复核。此开关本身不授予执行许可。',
-        'policies.candidate_audit': '是否要求候选审计；需同时配置带 audit 能力的隔离交付适配器。',
-        'policies.decision_contract': '是否声明科学决策合同；研究结论仍由科学角色作出。',
-        'policies.worker_context': 'same_session 保留同一会话，new_context 使用新上下文。此高级合同还需原调用恢复和全部角色阶段预算。',
-        'policies.selection': '用于生产交付的候选选择合同；需已配置相应执行、观察与交付条件。',
-        'policies.resume': '恢复已知原调用，不重新提交未知外部实验，不恢复已消耗预算。后端可为新配置声明有界恢复默认值；已有显式策略保持原义。自定义时需冻结启动程序及全部角色阶段预算。',
-        'policies.resume.max_attempts': '仅支持 1 或 2 次。次数针对同一原调用；不是重新开始研究。',
-        'policies.resume.protocol': '填写所选后端支持的原调用恢复协议；检查时验证协议与能力。',
-        'policies.resume.usage_scope': '当前合同要求 turn：按一次调用计量用量，保留原始预算消耗。',
-        'policies.resume.output_repair': '允许在有明确失败边界时恢复以修复输出格式；不豁免其他恢复条件。',
-        'policies.resume.output_only': '启用需同时允许修复输出；此授权仅允许输出补填。自动接续当前未完成任务须由下方独立策略明确允许。',
-        'policies.resume.native_home': '仅在“只修复输出”启用时使用，必须是规范绝对路径。这里只保存路径引用。',
-        'policies.resume.automatic_recovery.enabled': '独立允许支持的后端在原会话接续未完成任务，以及原请求明确尚未开始时的有限启动重试。不会新开上下文、扩大权限或重新提交未知外部调用。已有显式策略留空不新增此授权。',
-        'policies.resume.automatic_recovery.max_attempts': '单位：次。同一任务原 attempt 链的 retry 与 continue 合计上限；新配置的后端默认值为 8。0 禁用自动恢复。已有显式策略未声明此项时保留原义，不自动补入总上限。保存后从下一个新节点生效；已消耗次数和等待不清零。',
-        'policies.resume.automatic_recovery.max_continues': '单位：次。同一任务的原 attempt 链中，提前停止后最多追加的同会话工作次数；与临时故障重试分别累计，推进和重启均不清零。0 禁用此类接续。',
-        'policies.resume.automatic_recovery.max_retries': '单位：次。同一任务的原 attempt 链中，对明确可恢复的临时限流、容量或连接故障最多重试次数；永久错误和未知原因不重试，推进和重启均不清零。0 禁用此类重试。',
-        'policies.resume.automatic_recovery.initial_backoff_seconds': '单位：秒。首次服务退避的有限时长；后续指数增长，仍受单次及累计等待上限约束。',
-        'policies.resume.automatic_recovery.max_backoff_seconds': '单位：秒。一次服务退避的有限上限；不能小于首次退避，也不能大于累计服务等待上限。',
-        'policies.resume.automatic_recovery.jitter_fraction': '填 0 到 1 之间的小数，例如 0.1 表示最多 10% 的退避抖动。',
-        'policies.resume.automatic_recovery.max_wait_seconds': '单位：秒。本次恢复链累计服务退避上限；成功推进和重启不清零已保存值。停机及控制程序未运行的空闲不计入实际服务等待。',
-        'policies.history_observer': '仅为已接入的宿主历史观察插件配置；参数与路径按插件说明填写。',
-        'ui.port': '留空或 0 自动选择可用端口；指定时为 1 到 65535。',
-        'ui.open_browser': '留空默认不开浏览器；在远程服务器通常保持默认。',
-        'ui.approval_secret_file': '可选的宿主管理密钥文件路径。这里只填写路径，不读取或复制密钥内容。',
-    })
-    for role in 'HWAE':
-        hints[f'agent.roles.{role}.worker'] = '可选：填写 agent.workers 中准确的命名研究者。角色显式模型字段和技能集合覆盖该研究者的对应配置。'
-        hints[f'agent.roles.{role}.skill_set'] = '可选：填写已声明或由明确选中的插件提供的准确集合名称；留空沿用明确引用的命名研究者配置，未引用时不启用。'
-        for key in ('model', 'reasoning_effort', 'service_tier'):
-            hints[f'agent.roles.{role}.{key}'] = '留空沿用上方全局'+dict(model='模型', reasoning_effort='推理力度', service_tier='服务档位')[key]+'。支持的值取决于该角色选择的模型和后端。'
-        for key, unit in [('max_observed_tokens', 'tokens'), ('max_seconds', '秒')]:
-            hints[f'budget.node_targets.{role}.{key}'] = '单位：'+unit+'。'+ROLE_NAMES[role]+'单次工作的软目标；启用阶段预算时四个角色的两项都需填写，不能扩大总预算。'
     placeholders = {'research.root': '/srv/research/new-study', 'research.public_root': '/srv/research/materials',
                     'research.objective': '/srv/research/task.txt'}
     choice_labels = {'true':'允许', 'false':'不允许', 'read-only':'只读文件',
@@ -642,7 +683,6 @@ def render(draft, *, edit=False):
         'same_session':'沿用同一会话', 'new_context':'使用新上下文',
         'turn':'按单次调用计量'}
 
-    hints.update({field.path:field.description for field in form_fields if field.description})
 
     def control(field, *, advanced=False, matrix=False):
         value = _get(document, field.path)
@@ -659,53 +699,24 @@ def render(draft, *, edit=False):
         metadata = ''
         identity = 'config-'+field.path.replace('.', '-')
         help_id = identity+'-help'
-        hint = ('<details class="config-help"><summary aria-label="'+escape(field.label,quote=True)+'：填写说明">说明</summary>'
-            '<p id="'+help_id+'">'+escape(hints[field.path])+'</p></details>') if field.path in hints and not matrix else ''
+        hint = ('<small class="field-help" id="'+help_id+'">'+escape(short_hints[field.path])+'</small>') if field.path in short_hints and not matrix else ''
         described = ' aria-describedby="'+('role-settings-help' if matrix else help_id)+'"' if matrix or hint else ''
         attributes = ' data-config-path="'+escape(field.path,quote=True)+'" data-error-label="'+escape(field.label,quote=True)+'"'+(' data-invalid="true"' if isinstance(value, _Invalid) else '')
-        if field.kind == 'strings':
-            if value is not None and (not isinstance(value, list) or any(not isinstance(item, str) for item in value)):
-                raise ValueError(f'{field.label}：导入值必须为文本数组')
-            entries = ''.join('<div class="config-string-row"><textarea rows="1" aria-label="'+escape(field.label,quote=True)+'第 '+str(index+1)+' 项" name="cfg.'+field.path+'.'+str(index)+'">'+escape(item)+'</textarea><button type="button" class="config-string-remove secondary-button">删除</button></div>' for index,item in enumerate(value or []))
-            return '<div class="config-field config-list-setting"'+attributes+'><p class="field-label">'+label+metadata+'</p><label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>使用此列表（可保留为空）</label><div class="config-string-list" data-path="'+field.path+'">'+entries+'</div><textarea rows="2" name="cfg.'+field.path+'" placeholder="填写一项；留空不会添加。需要多项可使用下方按钮。" aria-label="'+escape(field.label,quote=True)+'新增项"></textarea><button type="button" class="config-string-add secondary-button" data-path="'+field.path+'">添加一项</button>'+hint+'</div>'
-        if field.kind in ('table','array'):
-            if value is not None and not isinstance(value, dict if field.kind=='table' else list):
-                raise ValueError(f'{field.label}：导入类型不正确')
-            configured = '<span class="configured-note">已配置</span>' if value is not None else '<span class="summary-note">可选</span>'
-            body = value if value is not None else ({} if field.kind=='table' else [])
-            if field.path in GROUP_FIELDS:
-                remainder = copy.deepcopy(body)
-                for child in GROUP_FIELDS[field.path]:
-                    key = child.path[len(field.path)+1:]
-                    missing = object()
-                    if _get(remainder, key, missing) is not missing:
-                        _delete(remainder, key)
-                children=GROUP_FIELDS[field.path]
-                if field.path=='policies.resume':
-                    primary_paths={'policies.resume.automatic_recovery.enabled','policies.resume.automatic_recovery.max_attempts'}
-                    contents='<p class="note recovery-scope">保存后从下一个新节点生效；已经准备、正在运行或恢复的节点继续使用原配置。已消耗的重试、接续次数与等待时间不会清零。</p>'
-                    contents+='<div class="config-grid">'+''.join(control(child) for child in children if child.path in primary_paths)+'</div>'
-                    contents+='<p class="note">支持有界自动恢复的后端，新配置默认 retry + continue 总上限为 8 次。已有显式策略未声明总上限时保持原义；留空不会改写当前原调用。</p>'
-                    contents+='<details class="recovery-advanced"><summary>分类上限、等待与恢复协议</summary><div class="config-grid config-grid-four">'+''.join(control(child, advanced=True) for child in children if child.path not in primary_paths)+'</div></details>'
-                else:
-                    contents = '<div class="config-grid config-grid-four">'+''.join(control(child, advanced=True) for child in children)+'</div>'
-                contents += '<details class="expert-settings"><summary>其他已导入参数 / 专家编辑</summary><p class="note">标准参数请使用上方表单。这里保留其他键名与类型；未知字段会在检查配置时验证。</p>'
-                contents += '<div class="config-children" data-parent="@'+field.path+'">'+tree(remainder, '@'+field.path)+'</div><button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加扩展项</button></details>'
-            else:
-                contents = '<p class="note">此结构由插件或专门合同定义。已有值会完整保留；请根据插件说明导入 TOML，或在下面按原类型编辑。无需使用时保持未声明。</p>'
-                contents += '<div class="config-children" data-parent="@'+field.path+'">'+tree(body,'@'+field.path)+'</div><button type="button" class="config-add secondary-button" data-parent="@'+field.path+'">添加项</button>'
-            known = field.path in GROUP_FIELDS
-            opening = '<fieldset class="structured-setting known-settings"'+(' id="recovery-settings"' if field.path=='policies.resume' else '')+attributes+'><legend>'+('重试设置' if field.path=='policies.resume' else label)+configured+'</legend>' if known else '<details class="structured-setting"'+attributes+'><summary>'+label+configured+'</summary>'
-            return opening+\
-                '<label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if value is not None else '')+'>使用这组自定义设置（关闭后不保存本组）</label>'+hint+'<noscript><p class="note">填写前请先启用本组；未启用时，本组内容不会保存。</p></noscript>'+contents+('</fieldset>' if known else '</details>')
         text = '' if value is None else (str(value).lower() if type(value) is bool else str(value))
         if field.choices or field.kind == 'boolean':
             choices = list(backends.names() if field.path=='agent.backend' else field.choices or ('true','false'))
             choices += [text] if text and text not in choices else []
-            widget = '<select id="'+identity+'" name="cfg.'+field.path+'"'+described+'><option value="">未声明 / 沿用默认'+('（'+escape(field.placeholder)+'）' if field.placeholder else '')+'</option>'+''.join(
+            widget = '<select id="'+identity+'" name="cfg.'+field.path+'"'+described+(' data-default="'+escape(backends.DEFAULT_BACKEND,quote=True)+'"' if field.path=='agent.backend' else '')+'><option value="">默认'+('（'+escape(field.placeholder)+'）' if field.placeholder else '')+'</option>'+''.join(
                 '<option value="'+escape(choice,quote=True)+'"'+(' selected' if text==choice else '')+'>'+escape(choice_labels.get(choice,choice))+'</option>' for choice in choices)+'</select>'
+        elif field.path.split('.')[-1] in ('model', 'reasoning_effort', 'service_tier') and field.path.startswith('agent.'):
+            kind = dict(model='model', reasoning_effort='effort', service_tier='tier')[field.path.split('.')[-1]]
+            scope = field.path.split('.')[2] if field.path.startswith('agent.roles.') else 'global'
+            inherit = ('沿用上方设置' if scope != 'global' else
+                '默认（'+(field.placeholder or '由后端决定')+'）' if field.placeholder else '默认（由后端决定）')
+            widget = ('<select class="model-picker" data-picker="'+kind+'" data-scope="'+scope+'" data-inherit="'+escape(inherit,quote=True)+'" hidden aria-label="'+escape(field.label,quote=True)+'"></select>'
+                '<input id="'+identity+'" name="cfg.'+field.path+'" value="'+escape(text,quote=True)+'" placeholder="'+escape(field.placeholder or ('精确模型 ID' if kind=='model' else ''),quote=True)+'" class="model-picker-text" data-picker-text="'+kind+'" data-scope="'+scope+'"'+described+'>')
         else:
-            suggestions = ('low','medium','high') if field.path.endswith('reasoning_effort') else ('default','priority') if field.path.endswith('service_tier') else ()
+            suggestions = ()
             suggestion_id = identity+'-suggestions'
             widget = '<input id="'+identity+'" name="cfg.'+field.path+'" value="'+escape(text,quote=True)+'" placeholder="'+escape(placeholders.get(field.path,field.placeholder),quote=True)+'"'+described+(' inputmode="decimal"' if field.kind in ('integer','number') else '')+(' list="'+suggestion_id+'"' if suggestions else '')+'>'
             if suggestions:
@@ -778,6 +789,10 @@ def render(draft, *, edit=False):
                 baseline = sorted(set(_role_skill_items(document, role)) & names)
                 contents.append('<input type="hidden" name="skill_picker.baseline.'+role+'" value="'+escape(json.dumps(baseline, ensure_ascii=False), quote=True)+'">')
             identity = 'skill-picker-choice-'+role
+            if not edit and not choices and _get(document, 'agent.workers') is None:
+                # Only the matrix is meaningful without named sets or researchers.
+                contents.append('<input type="hidden" id="'+identity+'" name="skill_picker.choice.'+role+'" value="keep">')
+                continue
             contents.append('<div class="config-field"><label for="'+identity+'">'+role+' · '+ROLE_NAMES[role]+' 技能分配</label><select id="'+identity+'" name="skill_picker.choice.'+role+'"><option value="keep" selected>保持当前：'+escape(current)+'</option>')
             if not edit:
                 contents.append('<option value="custom">使用本列勾选</option><option value="none">不启用技能（覆盖继承）</option>')
@@ -801,80 +816,86 @@ def render(draft, *, edit=False):
         +'<div class="config-grid">'+fields(['research.public_root','research.root'])+'</div>'+
         '<details class="path-base"><summary>服务器路径怎么填写？</summary><p>可填写完整绝对路径；相对路径从此服务器目录开始：<code>'+escape(draft['base'])+'</code></p></details>'
         '<div class="setup-actions"><span class="note">下一步：选择模型，填写用量上限</span><button type="button" hidden data-setup-go="2">下一步：模型与预算 →</button></div></section>']
-    primary = ['agent.model','agent.reasoning_effort','agent.service_tier','budget.max_tokens','budget.max_seconds','budget.max_steps']
+    model_paths = ['agent.backend','agent.model','agent.reasoning_effort','agent.service_tier']
+    budget_paths = ['budget.max_tokens','budget.max_seconds','budget.max_steps']
     permissions = ['permissions.workspace','permissions.network','permissions.web','permissions.subagents']
     heading = ('<section class="setup-panel configuration-editor" aria-labelledby="setup-limits-title">'
         '<div class="section-heading"><h2 id="setup-limits-title" tabindex="-1">调整后续研究配置</h2>'
         '<p>保存后从下一个新节点生效。已经准备、正在运行或恢复的节点继续使用原配置；已消耗的用量仍保留。</p></div>' if edit else
         '<section class="setup-panel" data-setup-step="2" aria-labelledby="setup-limits-title">'
-        '<div class="section-heading"><span class="eyebrow">第二步 / 模型与预算</span><h2 id="setup-limits-title" tabindex="-1">这次研究可以使用多少资源？</h2>'
-        '<p>模型可以沿用统一默认值。三项总预算都需明确填写，达到任一限制会影响研究继续。</p></div>')
-    rows.append(heading + '<fieldset class="config-group"><legend>统一模型</legend><div class="model-fields">'+fields(primary[:3])+'</div></fieldset>'
-        '<fieldset class="config-group" id="budget-settings"><legend>研究总上限</legend><div class="budget-fields">'+fields(primary[3:])+'</div></fieldset>')
-    rows.append(fields(['policies.resume']))
-    used = set(primary+permissions+['research.root','research.public_root','research.objective','policies.resume'])
-    role_paths = [f'agent.roles.{role}.{key}' for role in 'HWAE' for key in ('model','reasoning_effort','service_tier')]
-    target_paths = [f'budget.node_targets.{role}.{key}' for role in 'HWAE' for key in ('max_observed_tokens','max_seconds')]
-    configured = any(_get(document, path) is not None for path in role_paths+target_paths)
-    rows.append('<details class="role-settings config-group" data-config-group="agent.roles" open><summary>角色模型与单次用量'
-        + ('<span class="configured-note">已设置，折叠后仍保留</span>' if configured else '<span class="summary-note">可选，模型留空沿用统一设置</span>')
-        + '</summary><div class="config-matrix-scroll" role="region" aria-label="角色模型与单次用量，可横向滚动" tabindex="0">'
-        '<table class="config-role-matrix role-settings-matrix"><caption class="config-sr-only">四个研究角色的模型覆盖与单次工作软目标</caption><colgroup><col class="role-column"></colgroup><colgroup><col class="model-column"><col><col></colgroup><colgroup><col><col></colgroup>'
-        '<thead><tr><th rowspan="2" scope="col">研究角色</th><th colspan="3" scope="colgroup">模型设置</th><th colspan="2" scope="colgroup" data-config-group="budget.node_targets">单次工作软目标</th></tr>'
-        '<tr><th scope="col">模型</th><th scope="col">推理力度</th><th scope="col">服务档位</th><th scope="col">用量（tokens）</th><th scope="col">时间（秒）</th></tr></thead><tbody>')
+        '<div class="section-heading"><span class="eyebrow">第二步 / 模型与预算</span><h2 id="setup-limits-title" tabindex="-1">用哪个模型，最多用多少？</h2>'
+        '<p>选好模型并填写三项上限即可创建。其余设置都有默认值，需要时再展开。</p></div>')
+    catalog_note = ''.join('<p class="note" data-catalog-note="'+escape(name,quote=True)+'"'+('' if name==current_backend else ' hidden')+'>'
+        + escape('模型列表来自 '+value['source']+(('（更新于 '+str(value['fetched_at'])+'）') if value.get('fetched_at') else '')+'；也可选择“自定义”填写精确 ID。'
+                 if value.get('models') else (value.get('error') or '此后端没有模型列表，请填写精确模型 ID。'))+'</p>'
+        for name, value in catalogs.items())
+    rows.append(heading + '<fieldset class="config-group"><legend>模型</legend><div class="config-grid config-grid-four model-fields">'+fields(model_paths)+'</div>'+catalog_note+'</fieldset>'
+        '<fieldset class="config-group" id="budget-settings"><legend>研究总上限</legend><div class="budget-fields">'+fields(budget_paths)+'</div>'
+        '<p class="note">三项都必须填写，达到任一上限研究就会停下来等你决定。tokens 是模型用量，不是金额；时间按实际研究活动累计，不算暂停等待；步数统计研究阶段及恢复、审计等控制动作。</p></fieldset>')
+    role_paths = [f'agent.roles.{role}.{key}' for role in 'HWAE' for key in ('model','reasoning_effort')]
+    configured = any(_get(document, path) is not None for path in role_paths)
+    rows.append('<details class="role-settings config-group" data-config-group="agent.roles"'+(' open' if configured else '')+'><summary>按角色指定模型'
+        + ('<span class="configured-note">已设置</span>' if configured else '<span class="summary-note">可选，留空沿用上面的模型</span>')
+        + '</summary><div class="config-matrix-scroll" role="region" aria-label="角色模型，可横向滚动" tabindex="0">'
+        '<table class="config-role-matrix role-settings-matrix"><caption class="config-sr-only">四个研究角色的模型覆盖</caption>'
+        '<thead><tr><th scope="col">研究角色</th><th scope="col">模型</th><th scope="col">推理力度</th></tr></thead><tbody>')
     for role in 'HWAE':
-        paths = [f'agent.roles.{role}.{key}' for key in ('model','reasoning_effort','service_tier')]
-        paths += [f'budget.node_targets.{role}.{key}' for key in ('max_observed_tokens','max_seconds')]
-        used.update(paths)
-        rows.append('<tr><th scope="row">'+role+' · '+ROLE_NAMES[role]+'</th>'+''.join('<td>'+control(by_path[path], matrix=True)+'</td>' for path in paths)+'</tr>')
-    rows.append('</tbody></table></div><details class="config-help role-settings-help"><summary>角色职责与用量说明</summary>'
-        '<div id="role-settings-help"><p>角色模型、推理力度与服务档位留空时沿用统一设置。单次用量留空时不单独声明；若自定义，请填写四个角色的全部八项。单次软目标不能扩大总预算。</p>'
-        + ''.join('<p><strong>'+role+' · '+ROLE_NAMES[role]+'</strong>：'+ROLE_HELP[role]+'</p>' for role in 'HWAE')
-        + '<p>原调用恢复、预算份额与交付等设置可能要求完整的单次用量配置。</p></div></details></details>')
+        paths = [f'agent.roles.{role}.{key}' for key in ('model','reasoning_effort')]
+        rows.append('<tr><th scope="row">'+role+' · '+ROLE_NAMES[role]+'<p class="note">'+ROLE_HELP[role]+'</p></th>'+''.join('<td>'+control(by_path[path], matrix=True)+'</td>' for path in paths)+'</tr>')
+    rows.append('</tbody></table></div><p class="note" id="role-settings-help">留空的角色沿用上面的模型与推理力度。</p></details>')
     rows.append(skill_picker())
-    used.update(f'agent.roles.{role}.skill_set' for role in 'HWAE')
-    rows.append(
-        '<details class="permission-settings"><summary>研究助手可以访问什么？<span class="summary-note">权限与联网</span></summary>'
-        '<p class="note">'+('以下为后续节点的权限声明；实验仍需满足自身的授权条件。' if edit else
-        '权限沿用统一配置，检查时会列出生效值。实验执行仍需自身的授权条件。')+'</p><div class="config-grid config-grid-four">'+fields(permissions)+'</div></details>')
-    rows.append('<details class="advanced-settings"><summary>更多研究配置<span class="summary-note">探索节奏、接入与恢复</span></summary>'
-        + ('<p class="note">探索节奏、实验执行、交付及研究合同可在下面调整。折叠后仍完整保留填写的值。</p>' if edit else
-        '<p class="note">日常创建只需上方任务、模型和总预算。下面可选配置不会自动增加权限或预算。已导入的值在折叠后仍完整保留。</p>'))
-    categories = [
-        ('补充任务与材料约束','research','已有全局补充原文、材料来源限制。'),
-        ('已有工程','project','可选：在准确 Git 工程路径使用声明目录；创建时冻结工程身份，权限与执行条件仍需满足。'),
-        ('研究技能集合','skills','可选：声明具名技能集合，再由角色或命名研究者明确选择。插件声明不会自动启用技能。'),
-        ('后端接入与原生设置','agent','采用默认后端时可保持留空。更换后端、启动程序或原生环境时按其声明设置。'),
-        ('探索节奏与用量分配','budget','设置实验探索切片、角色份额、补正阈值与输出体积限制；这些设置不增加总预算。'),
-        ('实验执行插件与资源','executor','仅在本次研究需要实验执行时接入。配置本身不会授予实验执行许可。'),
-        ('结果交付适配器','delivery','仅在需要向明确外部目标交付时配置，按适配器说明准备。'),
-        ('独立复核与原调用恢复','policies','声明复核合同、恢复边界与已接入的历史观察插件。'),
-        ('实例网页与宿主管理','ui','实例网页端口与宿主管理文件路径。'),
-        ('声明格式','version','导入配置的格式版本。'),
-    ]
-    for title, prefix, explanation in categories:
-        if edit and prefix in {'research', 'ui', 'version', 'project', 'skills'}:
-            continue
-        paths = [field.path for field in form_fields if field.path not in used and (field.path == prefix or field.path.startswith(prefix+'.'))]
-        regular = [path for path in paths if by_path[path].kind not in ('table','array') or path in GROUP_FIELDS]
-        expert = [path for path in paths if path not in regular]
-        configured = any(_get(document, path) is not None for path in paths)
-        rows.append('<details class="advanced-category" data-config-group="'+prefix+'"><summary>'+title+('<span class="configured-note">已配置</span>' if configured else '')+'</summary><p class="note">'+explanation+'</p>')
-        if prefix == 'budget':
-            for group_title, group_paths in [
-                ('探索切片', [path for path in regular if path.startswith('budget.breadth.')]),
-                ('补正阈值', [path for path in regular if path.startswith('budget.correction.')]),
-                ('输出与候选', [path for path in regular if path not in {'budget.role_shares'} and not path.startswith(('budget.breadth.', 'budget.correction.'))]),
-            ]:
-                rows.append('<fieldset class="config-group"><legend>'+group_title+'</legend><div class="config-grid config-grid-four">'+fields(group_paths, advanced=True)+'</div></fieldset>')
-            rows.append(fields(['budget.role_shares'], advanced=True))
+    current_supervision = _get(document, 'policies.supervision')
+    current_mode = current_supervision.get('mode') if isinstance(current_supervision, dict) else None
+    if isinstance(current_supervision, dict):
+        remainder = {key: value for key, value in extras.get('policies', {}).get('supervision', {}).items() if key != 'mode'}
+        if remainder == {key: value for key, value in _default_supervision().items() if key != 'mode'}:
+            extras['policies'].pop('supervision', None)
+            if not extras['policies']:
+                extras.pop('policies')
         else:
-            rows.append('<div class="config-grid config-grid-four">'+fields(regular, advanced=True)+'</div>')
-        if expert:
-            rows.append(fields(expert, advanced=True))
-        rows.append('</details>')
-    rows.append('<details class="advanced-category"><summary>其他导入字段 / 专家编辑</summary><p class="note">原样保留并校验额外字段；不支持的声明会在检查时提示。</p><div class="config-children" data-parent="@extra">'+tree(extras,'@extra')+'</div><button type="button" class="config-add secondary-button" data-parent="@extra">添加扩展字段</button></details></details>'
+            extras['policies']['supervision'] = remainder
+    supervision_control = ('<div class="config-field" data-config-path="policies.supervision.mode" data-error-label="自动方向复核">'
+        '<label for="config-policies-supervision-mode">自动方向复核</label><select id="config-policies-supervision-mode" name="cfg.policies.supervision.mode">'
+        + ('' if current_mode else '<option value="">默认（开启）</option>')
+        + ''.join('<option value="'+key+'"'+(' selected' if key==current_mode else '')+'>'+escape(label)+'</option>' for key, label in SUPERVISION_MODES)
+        + '</select><small class="field-help">W 连续做了较多实验后，是否请独立 A 检查研究方向。</small></div>')
+    rows.append(
+        '<details class="permission-settings"><summary>权限与自动复核<span class="summary-note">留空使用默认值</span></summary>'
+        '<div class="config-grid config-grid-four">'+fields(permissions)+'</div><div class="config-grid">'+supervision_control+'</div></details>')
+    executor_paths = ['executor.config.executor','executor.config.config_file']
+    configured = any(_get(document, path) is not None for path in executor_paths)
+    rows.append('<details class="executor-settings"'+(' open' if configured else '')+'><summary>实验执行插件'
+        + ('<span class="configured-note">已设置</span>' if configured else '<span class="summary-note">只在需要接入求解器等外部执行时填写</span>')
+        + '</summary><div class="config-grid">'+fields(executor_paths)+'</div></details>')
+    if edit:
+        for key in ('research', 'ui', 'version', 'project', 'skills'):
+            extras.pop(key, None)
+    advanced_note = ''
+    native_fields = [field for field in form_fields if field.path.startswith('agent.native.')]
+    if native_fields:
+        advanced_note += ('<details class="native-options"><summary>当前后端可用的原生选项（写在 <code>[agent.native]</code> 下）</summary><ul class="note">'
+            + ''.join('<li><code>'+escape(field.path.removeprefix('agent.native.'))+'</code>：'+escape(field.description or field.label)+'</li>' for field in native_fields)
+            + '</ul></details>')
+    if 'advanced_text' in draft:
+        advanced_text, fixed = draft['advanced_text'], draft.get('advanced_fixed', [])
+    else:
+        advanced_text, fixed = advanced_toml(extras)
+    if fixed:
+        advanced_note += ('<p class="note">以下设置包含空值（null），TOML 无法表示，已原样保留：'
+            + escape('、'.join('.'.join(keys) for keys, _ in fixed))
+            + '。如需修改，在上面写入同名键即可覆盖。</p>')
+    configured = bool(advanced_text.strip() or fixed)
+    rows.append('<details class="advanced-settings" id="advanced-settings"'+(' open' if 'advanced_text' in draft and configured else '')+'><summary>高级设置（TOML）'
+        + ('<span class="configured-note">已有设置</span>' if configured else '<span class="summary-note">恢复策略、原生环境、工程、交付等</span>')
+        + '</summary><p class="note">表单之外的所有设置都写在这里，格式与研究 TOML 文件相同，例如 <code>[policies.resume]</code>、<code>[agent.native]</code>、<code>[budget.breadth]</code>。'
+        + '留空表示全部使用默认值。保存或检查时会完整校验；与上方表单重复的键会提示冲突。字段说明见 docs/RESEARCH_CONFIGURATION.md。</p>'
+        + '<textarea name="advanced_toml" rows="'+str(min(30, max(6, advanced_text.count(chr(10))+2)))+'" spellcheck="false" class="advanced-toml" aria-label="高级设置（TOML）">'+escape(advanced_text)+'</textarea>'
+        + '<input type="hidden" name="advanced_fixed" value="'+escape(json.dumps(fixed, ensure_ascii=False),quote=True)+'">'
+        + advanced_note + '</details>'
         + ('</section>' if edit else '<div class="setup-actions"><button type="button" hidden class="secondary-button" data-setup-go="1">← 返回任务与材料</button><span class="note">下一步会检查配置，尚不创建或运行研究。</span></div></section>'))
+    catalog_json = json.dumps({name: [dict(id=m['id'], label=m['label'], efforts=m['efforts'], tiers=m['tiers']) for m in value.get('models', [])]
+        for name, value in catalogs.items()}, ensure_ascii=False).replace('<', '\\u003c')
+    rows.append('<script type="application/json" id="model-catalog">'+catalog_json+'</script>')
     rows.append('<script src="/assets/configuration.js"></script>')
     metadata='<input type="hidden" name="rendered_backend" value="'+escape(
         str(_get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND),quote=True)+'">'
@@ -948,6 +969,59 @@ document.addEventListener('DOMContentLoaded', () => {
   show(current, false);
   if (notice) notice.focus(); else if (current === 3) flow.querySelector('[data-setup-step="3"] h2')?.focus();
 });
+(() => {
+  const source = document.getElementById('model-catalog');
+  if (!source) return;
+  const catalogs = JSON.parse(source.textContent);
+  const backendSelect = document.querySelector('[name="cfg.agent.backend"]');
+  const backend = () => (backendSelect && backendSelect.value) || (backendSelect && backendSelect.dataset.default) || 'codex';
+  const text = (kind, scope) => document.querySelector('[data-picker-text="'+kind+'"][data-scope="'+scope+'"]');
+  const picker = (kind, scope) => document.querySelector('select[data-picker="'+kind+'"][data-scope="'+scope+'"]');
+  const modelFor = scope => {
+    const own = text('model', scope);
+    if (scope !== 'global' && own && own.value) return own.value;
+    const global = text('model', 'global');
+    return (global && (global.value || global.placeholder)) || '';
+  };
+  function fill(select) {
+    const kind = select.dataset.picker, scope = select.dataset.scope, input = text(kind, scope);
+    const models = catalogs[backend()] || [];
+    let values;
+    if (kind === 'model') values = models.map(model => [model.id, model.label === model.id ? model.id : model.label + ' · ' + model.id]);
+    else {
+      const model = models.find(item => item.id === modelFor(scope));
+      values = (model ? (kind === 'effort' ? model.efforts : model.tiers) : []).map(value => [value, value]);
+    }
+    if (!values.length) { select.hidden = true; input.hidden = false; return; }
+    select.replaceChildren();
+    const add = (value, label) => { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); };
+    add('', select.dataset.inherit);
+    values.forEach(([value, label]) => add(value, label));
+    add('__custom__', '自定义…');
+    const known = !input.value || values.some(([value]) => value === input.value);
+    select.value = known ? input.value : '__custom__';
+    select.hidden = false; input.hidden = known;
+  }
+  const all = () => document.querySelectorAll('select[data-picker]').forEach(fill);
+  document.addEventListener('change', event => {
+    const select = event.target.closest('select[data-picker]');
+    if (select) {
+      const input = text(select.dataset.picker, select.dataset.scope);
+      if (select.value === '__custom__') { input.hidden = false; input.focus(); }
+      else { input.value = select.value; input.hidden = true; }
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      if (select.dataset.picker === 'model') document.querySelectorAll('select[data-picker]:not([data-picker="model"])').forEach(fill);
+      return;
+    }
+    if (event.target === backendSelect) {
+      document.querySelectorAll('[data-catalog-note]').forEach(note => { note.hidden = note.dataset.catalogNote !== backend(); });
+      all();
+    }
+  });
+  all();
+  const openHash = () => { const target = location.hash && document.querySelector(location.hash); if (target && target.tagName === 'DETAILS') target.open = true; };
+  openHash(); window.addEventListener('hashchange', openHash);
+})();
 let next = Math.max(0, ...Array.from(document.querySelectorAll('.config-node')).map(node => Number(node.dataset.node)), ...Array.from(document.querySelectorAll('.config-string-list textarea')).map(node => Number(node.name.split('.').pop())));
 const update = node => {
   const kind = node.querySelector('.config-kind').value;

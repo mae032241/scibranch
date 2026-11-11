@@ -423,7 +423,7 @@ def test_service_backoff_presentation_remains_active_and_pausable(tmp_path):
     parts = ui._dashboard_parts(token, snapshot)
     assert '<form' not in parts['live-hero'] and '<button' not in parts['live-hero']
     assert 'action="/control/pause"' in parts['live-actions']
-    assert 'href="/configuration#recovery-settings"' in parts['live-actions']
+    assert 'href="/configuration#advanced-settings"' in parts['live-actions']
     tools = ui._more_actions(token, snapshot)
     assert 'action="/control/pause"' not in tools and 'action="/control/start"' not in tools
     assert 'action="/control/continue"' not in tools
@@ -499,7 +499,7 @@ def test_permanent_failure_overview_offers_pause_and_exact_current_task_fork(tmp
     assert 'href="/nodes/2/fork"' in actions and '放弃本次尝试并分支重做' in actions
     assert '不会重跑前一阶段' in actions and '新分支须声明新预算，创建后保持暂停' in actions
     assert '原尝试不删除，已用预算不退还' in actions
-    assert 'href="/configuration#recovery-settings"' in actions and '重试设置' in actions
+    assert 'href="/configuration#advanced-settings"' in actions and '重试设置' in actions
     assert 'private-token' not in page and '/private/provider' not in page and 'https://private.invalid' not in page
     assert not (root / 'pause.request').exists()
     _, _, read_headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
@@ -1468,7 +1468,7 @@ def test_configuration_reads_audited_budget_without_rewriting_frozen_settings(tm
 @pytest.mark.parametrize('change_budget', [False, True])
 def test_workspace_configuration_updates_are_queued_after_host_restart(tmp_path, monkeypatch, change_budget):
     from scidiscovery.research_loop import budget, configuration_updates, contracts as c
-    from test_configuration_form import Controls
+    from test_configuration_form import Controls, set_setting
     root, key = prepare(tmp_path, enabled=False)
     c.build_job(root, 1, 'H', [])
     stamp = dict(at_unix=1000., at_boottime=10., boot_id='historical-boot')
@@ -1523,7 +1523,7 @@ def test_workspace_configuration_updates_are_queued_after_host_restart(tmp_path,
 
 def test_configuration_update_retains_draft_and_applies_only_to_new_nodes(tmp_path):
     from scidiscovery.research_loop import configuration_updates, contracts as c
-    from test_configuration_form import Controls
+    from test_configuration_form import Controls, set_setting
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)
     c.build_job(root, 1, 'H', [])
@@ -1565,7 +1565,7 @@ def test_configuration_update_retains_draft_and_applies_only_to_new_nodes(tmp_pa
 
 def test_configuration_update_keeps_maintenance_csrf_and_revision_guards(tmp_path):
     from scidiscovery.research_loop import configuration_updates
-    from test_configuration_form import Controls
+    from test_configuration_form import Controls, set_setting
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)
     page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
@@ -1588,14 +1588,14 @@ def test_configuration_update_keeps_maintenance_csrf_and_revision_guards(tmp_pat
 
 def test_configuration_enables_explicit_host_and_signed_endpoint_without_starting_call(tmp_path):
     from scidiscovery.research_loop import configuration_updates, execution_authority as authority, instance_ui
-    from test_configuration_form import Controls
+    from test_configuration_form import Controls, set_setting
     root, key = prepare(tmp_path, enabled=False)
     ui, cookie = session(root, key)
     assert not ui.approvals and not (root / 'execution-authority/host-key-source.json').exists()
     page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
     fields = Controls(re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page, re.S).group(1)).fields
-    fields['cfg.policies.formal_review'] = 'true'
-    fields['cfg.policies.execution_authority'] = 'true'
+    set_setting(fields, 'policies.formal_review', True)
+    set_setting(fields, 'policies.execution_authority', True)
     with instance_ui._host_lock(root):
         ui._serving = True
         assert post(ui, cookie, 'configuration-update', fields)[0] == 303
@@ -1614,7 +1614,7 @@ def test_configuration_enables_explicit_host_and_signed_endpoint_without_startin
 
 def test_configuration_disabling_host_policy_preserves_old_request_decisions_and_restart(tmp_path):
     from scidiscovery.research_loop import configuration_updates, contracts as c, execution_authority as authority
-    from test_configuration_form import Controls
+    from test_configuration_form import Controls, set_setting
     from test_execution_authority import declared_request
     root, secret, arguments = declared_request(tmp_path)
     ref = authority.create_request(root, **arguments)
@@ -1624,7 +1624,7 @@ def test_configuration_disabling_host_policy_preserves_old_request_decisions_and
     ui, cookie = session(root, key)
     page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
     fields = Controls(re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page, re.S).group(1)).fields
-    fields['cfg.policies.execution_authority'] = 'false'
+    set_setting(fields, 'policies.execution_authority', False)
     assert post(ui, cookie, 'configuration-update', fields)[0] == 303
     assert configuration_updates.current(root).get('execution_authority_policy') is None
     assert ui.get('/requests/' + request_id, host=ui.host, cookie=cookie)[0] == 200

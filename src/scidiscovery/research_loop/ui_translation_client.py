@@ -77,6 +77,9 @@ SCRIPT = r'''
         + (failures.size > 3 ? '；另有 ' + (failures.size - 3) + ' 类失败，悬停对应原文查看原因。' : '') : '') + (state.supported === false ? ' · ' + state.unsupported_reason : '') + (message ? ' · ' + message : '');
     start.disabled = state.supported === false || sessionExpired || !state.configured || !state.enabled || !state.csrf.start || busy || !texts.some(text => ['missing','failed'].includes(entries.get(text)?.status || 'missing'));
     toggle.textContent = original ? '显示译文' : '显示原文';
+    const enabled = Boolean(state.configured && state.enabled);
+    start.hidden = toggle.hidden = !enabled;
+    status.hidden = !enabled && !message;
     clearTimeout(timer);
     if (pending && !busy && !sessionExpired) timer = setTimeout(() => lookup(texts.filter(text => entries.get(text)?.status === 'pending')), 1500);
   }
@@ -126,7 +129,7 @@ SCRIPT = r'''
       if (state && next.config_generation !== state.config_generation) { entries.clear(); seen.clear(); }
       state = next; active = true; paint();
       await lookup(sources().filter(text => !seen.has(text)));
-    } catch (error) { message = error.message; if (state) paint(); else status.textContent = message; }
+    } catch (error) { message = error.message; if (state) paint(); else { status.textContent = message; status.hidden = false; } }
   }
   window.addEventListener('focus', refreshState);
   refreshState();
@@ -135,6 +138,6 @@ SCRIPT = r'''
 
 TOOLBAR = ('<aside class="translation-tools" data-translation-url="/translation" aria-label="阅读与翻译">'
     '<a href="/reading">阅读与翻译</a> '
-    '<button type="button" class="secondary-button" data-translation-start disabled>翻译缺失内容</button> '
-    '<button type="button" class="secondary-button" data-translation-toggle>显示原文</button> '
-    '<span class="note" data-translation-status role="status">正在读取翻译缓存…</span></aside>')
+    '<button type="button" class="secondary-button" data-translation-start disabled hidden>翻译缺失内容</button> '
+    '<button type="button" class="secondary-button" data-translation-toggle hidden>显示原文</button> '
+    '<span class="note" data-translation-status role="status" hidden></span></aside>')

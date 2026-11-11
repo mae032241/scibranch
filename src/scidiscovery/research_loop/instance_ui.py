@@ -747,16 +747,19 @@ class InstanceUI:
         body = ''
         if getattr(self, 'global_workspace', None) is not None:
             body += '<nav><a href="__WORKSPACE_HOME__">← 全部工作区</a></nav>'
+        workspaces = ''
         if self.multi_workspace:
-            body += '<section><h2>工作区</h2><p>默认工作区：' + html.escape(str(self.root)) + '</p><ul>'
+            workspaces += ('<details class="workspace-switcher"' + (' open' if len(self.workspace_roots) > 1 else '') + '><summary>其他工作区'
+                + ('（' + str(len(self.workspace_roots) - 1) + ' 个）' if len(self.workspace_roots) > 1 else '') + '</summary>'
+                '<p class="note">工作区只是分组保存研究的目录；通常使用默认工作区即可。默认工作区：' + html.escape(str(self.root)) + '</p><ul>')
             for index, root in enumerate(tuple(self.workspace_roots)[1:], 1):
                 try:
                     child = self._workspace_child(index)
                     link = '/workspaces/' + str(index) + '/manage?token=' + child.management_token
-                    body += '<li><a href="' + html.escape(link, quote=True) + '">' + html.escape(str(root)) + '</a> · ' + str(len(child.instance_roots) - 1) + ' 个已登记实例</li>'
+                    workspaces += '<li><a href="' + html.escape(link, quote=True) + '">' + html.escape(str(root)) + '</a> · ' + str(len(child.instance_roots) - 1) + ' 个已登记实例</li>'
                 except Exception as error:
-                    body += '<li>' + html.escape(str(root)) + ' · ' + html.escape(str(error)) + '</li>'
-            body += '</ul>' + self._form(token, 'workspace-open', '<label>工作区目录<input name="root" required placeholder="已有工作区的完整目录"></label>', '添加工作区') + '</section>'
+                    workspaces += '<li>' + html.escape(str(root)) + ' · ' + html.escape(str(error)) + '</li>'
+            workspaces += '</ul>' + self._form(token, 'workspace-open', '<label>工作区目录<input name="root" required placeholder="已有工作区的完整目录"></label>', '添加工作区') + '</details>'
         if self.catalog_errors:
             body += '<p class="note" role="alert">' + '<br>'.join(html.escape(item) for item in dict.fromkeys(self.catalog_errors)) + '</p>'
         body += ('<p class="setup-intro">准备一项新研究，或继续已有的工作。每个研究单独保存任务、预算、进度和结果。</p>'
@@ -766,7 +769,7 @@ class InstanceUI:
         body += self._form(token, 'open', '<label>实例目录<input name="root" required placeholder="已有实例的完整目录"></label>', '加载实例')
         body += '</section></div><section><h2>已加载的实例</h2><p class="note">显式加载的实例目录保存在此工作区；重启后可继续访问。不会搜索其他目录。</p>'
         body += '<div id="live-instances">' + self._loaded_instances() + '</div>'
-        body += '</section><details><summary>工作台信息</summary><p class="note">工作台目录：' + html.escape(str(self.root)) + '</p></details>'
+        body += '</section>' + workspaces + '<details><summary>工作台信息</summary><p class="note">工作台目录：' + html.escape(str(self.root)) + '</p></details>'
         return 200, self._page('研究工作台', body), {}
 
     def _new_research_page(self, token, *, draft=None, selection='', preview=None, notice='', frozen='', config_path='', save_path=''):
@@ -1671,7 +1674,7 @@ class InstanceUI:
                 href='/results', action='查看阶段结论')]
             hero = ui.hero({}, status)
             return {'live-hero': hero, 'live-actions': ui.actions(attention=attention,
-                        settings_href='/configuration#recovery-settings' if manager else None),
+                        settings_href='/configuration#advanced-settings' if manager else None),
                     'live-usage': self._fragment(ui.stats, error), 'live-activity': '', 'live-trail': self._fragment(ui.trail, error),
                     'live-token-monitor': ''}
         view = snapshot['view']
@@ -1697,7 +1700,9 @@ class InstanceUI:
         primary=self._primary(token, manager, snapshot, status)
         actions = self._fragment(ui.actions, primary=primary,
                        attention=self._attention(token, manager, snapshot, status),
-                       settings_href='/configuration#recovery-settings' if manager else None,
+                       # Retry/recovery settings only matter when a service or task failed.
+                       settings_href='/configuration#advanced-settings' if manager and status['state'] in {
+                           'service_wait', 'service_error', 'unknown', 'error', 'not_submitted'} else None,
                        notices=([headline] if len(headline)>180 else [])+self._notices(snapshot, receipt))
         mechanisms = projection if 'error' in projection else (projection.get('mechanism_trails') or
             dict(error=dict(kind='Unavailable', message='机制记录暂不可读')))
