@@ -40,6 +40,28 @@ class Backend(ABC):
         """Optional native capability; older providers remain unsupported."""
         return dict(status='unsupported', reason='native_subagents_unsupported')
 
+    def begin_turn_input(self, root, job, work, attempt, *, task_ref, base):
+        """Optional input into an existing native turn; never start another call."""
+        return None
+
+    def poll_turn_input(self, context, *, thread=None, turn=None, event=None):
+        from . import turn_input
+        try:
+            return turn_input.poll(context, thread=thread, turn=turn, event=event)
+        except turn_input.QueueArtifactError:
+            return turn_input.disable(context)
+
+    def retire_turn_input(self, context):
+        from . import turn_input
+        try:
+            return turn_input.retire(context)
+        except turn_input.QueueArtifactError:
+            return turn_input.disable(context)
+
+    def end_turn_input(self, context):
+        from . import turn_input
+        return turn_input.end(context)
+
     @staticmethod
     def resume_policy_defaults():
         """Pure provider grammar; launcher qualification remains a preparation check."""
@@ -447,7 +469,7 @@ class CodexEvents:
                         else:
                             self.selected = self.kind in {'thread.started', 'thread.observed', 'turn.completed',
                             'turn.failed', 'turn.incomplete', 'turn.interrupted', 'turn.started',
-                            'context.reported', 'context.compacted', 'transport.diagnostic', 'error'}
+                            'context.reported', 'context.compacted', 'transport.diagnostic', 'turn.input', 'error'}
                     elif len(self.pending) > self.HEADER_BYTES or complete:
                         self.selected = False
                     # The same chunk may contain a selected message/control.
@@ -962,6 +984,13 @@ class Codex(Backend):
         native_app_server.invocation(args)
         return [sys.executable, str(Path(native_app_server.__file__)), '--', *args]
 
+    def begin_turn_input(self, root, job, work, attempt, *, task_ref, base):
+        if not self.app_server_transport:
+            return None
+        from . import turn_input
+        self._turn_input = turn_input.begin(root, job, work, attempt, task_ref=task_ref, base=base)
+        return self._turn_input
+
     def meter(self, home, work, session=None, *, context_state=None):
         return SessionUsage(home,work,session=session,context_state=context_state)
 
@@ -978,6 +1007,8 @@ class Codex(Backend):
 
     def event(self, value):
         kind = value.get('type')
+        if kind == 'turn.input':
+            return dict(turn_input=value)
         if kind=='transport.diagnostic':
             selected=transport_diagnostic(value.get('diagnostic'))
             return dict(transport_diagnostic=selected) if selected is not None else {}
@@ -1047,6 +1078,13 @@ class Codex(Backend):
         return budget_notice.stage_helper(work)
 
     def prepare_launch(self, args, work, attempt, env, view_facts, context, *, diagnostic=None):
+        queue = getattr(self, '_turn_input', None)
+        if queue is not None:
+            from . import turn_input
+            view_facts = dict(view_facts, mounts=dict(view_facts['mounts'],
+                mappings=dict(view_facts['mounts']['mappings'])))
+            view_facts['mounts']['mappings'][str(queue['visible'])] = queue['inbox']
+            env[turn_input.ENV] = str(queue['visible'])
         return _codex_notice_launch(self,args,work,attempt,env,view_facts,context,diagnostic=diagnostic)
 
     def configure_observation(self, meter, work, attempt, thread, channel, *, required):

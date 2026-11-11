@@ -75,7 +75,8 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
         budget_status=None, remaining=None, execution_interface=None, managed_command=None,
         author=None, final_return=False):
     """Pure rendering of the complete request; no later response-format appends."""
-    from . import contracts as c
+    from . import budget_notice, contracts as c
+    ordinary_w=budget_notice.ordinary_worker(job,intent,author=bool(author),final_return=final_return)
     formal=bool(job.get('formal_review'))
     schema=c.result_schema(job['role'],job.get('handoff_protocol',c.HANDOFF_PROTOCOL),
         'selection' in job,**c.response_options(job))
@@ -109,14 +110,14 @@ def render_scientific_request(job, task, intent, *, backend_name, instruction_tr
                 'Reference token/time/step ceilings do not revoke this accepted return; original call limits, '
                 'permissions and delivery qualification still apply.')
         else:
-            prompt+=' Targets soft; limits/permissions bind.'
+            prompt+=(' Original limits/permissions bind.' if ordinary_w else ' Targets soft; limits/permissions bind.')
             if (job['role'] in {'A','H','W'} and not author
                     and not intent.get('output_repair') and not intent.get('work_repair')
                     and purpose(job) not in {'closeout','worker_consultation','delivery_review','delivery_correction'} and not job.get('final_report') and not job.get('final_only')):
                 prompt+=' Goals remain.'
-                if job['role'] in {'H','W'}:
+                if job['role']=='H':
                     prompt+=' Follow-up targets advise; no grant/required handoff.'
-                else:
+                elif job['role']=='A':
                     prompt+=(' Complete the requested judgment; follow role_contract. Soft targets do not end research. '
                         'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.')
                 if job['role']=='W':prompt+=' Wait 10-30s on pending originals within deadlines.'
@@ -498,12 +499,16 @@ def run_native(root: Path, step: int, attempt=0):
         task=dict(task,review_instruction=formal_review.public(root,job)['review']['instruction'])
     status=dict(shared_seconds_remaining=None if limits['seconds_remaining'] is None else max(0,int(limits['seconds_remaining'])),
         shared_observed_tokens_remaining=budget_limits.remaining(limits['max_tokens'],budget.get('accounted_tokens',budget['observed_tokens'])))
-    if intent.get('budget_slice'):status['node_budget']=intent['budget_slice']['limits']
+    from . import budget_notice
+    ordinary_w=budget_notice.ordinary_worker(job,intent,final_return=final_return is not None)
+    if intent.get('budget_slice') and not ordinary_w:status['node_budget']=intent['budget_slice']['limits']
     remaining=None
     if attempt:
-        remaining=dict(remaining_observed_tokens=max(0,intent['budget_slice']['limits']['max_observed_tokens']-intent['budget_slice']['previous_tokens']),
-            remaining_active_seconds=max(0.,intent['budget_slice']['limits']['max_seconds']-control_budget._node_duration(root,job,intent,limits)),
-            mode='soft_targets',previous_consumed_observed_tokens=intent['budget_slice']['previous_tokens'])
+        remaining=dict(previous_consumed_observed_tokens=intent['budget_slice']['previous_tokens'])
+        if not ordinary_w:
+            remaining.update(remaining_observed_tokens=max(0,intent['budget_slice']['limits']['max_observed_tokens']-intent['budget_slice']['previous_tokens']),
+                remaining_active_seconds=max(0.,intent['budget_slice']['limits']['max_seconds']-control_budget._node_duration(root,job,intent,limits)),
+                mode='soft_targets')
     command=None;interface=None
     if experiment_config is not None:
         interface=experiment_config['execution_interface']
@@ -646,6 +651,7 @@ def run_native(root: Path, step: int, attempt=0):
     public_clean = public_output.cleaner(root, settings)
     scientific_lifetime = ExitStack()
     code_exports = []
+    turn_input_context = None
     launch_started = False
     bridge_stopped = False
     def observe_interrupt():
@@ -689,6 +695,8 @@ def run_native(root: Path, step: int, attempt=0):
             limits,advice_facts=advice_cut()
             view_context=_shared_view_context(root,job,intent,limits,final_return=final_return,
                 author_permit=permit if intent.get('continuation_kind')=='author_closeout' else None)
+            turn_input_context=backend.begin_turn_input(root,job,work,attempt,
+                task_ref=intent['task_ref'],base=settings)
             view_sources=shared_input_views.load_source_facts(root,job,work,
                 native=native_facts,policy=settings,
                 include_wake=namespace_launcher is None,author_facts=author_context_facts,
@@ -750,6 +758,7 @@ def run_native(root: Path, step: int, attempt=0):
                 else:
                     process.stdin.close()
                 while selector.get_map() or process.poll() is None:
+                    turn_input_events=[]
                     for key, _ in selector.select(1):
                         if key.fileobj is process.stdin:
                             try:
@@ -794,6 +803,10 @@ def run_native(root: Path, step: int, attempt=0):
                                     public_log.write(json.dumps(published,ensure_ascii=False)+'\n')
                                     public_log.flush()
                             event = backend.event(event)
+                            if event.get('completed') or event.get('terminal_failure'):
+                                backend.retire_turn_input(turn_input_context)
+                            if event.get('turn_input') is not None:
+                                turn_input_events.append(event['turn_input'])
                             if event.get('transport_diagnostic') is not None:
                                 technical_diagnostic=event['transport_diagnostic']
                             if event.get('thread_event') is not None:
@@ -842,6 +855,9 @@ def run_native(root: Path, step: int, attempt=0):
                             elif event.get('completed'):
                                 terminal_usage_missing = True
                     observation = backend.poll_observation(live_meter)
+                    for turn_input_event in turn_input_events or [None]:
+                        backend.poll_turn_input(turn_input_context,thread=thread_id,
+                            turn=observation.get('turn_id'),event=turn_input_event)
                     observe_interrupt()
                     stop = stop or metadata_stop(observation,
                         required=context_policy is not None and checkpoint.ordinary_worker(job))
@@ -885,6 +901,12 @@ def run_native(root: Path, step: int, attempt=0):
             'native_metadata_unsupported' if isinstance(error, MetadataUnavailable) and process is None else
             'shared_input_view_unsupported' if isinstance(error,UnsupportedExecution) and process is None else 'native_error_unknown')
     finally:
+        try:
+            backend.end_turn_input(turn_input_context)
+        except BaseException as turn_input_error:
+            if error is None:
+                error=turn_input_error
+                stop='native_error_unknown'
         try:
             scientific_lifetime.close()
             bridge_stopped = True

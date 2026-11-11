@@ -501,7 +501,8 @@ def test_backend_refresh_reloads_selected_catalog_without_previewing_task(tmp_pa
         restored=controls(page)
         assert restored['cfg.agent.model']=='custom/exact:model[1]'
         assert restored['cfg.agent.roles.W.model']=='custom/worker:model[2]'
-        assert 'fast_mode = false' in restored['advanced_toml']
+        assert restored['cfg.agent.native.features.fast_mode'] == 'false'
+        assert 'fast_mode' not in restored['advanced_toml']
         assert b'data-resume-protocol="codex_exec_resume"' in page
         assert not (workspace/'missing-task.md').exists()
 

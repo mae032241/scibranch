@@ -123,7 +123,7 @@ def _controlled_transport(value, launch, session, prompt_hash):
             or type(source.get('version')) is not int or source['version'] != 1
             or source.get('path') != observer['extension'] or not _hash(source.get('sha256')) or type(source.get('size_bytes')) is not int
             or source['size_bytes'] <= 0
-            or not isinstance(value, dict) or set(value) != {'type', 'version', 'argv', 'session_id',
+            or not isinstance(value, dict) or set(value) - {'turn_inputs'} != {'type', 'version', 'argv', 'session_id',
                 'path', 'workspace', 'profile', 'resource_policy', 'resources', 'observer_start', 'observer_command',
                 'prompt_sha256', 'disposition', 'settled', 'idle', 'stdin_closed', 'stdout_eof', 'drained',
                 'pending_commands', 'returncode'} or value.get('type') != CONTROLLED_EXIT
@@ -143,6 +143,20 @@ def _controlled_transport(value, launch, session, prompt_hash):
         raise ValueError('pi_authorship_transport_incomplete')
     if runtime_resource_mode(value['resource_policy']) != mode:
         raise ValueError('pi_authorship_resource_profile_changed')
+    inputs = value.get('turn_inputs', [])
+    seen = set()
+    if not isinstance(inputs, list): raise ValueError('pi_authorship_turn_inputs_changed')
+    for receipt in inputs:
+        if (not isinstance(receipt, dict) or set(receipt) != {'type', 'input_id', 'channel_id',
+                'thread', 'turn', 'status', 'payload_sha256'}
+                or receipt.get('type') != 'turn.input' or receipt.get('status') != 'accepted'
+                or receipt.get('thread') != session['thread_id'] or not _hash(receipt.get('payload_sha256'))
+                or not isinstance(receipt.get('turn'), str) or not receipt['turn']
+                or any(not isinstance(receipt.get(key), str)
+                    or re.fullmatch('[0-9a-f]{32}', receipt[key]) is None for key in ('input_id', 'channel_id'))
+                or receipt['input_id'] in seen):
+            raise ValueError('pi_authorship_turn_inputs_changed')
+        seen.add(receipt['input_id'])
     start = value.get('observer_start')
     if not isinstance(start, dict) or validate_start(dict(start, type=START), observer,
             session=session['thread_id']) != start:
@@ -204,9 +218,12 @@ def _participant_from_facts(outcome, intent, workspace):
         raise ValueError('pi_authorship_session_changed')
     persisted = proof['persisted']; user = persisted['user']; delivery = persisted['delivery']
     _controlled_transport(proof['transport'], proof['launch'], session, user['prompt_sha256'])
+    if (any(row['turn'] != user['id'] for row in proof['transport'].get('turn_inputs', []))
+            or len({row['channel_id'] for row in proof['transport'].get('turn_inputs', [])}) > 1):
+        raise ValueError('pi_authorship_turn_input_call_changed')
     def entry_id(value):
         return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,256}', value) is not None
-    if (set(persisted) != {'user', 'leaf', 'baseline_leaf', 'baseline_count', 'baseline_offset',
+    if (set(persisted) - {'supplemental_users'} != {'user', 'leaf', 'baseline_leaf', 'baseline_count', 'baseline_offset',
                 'entry_count', 'branch_sha256', 'responses', 'delivery'}
             or set(user) != {'id', 'prompt_sha256'}
             or set(delivery) != {'source', 'nonce', 'attempt', 'sequence', 'acknowledged', 'pending', 'fault', 'terminal'}
@@ -242,6 +259,17 @@ def _participant_from_facts(outcome, intent, workspace):
     if not isinstance(rows, list) or not 1 <= len(rows) <= 65536:
         raise ValueError('pi_authorship_responses_missing')
     ids = set()
+    supplemental = persisted.get('supplemental_users', [])
+    if not isinstance(supplemental, list): raise ValueError('pi_authorship_supplemental_users_changed')
+    input_ids = set()
+    for row in supplemental:
+        receipt = row.get('receipt') if isinstance(row, dict) else None
+        if (not isinstance(row, dict) or set(row) != {'id', 'receipt'} or not entry_id(row.get('id'))
+                or row['id'] in ids | {user['id']} or not isinstance(receipt, dict)
+                or receipt not in proof['transport'].get('turn_inputs', [])
+                or receipt.get('turn') != user['id'] or receipt['input_id'] in input_ids):
+            raise ValueError('pi_authorship_supplemental_users_changed')
+        ids.add(row['id']); input_ids.add(receipt['input_id'])
     for row in rows:
         if (not isinstance(row, dict) or set(row) != {'id', 'status', 'profile', 'final'}
                 or not entry_id(row.get('id')) or row['id'] in ids | {user['id']}
@@ -515,6 +543,7 @@ class PiEvents:
         self.failures = []; self.recovering = set(); self.recovered = set()
         self.unidentified_compaction = False
         self.identified_compaction_tokens = dict.fromkeys(self.usage.live['compaction'], 0)
+        self.turn_input_payloads = set()
 
     def failure(self, source=None, *, kind='turn.failed', fatal=True, activity=True):
         failure = failure_projection(source or {}, event_type=kind)
@@ -626,6 +655,12 @@ class PiEvents:
             reason = 'pi_transport_fault'
             if isinstance(code, str) and code in FAULT_CODES: reason += ':' + code
             self.accounting_only = True; self.usage.unknown(reason); return self.failure()
+        if kind == 'queue_update':
+            steering = value.get('steering')
+            return (dict(activity=True) if isinstance(steering, list) and value.get('followUp') == []
+                and all(isinstance(text, str) and text in self.turn_input_payloads for text in steering)
+                and len(steering) == len(set(steering))
+                else self.failure())
         if self.accounting_only or self.settled:
             self.accounting_only = True; self.usage.unknown('pi_activity_after_settlement'); return self.accounting_event(value)
         if kind == 'pi.session_bound':
@@ -696,8 +731,6 @@ class PiEvents:
         if kind in {'turn_failed', 'turn_incomplete', 'turn_interrupted', 'turn.failed', 'turn.incomplete', 'turn.interrupted'}:
             return self.failure(value, kind=kind.replace('turn_', 'turn.'), fatal=False)
         if kind == 'extension_error': return self.failure()
-        if kind == 'queue_update':
-            return dict(activity=True) if value.get('steering') == [] and value.get('followUp') == [] else self.failure()
         if kind == 'entry_appended':
             entry = value.get('entry')
             if not isinstance(entry, dict): return self.failure()
@@ -775,6 +808,20 @@ class Pi(Backend):
         self._job = None
         self._notice_channel = None
         self._notice_writable = False
+        self._turn_input = None
+
+    def begin_turn_input(self, root, job, work, attempt, *, task_ref, base):
+        from . import turn_input
+        self._turn_input = turn_input.begin(root, job, work, attempt, task_ref=task_ref, base=base)
+        return self._turn_input
+
+    def poll_turn_input(self, context, *, thread=None, turn=None, event=None):
+        super().poll_turn_input(context, thread=thread, turn=turn, event=event)
+        if event is not None and event.get('status') == 'accepted':
+            from .turn_input import request_for_receipt
+            request = request_for_receipt(context, event)
+            if request is not None and self._meter is not None and self._meter.observation is not None:
+                self._meter.observation.turn_inputs[request['input_id']] = dict(event)
 
     @staticmethod
     def default_launcher(): return ['pi']
@@ -1037,6 +1084,13 @@ class Pi(Backend):
     def event_selector(self, *, source): return PiEventSelector()
     def event(self, value):
         from .pi_observation import BOUND
+        if value.get('type') == 'turn.input':
+            # This frame is emitted only by the bridge; native stdout frames
+            # with this type are rejected before forwarding. Retained proof
+            # additionally requires the host owner's exact queued original.
+            if value.get('status') == 'submitting' and isinstance(value.get('payload'), str):
+                self.engine.turn_input_payloads.add(value['payload'])
+            return dict(turn_input=value)
         from .pi_transport import CONTROLLED_EXIT
         if value.get('type') == CONTROLLED_EXIT:
             try:
@@ -1150,6 +1204,10 @@ class Pi(Backend):
         self._notice_writable = not view_facts.get('readonly', True) and self._observer_staged
         channel = dict(status='unavailable', reason='not_preflighted' if self._notice_writable else 'helper_unavailable')
         self._notice_channel = channel
+        if self._turn_input is not None:
+            from .turn_input import ENV
+            view_facts['mounts']['mappings'][str(self._turn_input['visible'])] = self._turn_input['inbox']
+            env[ENV] = str(self._turn_input['visible'])
         return self.wrap_launch(args, view_facts), channel
     def prepare_execution(self,root,step,record,work,home,args,*,resume_position,job,intent,settings,
                           source_facts,selected_code,material_sources):

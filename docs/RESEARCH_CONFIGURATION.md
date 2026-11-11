@@ -12,35 +12,76 @@ an adapter or successful command does not qualify a model, browser or solver.
 ## Prepare once / 一次准备
 
 The independent workspace webpage starts with a blank structured form: enter the
-task, public material directory, new instance directory and finite budgets. Role,
-permission, execution, delivery and policy groups are optional advanced settings. Role models and stage targets
-share a compact role table; related limits use grouped fields with units and expandable
-help. Role budget shares and resume options use labelled controls. Plugin
-structures retain an expandable typed editor for lossless import/edit/export. Opening
-More research settings shows separately collapsible categories. Expanding a category
-reveals compact grouped fields, including role shares and resume parameters. Plugin
-entries use compact key/type/value rows. No
-configuration file is required.
-Check the complete effective preview, explicitly create the instance, then start
-research separately. Editing the form after checking requires a new preview.
-The form also imports and exports `[project]`, `skills.sets`, named Workers and
-role `worker`/`skill_set` references. Declaring an optional set does not select it;
-an explicit role or Worker selection enables use. Existing-instance edits retain
-the original project and set inventory; operational revisions cannot replace them.
+task, public material directory, new instance directory and shared budgets. Models
+include global settings and H/W/A/E overrides for model, reasoning and service tier.
+Explicit role settings override the named Worker's settings, then global settings;
+Final A uses the A profile. Provider descriptions identify unsupported fields, such
+as Pi's service tier; incompatible imported values remain visible and clearable.
+The model catalog supplies suggestions only; exact declared values remain authoritative.
 
-独立工作台从空白表单开始，只显示日常需要的字段：任务原文、公开材料目录、新实例目录、
-后端 → 模型 → 推理力度 / 服务档位（按已安装后端的模型目录给出下拉选项，也可选“自定义”
-填写精确 ID；Codex 读取 `models_cache.json`，Pi 读取 `pi --list-models`，读不到时退回文本框）、
-三项有限预算，以及可选的角色模型、技能勾选、权限、自动方向复核（`policies.supervision.mode`）
-和实验执行插件。模型目录只用于编辑时给出选项，准备、冻结与执行仍只校验写入的精确值。
-其余设置统一在“高级设置（TOML）”文本框中编辑，格式与研究 TOML 文件相同；已有实例预填
-当前生效的这部分配置。表单字段与 TOML 写同一个键时提示冲突；表单上没有的键原样保留。
-TOML 无法表示的空值（null）随表单原样保留，写同名键即可覆盖。无需先写 TOML 文件，
-也不自动读取工作区已有任务或配置。检查完整有效预览后明确创建，再单独开始研究；
-修改参数后须重新预览。
-表单同样支持 `[project]`、`skills.sets`、命名 Worker 与角色 `worker`/`skill_set` 引用的
-导入及导出。声明可选集合本身不启用，须由角色或 Worker 显式选择。已有实例编辑保留
-原工程和集合清单，不能通过运行配置修订替换。
+Collapsed groups expose H/A/E single-work observed-token and active-time targets,
+original-call recovery and retry/backoff limits, Worker context/window
+settings, automatic-A count/spacing/cost controls, exact launcher argv, and the selected
+Backend's public native fields. Unlimited shared token/time totals open the target
+group. Ordinary W has no additional token/time closeout target; it uses context
+windows and shared budgets. Near 90% of the shared token ceiling, W may receive a
+shared-budget reminder based on cumulative input plus output tokens; this is not a
+W node target or an additional time closeout condition. Existing finite W values stay in advanced TOML only as
+original-call recovery/accounting anchors, without serving as ordinary W closeout
+conditions. Complete target declarations still require the W anchor under current
+validation; entering H/A/E alone does not invent one. H/A/E targets advise bounded
+conclusions; they do not grant execution permission or force ordinary A. Ordinary A returns advice
+and W decides the next research action. Context handoff thresholds remain fixed:
+prepare a safe checkpoint at 90%; native compaction may continue, and handoff occurs
+only when current post-compaction occupancy remains above 70%.
+
+Opening a section never declares an optional policy or native override. To add a
+recovery policy, explicitly check its declaration box before editing; empty imported
+groups, explicit false, empty strings/arrays and null retain their original meanings.
+Recovery protocol, usage scope and native home stay in expert TOML. Native controls
+come from the selected provider's public descriptors; switching providers retains
+each provider's native options and exact launcher argv as separate form drafts.
+The launcher editor stores one literal argument per row without shell splitting.
+Collections containing CR or LF stay in escaped advanced TOML so browser textarea
+normalization cannot change their exact line endings.
+
+Other settings remain in Advanced settings (TOML), including project, delivery,
+plugin structures, named Workers and unknown imported extensions. Duplicate keys
+between visible controls and TOML are errors. TOML-inexpressible null values travel
+unchanged beside the text; a visible or TOML value at the same key replaces them.
+No configuration file is required or loaded implicitly. Check the effective preview,
+explicitly create the instance, then start research separately; editing requires a
+new preview. Existing-instance changes apply to the next new node and preserve
+original project and Skill-set inventory. Declaring a Skill set does not enable it;
+a role or named Worker must select it.
+
+独立工作台从空白表单开始：填写任务、公开材料目录、新实例目录及共享预算。全局模型与
+H/W/A/E 角色模型、推理力度、服务档位分别设置；角色显式值优先，其次命名 Worker，再次
+全局设置；Final A 使用 A 的配置。后端说明会标出不支持的字段（如 Pi 的服务档位），已有
+不兼容值仍可见、可清除。模型目录只提供建议，准备与执行仍使用准确声明值。
+
+折叠区提供 H/A/E 单次工作 observed-token／活动时间软目标、原调用恢复与
+retry／continue／退避上限、W 上下文与窗口、自动 A 次数／间距／累计比例、准确 launcher argv
+及当前后端公开的原生选项。共享 tokens／时间为 unlimited 时自动展开目标区。普通 W 不设
+额外时间/tokens 收口目标，仅依据上下文窗口与总预算。全局累计输入加输出 token 接近
+总上限 90% 时仍可提醒 W，这是共享预算提醒，不是 W 节点目标或额外时间收口条件。
+已有 W 有限值留在高级 TOML，
+仅作原调用恢复／计量锚点，不是普通 W 收口条件；当前完整声明校验仍要求 W 锚点，
+仅填写 H/A/E 不自动补造数值。H/A/E 软目标提示收口，不授执行权限或强制普通 A；普通 A 给建议，W 决定
+下一研究动作。交接规则固定：90% 时准备安全检查点，原生压缩可继续；仅当当前压缩后占用
+仍超过 70% 时交接，界面不提供可调阈值或协议版本。
+
+展开分组不声明可选策略或原生覆盖。新增恢复策略须明确勾选声明；已导入空组、false、
+空文本／数组及 null 均保留原义。恢复协议、计量范围、原生 home 留在高级 TOML 中。
+原生控件来自所选后端的公开描述；切换后端分别保留原生选项与准确 launcher argv 草稿。
+launcher 每行是一项字面参数，不按 shell 拆词。含 CR 或 LF 的整组文本保留在转义的高级
+TOML 中，避免浏览器 textarea 规范化改变准确换行字节。
+
+其余工程、交付、插件结构、命名 Worker 与未知导入扩展保留在高级设置（TOML）。表单与
+TOML 重复同一键时提示冲突。TOML 无法表示的 null 随表单保留，同名表单或 TOML 值可覆盖。
+无需配置文件，也不隐式读取已有文件。检查完整预览后明确创建，再单独开始研究；修改后
+须重新检查。已有实例修订只作用于后续新节点，保留原工程与 Skill 集合清单；声明集合本身
+不启用 Skill，须由角色或命名 Worker 明确选择。
 
 TOML is an optional import/export and explicit save format. Imports populate the
 same controls. Save/update writes only the explicitly selected configuration file;
@@ -264,8 +305,8 @@ argv elements are literal native arguments, so use absolute paths for their inpu
 | `agent.native.features` | Codex-specific / Codex 专用: `fast_mode` (boolean) |
 | `agent.native.resource_mode` | Pi-specific / Pi 专用: `closed` (default when omitted / 省略时默认) or explicit / 显式 `configured`; see native resources and permissions below / 原生资源与权限见下文。 |
 | `budget` | Required finite / 必填有限值: `max_tokens`, `max_seconds`, `max_steps`; optional / 可选: `candidate_extra_slots`, `portfolio_review_after_cycles`, `node_targets`, `role_shares`, `breadth`, `correction`, `storage`; legacy `max_output_item_bytes`, `max_output_total_bytes` remain accepted/frozen without file-byte enforcement / 旧字节字段仍接受并冻结，不限制文件字节 |
-| `budget.node_targets.H`, `.W`, `.A`, `.E` | Complete positive finite role targets with `max_observed_tokens` and `max_seconds`; token targets are advisory, as is W time under its context-window policy; saved legacy fragments retain their time review cadence / 四角色完整正有限目标；token 为建议，W 上下文窗口策略下时间目标也为建议，旧冻结 fragment 保留原时间复核节奏，不增加总额 |
-| `budget.breadth` | `max_w_seconds`, `max_w_observed_tokens`, `max_requested_repairs`; optional positive integer / 可选正整数 `initial_calls` |
+| `budget.node_targets.H`, `.W`, `.A`, `.E` | Complete declarations retain positive finite `max_observed_tokens` and `max_seconds` for all roles. H/A/E values are advisory targets; W values are retained original-call recovery/accounting anchors, without ordinary W token/time closeout advice. / 完整声明保留四角色正有限值；H/A/E 为软目标，W 值仅保留原调用恢复／计量锚点，不向普通 W 提供时间／token 收口建议 |
+| `budget.breadth` | Retained W anchors / 保留的 W 锚点: `max_w_seconds`, `max_w_observed_tokens`; `max_requested_repairs`; optional positive integer / 可选正整数 `initial_calls` |
 | `budget.correction` | `review_after`, `pause_after` (explicit optional correction policy / 显式可选补正策略) |
 | `budget.storage` | Existing storage-policy object: `version = 1`, `enabled`, optional positive count limits `max_scan_entries`, `max_files`; disabled by default. Legacy positive `max_file_bytes`, `max_total_bytes`, `max_instance_bytes` remain accepted/frozen without byte enforcement. See [managed retention](ROOTLESS_CLI.zh-CN.md#受管本地实验). / 默认关闭的既有存储策略；启用须有明确正整数项，文件/条目数继续有效，旧字节字段只接受并冻结。 |
 | `executor` | `mode` (`local` or `external`), `config` (existing `executor`/`configuration` object), `resource_policy` (existing cumulative allowance contract) |
@@ -298,14 +339,15 @@ Codex defaults are `gpt-6.1-sol`, reasoning effort `high`, service tier `default
 and launcher `["codex"]`. A standard single-command Codex launcher defaults to
 host-configured local experiments and at most two output-only repairs in the original
 native home, plus a separate bounded automatic-recovery policy. Without explicit
-node targets each role references the original total ceilings. Protocol requires an explicit launcher and model, and does not invent
+node targets each role references the original total ceilings; W retains that
+finite original-call recovery/accounting anchor without ordinary closeout advice. Protocol requires an explicit launcher and model, and does not invent
 Codex reasoning-effort or service-tier defaults. Custom launchers default to external
 experiment ownership unless explicitly configured. The sample expands commonly used
 settings; optional policy shapes are described in the CLI guide and existing contracts.
 
 Codex 默认模型、推理力度、档位和 launcher 如上。标准单命令 Codex 默认使用宿主管理的
 local 实验，在原生原 home 最多执行两次仅输出补填，并启用独立的有界自动接续策略；
-未指定节点目标时引用原总上限。
+未指定节点目标时引用原总上限；W 仅保留有限的原调用恢复／计量锚点，不提供普通收口建议。
 protocol 必须显式提供 launcher 和 model，不套用 Codex 推理或服务档位默认值。
 自定义 launcher 默认由 external 路径拥有实验执行，除非另行配置。
 
@@ -342,9 +384,10 @@ launch, rather than repeatedly starting fresh W jobs with unknown coverage. Pi u
 This describes supported launch paths, not every backend. Original-call query,
 collect and reconciliation remain available. Existing owners retain time and
 call state. Context renewal does not reset global active time, tokens,
-steps, execution consumption, permissions or unknown usage. W role/breadth time
-and cumulative-token targets remain advisory; shared and per-experiment limits
-remain binding. Direct API `worker_fragment_policy=None` still disables ordinary
+steps, execution consumption, permissions or unknown usage. Ordinary W uses context
+occupancy guidance without additional role/breadth time or cumulative-token closeout
+advice. Its finite retained values remain original-call recovery/accounting anchors;
+shared and per-experiment limits remain binding. Direct API `worker_fragment_policy=None` still disables ordinary
 fragments. Next-new-node configuration revisions preserve already accepted jobs.
 Protocol 29, 30, 31 and 32 instances require their matching old runtime; the current runtime
 rejects them without migration or settings edits.
@@ -365,8 +408,8 @@ rejects them without migration or settings edits.
 工具/输入/输出正文，不扫描私有 rollout。缺少必需 hooks 时启动前明确 unsupported，不能在
 未知覆盖下反复新建 W；Pi 改由其合格的持久化边界 observer 提供事实。该能力仅适用于受支持启动路径，不保证所有后端。时间和原调用状态
 沿用既有 owner，原调用仍可 query/collect/核对。新 W 不重置全局活动时间、token、步骤、执行消费、
-权限或未知量；W role/breadth 时间及累计 token 目标为建议，真实共享和单实验限制继续
-有效。直接 API `worker_fragment_policy=None` 仍可禁用；下一新节点配置修订保留已接受
+权限或未知量；普通 W 只接收上下文占用提醒，不再接收 role/breadth 时间或累计 token
+收口建议。有限旧值保留为原调用恢复／计量锚点，真实共享和单实验限制继续有效。直接 API `worker_fragment_policy=None` 仍可禁用；下一新节点配置修订保留已接受
 任务。协议 29、30、31、32 实例保留匹配旧 runtime；新版拒绝读取，不迁移、不手改版本。
 
 Ordinary research declares or revises mechanisms through `--research JSON_FILE`
@@ -816,12 +859,14 @@ TOML 与表单共用的规范化会为部分填写的 `[policies.resume]` 对象
 这些默认值不为不受支持的启动器授予能力，也不修改已有冻结任务。
 
 Changing Backend in the webpage refreshes only the selected provider's model
-suggestions and option schema, retaining the draft without previewing or creating
-research. An exact built-in launcher spelling follows the new Backend; custom
-launcher arguments remain explicit and are validated separately.
+suggestions and option schema. Native options and exact launcher arguments are
+retained as separate drafts for each Backend; the first switch uses the selected
+Backend's default launcher, and switching back restores its exact custom arguments.
+Refreshing does not save, apply configuration, preview, or start research.
 
 网页切换 Backend 时，只按需刷新所选后端的模型建议与选项，保留草稿，不预览或创建研究。
-精确使用内置默认拼写的启动命令随新后端切换；自定义启动参数保持显式声明，另行校验。
+原生选项和精确启动参数按后端分别保留；首次切入使用所选后端的默认启动命令，切回时恢复
+原有的完整自定义参数。刷新不保存、不应用配置，也不启动研究。
 
 | Field / 字段 | Default / 默认 | Meaning / 含义 |
 | --- | --- | --- |
@@ -1239,13 +1284,16 @@ A positively proven never-submitted prelaunch failure offers explicit `worker-re
 Scientific `budget-amend` requests receive durable operation IDs and apply at a safe
 boundary before another new task, retaining all consumption, reservations and unknown
 usage. `accepted` is a queued request, not an applied ceiling. Execution-resource
-amendments remain separate and grant no exact-call permission. Soft node/W targets
-request a bounded conclusion without forcing A or rejecting a new managed experiment
-solely for reaching the target. W's enabled context-window gate remains separate. Notices start at 80% of the advisory node token or
-time target, at token balance no higher than the existing W+A advice for H or A
-advice for W, or at strictly less than 10% of shared active time remaining. Each
-logical node receives one token-risk and one time-risk notice across resumes, at
-most two risk notices; ordinary W has a separate context-review notice. Token advice
+amendments remain separate and grant no exact-call permission. H/A/E soft node
+targets request a bounded conclusion without forcing A or rejecting a new managed
+experiment solely for reaching the target. Ordinary W receives context occupancy
+guidance and a near-90%-of-shared-token-ceiling reminder based on cumulative input
+plus output tokens, without additional node/breadth targets or time closeout advice;
+shared budget and context-window gates remain binding. For other applicable nodes, notices
+start at 80% of the advisory token/time target, at token balance no higher than the
+existing continuation advice, or at strictly less than 10% of shared active time
+remaining. Applicable logical nodes receive one token-risk and one time-risk notice
+across resumes, at most two risk notices. Token advice
 does not suppress later time advice. Notices arrive
 at the next supported local tool boundary without interrupting the current request.
 For marked ordinary A, notices close only the diagnosis and return advice to W;
@@ -1260,10 +1308,12 @@ their completion policy; see [architecture](ARCHITECTURE.md).
 
 科学预算修订先收取持久 operation ID，在下一新任务前的安全边界应用，保留全部消费、
 预留和未知用量。accepted 仅表示排队；执行资源修订另行办理且不授精确调用权限。
-节点/W 软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A；W 启用的上下文窗口门禁另行保留。节点建议 token 或时间目标
-达到 80%、token 余额不高于 H 后续 W+A 或 W 后续 A 的既有建议量、或共享剩余 active time
-严格低于总时限的 10% 时提醒；每逻辑节点的 token、time 风险各一次，跨 resume 去重，最多
-两次风险提醒，普通 W 另有独立的上下文复核提醒。token 提醒不抑制后续 time 提醒；
+H/A/E 节点软目标只提示收口，不仅因达线拒绝新受管实验或强制转 A；普通 W 接收上下文
+占用及共享累计输入加输出 token 接近总上限 90% 的提醒，不接收额外 node/breadth 目标
+或时间收口建议，共享预算与上下文窗口门禁保持。
+其他适用节点的建议 token 或时间目标达到 80%、token 余额不高于既有后续工作建议量、
+或共享剩余 active time 严格低于总时限的 10% 时提醒；适用逻辑节点的 token、time 风险各
+一次，跨 resume 去重，最多两次风险提醒。token 提醒不抑制后续 time 提醒；
 在下一受支持本地工具边界生效，不打断当前请求。
 普通 A 只收口诊断并返回 W，提醒不扩大动作集。共享额度耗尽时，Final A 从原件给出结论，
 不新开 H/W/E 研究。阈值均为建议，不新增配额、预留、授权或默认配置。仅计费未知
@@ -1271,19 +1321,37 @@ their completion policy; see [architecture](ARCHITECTURE.md).
 核对。共享准入、单次有限执行及 protected FINAL 原策略继续有效。
 
 User direction uses `guidance-submit`, `guidance-list`, `guidance-edit` and
-`guidance-revoke`. Targets are `global`, `H`, `W`, `A`, `E`; `--scope next` binds
-the next matching new task, while `--scope research` applies to matching future
-tasks. Pending edits/revocations require the current `--expected-revision`. Applied
-task inputs are immutable; revoking applied research guidance records a future-only
-revocation. `--kind advice` is optional scientific advice. An explicit `goal_change`
-requires `--target global --effective-step N` and has research scope. Guidance grants
-no scientific verdict, qualification or execution permission and does not reset the
-original goal, identities or budgets.
+`guidance-revoke`. Targets are `global`, `H`, `W`, `A`, `E`. Supplemental advice
+for a running target role joins that role's current-turn pending queue without
+interrupting its work; `global` matches the current role. If the role is not running,
+it waits for the next eligible phase. An explicit future `effective_step` cannot
+be delivered early. `--scope next` consumes the advice at its first accepted binding;
+`--scope research` also applies to matching future tasks. `goal_change` retains its
+explicit `--target global --effective-step N` contract and research scope.
 
-用户方向通过上述 guidance 命令管理，支持全局或指定角色、下一匹配任务或整项研究范围。
-待应用项可按当前 revision 修改/撤销；已应用任务输入不可改写，整项研究建议的撤销只对未来
-生效。advice 是可不采纳的科学建议；显式目标变更须给全局目标和生效节点，范围为后续研究。
-建议及目标变更均不授结论、资格或执行权限，不重置原目标记录、身份与预算。
+The guidance webpage polls only history status every two seconds; it preserves the
+composer and any open edit draft. “Added to current-turn pending queue” means the
+backend accepted that queue operation, not that the model read or adopted the advice.
+Queued, submitting and unknown exact-turn claims cannot be edited or revoked; unknown
+submission stays bound for original-call reconciliation and is never automatically
+resent. A proven never-submitted receipt releases the claim for a later eligible
+phase. Pending edits/revocations still require `--expected-revision`. Revoking an
+applied research-scope statement affects future tasks only and cannot withdraw a
+message already queued in the current turn. Guidance grants no scientific verdict,
+qualification or execution permission and resets no goal, identity or budget.
+
+用户方向通过 guidance-submit／list／edit／revoke 管理，支持 global、H、W、A、E。
+补充建议的目标角色正在运行时，加入该角色当前 turn 待发队列，不中断工作；global 匹配
+当前角色。角色未运行时等待下一适用阶段；明确指定未来 effective_step 的建议不会提前交付。
+next 在首次接受绑定时消费，research 还用于匹配的后续任务；goal_change 仍须明确 global
+目标和生效阶段，并保持研究范围的原合同。
+
+方向建议页每两秒只更新历史状态，保留输入框及展开的修改草稿。“已加入当前 turn 待发队列”
+只表示后端接受入队操作，不表示模型已读取或采纳。queued、submitting、unknown 的准确
+turn 绑定不能修改或撤回；未知提交保留原绑定核对，绝不自动重发。有明确尚未提交证明时
+才解除绑定，等待后续适用阶段。待处理项修改／撤回仍须当前 revision。已应用 research
+建议的撤回仅影响未来任务，不能撤回当前 turn 已入队消息。建议不授科学结论、资格或
+执行权限，不重置原目标、身份或预算。
 
 
 ## Results and optional webpage / 结果与可选网页

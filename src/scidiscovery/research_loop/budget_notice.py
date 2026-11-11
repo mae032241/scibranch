@@ -38,6 +38,8 @@ WORKER_INVESTMENT_TEXT = ('Repeated calls under this mechanism: inspect retained
     'Counts measure effort, not scientific stagnation. Original permissions and budgets hold.')
 WORKER_CONTEXT_90_TEXT = ('W context >=90%: prepare a safe checkpoint; compaction may continue. '
     'Handoff only after current post-compaction occupancy >70%. Reconcile originals; never replay.')
+WORKER_SHARED_TOKEN_NEAR_TEXT = ('Shared cumulative tokens >=90% of configured total. Preserve progress; '
+    'continue useful work within original permissions/shared limits. No handoff required; unknown usage != 0.')
 HELPER = '.scid-budget-notice.py'
 EMPTY_CONFIG = '.scid-budget-notice-empty-config.toml'
 VISIBLE = 'scid-budget-hook-visible-v1'
@@ -54,12 +56,31 @@ def public_channel(value):
     return dict(status='unavailable', reason=reason if reason in UNAVAILABLE_REASONS else 'not_preflighted')
 
 
+def ordinary_worker(job, intent, *, author=False, final_return=False):
+    """Identify ordinary W advice without changing an accepted scope or grant."""
+    return (job.get('role') == 'W' and not author and not final_return
+        and intent.get('continuation_kind') != 'author_closeout'
+        and (intent.get('budget_slice') or {}).get('final_return') is None
+        and not intent.get('output_repair') and not intent.get('work_repair')
+        and not job.get('formal_review')
+        and job.get('purpose') not in {'closeout', 'worker_consultation', 'delivery_review', 'delivery_correction'}
+        and (job.get('evidence_return') or {}).get('kind') not in {'delivery_review', 'delivery_correction'}
+        and not job.get('final_report') and not job.get('final_only'))
+
+
 def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, target_near=False,
         shared_risk=False, shared_expired=False, shared_exhausted=False, followup_tokens=None,
         author=False, final_return=False):
     """Render only already-loaded observations; unknown usage is never zero."""
     if dimension not in {'token', 'time'}:
         raise ValueError('Unknown budget advice dimension')
+    ordinary_w = ordinary_worker(job, intent, author=author, final_return=final_return)
+    if ordinary_w:
+        # Accepted node anchors remain accounting facts. W's cumulative token
+        # reminder is independent of node targets and suggested follow-up work.
+        target_reached = target_near = False
+        shared_risk = shared_risk and dimension == 'token'
+        followup_tokens = None
     # Global exhaustion changes ordinary A's advice, not this dimension's trigger.
     if not (target_reached or target_near or shared_reached or shared_risk):
         return None
@@ -126,6 +147,8 @@ def closeout_notice(job, intent, *, dimension, target_reached, shared_reached, t
             text = (risk+' A: end this assessment; retain unmet goals. '
                 'Choose normal next_action by evidence/shared balance. '
                 'Soft targets do not end research; permissions hold; unknown usage != 0.')
+    elif ordinary_w and dimension == 'token' and shared_risk and not shared_reached:
+        text = WORKER_SHARED_TOKEN_NEAR_TEXT
     elif (job['role'] == 'W' and not (job.get('purpose') == 'closeout'
             or job.get('final_report') or job.get('final_only'))
             and not (shared_reached or shared_risk or shared_expired or shared_exhausted)):
@@ -153,19 +176,24 @@ def _finite(value):
         return False
 
 
+def _worker_progress_eligible(job, intent, *, fragment_enabled=False, author=False, final_return=False):
+    """Preserve the accepted cadence scope independently of its observations."""
+    return (fragment_enabled and job.get('role') == 'W' and not author and not final_return
+        and intent.get('continuation_kind') != 'author_closeout'
+        and (intent.get('budget_slice') or {}).get('final_return') is None
+        and not job.get('formal_review') and job.get('purpose') != 'closeout'
+        and not job.get('final_report') and not job.get('final_only'))
+
+
 def worker_progress_due(job, intent, *, active_seconds, target_seconds, fragment_enabled=False,
         author=False, final_return=False, max_context_windows=None, context_observation=None, context_handoff_version=None):
     """Use loaded cadence and scope only; never infer scientific progress."""
-    if (not fragment_enabled or job.get('role') != 'W' or author or final_return
-            or intent.get('continuation_kind') == 'author_closeout'
-            or (intent.get('budget_slice') or {}).get('final_return') is not None
-            or job.get('formal_review') or job.get('purpose') == 'closeout'
-            or job.get('final_report') or job.get('final_only')):
+    if not _worker_progress_eligible(job, intent, fragment_enabled=fragment_enabled,
+            author=author, final_return=final_return):
         return False
     if max_context_windows is not None:
         return worker_context_reason(max_context_windows, context_observation,version=context_handoff_version) is not None
-    return (_finite(active_seconds) and _finite(target_seconds)
-        and target_seconds > 0 and active_seconds >= target_seconds)
+    return False  # Missing context telemetry never creates an elapsed-time loop.
 
 
 def worker_context_reason(maximum, observation, *, version=None):
@@ -191,10 +219,11 @@ def worker_progress_notice(job, intent, **facts):
         return None
     due = worker_progress_due(job, intent, **facts)
     if not due:
-        # Reuse the cadence's scope checks without making fullness an admission
-        # condition. Optional telemetry loss must never create a handoff reason.
-        eligible = dict(facts, max_context_windows=None, active_seconds=1, target_seconds=1)
-        if (not worker_progress_due(job, intent, **eligible)
+        # Eligibility is independent of a handoff trigger: a 90% checkpoint
+        # notice remains valid before post-compaction handoff becomes due.
+        if (not _worker_progress_eligible(job, intent, fragment_enabled=facts.get('fragment_enabled', False),
+                    author=facts.get('author', False),
+                    final_return=facts.get('final_return', False))
                 or not worker_context_near(facts.get('max_context_windows'), facts.get('context_observation'),version=facts.get('context_handoff_version'))):
             return None
         return dict(cause='node', text=WORKER_CONTEXT_90_TEXT if facts.get('context_handoff_version')==2 else WORKER_CONTEXT_NEAR_TEXT)

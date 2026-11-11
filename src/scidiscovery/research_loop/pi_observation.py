@@ -97,6 +97,7 @@ class Observation:
         self.compact_cursor = None
         self.compact_index = 0
         self.responses = {}
+        self.turn_inputs = {}
         self.windows = context_windows(retained) if retained is not None else dict(
             coverage='awaiting', windows_started=0, reason='context_awaiting_session')
         self.windows_started = self.windows['windows_started']
@@ -360,7 +361,11 @@ class Observation:
             # this pending delivery is acquired; pure acceptance never reads IO.
             phase, phase_started = 'original_capture', time.monotonic()
             self.meter.refresh_pending_original()
-            if self.meter.fault: raise ValueError('pi_metadata_original_invalid')
+            if (self.meter.fault or self.meter.usage_reason == 'session_terminal_original_changed_or_unverified'):
+                # The original owner retains known billing and reusable SDK
+                # identity independently of full stopped-writer proof. A failed
+                # rehash still cannot publish or acknowledge this delivery.
+                raise ValueError('pi_metadata_original_invalid')
             if time.monotonic() - started >= 5:
                 self.fail('native_metadata_delivery_timeout')
                 budget_notice.update_delivery(self.path, self.proof['nonce'], value['sequence'], fault=self.fault)
@@ -408,8 +413,21 @@ class Observation:
             raise ValueError('pi_authorship_delivery_incomplete')
         user = self.entries.get(self.turn) or {}
         users = [key for key, row in self.entries.items() if row.get('role') == 'user']
+        supplemental = []
+        used = set()
+        for identity in users:
+            if identity == self.turn: continue
+            row = self.entries[identity]
+            matches = [(key, value) for key, value in self.turn_inputs.items()
+                if key not in used and value.get('status') == 'accepted'
+                and value.get('thread') == self.meter.thread and value.get('turn') == self.turn
+                and value.get('payload_sha256') == row.get('prompt_hash')]
+            if len(matches) != 1 or not self._ancestor(self.leaf, identity) or not self._ancestor(identity, self.turn):
+                raise ValueError('pi_authorship_supplemental_user_unreceipted')
+            key, receipt = matches[0]; used.add(key)
+            supplemental.append(dict(id=identity, receipt=dict(receipt)))
         assistants = {key: row for key, row in self.entries.items() if row.get('role') == 'assistant'}
-        if (users != [self.turn] or user.get('prompt_hash') != self.prompt_hash
+        if (not users or users[0] != self.turn or user.get('prompt_hash') != self.prompt_hash
                 or not self._ancestor(self.leaf, self.turn) or not assistants
                 or set(assistants) != set(self.responses)
                 or any(row.get('profile') != self.meter.profile
@@ -425,7 +443,7 @@ class Observation:
         # The final persisted response, not pass text or agent_end, binds output.
         if responses[-1]['status'] != 'completed' or responses[-1]['final'] is None:
             raise ValueError('pi_authorship_final_response_missing')
-        return dict(user=dict(id=self.turn, prompt_sha256=self.prompt_hash), leaf=self.leaf,
+        facts = dict(user=dict(id=self.turn, prompt_sha256=self.prompt_hash), leaf=self.leaf,
             baseline_leaf=self.baseline_leaf, baseline_count=(self.entries.get(self.baseline_leaf) or {}).get(
                 'index', self.meter.original_count if self.baseline_leaf == self.meter.original_leaf else 0),
             baseline_offset=self.meter.baseline_offset, entry_count=len(self.meter.seen),
@@ -434,6 +452,8 @@ class Observation:
             delivery=dict(source=SOURCE, nonce=self.proof['nonce'], attempt=self.attempt,
                 sequence=self.sequence, acknowledged=self.acknowledged, pending=self.pending,
                 fault=self.fault, terminal=self.terminal_seen))
+        if supplemental: facts['supplemental_users'] = supplemental
+        return facts
 
     def snapshot(self):
         live = (self.available and self.bound and self.turn is not None and not self.pending

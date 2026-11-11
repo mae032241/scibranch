@@ -28,7 +28,7 @@ from . import instance_science as science
 from . import instance_display as display, ui_saved_status as saved_status
 from . import instance_render as render
 from . import instance_live as live
-from . import backends, budget, configuration_form, configuration_updates, progress, public_output, research_config, user_guidance
+from . import backends, budget, configuration_changes, configuration_form, configuration_updates, progress, public_output, research_config, user_guidance
 from . import ui_components as ui
 from . import ui_mechanisms, ui_view, ui_translation, ui_errors, ui_guidance
 from . import execution_wait_monitor
@@ -672,16 +672,32 @@ class InstanceUI:
             expected_revision=expected_revision, authorization_note=authorization_note)
 
     def _configuration_page_from_state(self, token, *, state, text='', path='', result=None, draft=None, problem=None, expected_revision=None, authorization_note=''):
+        saved_draft = draft is None
         if draft is None:
             draft=configuration_form.imported(state['configuration'],base=self.root)
         catalogs=configuration_form.load_catalogs(draft)
         original_settings=display.settings(self.root)
         current_budget=self._guarded(budget.ceilings, self.root)
+        active_document=research_config.to_document(self.root, settings=state['active_settings'])
+        budget_available='error' not in current_budget
+        if budget_available:
+            for key in ('max_tokens', 'max_seconds', 'max_steps'):
+                active_document['budget'][key]='unlimited' if current_budget[key] is None else current_budget[key]
+        comparison_fields=[*configuration_form.FIELDS, configuration_form.SUPERVISION_MODE_FIELD]
+        for group in configuration_form.GROUP_FIELDS.values():
+            comparison_fields.extend(group)
+        for document in (draft['document'], active_document):
+            name=configuration_form._get(document, 'agent.backend')
+            if type(name) is str and name in backends.names():
+                comparison_fields.extend(configuration_form._fields(name))
+        change_summary=dict(rows=configuration_changes.rows(active_document, draft['document'], fields=comparison_fields,
+            budget_available=budget_available), budget_available=budget_available, advanced_unparsed='advanced_text' in draft,
+            target=('已保存待生效声明' if state['pending'] else '当前声明') if saved_draft else '当前草稿（尚未验证）')
         return self._render_configuration_page(token, state=state, original_settings=original_settings,
-            current_budget=current_budget, catalogs=catalogs, text=text, path=path, result=result, draft=draft, problem=problem,
+            current_budget=current_budget, catalogs=catalogs, change_summary=change_summary, text=text, path=path, result=result, draft=draft, problem=problem,
             expected_revision=expected_revision, authorization_note=authorization_note)
 
-    def _render_configuration_page(self, token, *, state, original_settings, current_budget, catalogs, draft, text='', path='', result=None, problem=None, expected_revision=None, authorization_note=''):
+    def _render_configuration_page(self, token, *, state, original_settings, current_budget, catalogs, draft, change_summary, text='', path='', result=None, problem=None, expected_revision=None, authorization_note=''):
         settings = state['active_settings']
         view = public_output.settings_view(settings)
         original_view = public_output.settings_view(original_settings)
@@ -702,6 +718,23 @@ class InstanceUI:
             + '</h2><p>' + status_note + '</p></section>')
         if problem:
             body += problem.markup()
+        body += ('<section class="configuration-changes" aria-labelledby="configuration-changes-title"><h2 id="configuration-changes-title">当前 → '
+            + html.escape(change_summary['target']) + '</h2><p class="note">左侧为当前节点配置，总预算取当前已接受上限；右侧为声明值，省略项仍须按继承与后端默认值校验，不能视为已生效权限。'
+            '新配置只用于后续新节点；已准备、运行及恢复的原调用保留原配置与已用预算。</p>')
+        if change_summary['rows']:
+            body += ('<div class="table-scroll"><table class="configuration-change-table"><thead><tr><th scope="col">设置</th>'
+                '<th scope="col">当前</th><th scope="col">' + html.escape(change_summary['target'])
+                + '</th><th scope="col">影响范围</th></tr></thead><tbody>' + ''.join(
+                    '<tr data-configuration-change="' + html.escape(row['path'], quote=True) + '"><th scope="row">'
+                    + html.escape(row['label']) + '</th><td>' + text(row['active']) + '</td><td>' + text(row['draft'])
+                    + '</td><td>' + html.escape(row['scope']) + '</td></tr>' for row in change_summary['rows']) + '</tbody></table></div>')
+        else:
+            body += '<p>摘要所列设置没有变化。</p>'
+        if not change_summary['budget_available']:
+            body += '<p class="note">当前总预算不可读，相关当前值标为未知；请核对预算调整记录。</p>'
+        if change_summary['advanced_unparsed']:
+            body += '<p class="note">高级 TOML 保留在编辑区；摘要仅列已解析的字段，完整草稿尚未验证。</p>'
+        body += '<p class="note">摘要只比较已知公开设置；自定义嵌套内容、私有路径及凭据不在此展开。完整声明仍须保存时校验。</p></section>'
         fields = ('<input type="hidden" name="expected_revision" value="' + html.escape(str(revision), quote=True) + '">'
             + '<p class="note">相对路径基准：<code>' + html.escape(str(draft['base'])) + '</code>；推荐填写绝对路径。导入 TOML 时相对其所在目录。</p>'
             + configuration_form.render(draft, edit=True, catalogs=catalogs)
@@ -991,41 +1024,43 @@ class InstanceUI:
 
     def _guidance_page(self, token, *, draft=None, problem=None):
         manager = 'maintenance' in self.browser.verify(token, instance_id=self.instance).scopes
-        body = (self._navigation('/settings') + '<p class="settings-intro">告诉研究者接下来优先检查什么、比较哪些方案，或明确提出目标变化。</p>'
-            '<p>当前运行或已经准备的阶段保持原样。建议会交给下一次生成的、匹配所选角色的任务；恢复原任务时仍沿用原建议。研究者会判断建议的科学合理性，建议本身不授予实验执行权限。</p>')
+        rows = user_guidance.list_guidance(self.root)
+        body = (self._navigation('/settings') + '<p class="settings-intro">告诉研究者当前及后续优先检查什么、比较哪些方案，或明确提出目标变化。</p>'
+            '<p>目标角色正在运行时，补充建议加入其当前 turn 待发队列，不中断当前工作；global 匹配当前角色。角色未运行时等待下一适用阶段。明确未来生效阶段不会提前交付，目标修改仍按显式未来阶段合同办理。建议不授予实验执行权限，入队也不表示模型已采纳。</p>')
         if problem:
             body += problem.markup()
         if manager:
             body += '<section class="guidance-create"><h2>添加方向建议</h2>' + self._form(token, 'guidance-submit', ui_guidance.fields(draft), '提交建议') + '</section>'
         else:
             body += '<p class="note">当前为只读查看，提交或修改建议需要管理会话。</p>'
-        rows = user_guidance.list_guidance(self.root)
-        body += '<section class="guidance-history"><h2>已提交的建议</h2>'
+        body += '<section class="guidance-history" data-guidance-history data-status-url="guidance/status"><h2>已提交的建议</h2>'
         if not rows:
             body += '<p class="note">尚无方向建议。研究会继续按原任务推进。</p>'
         clean = public_output.cleaner(self.root)
-        statuses = {'pending': '等待适用阶段', 'applied': '已交给研究者', 'revoked': '已撤回'}
         for row in reversed(rows):
-            body += '<article class="guidance-record"><h3>' + ui.esc(statuses.get(row['status'], row['status'])) + '</h3>' + render.excerpt(clean(row['text']), 4000)
-            body += '<dl class="guidance-metadata">' + ''.join('<div><dt>' + label + '</dt><dd>' + ui.esc(value) + '</dd></div>' for label, value in [
+            state = ui_guidance.state(row, manager=manager)
+            body += '<article class="guidance-record" data-guidance-id="'+ui.esc(row['guidance_id'])+'"><h3 data-guidance-status>' + ui.esc(state['label']) + '</h3>' + render.excerpt(clean(row['text']), 4000)
+            body += '<dl class="guidance-metadata">' + ''.join('<div><dt>' + label + '</dt><dd'+(' data-guidance-binding' if label=='首次绑定阶段' else '')+'>' + ui.esc(value) + '</dd></div>' for label, value in [
                 ('交给谁', dict(ui_guidance.TARGETS).get(row['target'], row['target'])),
                 ('类型', dict(ui_guidance.KINDS).get(row['kind'], row['kind'])),
                 ('范围', dict(ui_guidance.SCOPES).get(row['scope'], row['scope'])),
-                ('最早生效阶段', str(row.get('effective_step') or '下一适用阶段')),
-                ('首次交付阶段', '第 ' + str(row['applied_step']) + ' 阶段' if row.get('applied_step') else '尚未交付')]) + '</dl>'
-            if row['status'] == 'applied':
-                body += '<p class="note">已交付仅表示建议进入了研究任务，不表示科学结论已采纳。</p>'
-            if row.get('future_revocation'):
-                body += '<p class="note">已撤回后续建议：从第 ' + ui.esc(str(row['future_revocation']['effective_step'])) + ' 阶段起不再用于新任务；已经绑定的任务保留原建议。</p>'
+                ('最早生效阶段', str(row.get('effective_step') or '当前或下一适用阶段')),
+                ('首次绑定阶段', '第 ' + str(row['applied_step']) + ' 阶段' if row.get('applied_step') else '尚未绑定')]) + '</dl>'
+            body += '<p class="note" data-guidance-delivery-note>'+ui.esc(state['note'])+'</p>'
             hidden = ('<input type="hidden" name="guidance_id" value="' + ui.esc(row['guidance_id']) + '">'
                 '<input type="hidden" name="expected_revision" value="' + str(row['revision']) + '">')
-            if manager and row['status'] == 'pending':
-                body += '<details><summary>修改待交付的文字</summary>' + self._form(token, 'guidance-edit', hidden + '<label>建议内容<textarea name="text" required>' + html.escape(row['text']) + '</textarea></label>', '保存修改') + '</details>'
-            if manager and (row['status'] == 'pending' or row['status'] == 'applied' and row.get('scope') == 'research' and not row.get('future_revocation')):
-                body += self._form(token, 'guidance-revoke', hidden, '撤回后续建议')
+            if manager:
+                body += '<div data-guidance-edit'+('' if state['editable'] else ' hidden')+'><details><summary>修改待交付的文字</summary>' + self._form(token, 'guidance-edit', hidden + '<label>建议内容<textarea name="text" required>' + html.escape(row['text']) + '</textarea></label>', '保存修改') + '</details></div>'
+                body += '<div data-guidance-revoke'+('' if state['revocable'] else ' hidden')+'>'+self._form(token, 'guidance-revoke', hidden, '撤回后续建议')+'</div>'
             body += '</article>'
-        body += '</section>' + ('<script src="/assets/guidance.js"></script>' if manager else '')
+        body += '</section><script src="/assets/guidance.js"></script>'
         return (problem.status if problem else 200), self._page('方向建议', body, live=False), {}
+
+    def _guidance_status(self, token):
+        manager = 'maintenance' in self.browser.verify(token, instance_id=self.instance).scopes
+        rows = user_guidance.list_guidance(self.root)
+        return 200, json.dumps(dict(rows=[ui_guidance.state(row, manager=manager) for row in rows]),
+            ensure_ascii=False).encode('utf-8'), {'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store'}
 
     def _operations_page(self, token):
         self._admin(token)
@@ -2364,7 +2399,7 @@ class InstanceUI:
         browser_token = self._browser(cookie, scope='read')
         if parsed.path == '/favicon.ico':
             return 204, b'', {}
-        known = {'/', '/new', '/instances', '/configuration', '/guidance', '/operations', '/settings',
+        known = {'/', '/new', '/instances', '/configuration', '/guidance', '/guidance/status', '/operations', '/settings',
             '/budget-recovery', '/progress', '/final-results', '/results', '/session', '/reading',
             '/translation/state', '/live', '/requests', '/candidates', '/delete'}
         dynamic = (re.fullmatch(r'/nodes/[1-9][0-9]*(?:/(?:fork|progress|events|science|materials(?:/[1-9][0-9]*)?))?', parsed.path)
@@ -2378,6 +2413,10 @@ class InstanceUI:
             if parsed.query:
                 raise ValueError('Exact browser session route required')
             return 200, b'{"authenticated":true}', {'Content-Type': 'application/json; charset=utf-8'}
+        if parsed.path == '/guidance/status':
+            if parsed.query:
+                raise ValueError('Exact guidance status route required')
+            return self._guidance_status(browser_token)
         if parsed.path in {'/reading', '/translation/state'}:
             if parsed.query:
                 raise ValueError('Exact reading settings route required')

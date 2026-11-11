@@ -46,6 +46,8 @@ def submit(root, text, *, target='global', kind='advice', effective_step=None, s
     with budget._ledger_writer(root):
         value['sequence'] = 1 + len(list((root / 'host-control' / 'guidance').glob('*.json')))
         contracts.write(_path(root, value['guidance_id']), value)
+        from . import turn_input
+        value = turn_input.offer(root, value)
     return value
 
 
@@ -55,6 +57,8 @@ def _pending(root, guidance_id, expected_revision):
         raise ValueError('Pending guidance revision changed; read the current revision first')
     if value['status'] != 'pending':
         raise ValueError('Applied or revoked guidance is immutable')
+    if value.get('turn_input'):
+        raise ValueError('Guidance is already bound to an exact running native turn')
     # A task written immediately before a controller interruption is already bound.
     for path in (Path(root) / 'jobs').glob('*.json'):
         if any(row['guidance_id'] == guidance_id for row in contracts.read(contracts.regular(path)).get('user_guidance', [])):
@@ -125,6 +129,10 @@ def select_binding(step, role, retained, *, current, revocations):
         values = list(retained.get('user_guidance', []))
     else:
         for identity, value in current.items():
+            if value.get('turn_input') and value['status'] == 'pending':
+                # Queued/uncertain native submissions cannot be resent at a new
+                # stage. Only an explicit never-submitted receipt releases it.
+                continue
             revoked = revocations.get(identity)
             if revoked is not None and revoked['effective_step'] <= step:
                 continue

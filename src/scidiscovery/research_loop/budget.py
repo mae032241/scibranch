@@ -2715,7 +2715,7 @@ def _advice_duration(intent, limits):
 def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author_limits=None, notice_channel=None,
         context_observation=None):
     """Optional replaceable advice; never read as a grant, meter or evidence."""
-    from . import checkpoint
+    from . import budget_notice, checkpoint
     review=publish_review(root,job,intent,limits,meter,facts=facts,observed=observed,
         context_observation=context_observation)
     settings=facts['settings'];shared=facts['shared'];mode=review['mode']
@@ -2747,9 +2747,10 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
     shared_seconds=limits['seconds_remaining']
     ordinary=not (delivery_review.scope(job) is not None or author or final_return is not None or job.get('formal_review') or closeout
         or job.get('final_report') or job.get('final_only') or intent.get('output_repair') or intent.get('work_repair'))
+    ordinary_w=budget_notice.ordinary_worker(job,intent,author=author,final_return=final_return is not None)
     followup_tokens={}
     if ordinary:
-        for role in ('W','A') if job['role']=='H' else ('A',) if job['role']=='W' else ():
+        for role in ('W','A') if job['role']=='H' else ():
             suggestion=node_limits(root,dict(role=role),settings=settings)
             if suggestion is not None:followup_tokens[role]=suggestion['max_observed_tokens']
     available_tokens=budget_limits.remaining(remaining, reserve['tokens'])
@@ -2768,7 +2769,7 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
         input_accounting='input_includes_cached_input_once; observed_total=input+output',
         inflight_usage_unknown=True,reporting_delay_unmeasured=True,per_request_admission='unavailable',
         final_response_allowance='not_guaranteed',current_work_boundary=boundary,
-        target_kind='unavailable' if targets is None else 'soft_target',
+        target_kind='context_window_only' if ordinary_w else 'unavailable' if targets is None else 'soft_target',
         unknown_usage=not observed or bool(shared.get('unknown_steps')),
         shared_remaining_basis='configured_ceiling_minus_reported_usage',
         shared_observed_tokens_remaining_upper_bound=remaining,shared_active_seconds_remaining=shared_seconds,
@@ -2778,12 +2779,12 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
         current_work_observed_tokens_remaining_upper_bound=available_tokens,
         current_work_active_seconds_available=available_seconds,
         instruction='Near/reached limits, targets or reserve: finish bounded actions and return your scientific JSON. Unknown coverage is not zero usage; reported consumption is a lower bound, and remaining upper bounds are not grants or request/billing caps. Shared ceilings are checked before the next node, without terminating this accepted node for a soft target. Original finite external-call and resource limits still apply.')
-    if ordinary and job['role']=='W' and fragment_enabled:
+    if ordinary_w:
         hint['instruction'] = ('Continue useful work within original permissions; retain progress/best/residuals. '
-            'Token targets alone do not require A. W time target bounds handoff: finish/reconcile original in-flight work; '
-            'return a checkpoint for a fresh W to retain its focus and unfinished work. Direction supervision is separate, when the host ledger/control says due. '
-            'Time is no stagnation/overfitting verdict; W adaptation/low scores alone do not end research. '
-            'Never replay unknown calls. Near/reached shared budgets/reserves: finish bounded actions and return scientific JSON. '
+            'Native context handoff uses observed capacity; missing occupancy remains unknown. '
+            'Reconcile original in-flight work; never replay unknown calls. '
+            'Independent reflection and direction supervision follow ledger/control due state. '
+            'At exhausted shared budgets, finish bounded actions and return scientific JSON. '
             'Unknown usage!=0; remaining upper bounds are advice, not grants or billing/request caps. '
             'Notice: next local tool boundary only; running model requests and hosted web cannot be interrupted. '
             'Original finite external-call and resource limits still apply.')
@@ -2804,7 +2805,7 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
                 'Node time/token targets do not set this cadence. Unknown calls never replay. '
                 'Shared budgets and original finite experiment/resource limits hold. '
                 'Soft next-tool/checkpoint boundary: native compaction/requests may overshoot; unknown usage is not zero.')
-    if ordinary and job['role']=='W' and context_max is not None and settings['worker_fragment_policy'].get('context_handoff_version')==2:
+    if ordinary_w and context_max is not None and settings['worker_fragment_policy'].get('context_handoff_version')==2:
         hint['instruction']=(f'Context policy: allow {context_max} complete native window(s), then use the next current window until occupancy exceeds 70%. '
             'At 90% within allowed complete windows, prepare a safe checkpoint; automatic compaction alone does not require handoff. '
             'Only a valid current-window occupancy above 70% after those complete windows requests a fresh W. '
@@ -2836,14 +2837,15 @@ def write_node_hint(root, job, intent, limits, meter, *, facts, observed, author
             current_work_observed_tokens_remaining_upper_bound=None,
             current_work_active_seconds_available=node_seconds,
             instruction='Complete this same final scientific return and explain completed work, unfinished work and any evidence gap. Token targets and reference ceilings do not terminate this original return; all actual usage is retained. The original finite call duration, resources and transport boundaries remain enforced; shared time and step exhaustion do not revoke this completion. No further scientific turn is authorized.')
-    from . import budget_notice
     notices={}
     for dimension,used,target,shared_reached,shared_risk in (
             ('time',duration,targets['max_seconds'] if targets else None,budget_limits.reached(shared_seconds),
                 shared_seconds is not None and limits['max_seconds'] is not None
                     and shared_seconds<.1*limits['max_seconds']),
             ('token',consumed,targets['max_observed_tokens'] if targets else None,budget_limits.reached(remaining),
-                bool(followup_tokens) and budget_limits.reached(remaining,sum(followup_tokens.values())))):
+                (remaining is not None and limits['max_tokens'] is not None
+                    and remaining<=.1*limits['max_tokens']) if ordinary_w else
+                    bool(followup_tokens) and budget_limits.reached(remaining,sum(followup_tokens.values())))):
         notice=budget_notice.closeout_notice(job,intent,dimension=dimension,
             target_reached=target is not None and used is not None and used>=target,
             target_near=target is not None and used is not None and used>=.8*target,
@@ -3009,9 +3011,8 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
             shared.get('accounted_tokens', shared['observed_tokens'])+reserve['tokens'])
         available_seconds=budget_limits.remaining(budget_limits.minimum(limits['seconds_remaining'],
             budget_limits.remaining(grant['max_seconds'],limits['consumed_seconds'])),reserve['seconds'])
-        # Shared ceilings retain priority. The ordinary W time target also
-        # bounds its review window, without judging scientific progress:
-        # pause new work, never accepted calls.
+        # Shared ceilings retain priority; ordinary W handoff uses native
+        # context observations, independently of legacy accounting targets.
         remaining=available_seconds
         context_max=((settings.get('worker_fragment_policy') or {}).get('max_context_windows')
             if checkpoint.enabled_for_policy(job,settings=settings) else None)
@@ -3020,19 +3021,21 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
             fragment_enabled=checkpoint.enabled_for_policy(job,settings=settings),
             max_context_windows=context_max,context_observation=context_observation,
             context_handoff_version=(settings.get('worker_fragment_policy') or {}).get('context_handoff_version'))
+        ordinary_w=budget_notice.ordinary_worker(job,intent)
         reason=('shared_usage_unknown' if _usage_unknown(shared, (job['step'],)) else
             'reserve_reached' if budget_limits.reached(available_seconds) or budget_limits.reached(available_tokens) else
             'worker_direction_review_due' if direction_review is not None else
             budget_notice.worker_context_reason(context_max,context_observation,version=(settings.get('worker_fragment_policy') or {}).get('context_handoff_version')) if context_max is not None and progress_due else
             'worker_progress_review_due' if progress_due else
-            'target_time_reached' if context_max is None and targets and duration>=targets['max_seconds'] else
-            'target_tokens_reached' if context_max is None and targets and consumed>=targets['max_observed_tokens'] else None)
+            'target_time_reached' if not ordinary_w and context_max is None and targets and duration>=targets['max_seconds'] else
+            'target_tokens_reached' if not ordinary_w and context_max is None and targets and consumed>=targets['max_observed_tokens'] else None)
+        projected_targets=None if ordinary_w else targets
         value=dict(version=experiments.ADMISSION_VERSION,stage_anchor=task,
             scope=facts['scope'],native_attempt=facts['native_attempt'],
             boot_id=stamp['boot_id'],observed_at=stamp['at_unix'],
             deadline_boottime=None if remaining is None else stamp['at_boottime']+remaining,
             valid_until_boottime=stamp['at_boottime']+10,pending=bool(reason),reason=reason,
-            observed_tokens_lower_bound=consumed,inflight_usage_unknown=True,targets=targets)
+            observed_tokens_lower_bound=consumed,inflight_usage_unknown=True,targets=projected_targets)
         if direction_review is not None:value['direction_review']=direction_review
         path=directory/'review.json'
         if path.exists():
@@ -3040,6 +3043,6 @@ def publish_review(root,job,intent,limits,meter,*,facts,observed,context_observa
             if old.get('stage_anchor')!=task or old.get('scope')!=value['scope']:
                 raise ValueError('Host review projection binding changed')
         contracts.write(path,value);path.chmod(0o400)
-        return dict(mode=mode,targets=targets,duration=duration,direction_review=direction_review,
+        return dict(mode=mode,targets=projected_targets,duration=duration,direction_review=direction_review,
             research_investment=investment,investment_notice=investment_notice)
     finally:os.close(fd)

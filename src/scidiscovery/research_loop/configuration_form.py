@@ -63,11 +63,11 @@ FIELDS = [
     Field('budget.max_steps', '总节点步数', 'integer', required=True),
     Field('budget.candidate_extra_slots', 'W 提名预览额外名额', 'integer'),
     Field('budget.portfolio_review_after_cycles', '组合复核周期数', 'integer'),
-    *[Field(f'budget.node_targets.{role}.{key}', f'{role} 节点软目标：{label}', kind)
+    *[Field(f'budget.node_targets.{role}.{key}', f'{role} '+('原调用恢复／计量锚点' if role=='W' else '节点软目标')+f'：{label}', kind)
       for role in 'HWAE' for key, label, kind in [('max_observed_tokens', 'tokens', 'integer'), ('max_seconds', '秒', 'number')]],
     Field('budget.role_shares', '角色预算份额策略', 'table'),
     *[Field(f'budget.breadth.{key}', label, kind) for key, label, kind in [
-        ('max_w_seconds', 'W 软目标秒数', 'number'), ('max_w_observed_tokens', 'W 软目标 tokens', 'integer'),
+        ('max_w_seconds', 'W 原调用计量锚点秒数', 'number'), ('max_w_observed_tokens', 'W 原调用计量锚点 tokens', 'integer'),
         ('max_requested_repairs', '请求修复次数', 'integer'), ('initial_calls', '首次探索调用数', 'integer')]],
     Field('budget.correction.review_after', '补正复核阈值', 'integer'),
     Field('budget.correction.pause_after', '补正暂停阈值', 'integer'),
@@ -81,6 +81,14 @@ FIELDS = [
         ('formal_review', '正式独立复核'), ('execution_authority', '实验执行授权合同'),
         ('candidate_audit', '候选审计'), ('decision_contract', '科学决策合同')]],
     Field('policies.worker_context', 'Worker 上下文', choices=('same_session', 'new_context')),
+    Field('policies.worker_context_windows', 'W 每节点最多上下文窗口数', 'integer'),
+    *[Field('policies.supervision.'+key, label, kind) for key, label, kind in [
+        ('consecutive_calls', '同一机制连续调用间隔（次）', 'integer'),
+        ('min_budget_fraction', '首次复核与后续最小间距（共享预算比例）', 'number'),
+        ('max_automatic_reviews', '自动 A 最大次数（留空不设次数上限）', 'integer'),
+        ('require_fresh_input', '自动 A 要求新问题或收据', 'boolean'),
+        ('automatic_budget_fraction.tokens', '自动 A 累计 tokens 比例上限', 'number'),
+        ('automatic_budget_fraction.seconds', '自动 A 累计时间比例上限', 'number')]],
     Field('policies.selection', '选择策略', 'table'),
     Field('policies.resume', '原调用恢复策略', 'table'),
     Field('policies.history_observer', '历史观察器及插件配置', 'table'),
@@ -97,7 +105,8 @@ def _fields(backend_name):
     result=[field for field in FIELDS if not provider_fields or field.path!='agent.native']
     result=[Field(field.path,field.label,field.kind,backends.names(),field.required,field.placeholder,
         field.description) if field.path=='agent.backend' else field for field in result]
-    return result+[Field(**field) for field in provider_fields]
+    # A provider's labels, requirements and choices replace shared descriptors.
+    return list({field.path: field for field in [*result, *(Field(**field) for field in provider_fields)]}.values())
 
 
 # These are the actual policy schemas; unknown imported keys remain in the
@@ -128,7 +137,7 @@ GROUP_FIELDS = {
 }
 ROLE_NAMES = dict(H='研究方向', W='实验与实现', A='综合评估', E='证据检索与提取')
 ROLE_HELP = dict(H='提出或修订研究假设与方向。', W='在已选假设下设计、实现并运行有界实验。',
-    A='独立评估证据与候选方案，决定下一步研究。', E='按明确问题检索或提取证据，保留来源与缺失信息。')
+    A='普通 A 提供诊断建议，由 W 决定下一步；Final A 负责最终评估。', E='按明确问题检索或提取证据，保留来源与缺失信息。')
 
 
 def _get(document, path, default=None):
@@ -201,7 +210,12 @@ def _single(fields, key, default=''):
     return value
 
 
-def _typed(value, kind, label):
+_UNLIMITED_BUDGET_PATHS = {'budget.max_tokens', 'budget.max_seconds'}
+
+
+def _typed(value, kind, label, *, path=None):
+    if path in _UNLIMITED_BUDGET_PATHS and value == 'unlimited':
+        return value
     try:
         if kind == 'null':
             if value != '':
@@ -348,8 +362,24 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
             or any(not isinstance(name,str) or not name or not isinstance(value,(dict,type(None)))
                 for name,value in native_drafts.items())):
         raise ValueError('后端原生设置草稿无效，请重新打开配置表单')
+    saved_launchers=_single(fields,'launcher_drafts','{}')
+    def unique_launchers(pairs):
+        result={}
+        for name,value in pairs:
+            if name in result:raise ValueError()
+            result[name]=value
+        return result
+    try:
+        launcher_drafts=json.loads(saved_launchers,object_pairs_hook=unique_launchers) if len(saved_launchers)<=256_000 else None
+    except (ValueError,TypeError,RecursionError):
+        launcher_drafts=None
+    if (not isinstance(launcher_drafts,dict) or len(launcher_drafts)>64
+            or any(not isinstance(name,str) or not name or
+                (value is not None and (not isinstance(value,list) or any(not isinstance(item,str) for item in value)))
+                for name,value in launcher_drafts.items())):
+        raise ValueError('后端启动命令草稿无效，请重新打开配置表单')
     scalar_fields = form_fields + [field for group in GROUP_FIELDS.values() for field in group]
-    allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text', 'rendered_backend', 'native_drafts', 'advanced_toml', 'advanced_fixed', 'cfg.policies.supervision.mode'} | {'cfg.'+f.path for f in form_fields if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}
+    allowed = {'present.'+f.path for f in scalar_fields} | {'cfg.'+f.path for group in GROUP_FIELDS.values() for f in group} | {'task_mode', 'task_text', 'rendered_backend', 'native_drafts', 'launcher_drafts', 'supervision_baseline', 'advanced_toml', 'advanced_fixed', 'cfg.policies.supervision.mode'} | {'cfg.'+f.path for f in form_fields if f.kind not in ('table', 'array', 'strings')} | {'enabled.'+f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}
     for name in fields:
         parts = name.split('.')
         picker = (len(parts) == 3 and parts[0] == 'skill_picker' and parts[1] in {'choice', 'baseline'} and parts[2] in 'HWAE' and len(parts[2]) == 1) or (len(parts) == 4 and parts[:2] == ['skill_picker', 'item'] and parts[2] in 'HWAE' and len(parts[2]) == 1 and parts[3].isdecimal())
@@ -361,9 +391,9 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
         raise ValueError('任务输入：请选择文本或已有原件')
     result['task_text'] = _single(fields, 'task_text')
     errors = []
-    def typed(value, kind, label):
+    def typed(value, kind, label, *, path=None):
         try:
-            return _typed(value, kind, label)
+            return _typed(value, kind, label, path=path)
         except ValueError as error:
             errors.append(str(error))
             return _Invalid(value, kind)
@@ -410,6 +440,16 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
                 _put(result['document'], field.path, items)
             continue
         if field.kind in ('table', 'array'):
+            if (field.path in GROUP_FIELDS and _single(fields, 'enabled.'+field.path) != 'yes'
+                    and _single(fields, 'present.'+field.path) != 'yes'):
+                pending_group = {}
+                for child in GROUP_FIELDS[field.path]:
+                    raw = _single(fields, 'cfg.'+child.path)
+                    if raw != '':
+                        _put(pending_group, child.path[len(field.path)+1:], typed(raw, child.kind, child.label))
+                if pending_group:
+                    result.setdefault('group_drafts', {})[field.path] = pending_group
+                    errors.append(field.label+'：修改本组前请明确勾选声明')
             if _single(fields, 'enabled.'+field.path) == 'yes':
                 value = tree('@'+field.path, field.kind)
                 for child in GROUP_FIELDS.get(field.path, []):
@@ -428,7 +468,7 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
         if raw != '' or _single(fields, 'present.'+field.path) == 'yes':
             if field.choices and raw not in field.choices:
                 errors.append(f'{field.label}：请选择支持的选项')
-            _put(result['document'], field.path, typed(raw, field.kind, field.label))
+            _put(result['document'], field.path, typed(raw, field.kind, field.label, path=field.path))
     # An explicit extra tree preserves empty groups and arbitrary imported keys.
     extras = tree('@extra', 'table')
     def merge(target, extra, prefix=''):
@@ -462,9 +502,19 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
             if keys[-1] not in target:
                 target[keys[-1]] = copy.deepcopy(value)
     mode = _single(fields, 'cfg.policies.supervision.mode')
+    supervision_paths = [field.path for field in form_fields if field.path.startswith('policies.supervision.')]
+    observed = {path: _single(fields, 'cfg.'+path) for path in [*supervision_paths, 'policies.supervision.mode']}
+    try:
+        baseline = json.loads(_single(fields, 'supervision_baseline', '{}'))
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError('自动复核草稿无效，请重新打开表单') from None
+    if not isinstance(baseline, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in baseline.items()):
+        raise ValueError('自动复核草稿无效，请重新打开表单')
+    changed_supervision = any(raw != baseline.get(path, '') for path, raw in observed.items())
     if mode:
-        if mode not in {key for key, _ in SUPERVISION_MODES}:
-            errors.append('自动方向复核：请选择支持的选项')
+        if mode not in SUPERVISION_MODE_FIELD.choices:
+            errors.append(SUPERVISION_MODE_FIELD.label+'：请选择支持的选项')
+            _put(result['document'], SUPERVISION_MODE_FIELD.path, mode)
         else:
             current = _get(result['document'], 'policies.supervision')
             if isinstance(current, dict) and 'mode' in current:
@@ -475,6 +525,18 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
                 selected = copy.deepcopy(current) if isinstance(current, dict) else _default_supervision()
                 selected['mode'] = mode
                 _put(result['document'], 'policies.supervision', selected)
+    if changed_supervision:
+        current = _get(result['document'], 'policies.supervision')
+        if current is None or isinstance(current, dict):
+            selected = _default_supervision()
+            def retain(target, source):
+                for key, value in source.items():
+                    if isinstance(value, dict) and isinstance(target.get(key), dict):
+                        retain(target[key], value)
+                    else:
+                        target[key] = copy.deepcopy(value)
+            retain(selected, current or {})
+            _put(result['document'], 'policies.supervision', selected)
     # Disabled groups' children are deliberately omitted. Reject stray topology.
     allowed = {identity for identity, node in nodes.items() if node['parent'].startswith('@') and
                node['parent'][1:] in {f.path for f in form_fields if f.kind in ('table', 'array', 'strings')}}
@@ -488,15 +550,18 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
     if set(nodes) - used - allowed:
         raise ValueError('结构字段没有有效的父对象')
     _skill_picker(fields, result['document'], fixed_sets=_fixed_skill_sets)
-    if selected_backend!=rendered_backend:
-        try:
-            previous_default=backends.provider(rendered_backend).default_launcher()
-        except ValueError:
-            previous_default=None
-        if previous_default is not None and _get(result['document'],'agent.launcher')==previous_default:
-            # An exact built-in spelling follows the newly selected provider.
-            # Custom argv remains an explicit declaration for validation.
-            _delete(result['document'],'agent.launcher')
+    if selected_backend!=rendered_backend and not advanced_valid:
+        # Unparsed options still belong to the rendered provider. Keep that
+        # context until the text can be corrected before attempting a switch.
+        _put(result['document'],'agent.backend',rendered_backend)
+    if selected_backend!=rendered_backend and advanced_valid:
+        # Exact launch argv belongs to the provider whose controls produced it,
+        # including absolute executables and custom wrappers.
+        launcher_drafts[rendered_backend]=_get(result['document'],'agent.launcher')
+        _delete(result['document'],'agent.launcher')
+        restored_launcher=launcher_drafts.pop(selected_backend,None)
+        if restored_launcher is not None:_put(result['document'],'agent.launcher',restored_launcher)
+        result['launcher_drafts']=launcher_drafts
         # Native extensions belong to the provider whose controls produced
         # them. Switching renders the new schema before any preparation call.
         native_drafts[rendered_backend]=_get(result['document'],'agent.native')
@@ -504,14 +569,15 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
         restored=native_drafts.pop(selected_backend,None)
         if restored is not None:_put(result['document'],'agent.native',restored)
         result['native_drafts']=native_drafts
-        if advanced_valid:
-            # Regenerate the text so the previous provider's options leave it.
-            del result['advanced_text']
-            result.pop('advanced_fixed', None)
+        # Regenerate the text so the previous provider's options leave it.
+        del result['advanced_text']
+        result.pop('advanced_fixed', None)
         if not refresh_backend:
             errors.append('后端已切换；原生设置按原后端保留。请检查当前后端的设置后再次提交。')
     elif native_drafts:
         result['native_drafts']=native_drafts
+    if launcher_drafts:
+        result['launcher_drafts']=launcher_drafts
     if errors:
         raise FormError('；'.join(errors), result)
     return result
@@ -563,6 +629,8 @@ def _default_supervision():
     return {key: value for key, value in supervision.policy().items() if value is not None}
 SUPERVISION_MODES = (('review', '开启：到期时由独立 A 复核方向'), ('notice', '只提示：到期时提醒 W，不调用 A'),
                      ('off', '关闭：不做自动方向复核'))
+SUPERVISION_MODE_FIELD = Field('policies.supervision.mode', '自动方向复核',
+    choices=tuple(key for key, _ in SUPERVISION_MODES))
 
 
 def _toml_key(key):
@@ -659,8 +727,8 @@ def render(draft, *, edit=False, catalogs=None):
         'research.objective': '服务器上的文本文件，原文会保存为本次任务。',
         'agent.backend': '运行研究角色的智能体程序。',
         'agent.model': '所有角色默认使用的模型。',
-        'budget.max_tokens': '例如 5000000。',
-        'budget.max_seconds': '例如 3600 表示 1 小时。',
+        'budget.max_tokens': '例如 5000000，也可填 unlimited。',
+        'budget.max_seconds': '例如 3600 表示 1 小时，也可填 unlimited。',
         'budget.max_steps': '例如 40。',
         'permissions.workspace': '默认：可写工作目录。',
         'permissions.network': '默认：不允许。',
@@ -669,8 +737,10 @@ def render(draft, *, edit=False, catalogs=None):
         'executor.config.executor': '已安装插件的绑定名，例如 tcad_execution:tcad。',
         'executor.config.config_file': '该插件的配置文件，相对路径按声明目录解析。',
     }
-    short_hints.update({field.path: field.description for field in form_fields
-        if field.description and field.path in ('agent.model', 'agent.reasoning_effort')})
+    short_hints.update({field.path: field.description for field in form_fields if field.description})
+    tier_help = next((field.description for field in form_fields if field.path=='agent.service_tier'), '')
+    if tier_help:
+        short_hints.update({f'agent.roles.{role}.service_tier': tier_help for role in 'HWAE'})
     extras = copy.deepcopy(document)
     _delete(extras, 'research.objective_text')
     if edit:
@@ -689,8 +759,8 @@ def render(draft, *, edit=False, catalogs=None):
         'budget.max_output_total_bytes': '单节点输出合计（字节）',
         'budget.candidate_extra_slots': 'W 提名预览额外名额（个）',
         'budget.portfolio_review_after_cycles': '组合复核（周期）',
-        'budget.breadth.max_w_seconds': 'W 时间目标（秒）',
-        'budget.breadth.max_w_observed_tokens': 'W 用量目标（tokens）',
+        'budget.breadth.max_w_seconds': 'W 原调用计量锚点（秒）',
+        'budget.breadth.max_w_observed_tokens': 'W 原调用计量锚点（tokens）',
         'budget.breadth.max_requested_repairs': '最多请求修复（次）',
         'budget.breadth.initial_calls': '首次探索调用（次）',
         'budget.correction.review_after': '复核阈值（次）',
@@ -710,11 +780,33 @@ def render(draft, *, edit=False, catalogs=None):
         'turn':'按单次调用计量'}
 
 
+    node_identity = 0
+    def structured(value, parent):
+        nonlocal node_identity
+        rows = []
+        for key, item in (value.items() if isinstance(value, dict) else enumerate(value)):
+            node_identity += 1
+            identity = str(node_identity)
+            prefix = 'node.'+identity+'.'
+            kind = _kind(item)
+            scalar = '' if kind in ('null', 'table', 'array') else str(item).lower() if type(item) is bool else str(item)
+            rows.append('<div class="config-node" data-node="'+identity+'"><input type="hidden" name="'+prefix+'parent" value="'+escape(parent, quote=True)+'">'
+                '<label>键名 <input name="'+prefix+'key" value="'+escape(str(key) if isinstance(value, dict) else '', quote=True)+'"></label>'
+                '<label>类型 <select class="config-kind" name="'+prefix+'kind">'+''.join('<option value="'+choice+'"'+(' selected' if choice==kind else '')+'>'+choice+'</option>' for choice in ('string','integer','number','boolean','null','table','array','datetime','date','time'))+'</select></label>'
+                '<label class="config-value">值 <input name="'+prefix+'value" value="'+escape(scalar, quote=True)+'"></label><button type="button" class="config-remove">删除此项</button>'
+                '<div class="config-children" data-parent="'+identity+'">'+(structured(item, identity) if kind in ('table','array') else '')+'</div><button type="button" class="config-add" data-parent="'+identity+'">添加子项</button></div>')
+        return ''.join(rows)
+
     def control(field, *, advanced=False, matrix=False):
         value = _get(document, field.path)
-        if value is not None:
+        for path, pending in draft.get('group_drafts', {}).items():
+            if field.path.startswith(path+'.'):
+                value = _get(pending, field.path[len(path)+1:], value)
+        if field.kind not in ('strings', 'array', 'table') and isinstance(value, (dict, list)):
+            return '<p class="note">'+escape(field.label)+'：已导入的非标准结构保留在高级设置中。</p>'
+        if value is not None and field.kind not in ('strings', 'array', 'table'):
             _delete(extras, field.path)
-        label = escape(labels.get(field.path, field.label))
+        label = escape(field.label if field.description else labels.get(field.path, field.label))
         if field.path.startswith('budget.node_targets.'):
             label = '单次工作 tokens 目标' if field.path.endswith('max_observed_tokens') else '单次工作时间目标（秒）'
         if field.path.startswith('agent.roles.'):
@@ -725,10 +817,37 @@ def render(draft, *, edit=False, catalogs=None):
         metadata = ''
         identity = 'config-'+field.path.replace('.', '-')
         help_id = identity+'-help'
-        hint = ('<small class="field-help" id="'+help_id+'">'+escape(short_hints[field.path])+'</small>') if field.path in short_hints and not matrix else ''
+        hint = ('<small class="field-help" id="'+help_id+'">'+escape(short_hints[field.path])+'</small>') if field.path in short_hints and (not matrix or field.path.endswith('.service_tier')) else ''
         described = ' aria-describedby="'+('role-settings-help' if matrix else help_id)+'"' if matrix or hint else ''
         attributes = ' data-config-path="'+escape(field.path,quote=True)+'" data-error-label="'+escape(field.label,quote=True)+'"'+(' data-invalid="true"' if isinstance(value, _Invalid) else '')
         text = '' if value is None else (str(value).lower() if type(value) is bool else str(value))
+        if field.kind in ('strings', 'array', 'table'):
+            valid = isinstance(value, list if field.kind in ('strings', 'array') else dict)
+            multiline = False
+            if field.kind == 'strings' and valid:
+                valid = all(isinstance(item, str) for item in value)
+                multiline = valid and any('\r' in item or '\n' in item for item in value)
+            if value is not None and (not valid or multiline):
+                reason = '含换行的逐项文本' if multiline else '已导入的非标准值'
+                return '<p class="note">'+label+'：'+reason+'保留在高级设置中。</p>'
+            if valid:
+                _delete(extras, field.path)
+            enabled = '<label class="check-label"><input type="checkbox" name="enabled.'+field.path+'" value="yes"'+(' checked' if valid else '')+'>明确声明'+label+'（取消则省略表单部分）</label>'
+            if valid and field.path in GROUP_FIELDS:
+                enabled += '<input type="hidden" name="present.'+field.path+'" value="yes">'
+            if field.kind == 'strings':
+                widget = '<div class="config-string-list" data-path="'+field.path+'">'+''.join('<div class="config-string-row"><textarea rows="1" name="cfg.'+field.path+'.'+str(index)+'">'+escape(item)+'</textarea><button type="button" class="config-string-remove">删除</button></div>' for index, item in enumerate(value or []))+'</div><button type="button" class="config-string-add" data-path="'+field.path+'">添加一项</button>'
+            elif field.path in GROUP_FIELDS:
+                # Expert resume protocol, metering and native home stay in TOML.
+                if valid:
+                    _put(extras, field.path, copy.deepcopy(value))
+                visible = [child for child in GROUP_FIELDS[field.path] if child.path.rsplit('.',1)[-1] not in {'protocol','usage_scope','native_home'}]
+                widget = '<div class="config-grid">'+''.join(control(child) for child in visible)+'</div>'
+                if _get(extras, field.path) == {}:
+                    _delete(extras, field.path)
+            else:
+                widget = '<div class="config-children" data-parent="@'+field.path+'">'+structured(value or ({} if field.kind=='table' else []), '@'+field.path)+'</div><button type="button" class="config-add" data-parent="@'+field.path+'">添加一项</button>'
+            return '<fieldset class="config-group structured-setting"'+attributes+'><legend>'+label+'</legend>'+enabled+widget+hint+'</fieldset>'
         if field.choices or field.kind == 'boolean':
             choices = list(backends.names() if field.path=='agent.backend' else field.choices or ('true','false'))
             choices += [text] if text and text not in choices else []
@@ -744,7 +863,7 @@ def render(draft, *, edit=False, catalogs=None):
         else:
             suggestions = ()
             suggestion_id = identity+'-suggestions'
-            widget = '<input id="'+identity+'" name="cfg.'+field.path+'" value="'+escape(text,quote=True)+'" placeholder="'+escape(placeholders.get(field.path,field.placeholder),quote=True)+'"'+described+(' inputmode="decimal"' if field.kind in ('integer','number') else '')+(' list="'+suggestion_id+'"' if suggestions else '')+'>'
+            widget = '<input id="'+identity+'" name="cfg.'+field.path+'" value="'+escape(text,quote=True)+'" placeholder="'+escape(placeholders.get(field.path,field.placeholder),quote=True)+'"'+described+(' inputmode="decimal"' if field.kind in ('integer','number') and field.path not in _UNLIMITED_BUDGET_PATHS else '')+(' list="'+suggestion_id+'"' if suggestions else '')+'>'
             if suggestions:
                 widget += '<datalist id="'+suggestion_id+'">'+''.join('<option value="'+choice+'">' for choice in suggestions)+'</datalist>'
         if value == '' and field.kind == 'string':
@@ -858,37 +977,42 @@ def render(draft, *, edit=False, catalogs=None):
         for name, value in catalogs.items())
     rows.append(heading + '<fieldset class="config-group"><legend>模型</legend><div class="config-grid config-grid-four model-fields">'+fields(model_paths)+'</div>'+catalog_note+'</fieldset>'
         '<fieldset class="config-group" id="budget-settings"><legend>研究总上限</legend><div class="budget-fields">'+fields(budget_paths)+'</div>'
-        '<p class="note">三项都必须填写，达到任一上限研究就会停下来等你决定。tokens 是模型用量，不是金额；时间按研究活动累计，等待外部实验、服务退避和暂停的时间都不计入；步数统计研究阶段及恢复、审计等控制动作。</p></fieldset>')
-    role_paths = [f'agent.roles.{role}.{key}' for role in 'HWAE' for key in ('model','reasoning_effort')]
+        '<p class="note">三项都必须填写，达到任一上限研究就会停下来等你决定。tokens 是模型用量，不是金额；时间按研究活动累计，等待外部实验、服务退避和暂停的时间都不计入；步数统计研究阶段及恢复、审计等控制动作。H/A/E 可在下方设置单次工作软目标；普通 W 仅依据上下文窗口与总预算，不设置额外收口目标。</p></fieldset>')
+    role_paths = [f'agent.roles.{role}.{key}' for role in 'HWAE' for key in ('model','reasoning_effort','service_tier')]
     configured = any(_get(document, path) is not None for path in role_paths)
     rows.append('<details class="role-settings config-group" data-config-group="agent.roles"'+(' open' if configured else '')+'><summary>按角色指定模型'
         + ('<span class="configured-note">已设置</span>' if configured else '<span class="summary-note">可选，留空沿用上面的模型</span>')
         + '</summary><div class="config-matrix-scroll" role="region" aria-label="角色模型，可横向滚动" tabindex="0">'
         '<table class="config-role-matrix role-settings-matrix"><caption class="config-sr-only">四个研究角色的模型覆盖</caption>'
-        '<thead><tr><th scope="col">研究角色</th><th scope="col">模型</th><th scope="col">推理力度</th></tr></thead><tbody>')
+        '<thead><tr><th scope="col">研究角色</th><th scope="col">模型</th><th scope="col">推理力度</th><th scope="col">服务档位</th></tr></thead><tbody>')
     for role in 'HWAE':
-        paths = [f'agent.roles.{role}.{key}' for key in ('model','reasoning_effort')]
-        rows.append('<tr><th scope="row">'+role+' · '+ROLE_NAMES[role]+'<p class="note">'+ROLE_HELP[role]+'</p></th>'+''.join('<td>'+control(by_path[path], matrix=True)+'</td>' for path in paths)+'</tr>')
-    rows.append('</tbody></table></div><p class="note" id="role-settings-help">留空的角色沿用上面的模型与推理力度。</p></details>')
+        paths = [f'agent.roles.{role}.{key}' for key in ('model','reasoning_effort','service_tier')]
+        worker_name = _get(document, f'agent.roles.{role}.worker')
+        inheritance = '继承来源：命名研究者 '+str(worker_name)+'，其未声明项沿用全局。' if worker_name is not None else '未覆盖项沿用全局设置。'
+        rows.append('<tr><th scope="row">'+role+' · '+ROLE_NAMES[role]+'<p class="note">'+ROLE_HELP[role]+'</p><p class="note">'+escape(inheritance)+'</p></th>'+''.join('<td>'+control(by_path[path], matrix=True)+'</td>' for path in paths)+'</tr>')
+    rows.append('</tbody></table></div><p class="note" id="role-settings-help">角色显式值优先，其次沿用命名研究者，再沿用全局模型、推理力度与服务档位。Final A 使用 A 的配置。</p></details>')
     rows.append(skill_picker())
     current_supervision = _get(document, 'policies.supervision')
     current_mode = current_supervision.get('mode') if isinstance(current_supervision, dict) else None
-    if isinstance(current_supervision, dict):
-        remainder = {key: value for key, value in extras.get('policies', {}).get('supervision', {}).items() if key != 'mode'}
-        if remainder == {key: value for key, value in _default_supervision().items() if key != 'mode'}:
-            extras['policies'].pop('supervision', None)
-            if not extras['policies']:
-                extras.pop('policies')
-        else:
-            extras['policies']['supervision'] = remainder
-    supervision_control = ('<div class="config-field" data-config-path="policies.supervision.mode" data-error-label="自动方向复核">'
-        '<label for="config-policies-supervision-mode">自动方向复核</label><select id="config-policies-supervision-mode" name="cfg.policies.supervision.mode">'
-        + ('' if current_mode else '<option value="">默认（开启）</option>')
+    if isinstance(current_mode, str) and current_mode:
+        _delete(extras, SUPERVISION_MODE_FIELD.path)
+    supervision_control = ('<div class="config-field" data-config-path="'+SUPERVISION_MODE_FIELD.path+'" data-error-label="'+SUPERVISION_MODE_FIELD.label+'">'
+        '<label for="config-policies-supervision-mode">'+SUPERVISION_MODE_FIELD.label+'</label><select id="config-policies-supervision-mode" name="cfg.'+SUPERVISION_MODE_FIELD.path+'">'
+        + ('' if isinstance(current_mode, str) and current_mode else '<option value="">默认（开启）</option>')
+        + ('<option value="'+escape(current_mode, quote=True)+'" selected>已导入的不支持值：'+escape(current_mode)+'</option>' if isinstance(current_mode, str) and current_mode and current_mode not in SUPERVISION_MODE_FIELD.choices else '')
         + ''.join('<option value="'+key+'"'+(' selected' if key==current_mode else '')+'>'+escape(label)+'</option>' for key, label in SUPERVISION_MODES)
         + '</select><small class="field-help">W 连续做了较多实验后，是否请独立 A 检查研究方向。</small></div>')
     rows.append(
         '<details class="permission-settings"><summary>权限与自动复核<span class="summary-note">留空使用默认值</span></summary>'
-        '<div class="config-grid config-grid-four">'+fields(permissions)+'</div><div class="config-grid">'+supervision_control+'</div></details>')
+        '<div class="config-grid config-grid-four">'+fields(permissions)+'</div><div class="config-grid">'+supervision_control+'</div>'
+        '<details><summary>自动 A 次数、间距与累计比例</summary><p class="note">普通 A 返回建议，由 W 决定下一步；这些限制仅约束额外自动 A。</p><div class="config-grid">'+fields([field.path for field in form_fields if field.path.startswith('policies.supervision.')])+'</div></details></details>')
+    target_paths = [f'budget.node_targets.{role}.{key}' for role in 'HAE' for key in ('max_observed_tokens','max_seconds')]
+    rows.append('<details class="node-target-settings"'+(' open' if any(_get(document, path)=='unlimited' for path in _UNLIMITED_BUDGET_PATHS) else '')+'><summary>H / A / E 单次工作软目标</summary><p class="note">建议收口目标，不是额度或强制转 A 的门槛。</p><p class="note" data-worker-target-policy="context-only">普通 W 不设额外时间/tokens 收口目标，仅依据上下文窗口与总预算。</p><p class="note">已有 W 有限锚点保留在高级 TOML，仅作原调用恢复与计量绑定，不是普通 W 收口条件。当前完整声明校验仍要求保留 W 锚点；仅填写 H/A/E 不会自动补造 W 数值。</p>'
+        + ''.join('<fieldset class="config-group"><legend>'+role+' · '+ROLE_NAMES[role]+'</legend><div class="config-grid">'+fields([path for path in target_paths if path.split('.')[2]==role])+'</div></fieldset>' for role in 'HAE')+'</details>')
+    rows.append('<details class="recovery-settings"><summary>恢复与重试</summary><p class="note">仅恢复同一原调用，保留已耗预算；未知提交须核对原调用，不能重新提交。修改本组请明确勾选声明。</p>'+control(by_path['policies.resume'])+'</details>')
+    rows.append('<details class="context-settings"><summary>W 上下文与窗口</summary><div class="config-grid">'+fields(['policies.worker_context','policies.worker_context_windows'])+'</div><p class="note">固定交接规则：W 上下文达到 90% 时准备安全检查点，原生压缩可以继续；仅在当前压缩后占用仍超过 70% 时交接。阈值不可调整，窗口数上限仍受原有检查，窗口不重置节点目标或预算。</p></details>')
+    native_fields = [field.path for field in form_fields if field.path.startswith('agent.native.')]
+    rows.append('<details class="backend-native-settings"><summary>后端原生设置与准确启动命令</summary><p class="note">启动命令逐项保存 argv，不按 shell 拆词；切换后端保留各自草稿。留空原生字段不覆盖后端设置。</p>'+control(by_path['agent.launcher'])+fields(native_fields)+'</details>')
     executor_paths = ['executor.config.executor','executor.config.config_file']
     configured = any(_get(document, path) is not None for path in executor_paths)
     rows.append('<details class="executor-settings"'+(' open' if configured else '')+'><summary>实验执行插件'
@@ -930,7 +1054,11 @@ def render(draft, *, edit=False, catalogs=None):
         for name, value in catalogs.items()}, ensure_ascii=False).replace('<', '\\u003c')
     rows.append('<script type="application/json" id="model-catalog">'+catalog_json+'</script>')
     rows.append('<script src="/assets/configuration.js"></script>')
-    metadata='<input type="hidden" name="rendered_backend" value="'+escape(
+    baseline = {path: (str(value).lower() if type(value) is bool else str(value)) if (value := _get(document, path)) is not None and not isinstance(value, (dict, list)) else '' for path in [*(field.path for field in form_fields if field.path.startswith('policies.supervision.')), 'policies.supervision.mode']}
+    if not isinstance(_get(document, SUPERVISION_MODE_FIELD.path), str):
+        baseline[SUPERVISION_MODE_FIELD.path] = ''
+    metadata='<input type="hidden" name="supervision_baseline" value="'+escape(json.dumps(baseline, ensure_ascii=False),quote=True)+'">'
+    metadata+='<input type="hidden" name="rendered_backend" value="'+escape(
         str(_get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND),quote=True)+'">'
     saved_native=draft.get('native_drafts',{})
     if saved_native:
@@ -938,6 +1066,12 @@ def render(draft, *, edit=False, catalogs=None):
             json.dumps(saved_native,ensure_ascii=False,separators=(',',':')),quote=True)+'">'
         metadata+=('<p class="note">已保留以下后端的原生设置草稿：'+escape('、'.join(saved_native))
             +'。切回对应后端时恢复；这些设置不传给当前后端。</p>')
+    saved_launchers=draft.get('launcher_drafts',{})
+    if saved_launchers:
+        metadata+='<input type="hidden" name="launcher_drafts" value="'+escape(
+            json.dumps(saved_launchers,ensure_ascii=False,separators=(',',':')),quote=True)+'">'
+        metadata+=('<p class="note">已保留以下后端的启动命令草稿：'+escape('、'.join(saved_launchers))
+            +'。切回对应后端时恢复；当前后端使用自己的启动命令。</p>')
     return '<div class="compact-configuration">'+metadata+'\n'.join(rows)+'</div>'
 
 
@@ -1091,7 +1225,8 @@ const enableEditedGroup = e => {
   const group = e.target.closest('.structured-setting');
   if (!group || e.target.type === 'checkbox') return;
   const enabled = group.querySelector('input[type="checkbox"]');
-  if (enabled) enabled.checked = true;
+  // Optional policy groups require an explicit opt-in.
+  if (enabled && group.querySelector('.config-string-list')) enabled.checked = true;
 };
 document.addEventListener('input', enableEditedGroup); document.addEventListener('change', enableEditedGroup);
 document.addEventListener('click', e => { if (e.target.matches('.config-add,.config-remove,.config-string-add,.config-string-remove')) invalidate(e); });
@@ -1156,7 +1291,7 @@ def _options(draft):
         if value is not None and field.kind not in ('array', 'table', 'strings'):
             if field.choices and value not in field.choices:
                 raise ValueError(f'{field.label}：请选择支持的选项')
-            _typed(str(value).lower() if type(value) is bool else str(value), field.kind, field.label)
+            _typed(str(value).lower() if type(value) is bool else str(value), field.kind, field.label, path=field.path)
     return research_config.normalize(research_config.from_document(declaration(draft), base=draft['base']))
 
 

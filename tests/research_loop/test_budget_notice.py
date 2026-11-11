@@ -142,8 +142,9 @@ def test_hook_does_not_read_symlink_or_missing_hint(tmp_path):
     (dict(intent=dict(output_repair=True)),'future action'),
     (dict(intent=dict(work_repair=True)),'original authorization/action'),
     (dict(author=True),'author-only'),(dict(final_return=True),'accepted final return')])
-def test_closeout_notice_preserves_repair_author_and_final_scope(options,required):
-    value=published(shared=True,**options)
+@pytest.mark.parametrize('role',['A','W'])
+def test_closeout_notice_preserves_repair_author_and_final_scope(options,required,role):
+    value=published(role=role,shared=True,**options)
     text=value['closeout_notices']['token']['text']
     assert required in text and ('permissions hold' in text or 'original authorization/action' in text)
     assert 'unknown usage != 0' in text.lower()
@@ -152,7 +153,7 @@ def test_closeout_notice_preserves_repair_author_and_final_scope(options,require
 
 
 @pytest.mark.parametrize('role,dimension,risk',[
-    ('H','token','node'),('H','time','shared'),('W','time','node'),
+    ('H','token','node'),('H','time','shared'),
     ('W','time','expired'),('E','token','shared'),
     ('A','token','node'),('A','token','shared'),('A','time','expired')])
 def test_first_risk_notice_is_bounded_and_keeps_scientific_permissions(role,dimension,risk):
@@ -230,11 +231,48 @@ def test_current_90_percent_context_notice_reaches_the_hook(tmp_path):
     assert notice.hook_output(tmp_path,1) is None
 
 
-def test_shared_time_handoff_without_context_telemetry_retains_originals():
-    alert=notice.worker_progress_notice(dict(role='W'),{},active_seconds=901,
-        target_seconds=900,fragment_enabled=True)
-    assert alert==dict(cause='node',text=notice.WORKER_PROGRESS_TEXT)
-    assert 'never replay unknown calls' in alert['text']
+@pytest.mark.parametrize('observation',[None,dict(context_windows=dict(coverage='unknown'))])
+def test_elapsed_time_without_current_context_never_requests_worker_handoff(observation):
+    facts=dict(active_seconds=100000,target_seconds=900,fragment_enabled=True,
+        context_observation=observation,context_handoff_version=2)
+    assert notice.worker_progress_due(dict(role='W'),{},**facts) is False
+    assert notice.worker_progress_notice(dict(role='W'),{},**facts) is None
+
+
+@pytest.mark.parametrize('dimension',['token','time'])
+@pytest.mark.parametrize('risk',[dict(target_reached=True),dict(target_near=True)])
+def test_ordinary_worker_has_no_time_or_token_soft_target_notice(dimension,risk):
+    facts=dict(target_reached=False,shared_reached=False,followup_tokens=dict(A=40))
+    facts.update(risk)
+    assert notice.closeout_notice(dict(role='W'),{},dimension=dimension,**facts) is None
+
+
+def test_ordinary_worker_shared_token_near_notice_keeps_work_and_context_handoff_separate(tmp_path):
+    assert notice.closeout_notice(dict(role='W'),{},dimension='time',target_reached=False,
+        shared_reached=False,shared_risk=True) is None
+    value=published(role='W',target=False,shared_risk=True)
+    value['shared_observed_tokens_remaining_upper_bound']=100
+    alert=value['closeout_notices']['token']
+    assert alert['cause']=='shared' and 'cumulative tokens >=90% of configured total' in alert['text']
+    assert 'No handoff required' in alert['text'] and 'unknown usage != 0' in alert['text']
+    assert 'suggested' not in alert['text'] and len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
+    save(tmp_path,value)
+    assert notice.hook_output(tmp_path,0)['hookSpecificOutput']['additionalContext']==alert['text']
+    assert notice.hook_output(tmp_path,1) is None
+    value.update(target_state='near')
+    value['closeout_notices']['progress']=dict(cause='node',text=notice.WORKER_CONTEXT_90_TEXT)
+    save(tmp_path,value)
+    assert notice.hook_output(tmp_path,2)['hookSpecificOutput']['additionalContext']==notice.WORKER_CONTEXT_90_TEXT
+    assert notice.hook_output(tmp_path,3) is None
+
+
+@pytest.mark.parametrize('dimension',['token','time'])
+def test_ordinary_worker_true_shared_exhaustion_still_returns_originals(dimension):
+    alert=notice.closeout_notice(dict(role='W'),{},dimension=dimension,
+        target_reached=False,shared_reached=True,shared_expired=dimension=='time',
+        shared_exhausted=True,followup_tokens=dict(A=40))
+    assert alert['cause']=='shared' and f'Shared {dimension} budget reached.' in alert['text']
+    assert 'No new work/replay' in alert['text'] and 'suggested' not in alert['text']
 
 
 def test_exhausted_final_a_retains_exact_delivery_judgment():
@@ -244,6 +282,14 @@ def test_exhausted_final_a_retains_exact_delivery_judgment():
     assert 'exact deliver or reject all with finish' in alert['text']
     assert 'No correction/new W/E/extra FINAL' in alert['text']
     assert len(alert['text'].encode())<=notice.MAX_NOTICE_BYTES
+
+
+def test_worker_delivery_correction_keeps_its_bounded_target_advice():
+    alert=notice.closeout_notice(dict(role='W',research_strategy_version=3,
+        evidence_return=dict(kind='delivery_correction')),{},dimension='token',
+        target_reached=False,target_near=True,shared_reached=False)
+    assert 'save the exact correction/gaps' in alert['text']
+    assert 'No scope expansion/replay' in alert['text']
 
 
 def test_followup_notice_does_not_copy_unbounded_configured_numbers():
@@ -435,6 +481,129 @@ def test_unsupported_launchers_cannot_claim_native_hook_channel(settings,tmp_pat
 
 
 @pytest.mark.process_e2e
+@pytest.mark.parametrize('terminal_event',['turn.completed','turn.failed','turn.interrupted'])
+def test_native_terminal_retires_turn_input_before_late_receipt(tmp_path,monkeypatch,terminal_event):
+    """Run the existing local launcher and real queue without a model call."""
+    from scidiscovery.research_loop import accepted_budget,budget,execution,profiles,turn_input
+    from test_node_budget import instance,policy
+    from test_soft_node_budget import start_clock
+
+    root=instance(tmp_path,limits=policy())
+    job=c.build_job(root,1,'H',[])
+    start_clock(root,'local terminal queue fixture')
+    anchor=budget.accept_node(root,job)
+    record=execution.origin(root,1)
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=anchor,
+        **profiles.binding(c.settings(root),job))
+    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
+    launcher=tmp_path/'native.py'
+    code=launcher.read_text().replace("mode=config['mode']",
+        "print(json.dumps({'type':'thread.started','thread_id':'11111111-2222-4333-8444-555555555555'}),flush=True)\n"
+        "print(json.dumps({'type':'turn.started','turn_id':'fixture-turn'}),flush=True)\n"
+        "mode=config['mode']")
+    code=code.replace("'type':'turn.completed'","'type':config['terminal_event']")
+    code=code.replace("(work/'work/ready').touch()",
+        "print(json.dumps(config['late_receipt']),flush=True)\n(work/'work/ready').touch()")
+    launcher.write_text(code)
+    contexts=[];retired=[];late_receipts=[]
+    def advice(identity):
+        return dict(guidance_id=identity,revision=1,text='Retain the original evidence.',
+            target='H',kind='advice',scope='research',effective_step=1,sequence=1,status='pending')
+    def begin(self,root,job,work,attempt,*,task_ref,base):
+        # The fake exec launcher supplies the same optional queue seam that a
+        # supported live transport binds; all admission and receipt IO is real.
+        context=turn_input.begin(root,job,work,attempt,task_ref=task_ref,base=base)
+        assert context is not None
+        turn_input.poll(context,thread='11111111-2222-4333-8444-555555555555',turn='fixture-turn')
+        queued=turn_input.offer(root,advice('original-advice'))
+        assert queued['turn_input']['status']=='queued'
+        requests=c.read(context['inbox']/'inbox.json')
+        assert len(requests)==1
+        configuration=c.read(launcher.with_suffix('.json'))
+        configuration.update(terminal_event=terminal_event,
+            late_receipt=turn_input.Inbox.receipt(requests[0],'accepted'))
+        c.write(launcher.with_suffix('.json'),configuration)
+        contexts.append(context)
+        return context
+    retire=backends.Backend.retire_turn_input
+    def retire_at_terminal(self,context):
+        retire(self,context)
+        assert context['accepting'] is False
+        offered=turn_input.offer(root,advice('after-terminal'))
+        assert offered['status']=='pending' and 'turn_input' not in offered
+        assert len(c.read(context['inbox']/'inbox.json'))==1
+        retired.append(True)
+    poll=backends.Backend.poll_turn_input
+    def poll_receipt(self,context,**kwargs):
+        event=kwargs.get('event')
+        if event is not None:
+            assert retired and context['accepting'] is False
+            late_receipts.append(event)
+        return poll(self,context,**kwargs)
+    monkeypatch.setattr(backends.Codex,'begin_turn_input',begin)
+    monkeypatch.setattr(backends.Codex,'retire_turn_input',retire_at_terminal)
+    monkeypatch.setattr(backends.Codex,'poll_turn_input',poll_receipt)
+    if terminal_event=='turn.completed':
+        outcome=native.run_native(root,1)
+        assert outcome['terminal_observed'] and outcome['stop_reason'] is None
+    else:
+        with pytest.raises(RuntimeError,match='not a verified terminal result'):
+            native.run_native(root,1)
+        assert c.read(record/'native-outcome.json')['stop_reason']=='native_failure_event'
+    assert len(contexts)==len(retired)==len(late_receipts)==1
+    original=c.read(root/'host-control/guidance/original-advice.json')
+    assert original['status']=='applied' and original['turn_input']['status']=='accepted'
+    assert original['applied_step']==1 and original['applied_role']=='H'
+    assert (contexts[0]['inbox']/'retired.json').exists()
+    assert not (root/'host-control/guidance/after-terminal.json').exists()
+
+
+@pytest.mark.process_e2e
+def test_native_turn_input_end_error_still_cleans_original_process(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget,budget,execution,profiles,turn_input
+    from test_node_budget import instance,policy
+    from test_soft_node_budget import start_clock
+
+    root=instance(tmp_path,limits=policy(),mode='hold')
+    job=c.build_job(root,1,'H',[])
+    start_clock(root,'local queue cleanup failure fixture')
+    anchor=budget.accept_node(root,job)
+    record=execution.origin(root,1)
+    intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=anchor,
+        **profiles.binding(c.settings(root),job))
+    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
+    def begin(self,*args,**kwargs):return turn_input.begin(*args,**kwargs)
+    refusal=ValueError('Fixture queue writer lease changed')
+    def refused_end(self,context):
+        assert context is not None
+        raise refusal
+    stop_node=budget.stop_node
+    def stop_after_observation(root,job,intent,limits,meter):
+        return 'fixture_stop' if meter['input_tokens'] else stop_node(root,job,intent,limits,meter)
+    cleaned=[]
+    cleanup=native.runtime.cleanup_owned_group
+    def cleanup_original(identity):
+        result=cleanup(identity)
+        cleaned.append(result)
+        return result
+    monkeypatch.setattr(backends.Codex,'begin_turn_input',begin)
+    monkeypatch.setattr(backends.Codex,'end_turn_input',refused_end)
+    monkeypatch.setattr(budget,'stop_node',stop_after_observation)
+    monkeypatch.setattr(native.runtime,'cleanup_owned_group',cleanup_original)
+    with pytest.raises(ValueError,match='queue writer lease changed') as failure:
+        native.run_native(root,1)
+    assert failure.value is refusal
+    outcome=c.read(record/'native-outcome.json')
+    assert outcome['native_started'] and outcome['returncode']<0
+    assert outcome['stop_reason']=='native_error_unknown'
+    assert outcome['cleanup']=='observed_group_cleaned' and cleaned==['observed_group_cleaned']
+    assert (c.workspace(root,1)/'work/launches.txt').read_text().splitlines()==['launch']
+    assert c.read(record/'usage.json')['input_tokens']==7
+
+
+@pytest.mark.process_e2e
 @pytest.mark.parametrize(('role','shared'),[('H',False),('A',True),('W',False)])
 def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_namespace(tmp_path,monkeypatch,role,shared):
     """Local Responses fixture only: no external model, authentication or billing."""
@@ -528,12 +697,14 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
         **profiles.binding(c.settings(root),job))
     c.write(record/'native-intent.json',native_intent)
     accepted_budget.accept_native(root,1,record,native_intent)
+    hint=published(role=role,shared=shared,target=role!='W',shared_risk=role=='W')
+    if role=='W':hint['shared_observed_tokens_remaining_upper_bound']=1000
     write_hint=budget.write_node_hint
     def reached(*args,**kwargs):
         write_hint(*args,**kwargs)
         # Only this published current hint changes; the hook receives no
         # controller/history facts and the native invocation remains accepted.
-        save(c.workspace(root,1),published(role=role,shared=shared))
+        save(c.workspace(root,1),hint)
     monkeypatch.setattr(budget,'write_node_hint',reached)
     try:
         outcome=native.run_native(root,1)
@@ -563,7 +734,7 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     assert current['ratio']==12/950
     assert len(requests)==2
     packet=requests[1]
-    text=published(role=role,shared=shared)['closeout_notices']['token']['text']
+    text=hint['closeout_notices']['token']['text']
     developer=[item for item in packet['input'] if item.get('role')=='developer']
     if os.environ.get('SCID_TEST_LOG_DIR'):
         report=Path(os.environ['SCID_TEST_LOG_DIR'])/'budget-notice-requests.json'
@@ -584,6 +755,7 @@ def test_real_codex_post_tool_notice_preserves_tool_output_in_final_scientific_n
     assert len(outputs)==1 and isinstance(outputs[0]['output'],str) and outputs[0]['output'].strip(),outputs
     assert json.loads(outputs[0]['output'])==expected_result and text not in outputs[0]['output'],outputs
     if role=='A':assert_ordinary_a_returns_advice(text)
+    if role=='W':assert 'cumulative tokens >=90% of configured total' in text
     assert c.read(record/'science-output.json')==final
     assert (home/'config.toml').read_text()==original_config
     assert observation['tokens']['input_tokens']+observation['tokens']['output_tokens']==24

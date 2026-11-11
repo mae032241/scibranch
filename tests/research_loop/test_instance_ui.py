@@ -1547,13 +1547,19 @@ def test_configuration_update_retains_draft_and_applies_only_to_new_nodes(tmp_pa
     assert retry['cfg.permissions.web'] == 'live'
     assert retry['cfg.budget.max_tokens'] == 'retain this invalid number'
     assert retry['authorization_note'] == fields['authorization_note']
+    summary = re.search(r'<section class="configuration-changes".*?</section>', page.decode(), re.S).group()
+    assert '当前草稿（尚未验证）' in summary and 'next-node-model' in summary and 'fixture' in summary
+    assert '待修正（尚未验证）' in summary and '原调用保留原配置与已用预算' in summary
     assert configuration_updates.status(root)['revision'] == 0
     retry['cfg.budget.max_tokens'] = '4500'
     assert post(ui, cookie, 'configuration-update', retry)[2]['Location'] == '/configuration'
     state = configuration_updates.status(root)
     assert state['pending'] and state['settings']['model'] == 'next-node-model'
     assert state['active_settings']['model'] == 'fixture'
-    assert '配置待生效'.encode() in ui.get('/configuration', host=ui.host, cookie=cookie)[1]
+    pending_page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+    assert '配置待生效' in pending_page
+    summary = re.search(r'<section class="configuration-changes".*?</section>', pending_page, re.S).group()
+    assert '已保存待生效声明' in summary and 'next-node-model' in summary and 'fixture' in summary
     assert (root / 'settings.json').read_bytes() == frozen
     assert (root / 'jobs/001.json').read_bytes() == original_job
     from test_history_handoff import finish
@@ -1561,6 +1567,71 @@ def test_configuration_update_retains_draft_and_applies_only_to_new_nodes(tmp_pa
     c.build_job(root, 2, 'H', [])
     assert not configuration_updates.status(root)['pending']
     assert c.read(root / 'jobs/002.json')['configuration_revision']['revision'] == 1
+
+
+def test_configuration_summary_producer_passes_loaded_facts_to_read_free_renderer(tmp_path, monkeypatch):
+    from scidiscovery.research_loop import budget, configuration_form, configuration_updates, instance_ui, research_config
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    budget.amend(root, max_tokens=54321, authorization_note='Accepted current ceiling')
+    token = ui._browser(cookie)
+    status = configuration_updates.status
+    to_document = research_config.to_document
+    states, conversions, captured = [], [], []
+    def load(root):
+        state = status(root)
+        states.append(state)
+        return state
+    def document(root, settings=None):
+        conversions.append(settings)
+        return to_document(root, settings=settings)
+    renderer = ui._render_configuration_page
+    monkeypatch.setattr(configuration_updates, 'status', load)
+    monkeypatch.setattr(research_config, 'to_document', document)
+    monkeypatch.setattr(ui, '_render_configuration_page', lambda *args, **kwargs: captured.append(kwargs))
+    ui._configuration_page(token)
+    assert len(states) == 1
+    facts = captured[0]
+    assert sum(value is states[0]['active_settings'] for value in conversions) == 1
+    assert facts['change_summary']['rows'] == []  # Accepted ceilings, not frozen creation totals.
+    assert facts['change_summary']['target'] == '当前声明'
+    def forbidden(*args, **kwargs):
+        pytest.fail('Renderer must consume already loaded facts')
+    monkeypatch.setattr(configuration_updates, 'status', forbidden)
+    monkeypatch.setattr(instance_ui.display, 'settings', forbidden)
+    monkeypatch.setattr(budget, 'ceilings', forbidden)
+    monkeypatch.setattr(research_config, 'to_document', forbidden)
+    monkeypatch.setattr(configuration_form, '_fields', forbidden)
+    monkeypatch.setattr(configuration_form, 'render', lambda *args, **kwargs: '<p>editable form</p>')
+    facts['change_summary'].update(target='当前草稿（尚未验证）', rows=[dict(path='agent.model', label='<模型>',
+        active='<old>', draft='<script>alert(1)</script>', scope='后续新节点')], advanced_unparsed=True)
+    page = renderer(token, **facts)[1].decode()
+    summary = re.search(r'<section class="configuration-changes".*?</section>', page, re.S).group()
+    assert '&lt;模型&gt;' in summary and '&lt;old&gt;' in summary
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in summary and '<script>' not in summary
+    assert '高级 TOML 保留在编辑区' in summary and 'editable form' in page
+
+
+def test_configuration_summary_includes_mode_only_supervision_refresh(tmp_path):
+    from scidiscovery.research_loop import configuration_updates
+    from test_configuration_form import Controls
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    frozen = (root / 'settings.json').read_bytes()
+    page = ui.get('/configuration', host=ui.host, cookie=cookie)[1].decode()
+    editor = re.search(r'<form id="research-config-edit-form".*?>(.*?)</form>', page, re.S).group(1)
+    fields = Controls(editor).fields
+    target = 'off' if fields['cfg.policies.supervision.mode'] != 'off' else 'notice'
+    fields.update({'cfg.policies.supervision.mode': target, 'mode': 'refresh'})
+    status, body, _ = post(ui, cookie, 'configuration-update', fields)
+    assert status == 200
+    summary = re.search(r'<section class="configuration-changes".*?</section>', body.decode(), re.S).group()
+    row = re.search(r'<tr data-configuration-change="policies.supervision.mode">.*?</tr>', summary, re.S).group()
+    assert '自动方向复核' in row and '<td>' + target + '</td>' in row
+    assert '当前草稿（尚未验证）' in summary and '后续新节点' in row
+    assert not re.search(r'data-configuration-change="(?:agent|budget)\.', summary), summary
+    assert configuration_updates.status(root)['revision'] == 0
+    assert (root / 'settings.json').read_bytes() == frozen
 
 
 def test_configuration_update_keeps_maintenance_csrf_and_revision_guards(tmp_path):

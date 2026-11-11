@@ -1,6 +1,8 @@
 """Optional native metadata stays behind the Backend boundary and exact context."""
 import json
 
+import pytest
+
 from scidiscovery.research_loop import backends, configuration_form, model_catalog, pi_backend
 
 
@@ -82,3 +84,41 @@ def test_codex_catalog_does_not_borrow_unknown_launcher_context(tmp_path, monkey
     monkeypatch.setattr(model_catalog, '_CACHE', {})
     assert model_catalog.load('codex', launcher=['wrapper', '--different-home'])['models'] == []
     assert model_catalog.load('codex', launcher=['/chosen/codex'])['models'][0]['id'] == 'unrelated-model'
+
+
+def test_codex_catalog_observes_created_cache_without_waiting_for_ttl(tmp_path, monkeypatch):
+    home = tmp_path / 'codex-home'
+    home.mkdir()
+    monkeypatch.setenv('CODEX_HOME', str(home))
+    monkeypatch.setattr(model_catalog, '_CACHE', {})
+    context = dict(launcher=['codex'], base=tmp_path)
+    assert model_catalog.load('codex', **context)['models'] == []
+
+    path = home / 'models_cache.json'
+    path.write_text(json.dumps(dict(models=[dict(slug='available-model')])))
+    assert model_catalog.load('codex', **context)['models'][0]['id'] == 'available-model'
+
+    # Successful observations still retain the normal context-specific TTL.
+    path.write_text(json.dumps(dict(models=[dict(slug='newer-model')])))
+    assert model_catalog.load('codex', **context)['models'][0]['id'] == 'available-model'
+
+
+@pytest.mark.parametrize('initial', [
+    dict(models=[], error=None),
+    dict(models=[dict(id='partial-model')], error='metadata incomplete'),
+])
+def test_optional_backend_catalog_retries_empty_or_failed_observation(tmp_path, monkeypatch, initial):
+    calls = []
+    class Custom(backends.Protocol):
+        @classmethod
+        def model_catalog(cls, context):
+            calls.append(context)
+            if len(calls) == 1:
+                return initial
+            return dict(models=[dict(id='available-model')], error=None)
+    monkeypatch.setitem(backends._PROVIDERS, 'recovering-catalog', Custom)
+    monkeypatch.setattr(model_catalog, '_CACHE', {})
+    context = dict(launcher=['fixture'], base=tmp_path)
+    assert model_catalog.load('recovering-catalog', **context) == initial
+    assert model_catalog.load('recovering-catalog', **context)['models'][0]['id'] == 'available-model'
+    assert len(calls) == 2

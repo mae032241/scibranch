@@ -35,8 +35,11 @@ def load(backend, *, launcher=None, native=None, base=None):
         value = provider.model_catalog(context)
     except (OSError, ValueError, TypeError) as error:
         return unavailable('模型目录暂不可用，请填写精确模型 ID：' + str(error))
-    with _LOCK:
-        _CACHE[key] = (now, copy.deepcopy(value))
+    # A refresh must be able to observe metadata repaired since the last load.
+    # Keep the TTL only for populated, successful native observations.
+    if value.get('models') and not value.get('error'):
+        with _LOCK:
+            _CACHE[key] = (now, copy.deepcopy(value))
     return value
 
 

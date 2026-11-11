@@ -35,6 +35,30 @@ def ready(tmp_path, *, resumed=None):
     return transport,d,emitted,sent
 
 
+def test_current_turn_advice_is_queued_once_without_a_new_turn(tmp_path):
+    transport, declaration, events, sent = ready(tmp_path)
+    request = dict(input_id='a' * 32, payload='Compare the alternate explanation.',
+        payload_sha256=hashlib.sha256(b'Compare the alternate explanation.').hexdigest(),
+        binding=dict(channel_id='b' * 32, thread='thread-one', turn='turn-one'))
+    transport.queue_input(request)
+    request_id = sent[-1]['id']
+    assert sent[-1]['method'] == 'turn/steer'
+    assert sent[-1]['params']['expectedTurnId'] == 'turn-one'
+    raw = (json.dumps(dict(id=request_id, result=dict(turnId='turn-one',
+        ignored=dict(tool_body='SECRET_OPAQUE')))) + '\n').encode()
+    for selected in rpc.native_lines(io.BytesIO(raw)):
+        transport.receive(selected, 'Private prompt')
+    transport.queue_input(request)
+    assert [event['status'] for event in events if event['type'] == 'turn.input'] == ['submitting', 'accepted']
+    assert [item['method'] for item in sent].count('turn/steer') == 1
+    assert [item['method'] for item in sent].count('turn/start') == 1
+    assert transport.turn == 'turn-one' and not transport.finished
+    assert not declaration['pending'].exists()
+    wire = (json.dumps(events[-1]) + '\n').encode()
+    selected = backends.CodexEvents().feed(wire)
+    assert backends.Codex.event(None, selected[0]) == dict(turn_input=events[-1])
+
+
 def test_real_typed_latest_context_reaches_neutral_meter_without_cumulative_ratio(tmp_path):
     transport,d,events,sent=ready(tmp_path)
     transport.receive(dict(method='thread/tokenUsage/updated',params=dict(threadId=transport.thread,

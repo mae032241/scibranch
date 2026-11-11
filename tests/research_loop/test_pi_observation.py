@@ -622,9 +622,14 @@ def test_pending_post_exit_refresh_rehash_rejects_early_prefix_rewrite(tmp_path,
     meter.metadata_callback = published.append
     result = backend.finish_observation(meter, required=True)
     assert arrivals == [True] and published == []
-    assert meter.fault == 'session_terminal_original_changed_or_unverified' and observer.fault
-    assert meter.verified_offset is None and meter.session_binding() is None
-    assert result['coverage'] == 'unknown' and result['session_binding'] is None
+    assert meter.fault is None and observer.fault
+    assert meter.usage_reason == 'session_terminal_original_changed_or_unverified'
+    assert meter.verified_offset != meter.offset
+    # Native session identity remains resumable even when rewritten runtime
+    # context cannot supply full-original authorship or authenticated metadata.
+    binding = meter.session_binding()
+    assert binding is not None and binding['thread_id'] == 'exact-session' and 'sha256' not in binding
+    assert result['coverage'] == 'unknown' and result['session_binding'] == binding
     assert result['tokens'] == {key: 2 * value for key, value in pi_sessions.usage_tokens(USAGE).items()}
     assert real_read(observer.path)['acknowledged'] == observer.acknowledged == 1
 

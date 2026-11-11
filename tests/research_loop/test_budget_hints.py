@@ -26,16 +26,29 @@ def assert_a_instruction_retains_advisory_scope(text):
 @pytest.fixture
 def advice(tmp_path, monkeypatch):
     def make(*, node=True, delivery=False, node_tokens=100, role='H',
-            role_targets=None, thinking_target=None, max_tokens=1000, max_seconds=120):
+            role_targets=None, thinking_target=None, max_tokens=1000, max_seconds=120,
+            fragment_policy=None):
         public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Bounded scientific question.')
         root=tmp_path/'instance'
         reserve=(dict(closeout_a=dict(max_observed_tokens=10,max_seconds=1),inflight_tokens=5,
             cleanup_seconds=2,submit_seconds=0,confirm_seconds=0,adapter=None) if delivery else None)
-        controller.prepare(root,objective,public,['never-launch'],max_tokens=max_tokens,max_seconds=max_seconds,max_steps=6,
+        fragment_options=(dict(native_backend='codex',
+            native_options=dict(workspace='workspace-write',network=False,web='disabled',subagents=False),
+            resume_policy=dict(
+            max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',output_repair=True,
+            automatic_recovery=dict(enabled=False))) if fragment_policy is not None else {})
+        launcher=['never-launch']
+        if fragment_policy is not None:
+            executable=tmp_path/'codex'
+            executable.write_text('#!/bin/sh\nexit 97\n')
+            executable.chmod(0o700)
+            launcher=[str(executable)]
+        controller.prepare(root,objective,public,launcher,max_tokens=max_tokens,max_seconds=max_seconds,max_steps=6,
             model='fixture',reasoning_effort='high',search_policy=None,node_budget_mode='soft',
             node_budget_policy=(role_targets or policy(tokens=node_tokens,seconds=30)) if node else None,delivery_policy=reserve,
             role_budget_policy=dict(version=1,min_w_share=.65,max_thinking_share=.35,
-                thinking_node_target_tokens=thinking_target) if thinking_target is not None else None)
+                thinking_node_target_tokens=thinking_target) if thinking_target is not None else None,
+            worker_fragment_policy=fragment_policy,**fragment_options)
         job=c.build_job(root,1,role,[]);start_clock(root,'advisory fixture')
         anchor=budget.accept_node(root,job)
         intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),**(dict(budget_slice=anchor) if anchor else {}))
@@ -63,9 +76,9 @@ def advice(tmp_path, monkeypatch):
         for name in ('snapshot','node_admission','accept_node'):
             monkeypatch.setattr(budget,name,lambda *a,**kw:pytest.fail('Advice must use the supplied observation, never reenter admission'))
         path=c.workspace(root,1)/'work/budget-status.json'
-        def publish(meter=None,*,observed=True,author_limits=None):
+        def publish(meter=None,*,observed=True,author_limits=None,context_observation=None):
             budget.write_node_hint(root,job,intent,limits,meter or dict(input_tokens=20,cached_input_tokens=19,output_tokens=5),
-                facts=facts,observed=observed,author_limits=author_limits)
+                facts=facts,observed=observed,author_limits=author_limits,context_observation=context_observation)
             assert path.stat().st_size<=4096
             return c.read(path)
         return root,job,intent,limits,shared,publications,publish
@@ -241,7 +254,7 @@ def test_node_time_risk_uses_the_existing_eighty_percent_target(advice,elapsed,a
     assert hint['targets']==dict(max_observed_tokens=100,max_seconds=30)
 
 
-@pytest.mark.parametrize('role,threshold,expected',[('H',340,{'W':300,'A':40}),('W',40,{'A':40})])
+@pytest.mark.parametrize('role,threshold,expected',[('H',340,{'W':300,'A':40})])
 def test_followup_risk_uses_existing_role_suggestions_without_reserving_them(advice,role,threshold,expected):
     targets={key:dict(max_observed_tokens=value,max_seconds=30) for key,value in dict(H=100,W=300,A=200,E=100).items()}
     root,_,_,_,shared,_,publish=advice(role=role,role_targets=targets,thinking_target=40)
@@ -259,6 +272,97 @@ def test_followup_risk_uses_existing_role_suggestions_without_reserving_them(adv
     for next_role,tokens in expected.items():assert f'{next_role}={tokens}' in hint['instruction']
     assert budget_notice.published_notices(hint)==hint['closeout_notices']
     assert (root/'settings.json').read_bytes()==frozen
+
+
+@pytest.mark.parametrize('shared_seconds',[100.,11.999])
+def test_ordinary_worker_ignores_legacy_soft_targets_and_shared_time_risk(advice,shared_seconds):
+    root,_,intent,limits,shared,_,publish=advice(role='W')
+    original=json.dumps(intent,sort_keys=True)
+    limits['advance_seconds']=intent['budget_slice']['advance_seconds']+3000
+    limits['seconds_remaining']=shared_seconds
+    shared.update(observed_tokens=885,accounted_tokens=885)
+    hint=publish(dict(input_tokens=200,cached_input_tokens=0,output_tokens=1))
+    assert hint['targets'] is None and hint['target_kind']=='context_window_only'
+    assert hint['current_work_boundary']=='shared_only' and hint['target_state']=='within'
+    assert 'closeout_notices' not in hint
+    assert 'suggested' not in hint['instruction'] and 'time target' not in hint['instruction']
+    review=c.read(root/'host-runtime/experiment-control/001/review.json')
+    assert review['pending'] is False and review['reason'] is None
+    assert review['targets'] is None
+    assert json.dumps(intent,sort_keys=True)==original  # Immutable accounting anchor remains intact.
+
+
+@pytest.mark.parametrize('charged,alert',[(889,False),(899,False),(900,True),(1000,True)])
+def test_ordinary_worker_global_token_reminder_uses_cumulative_configured_total(advice,charged,alert):
+    root,_,_,_,shared,_,publish=advice(role='W')
+    shared.update(observed_tokens=charged,accounted_tokens=charged)
+    hint=publish(dict(input_tokens=200,cached_input_tokens=190,output_tokens=1))
+    assert hint['targets'] is None and hint['target_state']=='within'
+    assert hint['shared_observed_tokens_remaining_upper_bound']==1000-charged
+    assert ('closeout_notices' in hint) is alert
+    if alert:
+        notice=hint['closeout_notices']['token']
+        assert notice['cause']=='shared'
+        assert set(hint['closeout_notices'])=={'token'}
+        assert ('Shared token budget reached.' if charged==1000 else
+            'cumulative tokens >=90% of configured total') in notice['text']
+        assert 'suggested' not in notice['text']
+        assert budget_notice.published_notices(hint)==hint['closeout_notices']
+    review=c.read(root/'host-runtime/experiment-control/001/review.json')
+    assert review['pending'] is (charged==1000)
+
+
+def test_ordinary_worker_global_token_reminder_keeps_unknown_usage_as_lower_bound(advice):
+    _,_,_,_,shared,_,publish=advice(role='W')
+    shared.update(observed_tokens=900,accounted_tokens=900,unknown_steps=[1])
+    hint=publish(dict(input_tokens=0,cached_input_tokens=0,output_tokens=0),observed=False)
+    assert hint['shared_observed_tokens_remaining_upper_bound']==100
+    assert hint['unknown_usage'] is True
+    assert hint['closeout_notices']['token']['cause']=='shared'
+    assert 'unknown usage != 0' in hint['closeout_notices']['token']['text']
+
+
+def test_ordinary_worker_unlimited_global_tokens_have_no_near_total_notice(advice):
+    _,_,_,_,shared,_,publish=advice(role='W',max_tokens=None)
+    shared.update(observed_tokens=10000,accounted_tokens=10000)
+    hint=publish(dict(input_tokens=200,cached_input_tokens=0,output_tokens=1))
+    assert hint['shared_observed_tokens_remaining_upper_bound'] is None
+    assert 'closeout_notices' not in hint
+
+
+def test_ordinary_worker_shared_exhaustion_remains_pending(advice):
+    root,_,_,_,shared,_,publish=advice(role='W')
+    shared.update(observed_tokens=1000,accounted_tokens=1000)
+    hint=publish()
+    assert hint['closeout_notices']['token']['cause']=='shared'
+    review=c.read(root/'host-runtime/experiment-control/001/review.json')
+    assert review['pending'] is True and review['reason']=='reserve_reached'
+
+
+@pytest.mark.parametrize('started,occupancy,state,reason',[
+    (1,25,'within',None),(1,90,'near',None),
+    (2,70,'within',None),(2,71,'reached','worker_context_review_due')])
+def test_ordinary_worker_hint_uses_context_occupancy_after_legacy_targets(advice,started,occupancy,state,reason):
+    root,_,intent,limits,_,_,publish=advice(role='W',fragment_policy=dict(
+        context='same_session',max_context_windows=1,context_handoff_version=2))
+    original=json.dumps(intent,sort_keys=True)
+    limits['advance_seconds']=intent['budget_slice']['advance_seconds']+3000
+    observation=dict(context_windows=dict(coverage='live',windows_started=started),
+        context=dict(status='last_reported',total_tokens=occupancy,model_context_window=100,
+            current_window=True,observed_at=123.))
+    hint=publish(dict(input_tokens=200,cached_input_tokens=0,output_tokens=1),
+        context_observation=observation)
+    assert hint['targets'] is None and hint['target_kind']=='context_window_only'
+    assert hint['target_state']==state
+    assert hint['observed_tokens_lower_bound']==201 and hint['active_seconds']==3000
+    assert set(hint.get('closeout_notices',{}))==({'progress'} if state!='within' else set())
+    if state!='within':
+        assert hint['closeout_notices']['progress']['text']==(
+            budget_notice.WORKER_CONTEXT_90_TEXT if state=='near' else budget_notice.WORKER_CONTEXT_TEXT)
+        assert budget_notice.published_notices(hint)==hint['closeout_notices']
+    review=c.read(root/'host-runtime/experiment-control/001/review.json')
+    assert review['pending'] is (reason is not None) and review['reason']==reason
+    assert review['targets'] is None and json.dumps(intent,sort_keys=True)==original
 
 
 @pytest.mark.parametrize('seconds,alert',[(12.,False),(11.999,True),(0.,True),(-1.,True)])
@@ -386,18 +490,32 @@ def test_soft_native_stdin_has_budget_advice_and_prelaunch_hint(tmp_path,role):
     assert ordinary['observed_tokens_remaining_upper_bound']==100_000-previous['accounted_tokens']-reserve['tokens']
     assert 0<ordinary['active_seconds_available']<=120-reserve['seconds']
     assert shared['shared_observed_tokens_remaining']==ordinary['observed_tokens_remaining_upper_bound']
-    assert shared['node_budget']==c.read(execution.origin(root,step)/'native-intent.json')['budget_slice']['limits']
+    if role=='W':
+        assert 'node_budget' not in shared
+        assert local['targets'] is None and local['target_kind']=='context_window_only'
+    else:
+        assert shared['node_budget']==c.read(execution.origin(root,step)/'native-intent.json')['budget_slice']['limits']
     assert local['shared_observed_tokens_remaining_upper_bound']==ordinary['observed_tokens_remaining_upper_bound']
     assert local['per_request_admission']=='unavailable' and local['final_response_allowance']=='not_guaranteed'
     assert local['inflight_usage_unknown'] and local['reporting_delay_unmeasured']
     assert ordinary['token_usage_unknown']  # This current native task has no outcome or usage before submission.
     assert 'unknown_usage' not in ordinary
-    for text in ('Targets soft; limits/permissions bind.','work/budget-status.json','input has cache',
+    for text in ('limits/permissions bind.','work/budget-status.json','input has cache',
             'unknown!=0','no grant'):
         assert text in prompt
-    if role in 'HW':
+    if role=='H':
         assert 'Follow-up targets advise; no grant/required handoff.' in prompt
+    if role=='W':
+        assert 'Targets soft' not in prompt and 'Follow-up targets' not in prompt
     if role=='A':
         assert ('Complete the requested judgment; follow role_contract. Soft targets do not end research. '
             'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.') in prompt
     assert c.read(execution.record(root,step)/'native-outcome.json')['stop_reason'] is None
+
+
+def test_ordinary_worker_prompt_does_not_describe_node_soft_targets(advice):
+    root,job,intent,_,_,_,_=advice(role='W')
+    prompt,_,_=native.render_scientific_request(job,c.read(c.workspace(root,1)/'science-task.json'),intent,
+        backend_name='codex',instruction_transport='developer')
+    assert 'Targets soft' not in prompt and 'Follow-up targets' not in prompt
+    assert 'limits/permissions bind' in prompt

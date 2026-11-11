@@ -18,6 +18,13 @@ import sys
 import time
 import tempfile
 import tomllib
+import queue
+import threading
+
+try:
+    from .turn_input import Inbox, ENV as INPUT_ENV
+except ImportError:  # This owned shim is also launched by exact script path.
+    from turn_input import Inbox, ENV as INPUT_ENV
 
 MAX_EVENT = 65536
 MAX_HEADER = 2048
@@ -227,7 +234,7 @@ def metadata_json(line):
     thread = dict(id=True, turns='empty')
     policy = dict(type=True, networkAccess=True, writableRoots='strings',
         excludeSlashTmp=True, excludeTmpdirEnvVar=True)
-    result = dict(thread=thread, turn=turn, cwd=True, model=True, approvalPolicy=True,
+    result = dict(thread=thread, turn=turn, turnId=True, cwd=True, model=True, approvalPolicy=True,
         sandbox=policy, reasoningEffort=True, serviceTier=True)
     params = dict(threadId=True, turnId=True, turn=turn,
         tokenUsage=dict(last=dict(totalTokens=True), modelContextWindow=True),
@@ -376,7 +383,7 @@ def selected_line(line):
     """
     header = line[:MAX_HEADER]
     method = re.match(rb'^\s*\{\s*"method"\s*:\s*"([A-Za-z0-9_/]+)"', header)
-    response = re.match(rb'^\s*\{\s*"id"\s*:\s*([123])\s*,', header)
+    response = re.match(rb'^\s*\{\s*"id"\s*:\s*(?:[123]|"input-[0-9a-f]{32}")\s*,', header)
     if response:
         return len(line) <= MAX_EVENT
     if method is None:
@@ -430,6 +437,32 @@ class Transport:
         self.finished = False
         self.completed = False
         self.turn_submission_possible = False
+        self.input_pending = {}
+        self.input_seen = set()
+
+    def queue_input(self, request):
+        """Append advice to the exact existing turn, without another model call."""
+        identity = 'input-' + request['input_id']
+        if identity in self.input_seen:
+            return
+        self.input_seen.add(identity)
+        if self.finished or self.stage < 4 or request['binding']['thread'] != self.thread or request['binding']['turn'] != self.turn:
+            self.emit(Inbox.receipt(request, 'unavailable', not_submitted=True))
+            return
+        self.input_pending[identity] = request
+        self.emit(Inbox.receipt(request, 'submitting'))
+        try:
+            self.send(dict(id=identity, method='turn/steer', params=dict(threadId=self.thread,
+                expectedTurnId=self.turn, input=[dict(type='text', text=request['payload'])],
+                clientUserMessageId=request['input_id'])))
+        except (OSError, ValueError):
+            self.input_pending.pop(identity, None)
+            self.emit(Inbox.receipt(request, 'unknown'))
+
+    def finish_inputs(self):
+        for request in self.input_pending.values():
+            self.emit(Inbox.receipt(request, 'unknown'))
+        self.input_pending.clear()
 
     def initialize(self):
         self.send(dict(id=1, method='initialize', params=dict(
@@ -490,6 +523,21 @@ class Transport:
 
     def receive(self, message, prompt):
         if 'id' in message:
+            request_id = message.get('id')
+            if isinstance(request_id, str) and request_id.startswith('input-'):
+                request = self.input_pending.pop(request_id, None)
+                if request is None:
+                    return
+                result = message.get('result')
+                if isinstance(result, dict) and result.get('turnId') == self.turn == request['binding']['turn']:
+                    self.emit(Inbox.receipt(request, 'accepted'))
+                else:
+                    error = message.get('error')
+                    code = error.get('code') if isinstance(error, dict) else None
+                    rejected = type(code) is int and code in {-32700, -32600, -32601, -32602}
+                    self.emit(Inbox.receipt(request, 'unavailable' if rejected else 'unknown',
+                        **(dict(not_submitted=True) if rejected else {})))
+                return
             if message.get('id') != self.stage:
                 raise ValueError('Native RPC submission response unavailable')
             if 'error' in message:
@@ -649,7 +697,7 @@ class Transport:
             self.emit(dict(type='turn.started', turn_id=current))
 
 
-def run(argv, prompt, *, output=sys.stdout):
+def run(argv, prompt, *, output=sys.stdout, input_path=None):
     try:d = invocation(argv)
     except Exception as error:
         error._scid_never_submitted=True
@@ -667,14 +715,32 @@ def run(argv, prompt, *, output=sys.stdout):
         process.stdin.write((json.dumps(value, ensure_ascii=False, separators=(',', ':'))+'\n').encode())
         process.stdin.flush()
     transport = Transport(d, emit=emit, send=send)
+    inbox = Inbox(input_path) if input_path is not None else None
     phase='initialization_submit'
     try:
         transport.initialize()
-        messages=iter(native_lines(process.stdout))
+        messages = queue.Queue()
+        def read_messages():
+            try:
+                for message in native_lines(process.stdout):
+                    messages.put((message, None))
+            except BaseException as error:
+                messages.put((None, error))
+            finally:
+                messages.put((None, None))
+        reader = threading.Thread(target=read_messages, daemon=True)
+        reader.start()
         while True:
+            if inbox is not None and transport.stage >= 4 and not transport.finished:
+                for request in inbox.requests(transport.thread, transport.turn):
+                    transport.queue_input(request)
             phase='event_projection'
-            try:message=next(messages)
-            except StopIteration:break
+            try: message, reader_error = messages.get(timeout=.1)
+            except queue.Empty: continue
+            if reader_error is not None:
+                raise reader_error
+            if message is None:
+                break
             phase=({1:'initialization_response',2:'thread_response',3:'turn_response'}.get(message.get('id'),'rpc_response')
                 if 'id' in message else {'turn/completed':'turn_completion','turn/started':'turn_start_notice',
                     'item/completed':'assistant_or_compaction','thread/tokenUsage/updated':'context_report'}.get(
@@ -699,6 +765,7 @@ def run(argv, prompt, *, output=sys.stdout):
         raise
     finally:
         try:
+            transport.finish_inputs()
             transport.close()
             try:process.stdin.close()
             except BrokenPipeError:pass
@@ -731,7 +798,7 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ['--']: argv = argv[1:]
     try:
-        return run(argv, sys.stdin.read())
+        return run(argv, sys.stdin.read(), input_path=os.environ.get(INPUT_ENV))
     except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
         # Only fixed stages/codes are published; exception strings may contain
         # native request bodies, config bindings, or paths and are never printed.

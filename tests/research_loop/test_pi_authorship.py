@@ -509,6 +509,8 @@ def test_formal_fork_retains_requester_inclusive_canonical_prefix(monkeypatch, n
             origin_identity=member['origin_identity'], step=member['step'])
         member_path = f'{base}/{member["origin_identity"]["goal_id"]}/{member["step"]:03d}.json'
         records[(branch['goal_id'], member_path)] = member
+        navigation_path = frozen['visibility_root']['path']+'/'+member['navigation']['path']
+        records[(branch['goal_id'], navigation_path)] = dict(research_note_files=[])
         expected.append(dict(member_ref=dict(origin_identity=branch, path=member_path, size_bytes=123),
             navigation_ref=dict(origin_identity=branch,
                 path=frozen['visibility_root']['path']+'/'+member['navigation']['path'], size_bytes=123),
@@ -528,25 +530,31 @@ def test_formal_fork_retains_requester_inclusive_canonical_prefix(monkeypatch, n
         def snapshot(self, *a): pass
         def phase(self, *a): return None
     selected_owner = selected
-    deny_io(monkeypatch)
-    monkeypatch.setattr(fork_sources.files, 'check_path', lambda path: path)
-    monkeypatch.setattr(c, 'settings', lambda root: dict(handoff_protocol=protocol.CURRENT))
-    monkeypatch.setattr(protocol, 'require_job_format', lambda job: None)
-    monkeypatch.setattr(fork_sources, '_Closure', RetainedClosure)
-    monkeypatch.setattr(fork_sources, '_parent_state', lambda root: [])
-    monkeypatch.setattr(fork_sources, '_json', lambda key: records[key])
-    monkeypatch.setattr(originals, 'node', lambda root, step: selected)
-    monkeypatch.setattr(originals, 'source_job', lambda owner: jobs[owner.step])
-    monkeypatch.setattr(originals, 'source_settings', lambda owner: {})
-    monkeypatch.setattr(originals, 'source_for_ref', lambda owner, ref: owners[ref.get('origin_identity', owner.origin_identity)['goal_id']])
-    monkeypatch.setattr(originals, 'resolve_ref', lambda owner, ref: (owner.origin_identity['goal_id'], ref['path']))
-    monkeypatch.setattr(originals, 'dependency', lambda owner, step, **kw: {1: worker, 2: requester}[step])
-    monkeypatch.setattr(originals, '_manifest', lambda root: None)
-    monkeypatch.setattr(originals, 'local_identity', lambda root: selected.origin_identity)
-    monkeypatch.setattr(originals, 'history_source', lambda owner, job: request_owner)
-    monkeypatch.setattr(originals, 'recovery_refs', lambda owner, job: [])
-    monkeypatch.setattr(accepted_prefix, 'current', lambda *a: pytest.fail('Fork reopened latest accepted head'))
-    plan = fork_sources.inspect_source('/retained', 3)
+    with monkeypatch.context() as guarded:
+        deny_io(guarded)
+        guarded.setattr(fork_sources.files, 'check_path', lambda path: path)
+        guarded.setattr(c, 'settings', lambda root: dict(handoff_protocol=protocol.CURRENT))
+        guarded.setattr(protocol, 'require_job_format', lambda job: None)
+        guarded.setattr(fork_sources, '_Closure', RetainedClosure)
+        guarded.setattr(fork_sources, '_parent_state', lambda root: [])
+        guarded.setattr(fork_sources, '_json', lambda key: records[key])
+        guarded.setattr(originals, 'node', lambda root, step: selected)
+        guarded.setattr(originals, 'source_job', lambda owner: jobs[owner.step])
+        guarded.setattr(originals, 'source_settings', lambda owner: {})
+        guarded.setattr(originals, 'source_for_ref', lambda owner, ref: owners[ref.get('origin_identity', owner.origin_identity)['goal_id']])
+        guarded.setattr(originals, 'resolve_ref', lambda owner, ref: (owner.origin_identity['goal_id'], ref['path']))
+        guarded.setattr(originals, 'dependency', lambda owner, step, **kw: {1: worker, 2: requester}[step])
+        guarded.setattr(originals, '_manifest', lambda root: None)
+        guarded.setattr(originals, 'local_identity', lambda root: selected.origin_identity)
+        guarded.setattr(originals, 'history_source', lambda owner, job: request_owner)
+        guarded.setattr(originals, 'recovery_refs', lambda owner, job: [])
+        guarded.setattr(accepted_prefix, 'current', lambda *a: pytest.fail('Fork reopened latest accepted head'))
+        plan = fork_sources.inspect_source('/retained', 3)
+        assert job == original_job  # Retention keeps neutral scientific inputs exact.
+        job['history']['prefix'] = dict(frozen, count=1)
+        with pytest.raises(ValueError, match='immutable requested prefix'):
+            fork_sources.inspect_source('/retained', 3)
+        job['history']['prefix'] = copy.deepcopy(frozen)
     entries = plan['prefix_entries']
     assert [row['step'] for row in entries] == [1, 2]
     assert [row['origin_identity'] for row in entries] == [worker_origin, branch]
@@ -558,9 +566,6 @@ def test_formal_fork_retains_requester_inclusive_canonical_prefix(monkeypatch, n
     assert cut['tip'] == tip and cut['tip']['step'] == entries[-1]['step']
     assert plan['bootstrap']['completed_source_refs'] == [row['job_ref'] for row in entries]
     assert job == original_job  # Host retention must not expand neutral scientist inputs.
-    job['history']['prefix'] = dict(frozen, count=1)
-    with pytest.raises(ValueError, match='immutable requested prefix'):
-        fork_sources.inspect_source('/retained', 3)
 
 
 @contextmanager

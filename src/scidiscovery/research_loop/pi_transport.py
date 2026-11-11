@@ -24,6 +24,41 @@ ACCOUNTING_EVENTS = frozenset({'message_end', 'message_update', 'compaction_star
 CONTROLLED_EXIT = 'pi.controlled_exit'
 
 
+class TurnInputs:
+    """One-shot steering of the existing RPC run; acceptance means queued."""
+    def __init__(self, inbox, emit):
+        self.inbox, self.emit = inbox, emit
+        self.pending = {}
+        self.accepted = []
+
+    def commands(self, binding):
+        if not binding.accepted or binding.settled is not None: return
+        # The host producer binds the original native-user ID after its existing
+        # observation owner accepts it. This exact per-call channel supplies it;
+        # the session ID is never substituted for a native turn identity.
+        for request in self.inbox.bound_requests(binding.session_id):
+            binding.turn_input_payloads.add(request['payload'])
+            command = binding.command('steer', message=request['payload'])
+            self.pending[command['id']] = request
+            self.emit(self.inbox.receipt(request, 'submitting', payload=request['payload']))
+            yield command
+
+    def response(self, value, binding):
+        request = self.pending.pop(value.get('id'), None)
+        if request is None: return False
+        binding.pending.pop(value['id'], None)
+        accepted = (value.get('command') == 'steer' and value.get('success') is True
+            and isinstance(value.get('data'), dict) and value['data'].get('disposition') == 'queued')
+        receipt = self.inbox.receipt(request, 'accepted' if accepted else 'unknown')
+        self.emit(receipt)
+        if accepted: self.accepted.append(receipt)
+        return True
+
+    def finish(self):
+        for request in self.pending.values(): self.emit(self.inbox.receipt(request, 'unknown'))
+        self.pending.clear()
+
+
 
 class TransportFault(ValueError): pass
 
@@ -323,6 +358,8 @@ class Binding:
         self.observation = observation
         self.observer_start = None
         self.observer_bound = False
+        self.turn_input_payloads = set()
+        self.queued_steering = []
 
     def command(self, kind, **fields):
         self.number += 1; identity = str(self.number); self.pending[identity] = kind
@@ -337,8 +374,10 @@ class Binding:
                 or value['api'] in {'virtual', 'pi-virtual'}): raise TransportFault('model_binding_mismatch')
 
     def _state(self, state, *, bound):
+        pending = len(self.queued_steering) if self.settled is not None else 0
         if (not isinstance(state, dict) or state.get('isStreaming') is not False
-                or state.get('isCompacting') is not False or state.get('pendingMessageCount') != 0
+                or state.get('isCompacting') is not False or type(state.get('pendingMessageCount')) is not int
+                or state['pendingMessageCount'] != pending
                 or state.get('sessionFile') != self.path or not isinstance(state.get('sessionId'), str)
                 or not state['sessionId']): raise TransportFault('session_not_exact_idle')
         if self.session_id is not None and self.session_id != state['sessionId']: raise TransportFault('session_identity_changed')
@@ -388,14 +427,20 @@ class Binding:
                 raise TransportFault('pi_observer_start_invalid')
             self.observer_start = validate_start(value, self.observation, session=self.session_id)
             return None
-        if kind in {CONTEXT_EVENT, BOUND, CONTROLLED_EXIT, 'pi_transport_fault', 'session', 'pi.session_bound'}: raise TransportFault('invalid_rpc_record')
+        if kind in {CONTEXT_EVENT, BOUND, CONTROLLED_EXIT, 'turn.input', 'pi_transport_fault', 'session', 'pi.session_bound'}: raise TransportFault('invalid_rpc_record')
         if kind == 'thinking_level_changed' and not self.prompt_sent: return None
         if not self.prompt_sent: raise TransportFault('work_before_model_binding')
         if kind == 'agent_settled':
             if self.settled is not None: raise TransportFault('duplicate_settlement')
             self.settled = value
             return self.command('get_state') if self.accepted else None
-        if self.settled is not None and kind != 'entry_appended': raise TransportFault('work_after_settlement')
+        if kind == 'queue_update':
+            steering = value.get('steering')
+            if (not isinstance(steering, list) or value.get('followUp') != []
+                    or any(not isinstance(text, str) or text not in self.turn_input_payloads for text in steering)):
+                raise TransportFault('invalid_rpc_record')
+            self.queued_steering = list(steering)
+        if self.settled is not None and kind not in {'entry_appended', 'queue_update'}: raise TransportFault('work_after_settlement')
         return None
 
     def finish(self, returncode):
@@ -496,6 +541,8 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
     if skills != tuple(row['path'] for row in resources):
         raise TransportFault('resource_binding_mismatch')
     context = ContextRequests(); published_context = dict(status='unavailable')
+    from .turn_input import Inbox
+    inputs = TurnInputs(Inbox(os.environ['SCID_TURN_INPUT']), lambda value: publish(value)) if os.environ.get('SCID_TURN_INPUT') else None
     try:
         if session is None:
             if _header_line(path) is not None: raise TransportFault('session_not_fresh')
@@ -603,7 +650,9 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
                                 if value['type'] in ACCOUNTING_EVENTS: emit(value)
                                 continue
                             if value['type'] == 'response':
-                                if context.response(value, binding.session_id, path, time.time()):
+                                if inputs is not None and inputs.response(value, binding):
+                                    pass
+                                elif context.response(value, binding.session_id, path, time.time()):
                                     if context.pending is None: context_deadline = None
                                     publish_context()
                                 else:
@@ -646,9 +695,11 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
                             if not retained and value is not None and value['type'] in ACCOUNTING_EVENTS: emit(value)
                     if not failed: send(context.request(enabled=binding.prompt_sent and binding.settled is None))
                 if not failed and not emitted_header: header()
+                if inputs is not None and not failed and not closing:
+                    for command in inputs.commands(binding): send(command)
                 if outgoing and not closing and process.stdin not in [key.fileobj for key in selector.get_map().values()]:
                     selector.register(process.stdin, selectors.EVENT_WRITE)
-                if (binding.idle or failed) and not closing:
+                if (binding.idle and not binding.pending or failed) and not closing:
                     closing = True
                     if process.stdin in [key.fileobj for key in selector.get_map().values()]: selector.unregister(process.stdin)
                     process.stdin.close()
@@ -664,7 +715,7 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
             # actual clean child exit have now all been observed, not predicted.
             import hashlib
             from .pi_observation import command_proof
-            emit(dict(type=CONTROLLED_EXIT, version=1, argv=child,
+            receipt = dict(type=CONTROLLED_EXIT, version=1, argv=child,
                 session_id=binding.session_id, path=path, workspace=str(Path.cwd()),
                 profile=dict(model=provider + '/' + model, reasoning_effort=thinking, service_tier=None),
                 resource_policy=runtime_policy, resources=list(resources),
@@ -672,11 +723,14 @@ def run(argv, prompt, emit, *, popen=subprocess.Popen, clock=time.monotonic):
                 prompt_sha256=hashlib.sha256(prompt.encode('utf-8')).hexdigest(), disposition='started',
                 settled=settled, idle=True, stdin_closed=process.stdin.closed,
                 stdout_eof=stdout_eof, drained=not pending and not outgoing,
-                pending_commands=len(binding.pending), returncode=process.returncode))
+                pending_commands=len(binding.pending), returncode=process.returncode)
+            if inputs is not None and inputs.accepted: receipt['turn_inputs'] = inputs.accepted
+            emit(receipt)
         return 0
     except (OSError, ValueError, TypeError, UnicodeError, RecursionError, subprocess.TimeoutExpired) as error:
         fault(error); return 1
     finally:
+        if inputs is not None: inputs.finish()
         if not process.stdin.closed: process.stdin.close()
         if process.poll() is None:
             process.terminate()
