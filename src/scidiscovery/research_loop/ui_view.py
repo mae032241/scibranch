@@ -8,6 +8,7 @@ first-observation order and only author/control records mark A or delivery.
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
@@ -848,23 +849,84 @@ WAIT_STOP_REASONS = {
 }
 
 
-def execution_wait_facts(wait, *, monitoring, stop_reason=None):
+EXECUTION_STATE_LABELS = {
+    'accepted': '已接受，尚未开始', 'submitted': '已提交', 'queued': '排队中', 'running': '运行中',
+    'cancelling': '取消中', 'known_success': '已成功结束', 'succeeded': '已成功结束',
+    'known_failed': '已失败结束', 'failed': '已失败结束', 'cancelled': '已取消', 'unknown': '状态未知',
+}
+
+
+def _ago(seconds):
+    return fmt_duration(seconds) + '前'
+
+
+def _monitor_line(monitoring, live):
+    age = (live or {}).get('heartbeat_age')
+    stale = (live or {}).get('stale_after', 30.)
+    if monitoring:
+        if age is None:
+            return '控制进程正在监视，尚未记录核对时间'
+        if age > stale:
+            return '控制进程仍在，但已 ' + fmt_duration(age) + '未核对外部实验，可能卡住；可暂停后重新唤醒'
+        return '正在监视：' + _ago(age) + '核对过外部实验，出结果后自动唤醒 W'
+    line = '当前没有进程在监视；点击“唤醒 W”会核对结果，已完成则唤醒，未完成则继续监视'
+    if age is not None:
+        line += '（最后一次核对在 ' + _ago(age) + '）'
+    return line
+
+
+def _call_line(row, live_row):
+    if row.get('result_ready') or (live_row or {}).get('result_ready'):
+        value = '已出结果，待唤醒 W'
+    elif live_row is None:
+        value = '运行中或尚未核对'
+    else:
+        parts = []
+        process = live_row.get('process')
+        if process is not None:
+            if process['alive']:
+                parts.append('实验进程 PID ' + str(process['pid']) + ' 正在运行')
+            elif live_row.get('finished'):
+                parts.append('实验进程已结束，结果待核对')
+            else:
+                parts.append('实验进程 PID ' + str(process['pid']) + ' 已不在运行，结果尚未记录')
+        if live_row.get('queried_state'):
+            parts.append('最近查询状态：' + EXECUTION_STATE_LABELS.get(live_row['queried_state'], live_row['queried_state']))
+        if live_row.get('last_output_age') is not None:
+            parts.append('最后输出在 ' + _ago(live_row['last_output_age']))
+        elif process is not None:
+            parts.append('尚无日志输出')
+        value = '；'.join(parts) or '无本机进程信息（远程执行器只显示查询状态）'
+    if row.get('external_run_id'):
+        value += '；外部 ID ' + row['external_run_id']
+    return value
+
+
+def execution_wait_facts(wait, *, monitoring, stop_reason=None, live=None):
     """Which original calls a suspended W waits for; display only."""
-    facts = [dict(label='监视状态', value=('控制进程正在监视，实验出结果后会自动唤醒 W' if monitoring else
-        '当前没有进程在监视；点击“唤醒 W”会核对结果，已完成则唤醒，未完成则继续监视'))]
+    facts = [dict(label='监视状态', value=_monitor_line(monitoring, live))]
     if stop_reason and not monitoring:
         facts.append(dict(label='上次停止原因', value=WAIT_STOP_REASONS.get(stop_reason, stop_reason)))
-    if wait.get('since'):
+    if live is not None:
+        facts.append(dict(label='已等待', value=fmt_duration(live['waited_seconds']) + '（自 ' + live['since'] + ' 起）'))
+    elif wait.get('since'):
         facts.append(dict(label='开始等待（UTC）', value=wait['since']))
     facts.append(dict(label='等待计时', value='等待外部实验不消耗研究时间预算'))
+    rows = {row['call_id']: row for row in (live or {}).get('calls', [])}
     for row in wait.get('calls', []):
-        value = ('已出结果，待唤醒 W' if row.get('result_ready') else '运行中或尚未核对')
-        if row.get('external_run_id'):
-            value += '；外部 ID ' + row['external_run_id']
-        facts.append(dict(label='原调用 ' + row['call_id'], value=value))
+        facts.append(dict(label='原调用 ' + row['call_id'], value=_call_line(row, rows.get(row['call_id']))))
     if not wait.get('readable', True):
         facts.append(dict(label='等待记录', value='暂不可读；请核对实例记录'))
     return facts
+
+
+def waited_text(wait):
+    """Elapsed wait from the saved suspension time, for the headline."""
+    try:
+        since = datetime.fromisoformat(wait['since'])
+    except (KeyError, TypeError, ValueError):
+        return ''
+    return '，已等待 ' + fmt_duration((datetime.now(timezone.utc) - since).total_seconds())
 
 
 def recovery_facts(recovery, clean):
@@ -950,11 +1012,11 @@ def status_summary(presentation, view, *, final_phase=False, exhausted=None, wai
             if not count:
                 pass  # No readable wait summary: keep the generic headline.
             elif monitoring:
-                headline = 'W 在等待 ' + str(count) + ' 个外部实验；出结果后自动唤醒'
+                headline = 'W 在等待 ' + str(count) + ' 个外部实验' + waited_text(wait) + '；出结果后自动唤醒'
             elif wait.get('all_ready'):
                 headline = '外部实验已出结果，等待唤醒 W'
             else:
-                headline = 'W 在等待 ' + str(count) + ' 个外部实验；当前无人监视，需点击唤醒'
+                headline = 'W 在等待 ' + str(count) + ' 个外部实验' + waited_text(wait) + '；当前无人监视，需点击唤醒'
         if state == 'unsealed' and native_completed(current):
             headline = native_state_label(current)
     elif state == 'unknown':

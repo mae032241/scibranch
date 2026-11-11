@@ -2680,3 +2680,32 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     with pytest.raises(ValueError, match='unknown candidate'):
         ui_view.candidate_projection(root, 5, job=job)
     ui.translation.close()
+
+
+@pytest.mark.parametrize('manager', [True, False])
+def test_external_wait_attention_shows_elapsed_liveness_and_manager_only_log_tail(tmp_path, manager):
+    import json as json_module
+    from scidiscovery.research_loop import contracts as c, execution_wait_monitor
+    root, key = prepare(tmp_path, enabled=False)
+    ui, cookie = session(root, key)
+    record = root / 'native-evidence/002'
+    call = root / 'host-runtime/experiment-control/002/records/calls' / ('e' * 32)
+    call.mkdir(parents=True); record.mkdir(parents=True, exist_ok=True)
+    c.write(record / 'execution-wait.json', dict(calls=[dict(accepted=dict(path=str(call / 'accepted.json')))]))
+    (call / 'process.json').write_text(json_module.dumps(dict(pid=2 ** 22 + 7, boot_id='old', start_ticks=1,
+        pgid=1, sid=1, task_ref=dict(path=str(call / 'accepted.json')))))
+    (call / 'stdout.raw').write_text('step 9 loss=0.12\n')
+    execution_wait_monitor.record_poll(root, 2, {call.name: 'running'})
+    snapshot = ui._snapshot()
+    wait = dict(calls=[dict(call_id=call.name, external_run_id='', result_ready=False)],
+                since='2026-11-11T00:00:00+00:00', readable=True, all_ready=False)
+    node = dict(step=2, role='W', state='waiting', execution_wait=wait)
+    snapshot.update(conclusion=None, final=None, operation=None)
+    snapshot['view'].update(nodes=[node], paused=False, correction={})
+    status = ui._status(snapshot, {})
+    assert status['state'] == 'external_wait' and '已等待' in status['headline']
+    attention = str(ui._attention(ui._browser(cookie), manager, snapshot, status)[0]['form'])
+    assert '当前没有进程在监视' in attention and '最后一次核对在' in attention
+    assert '已不在运行，结果尚未记录' in attention and '最近查询状态：运行中' in attention
+    assert ('step 9 loss=0.12' in attention) is manager
+    assert ('实验日志 · stdout' in attention) is manager

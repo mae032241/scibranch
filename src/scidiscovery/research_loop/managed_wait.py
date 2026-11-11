@@ -243,8 +243,9 @@ def wait_and_wake(root,step):
     # before spending the remaining wall budget monitoring an unwakeable task.
     from . import continuation
     continuation.validate_wake_policy(root,step)
+    from . import execution_wait_monitor
     while True:
-        terminals=[];has_pending=False
+        terminals=[];has_pending=False;states={}
         for item in value['calls']:
             accepted=c.read(Path(item['accepted']['path']));_,config=_config(root,job,accepted)
             path=Path(item['accepted']['path']).parent/'execution-observation.json'
@@ -255,6 +256,7 @@ def wait_and_wake(root,step):
                 if not config['execution_interface']['capabilities']['query']:
                     raise ExecutionWaiting('managed_execution_query_unavailable')
                 state=execution_status(adapter.status_details(accepted['call_id']).get('state'))
+                states[Path(item['accepted']['path']).parent.name]=state
                 action=handoff_action(state,original_bound=True,query=True,wake_authorized=True)
                 if action=='return_control':has_pending=True;continue
                 if state not in {'known_success','known_failed'}:raise ExecutionWaiting('managed_execution_status_unknown')
@@ -265,6 +267,8 @@ def wait_and_wake(root,step):
                     wake_authorized=True,terminal_verified=True)!='consume_terminal':
                 raise ExecutionWaiting('managed_execution_terminal_unverified')
             terminals.append(e.proof(path))
+            states[Path(item['accepted']['path']).parent.name]=observed['status']
+        execution_wait_monitor.record_poll(root,step,states)
         if (root/'pause.request').exists():raise ExecutionWaiting('paused_before_execution_wake')
         remaining=budget.snapshot(root)['seconds_remaining']
         if budget_limits.reached(remaining):

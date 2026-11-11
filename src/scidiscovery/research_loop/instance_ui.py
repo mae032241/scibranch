@@ -31,6 +31,7 @@ from . import instance_live as live
 from . import backends, budget, configuration_form, configuration_updates, progress, public_output, research_config, user_guidance
 from . import ui_components as ui
 from . import ui_mechanisms, ui_view, ui_translation, ui_errors, ui_guidance
+from . import execution_wait_monitor
 from . import fork_ui
 from . import protocol, workspace_catalog
 
@@ -53,6 +54,13 @@ def _host_lock(root, *, workspace=False):
     finally:
         os.close(fd)
 
+
+
+def _size(count):
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if count < 1024 or unit == 'GB':
+            return (str(count) if unit == 'B' else f'{count:.1f}') + ' ' + unit
+        count /= 1024
 
 class InstanceUI:
     def __init__(self, root, *, secret_file, instance_roots=(), approval_host=True, workspace=False, multi_workspace=False, translation_service=None, translation_config=None):
@@ -1362,6 +1370,27 @@ class InstanceUI:
             display['active']=False
         return dict(status, display=display)
 
+    def _execution_wait_live(self, step, *, include_logs):
+        """Fresh, uncached local liveness; reads files only and never queries an adapter."""
+        try:
+            record = saved_status.attempts(self.root, step)[-1]
+            return execution_wait_monitor.observe(self.root, record, step, include_logs=include_logs,
+                clean=ui_view.cleaner(self.root) if include_logs else None)
+        except Exception:  # noqa: BLE001 - liveness is optional display
+            return None
+
+    @staticmethod
+    def _execution_logs(live):
+        body = ''
+        for row in (live or {}).get('calls', []):
+            for log in row.get('logs', []):
+                key = 'execution-log:' + row['call_id'] + ':' + log['name']
+                body += ('<details class="execution-log" data-details-key="' + ui.esc(key) + '"><summary>实验日志 · '
+                    + ui.esc(log['name']) + ' · 调用 ' + ui.esc(row['call_id'][:12]) + '（末尾 '
+                    + str(execution_wait_monitor.LOG_TAIL_LINES) + ' 行，共 ' + _size(log['size']) + '）</summary><pre class="log-tail">'
+                    + ui.esc(log['text']) + '</pre></details>')
+        return body
+
     @staticmethod
     def _monitoring(receipt):
         """A live controller request owns waiting; a finished one watches nothing."""
@@ -1476,12 +1505,14 @@ class InstanceUI:
             monitoring = self._monitoring(receipt)
             stop_reason = ((receipt.get('result') or {}).get('reason')
                 if (receipt.get('result') or {}).get('status') == 'waiting_execution' else None)
+            live = self._execution_wait_live(current['step'], include_logs=manager)
+            body = str(ui.facts(ui_view.execution_wait_facts(current.get('execution_wait') or {},
+                monitoring=monitoring, stop_reason=stop_reason, live=live)))
+            body += self._execution_logs(live)
             items.append(dict(text=status['headline'] + '。原调用不会被重新提交；唤醒只核对同一原调用的结果。',
                 href='/nodes/' + str(current['step']), action='查看本阶段原任务',
                 form=ui.Safe('<details class="execution-wait" data-details-key="overview-execution-wait" open>'
-                    '<summary>等待中的外部实验</summary>' + str(ui.facts(ui_view.execution_wait_facts(
-                        current.get('execution_wait') or {}, monitoring=monitoring, stop_reason=stop_reason)))
-                    + '</details>')))
+                    '<summary>等待中的外部实验</summary>' + body + '</details>')))
         elif status['state'] in {'external_wait', 'unsealed', 'not_submitted'} or (
                 display['current'] and display['current'].get('native_failure')
                 and display['current']['state'] not in ui_view.SEALED):
