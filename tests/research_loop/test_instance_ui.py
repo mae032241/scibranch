@@ -1804,7 +1804,7 @@ def test_headless_browser_executes_public_progress_poll(tmp_path, monkeypatch):
     import subprocess
     import tempfile
     import time
-    from scidiscovery.research_loop import accepted_budget, profiles, instance_ui, contracts as c, execution, runtime, ui_mechanisms, ui_view, ui_translation
+    from scidiscovery.research_loop import accepted_budget, profiles, instance_ui, contracts as c, configuration_updates, execution, runtime, ui_mechanisms, ui_view, ui_translation
     chrome = shutil.which('google-chrome') or shutil.which('chromium')
     node = shutil.which('node')
     if not chrome or not node:
@@ -1829,10 +1829,12 @@ network = false
     key = tmp_path / 'operator.key'; key.write_bytes(b'operator-key-for-browser-only---32'); key.chmod(0o600)
     record = execution.origin(root, 1)
     owners = []
+    started_jobs = []
 
     def detached(instance, **options):
         owners.append((instance, options))
         c.build_job(instance, 1, 'H', [])
+        started_jobs.append(c.record_ref(instance / 'jobs/001.json'))
         record.mkdir(exist_ok=True)
         (record / 'native.jsonl').write_text(json.dumps(dict(type='item.completed', item=dict(type='agent_message', text='Earlier browser fixture'))) + '\n')
         return dict(operation_id='a' * 32, kind='controller', status='accepted')
@@ -1851,6 +1853,7 @@ network = false
     # or solver, and scientific production instances are not used.
     original_snapshot = InstanceUI._snapshot
     advanced = set()
+    frozen_originals = {}
     advance = tmp_path / 'advance-live-ui'
     def fixture_snapshot(selected, **options):
         if selected.root == root and advance.exists():
@@ -1885,6 +1888,10 @@ network = false
                     c.write(root / 'host-control/operations' / (operation_id + '.json'), dict(
                         operation_id=operation_id, kind='controller', sequence=1, status='applied',
                         result=dict(status='native_stopped', last_step=3, reason='Private fixture diagnostic')))
+                    originals = [root / 'settings.json', root / 'project/global/objective.md',
+                        *(root / 'jobs' / f'{step:03d}.json' for step in range(1, 5)),
+                        *(execution.origin(root, step) / 'science-output.json' for step in range(1, 4))]
+                    frozen_originals.update((path, path.read_bytes()) for path in originals)
         snapshot = original_snapshot(selected, **options)
         if selected.root == root and advance.exists() and advance.read_text() in {'3-refresh', '3-link', '3-outside'}:
             # A display-only update exercises focus restoration without another
@@ -1951,7 +1958,12 @@ network = false
             servers.append(self); ready.set(); super().serve_forever(**options)
 
     monkeypatch.setattr(instance_ui, 'ThreadingHTTPServer', Server)
-    monkeypatch.setattr(instance_ui, 'InstanceUI', lambda selected, **options: ui if Path(selected) == workspace else InstanceUI(selected, **options))
+    def fixture_ui(selected, **options):
+        return ui if Path(selected) == workspace else InstanceUI(selected, **options)
+    # Production child creation uses the accepted-settings constructor directly.
+    fixture_ui._from_settings = InstanceUI._from_settings
+    fixture_ui._mount = InstanceUI._mount
+    monkeypatch.setattr(instance_ui, 'InstanceUI', fixture_ui)
     monkeypatch.setattr(instance_ui, 'print', lambda *args, **options: None, raising=False)
 
     def serve():
@@ -2017,7 +2029,7 @@ async function evaluate(expression) {
 }
 async function waitFor(expression) {
   for (let index = 0; index < 60; index++) { await new Promise(resolve => setTimeout(resolve, 100)); if (await evaluate(expression)) return; }
-  const diagnostic = await evaluate('JSON.stringify({path:location.pathname, typedRowGeometry:window.typedRowGeometry, mobileTypedGeometry:window.mobileTypedGeometry, text:document.body?.innerText?.slice(0,4000)})');
+  const diagnostic = await evaluate('JSON.stringify({path:location.pathname, advancedEditorBox:document.getElementsByName("advanced_toml")[0]?.getBoundingClientRect(), text:document.body?.innerText?.slice(0,4000)})');
   throw new Error('Browser journey did not reach expected state: ' + expression + '\nPage: ' + diagnostic);
 }
 async function screenshot(name) {
@@ -2054,17 +2066,16 @@ await waitFor(`document.querySelector('[aria-current=step]')?.dataset.setupMarke
 await evaluate(`document.querySelector('[data-setup-go="1"]').click();true`);
 const returned = await evaluate(`JSON.stringify(Array.from(new FormData(document.getElementById('research-config-form'))).filter(([name])=>!['nonce','csrf','selection'].includes(name)))`);
 if (imported !== returned || !returned.includes('imported-worker-model') || !returned.includes('retained')) throw new Error('Imported nested controls changed across steps');
-// Opening more configuration preserves closed categories; imported plugin rows remain compact when expanded.
-await evaluate(`document.querySelector('[data-setup-go="2"]').click();document.querySelector('.advanced-settings').open=true;true`);
-await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));const groups=new Map(categories.map(group=>[group.dataset.configGroup,group]));const required=['research','project','skills','agent','budget','executor','delivery','policies','ui','version'];return required.every(name=>groups.has(name)) && groups.size===categories.length && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.agent.backend"]').checkVisibility({contentVisibilityAuto:true})})()`);
-await evaluate(`document.querySelectorAll('.advanced-settings details.structured-setting,.advanced-settings details.expert-settings,.advanced-settings details.advanced-category').forEach(group=>group.open=true);true`);
-await waitFor(`document.querySelector('[data-parent="@extra"] .config-node').checkVisibility({contentVisibilityAuto:true})`);
-await screenshot('config-advanced-imported-before-geometry');
-await waitFor(`(()=>{const nodes=Array.from(document.querySelectorAll('[data-parent="@extra"] .config-node'));const scalar=nodes.find(node=>!node.querySelector('.config-value').hidden);const box=element=>element.getBoundingClientRect();const key=box(scalar.querySelector('.config-node-key input')),kind=box(scalar.querySelector('.config-kind')),value=box(scalar.querySelector('.config-value input')),remove=box(scalar.querySelector('.config-remove'));const composite=nodes.find(node=>!node.querySelector('.config-children').hidden && node.querySelector('.config-children').children.length);const children=box(composite.querySelector('.config-children')),parent=box(composite.querySelector('.config-node-key'));window.typedRowGeometry={key,kind,value,remove,children,parent,visible:scalar.checkVisibility({contentVisibilityAuto:true})};return window.typedRowGeometry.visible && key.width>0 && Math.abs(key.top-kind.top)<2 && Math.abs(key.top-value.top)<2 && kind.left>key.left && value.left>kind.left && remove.left>value.left && children.top>=parent.bottom})()`);
+// Imported extensions remain in one collapsed TOML editor, with usable desktop/mobile geometry.
+await evaluate(`document.querySelector('[data-setup-go="2"]').click();true`);
+await waitFor(`(()=>{const advanced=document.querySelector('.advanced-settings'),editor=advanced.querySelector('textarea[name="advanced_toml"]');return !advanced.open && advanced.querySelector('summary').checkVisibility({contentVisibilityAuto:true}) && !editor.checkVisibility({contentVisibilityAuto:true}) && editor.value.includes('retained') && editor.value.includes('fixture') && !advanced.querySelector('.advanced-category,.config-node')})()`);
+const importedAdvanced = await evaluate(`document.querySelector('[name="advanced_toml"]').value`);
+await evaluate(`document.querySelector('.advanced-settings > summary').click();true`);
+await waitFor(`(()=>{const editor=document.querySelector('[name="advanced_toml"]'),box=editor.getBoundingClientRect();return editor.checkVisibility({contentVisibilityAuto:true}) && box.width>600 && box.height>100 && box.left>=0 && box.right<=innerWidth})()`);
 await noOverflow(); await screenshot('config-advanced-imported-desktop');
 await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
-await screenshot('config-advanced-imported-mobile-before-geometry');
-await waitFor(`(()=>{const nodes=Array.from(document.querySelectorAll('.advanced-settings .config-node'));const details=node=>({id:node.dataset.node,rect:node.getBoundingClientRect(),visible:node.checkVisibility({contentVisibilityAuto:true}),controls:Array.from(node.children).filter(child=>child.matches('label,button')).map(child=>({className:child.className,rect:child.getBoundingClientRect(),control:child.querySelector('input,select')?.getBoundingClientRect()}))});window.mobileTypedGeometry={innerWidth,documentClientWidth:document.documentElement.clientWidth,documentScrollWidth:document.documentElement.scrollWidth,visualViewportWidth:visualViewport?.width,offending:nodes.filter(node=>!node.checkVisibility({contentVisibilityAuto:true}) || node.getBoundingClientRect().right>innerWidth).map(details),nodes:nodes.map(details),wideElements:Array.from(document.querySelectorAll('body *')).filter(node=>node.checkVisibility({contentVisibilityAuto:true}) && node.getBoundingClientRect().right>375).map(node=>({tag:node.tagName,className:node.className,name:node.getAttribute('name'),right:node.getBoundingClientRect().right,clientWidth:node.clientWidth,inMatrixScroll:Boolean(node.closest('.config-matrix-scroll'))})).slice(0,60)};return innerWidth<=375 && nodes.every(node=>node.checkVisibility({contentVisibilityAuto:true}) && node.getBoundingClientRect().right<=innerWidth)})()`);
+await waitFor(`(()=>{const editor=document.querySelector('[name="advanced_toml"]'),box=editor.getBoundingClientRect();return editor.checkVisibility({contentVisibilityAuto:true}) && box.width>200 && box.height>100 && box.left>=0 && box.right<=innerWidth})()`);
+if (await evaluate(`document.querySelector('[name="advanced_toml"]').value`) !== importedAdvanced) throw new Error('Viewport change lost imported TOML');
 await noOverflow(); await screenshot('config-advanced-imported-mobile');
 await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
 // Begin a new draft from this authenticated page so Strict cookies retain a same-site initiator.
@@ -2097,19 +2108,20 @@ if (await evaluate(`document.querySelector('[name="cfg.agent.model"]').value`) !
 await screenshot('setup-error-budget-desktop');
 await evaluate(`document.querySelector('[name="cfg.budget.max_tokens"]').value='1234';true`);
 await screenshot('setup-budget-desktop');
-// User edits enable optional policy groups; explicit opt-out still wins.
-await evaluate(`(()=>{const field=document.getElementById('config-budget-role_shares-min_w_share');field.value='0.65';field.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
-if (!(await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').checked`))) throw new Error('Editing a policy field silently left its group disabled');
-await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').click();true`);
-if (await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').checked`)) throw new Error('Explicit policy opt-out was overridden');
-await evaluate(`document.querySelector('[data-config-path="budget.role_shares"] .expert-settings .config-add').click();true`);
-if (!(await evaluate(`document.querySelector('[name="enabled.budget.role_shares"]').checked`))) throw new Error('Nested expert edit failed to enable its policy group');
-await evaluate(`(()=>{const group=document.querySelector('[data-config-path="budget.role_shares"]');group.querySelector('.config-node .config-remove').click();group.querySelector('[name="enabled.budget.role_shares"]').click();document.querySelector('.advanced-settings').open=true;document.querySelector('[data-config-group="budget"]').open=true;document.querySelector('[data-config-group="agent.roles"]').open=true;return true})()`);
+// Optional recovery policy edits require explicit declaration; opting out remains effective.
+await evaluate(`(()=>{document.querySelector('.recovery-settings').open=true;const field=document.querySelector('[name="cfg.policies.resume.max_attempts"]');field.value='1';field.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+if (await evaluate(`document.querySelector('[name="enabled.policies.resume"]').checked`)) throw new Error('Policy edit bypassed explicit declaration');
+await evaluate(`document.querySelector('[name="enabled.policies.resume"]').click();true`);
+if (!(await evaluate(`document.querySelector('[name="enabled.policies.resume"]').checked`))) throw new Error('Recovery policy declaration did not enable');
+await evaluate(`document.querySelector('[name="enabled.policies.resume"]').click();document.querySelector('[name="cfg.policies.resume.max_attempts"]').value='';document.querySelector('.role-settings').open=true;document.querySelector('.advanced-settings > summary').click();true`);
+if (await evaluate(`document.querySelector('[name="enabled.policies.resume"]').checked`)) throw new Error('Explicit policy opt-out was overridden');
+const creationAdvanced = '[budget]\ncandidate_extra_slots = 2\n';
+await evaluate(`(()=>{const editor=document.querySelector('[name="advanced_toml"]');editor.value=${JSON.stringify(creationAdvanced)};editor.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
 await noOverflow(); await screenshot('config-role-options-desktop');
 await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
 await noOverflow(); await screenshot('config-role-options-mobile');
 await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
-await evaluate(`document.querySelector('.advanced-settings').open=false;true`);
+await evaluate(`document.querySelector('.advanced-settings > summary').click();true`);
 await evaluate(`document.querySelector('form[action="/control/configure"] button[value="preview"]').click();true`);
 await waitFor(`document.querySelector('form[action="/control/create"]') !== null && document.querySelector('[aria-current=step]')?.dataset.setupMarker === '3'`);
 if (!(await evaluate('document.body.innerText')).includes('Browser direct-form research task.')) throw new Error('Edited task missing from preview');
@@ -2136,7 +2148,8 @@ if (!(await evaluate(`document.querySelectorAll('[data-token-details] dt').lengt
 await call('Page.navigate', {url:origin+'/instances/1/'});
 await waitFor(`document.querySelector('form[action="/instances/1/control/start"] button') !== null`);
 await evaluate(`document.querySelector('form[action="/instances/1/control/start"] button').click(); true`);
-await waitFor('document.body.innerText.includes("已接受请求")');
+// A live refresh can replace a transient acknowledgment; wait for the prepared H task.
+await waitFor(`location.pathname === '/instances/1/' && document.getElementById('live-hero')?.innerText.includes('第 1 阶段') && document.getElementById('live-hero').innerText.includes('等待开始') && document.getElementById('live-trail')?.innerText.includes('H · 假设')`);
 await call('Page.navigate', {url: origin + '/instances/1/nodes/1/progress?attempt=0'});
 let observed = '';
 for (let index = 0; index < 60; index++) {
@@ -2174,7 +2187,7 @@ await noOverflow(); await screenshot('token-monitor-progress-mobile');
 await call('Emulation.setDeviceMetricsOverride', {width:1440,height:1000,deviceScaleFactor:1,mobile:false});
 await call('Page.navigate', {url:origin+'/instances/1/'});
 await waitFor(`document.querySelector('.token-monitor')?.innerText.includes('80.0%')`);
-if (!(await evaluate(`(()=>{const ids=['live-hero','live-usage','live-activity','live-trail','live-token-monitor'];return document.querySelectorAll('.stats > .stat').length===4 && ids.every((id,index)=>!index || document.getElementById(ids[index-1]).nextElementSibling===document.getElementById(id)) && document.querySelector('#live-token-monitor > .token-monitor') && !document.querySelector('#live-usage [data-token-details]')})()`))) throw new Error('Overview token monitor must follow the primary research content');
+if (!(await evaluate(`(()=>{const ids=['live-hero','live-actions','live-usage','live-activity','live-trail','live-token-monitor'],slots=ids.map(id=>document.getElementById(id));const labels=Array.from(document.querySelectorAll('#live-usage .stats > .stat h2'),node=>node.textContent);return slots.every(Boolean) && slots.every((slot,index)=>!index || Boolean(slots[index-1].compareDocumentPosition(slot)&Node.DOCUMENT_POSITION_FOLLOWING)) && ['模型用量（tokens）','研究时间','控制动作','历史候选记录'].every(label=>labels.includes(label)) && document.querySelector('#live-usage .mechanism-trails > summary')?.textContent.includes('W 已声明机制') && document.querySelector('#live-token-monitor > .token-monitor') && !document.querySelector('#live-usage [data-token-details]')})()`))) throw new Error('Overview must retain named usage counters and mechanism information before the independent token monitor');
 await noOverflow(); await screenshot('token-monitor-overview-desktop');
 await call('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:true});
 await noOverflow(); await screenshot('token-monitor-overview-mobile');
@@ -2232,10 +2245,10 @@ await evaluate(`(()=>{const round=Array.from(document.querySelectorAll('#live-tr
 await writeFile(process.env.SCID_TEST_ADVANCE, '3-link');
 await waitFor(`document.getElementById('live-trail')?.innerText.includes('Browser heading update 3-link')`);
 if (!(await evaluate(`document.activeElement?.dataset.liveFocus===window.retainedLink && document.activeElement.isConnected`))) throw new Error('Live trail lost keyboard focus on the same stage link');
-await evaluate(`document.querySelector('#more-actions').open=true;document.querySelector('form[action="/instances/1/control/pause"] button').focus();true`);
+await evaluate(`document.querySelector('#more-actions > summary').focus();true`);
 await writeFile(process.env.SCID_TEST_ADVANCE, '3-outside');
 await waitFor(`document.getElementById('live-trail')?.innerText.includes('Browser heading update 3-outside')`);
-if (!(await evaluate(`document.activeElement===document.querySelector('form[action="/instances/1/control/pause"] button')`))) throw new Error('Live trail stole keyboard focus from another form');
+if (!(await evaluate(`document.activeElement===document.querySelector('#more-actions > summary')`))) throw new Error('Live trail stole keyboard focus from an outside control');
 await call('Page.navigate', {url:origin+'/'});
 await waitFor(`document.getElementById('live-instances')?.innerText.includes('第 3 阶段') && document.getElementById('live-instances')?.innerText.includes('30 / 1,234 tokens')`);
 await screenshot('live-workbench-loaded-status');
@@ -2247,13 +2260,13 @@ await screenshot('live-workbench-path-preserved');
 await call('Page.navigate', {url:origin+'/instances/1/results/2'});
 await waitFor(`document.querySelector('.result-card') !== null && document.querySelector('.candidates-fold') !== null`);
 await evaluate(`document.querySelector('.candidates-fold').open=true;true`);
-const initialGroups = await evaluate(`Array.from(document.querySelectorAll('.candidate-group')).map(group=>Array.from(group.querySelectorAll('tbody tr')).map(row=>row.dataset.order))`);
-if (initialGroups.length !== 2 || initialGroups.flat().length !== 7) throw new Error('Candidate table did not restrict 37 historical candidates to six nominees and the A choice');
+const initialGroups = await evaluate(`Object.fromEntries(Array.from(document.querySelectorAll('.candidate-group'),group=>[group.querySelector('h3').firstChild.textContent.replace('口径：',''),Array.from(group.querySelectorAll('tbody tr'),row=>row.dataset.order)]))`);
+if (JSON.stringify(Object.keys(initialGroups).sort()) !== '["test","val"]' || Object.values(initialGroups).flat().length !== 7) throw new Error('Candidate table did not restrict 37 historical candidates to six nominees and the A choice across the two declared evaluation conditions');
 if (!(await evaluate(`document.querySelector('.candidates h2').textContent.includes('（7）') && !document.querySelector('.candidates .toggle-all') && Array.from(document.querySelectorAll('.candidate-table .cand-label')).every(label=>['1','2','3','4','5','6','37'].some(number=>label.textContent==='Browser candidate '+number)) && document.querySelector('.candidate-table .mark-recommended').closest('tr').textContent.includes('Browser candidate 37')`))) throw new Error('Candidate comparison leaked historical alternatives or lost the explicit A choice');
 for (const direction of ['desc','asc','order']) {
-  await evaluate(`document.querySelector('[data-sort-group]').click();true`);
-  const state = await evaluate(`(()=>{const groups=Array.from(document.querySelectorAll('.candidate-group'));const group=groups[0];return {order:groups.map(item=>Array.from(item.querySelectorAll('tbody tr')).map(row=>row.dataset.order)),metrics:Array.from(group.querySelectorAll('tbody tr')).map(row=>row.dataset.metric===''?null:Number(row.dataset.metric)),state:group.querySelector('[data-sort-group]').dataset.state,neutral:group.querySelector('[data-sort-note]').hidden}})()`);
-  if (state.state !== direction || JSON.stringify(state.order[1]) !== JSON.stringify(initialGroups[1])) throw new Error('Candidate sort crossed evaluation groups');
+  await evaluate(`Array.from(document.querySelectorAll('.candidate-group')).find(group=>group.querySelector('h3').firstChild.textContent==='口径：val').querySelector('[data-sort-group]').click();true`);
+  const state = await evaluate(`(()=>{const groups=Array.from(document.querySelectorAll('.candidate-group'));const group=groups.find(item=>item.querySelector('h3').firstChild.textContent==='口径：val');return {order:Object.fromEntries(groups.map(item=>[item.querySelector('h3').firstChild.textContent.replace('口径：',''),Array.from(item.querySelectorAll('tbody tr'),row=>row.dataset.order)])),metrics:Array.from(group.querySelectorAll('tbody tr')).map(row=>row.dataset.metric===''?null:Number(row.dataset.metric)),state:group.querySelector('[data-sort-group]').dataset.state,neutral:group.querySelector('[data-sort-note]').hidden}})()`);
+  if (state.state !== direction || JSON.stringify(state.order.test) !== JSON.stringify(initialGroups.test)) throw new Error('Candidate sort crossed evaluation groups');
   if (direction === 'order') {
     if (JSON.stringify(state.order) !== JSON.stringify(initialGroups) || !state.neutral) throw new Error('Candidate sort did not restore neutral observation order');
   } else {
@@ -2264,7 +2277,7 @@ for (const direction of ['desc','asc','order']) {
 await screenshot('result-candidates-desktop');
 await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
 await noOverflow();
-if (!(await evaluate(`parseFloat(getComputedStyle(document.querySelector('.candidate-table')).fontSize)>=13 && document.querySelector('.result-card').getBoundingClientRect().right<=innerWidth && document.querySelector('.table-scroll').scrollWidth>document.querySelector('.table-scroll').clientWidth`))) throw new Error('Mobile result or candidate table is unreadable');
+if (!(await evaluate(`parseFloat(getComputedStyle(document.querySelector('.candidate-table')).fontSize)>=13 && document.querySelector('.result-card').getBoundingClientRect().right<=innerWidth && document.querySelector('.candidate-group .table-scroll').scrollWidth>document.querySelector('.candidate-group .table-scroll').clientWidth`))) throw new Error('Mobile result or candidate table is unreadable');
 await screenshot('result-candidates-mobile');
 await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
 await call('Page.navigate', {url:origin+'/instances/1/progress'});
@@ -2274,11 +2287,15 @@ await waitFor(`document.querySelector('[data-stream-status]')?.textContent.inclu
 if ((await evaluate(`document.querySelector('[data-stream-status]').textContent`)).includes('等待助手输出')) throw new Error('Stopped runner still claims to wait for output');
 await screenshot('live-progress-stopped-unconfirmed');
 await call('Page.navigate', {url:origin+'/instances/1/'});
-await waitFor(`document.getElementById('live-hero')?.innerText.includes('本次控制请求已停止推进') && document.getElementById('live-hero')?.innerText.includes('原任务状态待核对')`);
+await waitFor(`document.getElementById('live-hero')?.innerText.includes('第 4 阶段') && document.getElementById('live-hero').innerText.includes('原任务状态待核对') && document.querySelector('#live-actions .status-context')?.textContent.includes('本次控制请求已停止推进')`);
+await evaluate(`document.querySelector('#live-actions .status-context > summary').click();true`);
 if ((await evaluate('document.body.innerText')).includes('Private fixture diagnostic')) throw new Error('Private stop diagnostic was rendered');
 await call('Page.navigate', {url:origin+'/instances/1/results'});
 await waitFor(`document.querySelector('#live-mechanisms .mechanism-trails') !== null && document.querySelector('[data-live-url]')?.dataset.state==='connected'`);
 if ((await evaluate('location.pathname')) !== '/instances/1/results') throw new Error('Research process live connection changed the selected route');
+if (!(await evaluate(`!document.querySelector('#live-mechanisms .mechanism-trails').open && !document.querySelector('#live-mechanisms .mechanism-card').checkVisibility({contentVisibilityAuto:true})`))) throw new Error('Mechanism ledger must initially hide its full cards');
+await evaluate(`document.querySelector('#live-mechanisms .mechanism-trails > summary').click();true`);
+await waitFor(`document.querySelector('#live-mechanisms .mechanism-card')?.checkVisibility({contentVisibilityAuto:true})`);
 if (!(await evaluate(`(()=>{const cards=Array.from(document.querySelectorAll('.mechanism-card'));const [first,second]=cards.map(card=>card.getBoundingClientRect());return cards.length===2 && Math.abs(first.top-second.top)<1 && second.left>first.right && cards.every(card=>!card.querySelector('details').open) && !document.querySelector('.mechanism-overview').innerText.includes('Original question detail')})()`))) throw new Error('Desktop mechanisms are not separate, concise, collapsed cards in two columns');
 await noOverflow();
 await screenshot('research-process-mechanisms-live');
@@ -2317,28 +2334,34 @@ await waitFor(`document.querySelector('.configuration-roles') !== null`);
 if (await evaluate(`document.querySelector('#research-config-form') !== null || document.querySelector('form[action$="/control/configure"]') !== null`)) throw new Error('Current configuration still opens the creation wizard');
 if (!(await evaluate(`document.querySelector('#budget-settings [name="cfg.budget.max_tokens"]') && document.querySelectorAll('[name="cfg.budget.max_tokens"]').length===1 && !document.querySelector('form[action$="/control/budget"]')`))) throw new Error('Research configuration does not provide one canonical budget editor');
 if (!(await evaluate(`(()=>{const matrix=document.querySelector('[data-config-group="agent.roles"] .role-settings-matrix');return matrix && matrix.querySelectorAll('tbody tr').length===4 && !document.querySelector('.role-settings-card')})()`))) throw new Error('Role controls are not consolidated into one matrix');
-await evaluate(`document.querySelector('.advanced-settings').open=true;true`);
-await waitFor(`(()=>{const categories=Array.from(document.querySelectorAll('.advanced-settings details.advanced-category[data-config-group]'));const groups=new Map(categories.map(group=>[group.dataset.configGroup,group]));const required=['agent','budget','executor','delivery','policies'],frozen=['research','project','skills','ui','version'];return required.every(name=>groups.has(name)) && frozen.every(name=>!groups.has(name)) && groups.size===categories.length && categories.every(group=>!group.open && group.querySelector('summary').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.budget.breadth.initial_calls"]').checkVisibility({contentVisibilityAuto:true})})()`);
-await evaluate(`['agent','budget','executor','policies'].forEach(prefix=>document.querySelector('.advanced-category[data-config-group="'+prefix+'"]').open=true);true`);
-await waitFor(`(()=>{const advanced=document.querySelector('.advanced-settings');const paths=['agent.backend','agent.native.features.fast_mode','budget.breadth.initial_calls','budget.correction.pause_after','budget.role_shares.min_w_share','executor.mode','executor.config.executor','policies.formal_review','policies.resume.max_attempts','policies.resume.output_only'];return paths.every(path=>advanced.querySelector('[name="cfg.'+path+'"]').checkVisibility({contentVisibilityAuto:true})) && !document.querySelector('[name="cfg.budget.max_output_item_bytes"]') && !document.querySelector('[name="cfg.budget.max_output_total_bytes"]')})()`);
-await waitFor(`(()=>{const boxes=['max_w_seconds','max_w_observed_tokens','max_requested_repairs','initial_calls'].map(key=>document.querySelector('[name="cfg.budget.breadth.'+key+'"]').getBoundingClientRect());return boxes.every((box,index)=>box.width>100 && Math.abs(box.top-boxes[0].top)<2 && (!index || box.left>boxes[index-1].right))})()`);
+await waitFor(`(()=>{const advanced=document.querySelector('.advanced-settings'),editor=advanced.querySelector('textarea[name="advanced_toml"]');return !advanced.open && !editor.checkVisibility({contentVisibilityAuto:true}) && editor.value.includes('candidate_extra_slots = 2') && !document.querySelector('[name="cfg.budget.breadth.initial_calls"],[name="cfg.budget.candidate_extra_slots"],.advanced-category')})()`);
+await evaluate(`document.querySelector('.advanced-settings > summary').click();true`);
+await waitFor(`(()=>{const editor=document.querySelector('[name="advanced_toml"]'),box=editor.getBoundingClientRect();return editor.checkVisibility({contentVisibilityAuto:true}) && box.width>600 && box.height>100 && box.right<=innerWidth && !document.querySelector('[name="cfg.budget.max_output_item_bytes"],[name="cfg.budget.max_output_total_bytes"]')})()`);
 await noOverflow();
 await screenshot('current-configuration-desktop');
 await call('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
+await waitFor(`(()=>{const box=document.querySelector('[name="advanced_toml"]').getBoundingClientRect();return box.width>200 && box.left>=0 && box.right<=innerWidth})()`);
 await noOverflow();
 await screenshot('current-configuration-mobile');
-// A failed settings save keeps the full draft and corrected submission becomes pending.
-await evaluate(`(()=>{const form=document.getElementById('research-config-edit-form');form.elements['cfg.agent.model'].value='browser-next-model';form.elements['cfg.budget.candidate_extra_slots'].value='invalid settings budget';document.querySelector('.advanced-category[data-config-group="budget"]').open=false;document.querySelector('.advanced-settings').open=false;form.querySelector('button[type="submit"]').click();return true})()`);
-await waitFor(`document.querySelector('[role="alert"]') !== null && document.querySelector('[name="cfg.budget.candidate_extra_slots"]')?.value==='invalid settings budget'`);
+// A real failed settings POST keeps the exact TOML draft; correction queues future settings.
+const currentAdvanced = await evaluate(`document.querySelector('[name="advanced_toml"]').value`);
+const invalidAdvanced = currentAdvanced.replace('candidate_extra_slots = 2','candidate_extra_slots = invalid settings budget');
+if (invalidAdvanced === currentAdvanced) throw new Error('Fixture did not edit the advanced budget declaration');
+await evaluate(`(()=>{const form=document.getElementById('research-config-edit-form');form.elements['cfg.agent.model'].value='browser-next-model';form.elements.advanced_toml.value=${JSON.stringify(invalidAdvanced)};form.elements.advanced_toml.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.advanced-settings > summary').click();form.querySelector('button[type="submit"]').click();return true})()`);
+await waitFor(`document.querySelector('.ui-error[role="alert"] > h2')?.textContent==='表单参数类型不正确' && document.querySelector('.ui-error[role="alert"]').textContent.includes('一个或多个参数未通过类型检查') && document.querySelector('[name="advanced_toml"]') !== null`);
+const retainedDraft = await evaluate(`document.querySelector('[name="advanced_toml"]').value`);
+if (retainedDraft !== invalidAdvanced) throw new Error('Invalid TOML draft was changed');
 if (!(await evaluate(`document.querySelector('[name="cfg.agent.model"]').value==='browser-next-model' && !document.querySelector('[name="cfg.research.root"]') && !document.querySelector('[name="cfg.ui.approval_secret_file"]')`))) throw new Error('Settings error lost draft or exposed instance identity controls');
-if (!(await evaluate(`document.querySelector('.advanced-settings').open && document.querySelector('.advanced-category[data-config-group="budget"]').open && document.activeElement===document.querySelector('[name="cfg.budget.candidate_extra_slots"]')`))) throw new Error('Settings validation did not open and focus the failed category');
-await evaluate(`document.querySelector('.advanced-category[data-config-group="policies"]').open=true;true`);
-await waitFor(`document.querySelector('[name="cfg.budget.candidate_extra_slots"]').value==='invalid settings budget' && document.querySelector('[name="cfg.policies.resume.max_attempts"]').checkVisibility({contentVisibilityAuto:true})`);
+if (!(await evaluate(`document.querySelector('.advanced-settings').open && document.querySelector('[name="advanced_toml"]').checkVisibility({contentVisibilityAuto:true}) && document.activeElement===document.querySelector('[role="alert"]')`))) throw new Error('Settings TOML error did not expose the draft and focus its explanation');
+await evaluate(`document.querySelector('.recovery-settings > summary').click();true`);
+if (await evaluate(`document.querySelector('[name="advanced_toml"]').value`) !== invalidAdvanced) throw new Error('Opening recovery settings lost invalid TOML');
 await noOverflow(); await screenshot('current-configuration-error-mobile');
-await evaluate(`(()=>{const form=document.getElementById('research-config-edit-form');form.elements['cfg.budget.max_tokens'].value='1234';form.elements['cfg.budget.candidate_extra_slots'].value='3';document.querySelector('.advanced-category[data-config-group="budget"]').open=false;document.querySelector('.advanced-settings').open=false;form.querySelector('button[type="submit"]').click();return true})()`);
+const correctedAdvanced = currentAdvanced.replace('candidate_extra_slots = 2','candidate_extra_slots = 3');
+await evaluate(`(()=>{const form=document.getElementById('research-config-edit-form');form.elements['cfg.budget.max_tokens'].value='1234';form.elements.advanced_toml.value=${JSON.stringify(correctedAdvanced)};form.elements.advanced_toml.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.advanced-settings > summary').click();form.querySelector('button[type="submit"]').click();return true})()`);
 await waitFor(`document.querySelector('.configuration-status')?.innerText.includes('配置待生效') && document.querySelector('[name="cfg.agent.model"]')?.value==='browser-next-model'`);
-await evaluate(`document.querySelector('.advanced-settings').open=true;document.querySelector('.advanced-category[data-config-group="budget"]').open=true;true`);
-await waitFor(`document.querySelector('[name="cfg.budget.candidate_extra_slots"]').value==='3' && document.querySelector('[name="cfg.budget.candidate_extra_slots"]').checkVisibility({contentVisibilityAuto:true})`);
+await evaluate(`document.querySelector('.advanced-settings > summary').click();document.querySelector('.configuration-active > summary').click();true`);
+await waitFor(`document.querySelector('[name="advanced_toml"]').value.includes('candidate_extra_slots = 3') && document.querySelector('[name="advanced_toml"]').checkVisibility({contentVisibilityAuto:true})`);
+if (!(await evaluate(`document.querySelector('.configuration-active').innerText.includes('browser-corrected-model') && !document.querySelector('.configuration-active').innerText.includes('browser-next-model') && document.querySelector('.configuration-status').innerText.includes('当前节点继续使用原配置')`))) throw new Error('Pending declaration changed the displayed active node settings');
 await noOverflow(); await screenshot('current-configuration-pending-mobile');
 await call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
 await call('Page.navigate', {url:origin+'/instances/1/guidance'});
@@ -2377,12 +2400,15 @@ if (await evaluate(`document.querySelector('[name="target_language"]').value`) !
 await screenshot('reading-error-timeout-desktop');
 await evaluate(`document.querySelector('[name="timeout_seconds"]').value='120';document.querySelector('form[action$="/translation/configure"]').requestSubmit();true`);
 await waitFor(`document.querySelector('h1')?.textContent==='阅读与翻译'`);
-await call('Page.navigate', {url:origin+'/instances/1/'});
-await waitFor(`document.getElementById('live-hero')?.innerText.includes('本次控制请求已停止推进') && document.querySelector('[data-live-url]')?.dataset.state==='connected'`);
-await evaluate(`(()=>{const note=document.querySelector('[name="authorization_note"]');note.value='Keep this expired-session draft';window.liveAuthChecks=0;const originalFetch=window.fetch;window.fetch=(url,options)=>{if(String(url).endsWith('/session')){window.liveAuthChecks++;window.checkedSessionURL=String(url);return Promise.resolve(new Response(JSON.stringify({error:{code:'browser_session_invalid',title:'浏览会话已失效',cause:'本地会话已过期。',hint:'请使用本次 management_url 重新打开。',reference:'live-fixture-ref'}}),{status:403,headers:{'Content-Type':'application/json'}}))}return originalFetch(url,options)};source.dispatchEvent(new Event('error'));return true})()`);
+// Reuse the display-only recovery fixture to expose its real unsent budget form.
+// This changes presentation, grants no budget, and starts no native work.
+await writeFile(process.env.SCID_TEST_ADVANCE, 'budget-recovery');
+await call('Page.navigate', {url:origin+'/instances/1/budget-recovery#budget'});
+await waitFor(`document.querySelector('#budget [name="authorization_note"]')?.checkVisibility({contentVisibilityAuto:true}) && document.querySelector('[data-live-url]')?.dataset.state==='connected'`);
+await evaluate(`(()=>{const note=document.querySelector('[name="authorization_note"]');note.value='Keep this expired-session draft';note.dispatchEvent(new Event('input',{bubbles:true}));note.focus();window.liveAuthChecks=0;const originalFetch=window.fetch;window.fetch=(url,options)=>{if(String(url).endsWith('/session')){window.liveAuthChecks++;window.checkedSessionURL=String(url);return Promise.resolve(new Response(JSON.stringify({error:{code:'browser_session_invalid',title:'浏览会话已失效',cause:'本地会话已过期。',hint:'请使用本次 management_url 重新打开。',reference:'live-fixture-ref'}}),{status:403,headers:{'Content-Type':'application/json'}}))}return originalFetch(url,options)};source.dispatchEvent(new Event('error'));return true})()`);
 await waitFor(`document.querySelector('[data-live-url]')?.dataset.state==='expired' && document.querySelector('[data-live-url]').textContent.includes('management_url') && document.querySelector('[data-live-url]').textContent.includes('live-fixture-ref')`);
 await new Promise(resolve=>setTimeout(resolve,1700));
-if (!(await evaluate(`source===null && window.liveAuthChecks===1 && window.checkedSessionURL==='/instances/1/session' && document.querySelector('[name="authorization_note"]').value==='Keep this expired-session draft'`))) throw new Error('Expired SSE retained reconnect or lost draft/mounted session route');
+if (!(await evaluate(`source===null && window.liveAuthChecks===1 && window.checkedSessionURL==='/instances/1/session' && document.querySelector('#budget [name="authorization_note"]').value==='Keep this expired-session draft' && document.activeElement===document.querySelector('#budget [name="authorization_note"]')`))) throw new Error('Expired SSE retained reconnect or lost draft/focus/mounted session route');
 await screenshot('reading-error-live-session-expired');
 ws.close();
 if (rendered.includes('{\"type\"')) throw new Error('Raw JSON appeared in the normal progress panel');
@@ -2395,12 +2421,30 @@ console.log(rendered);
                 SCID_TEST_INSTANCE_ROOT=str(root), SCID_TEST_PUBLIC_ROOT=str(workspace / 'public'),
                 SCID_TEST_CONFIG_PATH=str(config), SCID_TEST_LOG_DIR=str(log_dir), SCID_TEST_ADVANCE=str(advance)),
             capture_output=True, text=True, timeout=60)
-        assert checked.returncode == 0, checked.stderr
+        diagnostic_note = ''
+        if checked.returncode != 0:
+            reference = re.search(r'\.scid-ui/errors/([0-9a-f]{32})\.json', checked.stderr)
+            if reference:
+                error_id = reference.group(1)
+                diagnostic = json.loads((workspace / '.scid-ui/errors' / (error_id + '.json')).read_text())
+                retained = {key: diagnostic[key] for key in ('reference', 'context', 'exception', 'traceback')}
+                diagnostic_path = log_dir / ('headless-public-progress-error-' + error_id + '.json')
+                diagnostic_path.write_text(json.dumps(retained, ensure_ascii=False, indent=2) + '\n')
+                diagnostic_note = '\nMaintenance diagnostic: ' + str(diagnostic_path)
+        assert checked.returncode == 0, checked.stderr + diagnostic_note
         assert '已连接' in checked.stdout
         assert 'Public browser fixture' in checked.stdout
         assert len(owners) == 1 and owners[0][0] == root
+        assert started_jobs == [c.record_ref(root / 'jobs/001.json')]
+        assert c.read_job(root / 'jobs/001.json')['role'] == 'H'
         assert set(owners[0][1]) == {'operation_id'} and re.fullmatch('[0-9a-f]{32}', owners[0][1]['operation_id'])
         assert c.settings(root)['max_tokens'] == 1234
+        assert frozen_originals and all(path.read_bytes() == value for path, value in frozen_originals.items())
+        state = configuration_updates.status(root)
+        assert state['pending'] and state['settings']['model'] == 'browser-next-model'
+        assert state['configuration']['budget']['candidate_extra_slots'] == 3
+        assert state['active_settings']['model'] == c.settings(root)['model'] == 'browser-corrected-model'
+        assert not (root / 'jobs/005.json').exists()
     finally:
         if browser is not None:
             import signal
