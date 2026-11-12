@@ -653,13 +653,16 @@ if request['method']=='hooks/list':
  send(dict(id=2,result=dict(data=[dict(cwd=str(work),hooks=hooks,warnings=[],errors=[])])))
  raise SystemExit(0)
 assert request['method'] in {'thread/start','thread/resume'}
+with (work/'work/argv.jsonl').open('a') as stream:stream.write(json.dumps(args)+'\n')
+with (work/'work/requests.jsonl').open('a') as stream:stream.write(json.dumps(request)+'\n')
 resumed=request['method']=='thread/resume';thread='metering-thread'
 assert not resumed or request['params']['threadId']==thread and request['params']['excludeTurns'] is True
 with (work/'work/launches').open('a') as stream:stream.write('resume\n' if resumed else 'exec\n')
 send(dict(id=2,result=dict(thread=dict(id=thread,turns=[]),model=request['params']['model'],
  cwd=str(work),approvalPolicy='never',sandbox=dict(type='workspaceWrite',writableRoots=[],networkAccess=False),
  reasoningEffort=config['model_reasoning_effort'],serviceTier=config.get('service_tier'))))
-assert receive()['method']=='turn/start'
+request=receive();assert request['method']=='turn/start'
+with (work/'work/requests.jsonl').open('a') as stream:stream.write(json.dumps(request)+'\n')
 turn='resumed-turn' if resumed else 'initial-turn'
 send(dict(id=3,result=dict(turn=dict(id=turn,items=[],status='inProgress'))))
 home=pathlib.Path(os.environ.get('CODEX_HOME') or pathlib.Path.home()/'.codex');session=home/'sessions/opaque.jsonl'
@@ -694,6 +697,8 @@ elif mode=='home':
 elif mode=='unreported':
  report(dict(input_tokens=100,cached_input_tokens=80,output_tokens=5))
  report(dict(input_tokens=10,output_tokens=2))
+elif mode=='profile':
+ report(dict(input_tokens=7,cached_input_tokens=0,output_tokens=3))
 else:
  assert mode=='resume'
  report(scenario['delta'] if resumed else scenario['baseline'])

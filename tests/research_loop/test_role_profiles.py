@@ -75,9 +75,11 @@ def test_invalid_role_configuration_rejected_before_instance_creation(tmp_path,v
 
 
 def test_sparse_fields_and_unlisted_model_names_are_explicitly_inherited():
-    result=profiles.normalize({'A':{'model':'future-model','service_tier':'priority'}},DEFAULTS)
-    assert result['A']==dict(DEFAULTS,model='future-model',service_tier='priority')
-    assert result['E']==DEFAULTS
+    overrides={'A':{'model':'future-model','service_tier':'priority'}}
+    result=profiles.normalize(overrides,DEFAULTS)
+    assert result=={role:dict(DEFAULTS,**overrides.get(role,{})) for role in 'HWAE'}
+    settings=dict(DEFAULTS,role_profiles=overrides)
+    assert {role:profiles.selected(settings,role) for role in 'HWAE'}==result
     with pytest.raises(ValueError,match='Unknown scientific role'):
         profiles.selected(DEFAULTS,'Root')
 
@@ -107,46 +109,117 @@ def test_changed_profile_rejected_before_native_submission(tmp_path,monkeypatch,
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('role,overrides,tier',[(role,OVERRIDES,'default') for role in 'HWAE'] +
-    [('A',{'A':dict(model='gpt-5.6-sol',reasoning_effort='medium',service_tier='priority')},'default'),
-     ('H',None,'default'),('H',None,'priority')])
-def test_actual_fresh_and_resumed_argv_keep_original_role_profile(tmp_path,monkeypatch,role,overrides,tier):
+def test_actual_fresh_and_resumed_argv_keep_original_role_profile(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget
+    from test_native_cli import metering_instance
+
+    global_profile=dict(model='fixture-no-model',reasoning_effort='high',service_tier='default')
+    expected=dict(model='role-fixture-no-model',reasoning_effort='medium',service_tier='priority')
     original=controller.prepare
     def configured(*args,**kwargs):
-        return original(*args,**dict(kwargs,**dict(DEFAULTS,service_tier=tier),role_profiles=overrides))
+        return original(*args,**dict(kwargs,**global_profile,role_profiles={'H':expected}))
     monkeypatch.setattr(controller,'prepare',configured)
-    fake=resume.FAKE.replace("role!='A'","True").replace("with (work/'work/launches').open('a')",
-        "with (work/'work/argv.jsonl').open('a') as log:log.write(json.dumps(args)+'\\n')\nwith (work/'work/launches').open('a')")
-    fake=fake.replace("pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))",
-        "if role=='W':payload.update(mechanism_findings=None,stage_intent='review')\n"
-        + "if role=='A':payload.update(decision_request=None,portfolio_review=None)\n"
-        + "pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))")
-    root=resume.instance(tmp_path,fake=fake)
-    job=c.build_job(root,1,role,[])
-    c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','profile_fixture')
-    with pytest.raises(ValueError,match='unverified'):native.execute_native(root,1)
+    tokens=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4)
+    root=metering_instance(tmp_path,monkeypatch,'resume',baseline=tokens,delta=tokens)
+    assert controller.run(root)['status']=='technical_pause'
     first=resume.wait_runner(root)
-    assert continuation.start(root,1)['role']==role
+    work=c.workspace(root,1)
+    originals={path:path.read_bytes() for path in (root/'settings.json',root/'jobs/001.json',
+        work/'science-task.json',first/'science-result.schema.json',first/'native-intent.json',
+        first/'native-outcome.json',first/'usage.json',first/'native.jsonl')}
+    result=continuation.start(root,1,after_interrupt=True,expected_attempt=0,
+        native_intent_ref=c.record_ref(first/'native-intent.json'))
+    assert result['role']=='H'
     current=resume.wait_runner(root)
-    expected=profiles.selected(c.settings(root),role)
+    settings=c.settings(root)
+    assert {key:settings[key] for key in global_profile}==global_profile
+    assert profiles.selected(settings,'H')==expected
+    assert c.read(root/'jobs/001.json')['native_profile']==expected
     for record in (first,current):
         intent=c.read(record/'native-intent.json')
-        if overrides is None:
-            assert 'role_profiles' not in c.settings(root) and 'native_profile' not in intent
-        else:
-            assert intent['native_profile']==expected
-    launches=[json.loads(line) for line in (c.workspace(root,1)/'work/argv.jsonl').read_text().splitlines()]
-    assert len(launches)==2 and 'resume' not in launches[0] and 'resume' in launches[1]
+        assert intent['native_profile']==expected
+        assert intent['task_ref']==c.record_ref(root/'jobs/001.json')
+        outcome=c.read(record/'native-outcome.json')
+        assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+        assert outcome['native_identity']['session']['thread_id']=='metering-thread'
+        assert outcome['budget_notification']['status']=='available'
+        assert c.read(record/'usage.json')==tokens
+    launches=[json.loads(line) for line in (work/'work/argv.jsonl').read_text().splitlines()]
+    assert len(launches)==2
     for args in launches:
-        assert args[args.index('--model')+1]==expected['model']
-        assert 'model_reasoning_effort='+json.dumps(expected['reasoning_effort']) in args
-        assert 'service_tier='+json.dumps(expected['service_tier']) in args
+        configs=[args[index+1] for index,value in enumerate(args) if value=='-c']
+        assert configs.count('model_reasoning_effort='+json.dumps(expected['reasoning_effort']))==1
+        assert configs.count('service_tier='+json.dumps(expected['service_tier']))==1
+    requests=[json.loads(line) for line in (work/'work/requests.jsonl').read_text().splitlines()]
+    assert [request['method'] for request in requests]==['thread/start','turn/start','thread/resume','turn/start']
+    for request in requests:
+        assert request['params']['model']==expected['model']
+        assert request['params']['serviceTier']==expected['service_tier']
+        if request['method']=='turn/start':
+            assert request['params']['effort']==expected['reasoning_effort']
+            assert request['params']['threadId']=='metering-thread'
+    assert requests[2]['params']['threadId']=='metering-thread' and requests[2]['params']['excludeTurns'] is True
+    outcome=c.read(current/'native-outcome.json')
+    assert outcome['returncode']==0 and outcome['terminal_observed'] is True and outcome['stop_reason'] is None
+    assert outcome['metering']['coverage']=='terminal' and outcome['metering']['reconciliation']=='matched'
+    assert (current/'native.jsonl').read_bytes().endswith(b'{"type":"turn.completed","native_terminal":true}\n')
+    assert (current/'science-output.json').read_bytes()==(work/'work/resumed-result.json').read_bytes()
+    assert native.usage(root)['observed_tokens']==28
+    head=accepted_budget.read(root)
+    assert head['max_local_step']==1 and head['dispatch_count']==2 and head['continuation_count']==0
+    assert c.read(current/'native-intent.json')['continuation_kind']=='reentry'
+    assert budget.used_steps(root)==1 and len(execution.records(root,1))==2 and not (root/'jobs/002.json').exists()
+    assert all(path.read_bytes()==data for path,data in originals.items())
+    captured={path:path.read_bytes() for path in (work/'work/argv.jsonl',work/'work/requests.jsonl')}
+    assert native.wait_native(root,1)==result
+    assert all(path.read_bytes()==data for path,data in captured.items())
+    assert (work/'work/launches').read_text()=='exec\nresume\n'
 
 
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('tier',['default','priority'])
 @pytest.mark.parametrize('kind',['raw_codex','wrapper'])
-def test_global_configuration_reaches_actual_launcher_without_role_profiles(tmp_path,kind,tier):
+def test_global_configuration_reaches_actual_launcher_without_role_model_overrides(tmp_path,monkeypatch,kind,tier):
+    from scidiscovery.research_loop import accepted_budget
+
+    if kind=='raw_codex':
+        from test_native_cli import metering_instance
+        original=controller.prepare
+        def configured(*args,**kwargs):
+            return original(*args,**dict(kwargs,model='no-model',reasoning_effort='medium',service_tier=tier))
+        monkeypatch.setattr(controller,'prepare',configured)
+        root=metering_instance(tmp_path,monkeypatch,'profile')
+        assert native.execute_native(root,1)['role']=='H'
+        work=c.workspace(root,1)
+        launches=[json.loads(line) for line in (work/'work/argv.jsonl').read_text().splitlines()]
+        assert len(launches)==1
+        args=launches[0]
+        configs=[args[index+1] for index,value in enumerate(args) if value=='-c']
+        assert configs.count('model_reasoning_effort="medium"')==1
+        assert configs.count('service_tier='+json.dumps(tier))==1
+        assert not any(config.startswith('mcp_servers.') for config in configs)
+        requests=[json.loads(line) for line in (work/'work/requests.jsonl').read_text().splitlines()]
+        assert [request['method'] for request in requests]==['thread/start','turn/start']
+        for request in requests:
+            assert request['params']['model']=='no-model'
+            assert request['params']['serviceTier']==tier
+        assert requests[1]['params']['effort']=='medium'
+        # Ordinary standard-Codex jobs select prompt transport in Codex.for_job.
+        outcome=c.read(execution.origin(root,1)/'native-outcome.json')
+        assert outcome['native_schema_transport']=='prompt'
+        assert '--output-schema' not in args and 'outputSchema' not in requests[1]['params']
+        assert outcome['returncode']==0 and outcome['terminal_observed'] is True and outcome['stop_reason'] is None
+        assert outcome['budget_notification']['status']=='available'
+        assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+        assert outcome['metering']['coverage']=='terminal' and outcome['metering']['reconciliation']=='matched'
+        assert native.usage(root)['observed_tokens']==10
+        settings=c.settings(root)
+        assert settings['role_profile_declarations']=={'W':{'subagents':False}}
+        expected=dict(model='no-model',reasoning_effort='medium',service_tier=tier)
+        assert {role:profiles.selected(settings,role) for role in 'HWAE'}=={role:expected for role in 'HWAE'}
+        assert accepted_budget.read(root)['dispatch_count']==1 and not (root/'jobs/002.json').exists()
+        return
+
     public=tmp_path/'public';public.mkdir();goal=public/'goal';goal.write_text('Bounded transport fixture.')
     script=tmp_path/('codex' if kind=='raw_codex' else 'wrapper.py')
     script.write_text('#!'+sys.executable+'\n'+r'''import json,os,pathlib,sys
@@ -170,7 +243,7 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,output_tok
     budget.transition(root,'advance','profile_fixture')
     anchor=budget.accept_node(root,job)
     if anchor is not None:intent['budget_slice']=anchor
-    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
     native.run_native(root,1)
     assert not (root/'jobs/002.json').exists()
     assert 'role_profiles' not in c.settings(root)
