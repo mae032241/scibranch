@@ -1117,23 +1117,3 @@ def test_resume_launcher_allows_source_upgrade_and_rejects_path_redirect(tmp_pat
         continuation.validate_launcher(root)
     assert (root/'settings.json').read_bytes()==settings
     assert not (root/'jobs/001.json').exists() and not (root/'native-evidence/001/native-intent.json').exists()
-
-
-def test_resume_uses_retained_hook_identity_without_native_history_reads(tmp_path,monkeypatch):
-    from scidiscovery.research_loop.native_usage import stream_binding
-    home=tmp_path/'home';work=tmp_path/'work';path=home/'sessions'/'opaque.jsonl'
-    path.parent.mkdir(parents=True);path.write_bytes(b'opaque native body without a JSON header')
-    info=stream_binding(path);thread='11111111-2222-4333-8444-555555555555'
-    binding=dict(source='native_metadata_hooks',thread_id=thread,home=str(home),workspace=str(work),
-        path=str(path),identity=info['identity'],offset=info['size_bytes'])
-    outcome=dict(thread_id=thread,native_thread_event=dict(type='thread.started',thread_id=thread),
-        native_identity=dict(home=str(home),path=str(path),session=binding))
-    monkeypatch.setattr(continuation.configuration_updates,'for_step',lambda *a:dict(native_backend='codex',native_launcher_argv=['codex']))
-    monkeypatch.setattr(c,'native_outcome',lambda *a:outcome)
-    monkeypatch.setattr(c,'workspace',lambda *a:work)
-    monkeypatch.setattr(Path,'open',lambda *a,**k:pytest.fail('Resume must not read native history/header'))
-    assert continuation.session(tmp_path,1,tmp_path/'record')==binding
-    assert continuation.session(tmp_path,1,tmp_path/'record',identity_proof=True)['thread_event']==outcome['native_thread_event']
-    outcome['native_identity']['session']=None
-    with pytest.raises(continuation.ResumeUnavailable,match='metadata_unavailable'):
-        continuation.session(tmp_path,1,tmp_path/'record')

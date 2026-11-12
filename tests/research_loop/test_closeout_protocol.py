@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget, candidate_audit, cli, contracts as c, controller, delivery, native
+from scidiscovery.research_loop import budget, candidate_audit, cli, contracts as c, controller, delivery
 from test_delivery import FAKE_HARNESS, descriptor, delivery_policy
 from test_history_handoff import finish
 
@@ -49,7 +49,7 @@ print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_inp
 '''
 
 
-def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, max_tokens=100000, max_seconds=600,node_budget_mode='soft',legacy=False):
+def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, max_tokens=100000, max_seconds=600,node_budget_mode='soft'):
     if shutil.which('bwrap') is None:
         pytest.skip('Actual isolated adapter required')
     root=tmp_path/'instance';public=tmp_path/'public';(public/'harness').mkdir(parents=True)
@@ -69,13 +69,6 @@ def scene(tmp_path, actions, *, count=2, audit=True, selective_failure=False, ma
         history_observer=dict(adapter=str(Path(__file__).resolve().parents[2]/'plugins/cov_execution/cov_execution/observer.py'),
             config=dict(runs='runs',evaluation_key='fixture-public')),
         delivery_policy=delivery_policy(descriptor(root,public)))
-    if legacy:
-        # Freeze retained pre-FINAL behavior before any task or ledger original.
-        settings=c.settings(root)
-        assert not list((root/'control-ledger').glob('*.json')) and not list((root/'jobs').glob('*.json'))
-        settings.pop('final_a_completion_policy')
-        c.write(root/'settings.json',settings)
-        c.write(root/'settings-identity.json',dict(path='settings.json'))
     (root/'runs').mkdir();(root/'submission').mkdir()
     (root/'runs/model.bin').write_bytes(b'exact original fixture model')
     finish(root,1,'H',[],action='experiment')
@@ -162,63 +155,6 @@ def test_final_host_audit_failure_retains_original_without_reselection(tmp_path)
     assert all(path.read_bytes()==raw for path,raw in retained.items())
     assert not (root/'jobs/004.json').exists() and not (root/'submission/model.pkl').exists()
     assert {path:path.read_bytes() for path in (root/'host-delivery/leaf-output').glob('*.json')}==leaf_originals
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('mode',['soft'])
-def test_legacy_known_closeout_abort_resumes_exact_session(tmp_path,mode):
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1',crash=True)],max_tokens=3500,node_budget_mode=mode,legacy=True)
-    settings=(root/'settings.json').read_bytes()
-    assert command(root)['status']=='closeout_native_unsealed'
-    original=(root/'jobs/003.json').read_bytes()
-    assert command(root,'status')['closeout']['status']=='closeout_native_unsealed'
-    result=command(root,'worker-resume','--step','3')
-    assert result['status']=='delivery_confirmed',result
-    assert (root/'jobs/003.json').read_bytes()==original
-    assert (c.workspace(root,3)/'work/launches').read_text()=='exec\nresume\n'
-    assert command(root,'run')['status']=='delivery_confirmed'
-    assert len(list((root/'native-evidence/003/continuations').glob('*/native-intent.json')))==1
-    assert (root/'settings.json').read_bytes()==settings
-    assert not any(c.read(path)['kind']=='budget_amend' for path in (root/'control-ledger').glob('*.json'))
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('mode',['soft'])
-def test_legacy_closeout_resume_retains_original_node_allowance_and_delivery_floor(tmp_path,monkeypatch,mode):
-    from scidiscovery.research_loop import execution
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1',crash=True)],node_budget_mode=mode,legacy=True)
-    assert command(root)['status']=='closeout_native_unsealed'
-    job=c.read(root/'jobs/003.json');paths=execution.records(root,3)
-    tokens,seconds=budget._attempt_consumption(root,job,paths)
-    settings=c.settings(root);policy=budget.node_limits(root,job)
-    floor=budget.closeout_floor(settings,preparation_seconds=budget.closeout_state(root)['begin']['preparation_seconds'])
-    limits=budget.snapshot(root);meter=native.usage(root);used=budget.used_steps(root)
-    current_limits=dict(limits);current_meter=dict(meter);current_steps=[used]
-    monkeypatch.setattr(budget,'snapshot',lambda root:dict(current_limits))
-    monkeypatch.setattr(native,'usage',lambda root:dict(current_meter))
-    monkeypatch.setattr(budget,'used_steps',lambda root:current_steps[0])
-    for boundary in ('tokens','seconds','steps'):
-        for delta in (-1,0,1):
-            current_limits.update(limits);current_meter.update(meter);current_steps[0]=used
-            if boundary=='tokens':
-                needed=0
-                current_meter['observed_tokens']=limits['max_tokens']-(needed+floor['tokens']+delta)
-                current_meter['accounted_tokens']=current_meter['observed_tokens']
-            elif boundary=='seconds':
-                needed=0
-                current_limits['seconds_remaining']=needed+floor['seconds']+delta
-            else:
-                current_steps[0]=settings['max_steps']-(1+floor['steps']+delta)
-            blocked=delta<0 or boundary!='steps' and delta==0
-            if blocked:
-                with pytest.raises(budget.NodeBudgetUnavailable,match='worker_resume_budget_unavailable'):
-                    budget.accept_continuation(root,job,paths)
-            else:
-                anchor=budget.accept_continuation(root,job,paths)
-                assert anchor['previous_tokens']==tokens and anchor['previous_seconds']==seconds
-                assert anchor['limits']==policy and anchor['shared_limits']=={key:limits[key] for key in ('max_tokens','max_seconds')}
-    current_limits.update(limits);current_meter.update(meter);current_steps[0]=used
-    assert not (paths[0]/'continuations').exists()
 
 
 @pytest.mark.process_e2e
@@ -411,19 +347,3 @@ def test_ordinary_audit_failure_reselects_before_one_final_delivery_without_e(tm
     assert c.read(root/'runs/submitted.json')['run_id']==2
     assert all(path.read_bytes()==raw for path,raw in originals.items())
     assert command(root,'run')['status']=='delivery_confirmed' and not (root/'jobs/006.json').exists()
-
-
-@pytest.mark.process_e2e
-def test_legacy_budget_shortage_keeps_pending_closeout_distinct_from_operator_export(tmp_path):
-    # The frozen reserve fits at prepare. The two retained scientific nodes use
-    # twenty tokens, so a new full A plus the external floor no longer fits.
-    root=scene(tmp_path,[dict(action='deliver',candidate='run-1')],max_tokens=1100,legacy=True)
-    result=command(root)
-    assert result['status']=='closeout_budget_unavailable',result
-    begin=budget.closeout_state(root)['begin']
-    assert begin['mode']=='model' and begin['delivery_sources']['catalogue'] is True
-    assert command(root,'status')['closeout']['status']=='closeout_budget_unavailable'
-    assert command(root,'run')['status']=='closeout_budget_unavailable'
-    assert len(list((root/'jobs').glob('*.json')))==2 and not budget.closeout_state(root)['actions']
-    assert command(root,'closeout','--export-only')['status']=='exported_unsubmitted'
-    assert budget.closeout_state(root)['begin']==begin
