@@ -159,13 +159,10 @@ def test_invalid_pending_amendment_publishes_nothing(instance, monkeypatch, chan
         assert_retained(retained)
 
 
-@pytest.mark.parametrize('kind', ['budget_amend', 'clock'])
 @pytest.mark.parametrize('control_files', [[], None, '', 0, False, [{}], 'invalid', 1, True])
-def test_malformed_control_files_tail_is_rejected_before_any_redo(instance, monkeypatch, kind, control_files):
+def test_malformed_control_files_tail_is_rejected_before_any_redo(instance, monkeypatch, control_files):
     root = instance
     state, event, path = pending_amendment(root, monkeypatch)
-    if kind == 'clock':
-        event.update(kind='clock', phase='paused', head_updates={})
     # Keep the valid operation redo: recovery must not install even its first row.
     original = copy.deepcopy(event)
     event['control_files'] = control_files

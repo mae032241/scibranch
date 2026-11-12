@@ -162,7 +162,6 @@ def test_recovery_snapshot_advances_current_pointer_and_preserves_admitted_input
     assert after['usage'] == before['usage']
 
 
-@pytest.mark.process_e2e
 def test_two_ledger_writers_advance_fresh_head_without_lost_updates(tmp_path):
     root = prepare(tmp_path)
     before = accepted.read(root)['seq']

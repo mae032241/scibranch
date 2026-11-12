@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scidiscovery.research_loop import accepted_prefix, accepted_search, contracts as c
+from scidiscovery.research_loop import accepted_budget, accepted_prefix, accepted_search, contracts as c
 from scidiscovery.research_loop import controller, formal_review, fork_runtime, fork_service, lineage
 from scidiscovery.research_loop import continuation, candidate_refs
 from scidiscovery.research_loop import originals, semantic
@@ -87,7 +87,8 @@ def test_fork_worker_overview_uses_current_source_h_goal_not_child_goal(tmp_path
     plan=dict(scope='Original scientific H scope',commitments=[dict(label='Mechanism',
         minimal_test='A bounded discriminating measurement',existing_ref=None)],focus=dict(index=1,action='screen'))
     finish(root,1,'H',[],action='experiment',search_choice=plan)
-    c.build_job(root,2,'W',[1])
+    worker=c.build_job(root,2,'W',[1])
+    before=c.read(originals.resolve_root_ref(root,worker['history']['breadth_snapshot']))
     with controller._writer(root):pass
     child=tmp_path/'child';limits=dict(max_tokens=10000,max_seconds=60,max_steps=8)
     preview=fork_service.preview(root,2,child,budget=limits)
@@ -95,6 +96,20 @@ def test_fork_worker_overview_uses_current_source_h_goal_not_child_goal(tmp_path
     fork_service.create(root,2,child,budget=limits,
         expected_preview_id=preview['preview_id'],operation_id='overview-source-origin')
     job=fork_runtime.build_selected_job(child,2)
+    head=accepted_budget.read(child)
+    assert head['search']['table']==before['table']
+    assert job['search']['breadth']['catalog']==dict(prefix=head['prefix'],max_ordinal=1)
+    mechanism=head['search']['table']['mechanisms']['h001.m1']
+    assert mechanism['ordinal']==1
+    source=before['table']['mechanisms']['h001.m1']
+    assert mechanism['source_ref']==source['source_ref']
+    assert mechanism['source_step']==source['source_step']==1
+    assert mechanism['source_role']==source['source_role']=='H'
+    assert mechanism['source_origin_identity']==originals.local_identity(root)
+    published=c.read(accepted_prefix.visibility(child,head['prefix'])/'breadth-table.json')
+    assert published['mechanisms'][0]['ordinal']==1
+    assert published['mechanisms'][0]['original']==f'inputs/history/nodes/{originals.local_identity(root)["goal_id"]}/001/scientific-original.json'
+    assert str(root) not in json.dumps(published)
     link=c._role_lineage(job)['mechanisms']['overview'][0]['original']
     assert link==f'inputs/history/nodes/{originals.local_identity(root)["goal_id"]}/001/science.json'
     assert (accepted_prefix.visibility(child,job['history']['prefix'])/link.removeprefix('inputs/history/')).is_file()

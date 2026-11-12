@@ -118,39 +118,6 @@ def test_fork_uses_selected_task_input_snapshot_and_freezes_public_members(insta
     assert rebuilt['history']['breadth_snapshot']==head['search_ref']
 
 
-def test_worker_fork_keeps_selected_input_table_origin_and_rebinds_only_its_catalog(tmp_path):
-    from test_history_handoff import finish
-    public=tmp_path/'public';public.mkdir()
-    objective=public/'goal.md';objective.write_text('Keep the declared original mechanism and exact work scope.')
-    root=tmp_path/'source'
-    controller.prepare(root,objective,public,['fixture-never-launch'],max_tokens=100000,
-        max_seconds=600,max_steps=8,model='fixture',reasoning_effort='high')
-    plan=dict(scope='Original scientific H scope',commitments=[dict(label='Mechanism',
-        minimal_test='A bounded discriminating measurement',existing_ref=None)],focus=dict(index=1,action='screen'))
-    finish(root,1,'H',[],action='experiment',search_choice=plan)
-    worker=c.build_job(root,2,'W',[1])
-    before=c.read(originals.resolve_root_ref(root,worker['history']['breadth_snapshot']))
-    with controller._writer(root):pass
-    child=tmp_path/'child'
-    limits=dict(max_tokens=10000,max_seconds=60,max_steps=8)
-    preview=fork_service.preview(root,2,child,budget=limits)
-    assert preview['status']=='fork_preview_ready',preview
-    fork_service.create(root,2,child,budget=limits,
-        expected_preview_id=preview['preview_id'],operation_id='worker-table-input-cut')
-    selected=fork_runtime.build_selected_job(child,2)
-    head=accepted_budget.read(child)
-    assert head['search']['table']==before['table']
-    assert selected['search']['breadth']['catalog']==dict(prefix=head['prefix'],max_ordinal=1)
-    mechanism=head['search']['table']['mechanisms']['h001.m1']
-    assert mechanism['ordinal']==1
-    assert mechanism['source_h_ref']==before['table']['mechanisms']['h001.m1']['source_h_ref']
-    assert mechanism['source_origin_identity']==originals.local_identity(root)
-    published=c.read(accepted_prefix.visibility(child,head['prefix'])/'breadth-table.json')
-    assert published['mechanisms'][0]['ordinal']==1
-    assert published['mechanisms'][0]['original']==f'inputs/history/nodes/{originals.local_identity(root)["goal_id"]}/001/scientific-original.json'
-    assert str(root) not in json.dumps(published)
-
-
 def test_cold_controller_without_disposable_route_starts_at_the_current_accepted_job(instance,monkeypatch):
     from scidiscovery.research_loop import handoff_state
     for step in range(1,9):seal(instance,step,parents=[step-1] if step>1 else [])
