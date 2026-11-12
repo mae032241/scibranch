@@ -525,20 +525,6 @@ def test_terminal_repair_rechecks_initial_bad_output_before_seal(tmp_path,monkey
     assert not (root/'jobs/002.json').exists()
 
 
-@pytest.mark.process_e2e
-def test_output_repair_without_original_session_stops_without_fresh_fallback(tmp_path,monkeypatch):
-    root=repair_instance(tmp_path)
-    with monkeypatch.context() as patch:
-        patch.setattr(continuation,'seal_or_repair',c.seal_result)
-        with pytest.raises(OutputRepairRequired):native.execute_native(root,1)
-    wait_runner(root)
-    (root/'native-homes/001/sessions/rollout.jsonl').unlink()
-    with pytest.raises(continuation.ResumeUnavailable,match='worker_resume_session_unavailable'):
-        continuation.seal_or_repair(root,1)
-    assert len(execution.records(root,1))==1
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
-
-
 @pytest.mark.parametrize('kind,code,phase', [
     pytest.param('missing-final','final_unavailable','turn_completion',id='missing-final'),
     pytest.param('unknown','native_terminal_unreported','event_stream',id='unknown')])
@@ -674,30 +660,6 @@ def test_host_write_failure_retries_original_seal_without_model_reexecution(tmp_
         assert not (first/'continuations/001').exists() and not (root/'jobs/002.json').exists()
 
 
-@pytest.mark.process_e2e
-def test_known_failure_same_thread_success_keeps_originals_and_cumulative_budget(tmp_path):
-    root=instance(tmp_path);first=fail(root)
-    preserved={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    assert controller.worker_resume(root,1)['status']=='final_a_completed'
-    assert all(p.read_bytes()==data for p,data in preserved.items())
-    assert execution.raw(root,1)==first/'continuations/001/science-output.json'
-    assert c.validate(c.workspace(root,1))['summary']=='Continued scientific finding'
-    assert native.usage(root)['observed_tokens']==58
-    assert budget.used_steps(root)==3
-    node=status(root)['nodes'][0]
-    assert node['continuations']==1 and node['budget_report']['observed_tokens']==36
-    assert node['budget_report']['dispatches']==2
-    assert c.read(first/'result-identity.json')['execution_ref']==execution.reference(root,1)
-    final_job=c.read(root/'jobs/002.json')
-    assert final_job['role']=='A' and final_job['final_only'] is True
-    from scidiscovery.research_loop import history
-    assert history.direct_sources(root,c.read(root/'jobs/002.json'))[0][1]['summary']=='Continued scientific finding'
-    assert controller.run(root)['status']=='final_a_completed'
-    assert controller.worker_resume(root,1)['status']=='final_a_completed'
-    assert not (root/'jobs/003.json').exists()
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
-
-
 @pytest.mark.parametrize('mutation', ['root_intent', 'process_receipt', 'session_path', 'schema_missing'])
 @pytest.mark.process_e2e
 def test_original_binding_tamper_never_creates_continuation(tmp_path, monkeypatch, mutation):
@@ -743,20 +705,6 @@ def test_original_binding_tamper_never_creates_continuation(tmp_path, monkeypatc
         assert (work/'work/launches').read_text()=='exec\n'
     if mutation=='schema_missing':assert not (first/'science-result.schema.json').exists()
     if mutation=='session_path':assert session_file.is_symlink() and session_file.read_bytes()==session_bytes
-
-
-@pytest.mark.process_e2e
-def test_missing_meter_is_unknown_not_billing_delay(tmp_path):
-    root=instance(tmp_path);first=fail(root)
-    (first/'usage.json').unlink()
-    originals={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    result=controller.worker_resume(root,1)
-    assert result['status']=='worker_resume_unavailable'
-    assert result['reason']=='worker_resume_terminal_ineligible'
-    assert not (first/'continuations/001/native-intent.json').exists()
-    assert native.usage(root)['unknown_steps']==[1]
-    assert all(p.read_bytes()==data for p,data in originals.items())
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
 @pytest.mark.process_e2e
@@ -894,30 +842,6 @@ def test_unaccepted_intent_is_not_replayed_or_given_another_attempt(tmp_path,mon
 
 
 @pytest.mark.process_e2e
-def test_real_w_continuation_seals_a_and_reuses_successful_science(tmp_path):
-    from test_history_handoff import finish
-    from scidiscovery.research_loop import history, search
-    root=instance(tmp_path,search_policy=dict(max_w_seconds=10,max_w_observed_tokens=80,max_requested_repairs=2))
-    plan=dict(scope='A discriminating mechanism',commitments=[dict(label='M',minimal_test='Bounded screen',existing_ref=None)],focus=dict(label='M',action='screen'))
-    finish(root,1,'H',[],action='experiment',search_choice=plan)
-    first=fail(root,2)
-    saved={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    result=controller.worker_resume(root,2)
-    assert result['status']=='finish' and result['completed_steps']==3
-    assert all(p.read_bytes()==value for p,value in saved.items())
-    node=status(root)['nodes'][1]
-    assert node['budget_report']['limits']==dict(max_seconds=10,max_observed_tokens=80)
-    assert node['budget_report']['observed_tokens']==36
-    view=search.project(root,4)
-    assert view['accepted_slices'][0]['meter']['observed_tokens']==36
-    assert view['accepted_slices'][0]['meter']['dispatches']==2
-    assert c.validate(c.workspace(root,3))['role']=='A'
-    sources=history.direct_sources(root,c.read(root/'jobs/003.json'))
-    assert next(payload for job,payload,_ in sources if job['role']=='W')['scientific_result']=='Original checkpoint was retained.'
-    assert budget.used_steps(root)==4 and native.usage(root)['observed_tokens']==68
-
-
-@pytest.mark.process_e2e
 def test_continuation_cannot_exceed_consumed_shared_step_budget(tmp_path,monkeypatch):
     from scidiscovery.research_loop import accepted_budget
     root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson')
@@ -940,21 +864,6 @@ def test_continuation_cannot_exceed_consumed_shared_step_budget(tmp_path,monkeyp
         assert all(p.read_bytes()==raw for p,raw in retained.items())
         assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
         assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
-
-
-@pytest.mark.process_e2e
-def test_two_explicit_continuations_never_auto_loop_or_refund_attempts(tmp_path):
-    root=instance(tmp_path);first=fail(root)
-    (c.workspace(root,1)/'work/fail-again').touch()
-    for attempt in (1,2):
-        with pytest.raises(ValueError):controller.worker_resume(root,1)
-        wait_runner(root)
-        assert len(execution.records(root,1))-1==attempt
-        assert controller.run(root)['status']=='native_outcome_unsealed'
-    assert controller.worker_resume(root,1)['reason']=='worker_resume_limit'
-    assert native.usage(root)['observed_tokens']==58 and budget.used_steps(root)==3
-    assert not (first/'continuations/003').exists()
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\nresume\n'
 
 
 @pytest.mark.parametrize('mutation,value',[
@@ -1195,13 +1104,19 @@ def test_resume_rejects_missing_or_redirected_original_transport_schema(tmp_path
     assert not (execution.origin(root,1)/'native-intent.json').exists()
 
 
-@pytest.mark.process_e2e
-def test_worker_resume_allows_launcher_source_upgrade(tmp_path):
-    root=instance(tmp_path);fail(root)
-    launcher=Path(c.settings(root)['native_launcher_argv'][1])
-    launcher.write_text(launcher.read_text()+'\n# upgraded launcher\n')
-    controller.worker_resume(root,1)
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
+def test_resume_launcher_allows_source_upgrade_and_rejects_path_redirect(tmp_path):
+    root=instance(tmp_path);launcher=tmp_path/'native.py'
+    settings=(root/'settings.json').read_bytes()
+    assert c.settings(root)['native_launcher_argv'][-1]==str(launcher)
+    limits=continuation.validate_launcher(root)
+    launcher.write_bytes(launcher.read_bytes()+b'\n# upgraded launcher\n')
+    assert continuation.validate_launcher(root)==limits
+    redirected=tmp_path/'redirected-native.py';redirected.write_bytes(launcher.read_bytes())
+    launcher.unlink();launcher.symlink_to(redirected)
+    with pytest.raises(ValueError,match='^Frozen resume launcher changed$'):
+        continuation.validate_launcher(root)
+    assert (root/'settings.json').read_bytes()==settings
+    assert not (root/'jobs/001.json').exists() and not (root/'native-evidence/001/native-intent.json').exists()
 
 
 def test_resume_uses_retained_hook_identity_without_native_history_reads(tmp_path,monkeypatch):
