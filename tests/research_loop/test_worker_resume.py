@@ -760,28 +760,48 @@ def test_missing_meter_is_unknown_not_billing_delay(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_shared_amendment_does_not_change_original_soft_target(tmp_path):
-    root=instance(tmp_path,cap=30);first=fail(root)
+def test_shared_amendment_does_not_change_original_soft_target(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget
+    root,first,original_outcome=retain_metering_failed_original(tmp_path,monkeypatch)
     before={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    budget.amend(root,max_tokens=5000,max_seconds=500,authorization_note='Explicit shared ceiling only')
-    # Original 14 + continuation 22 exceeds the original 30-token soft target.
-    assert controller.worker_resume(root,1)['status']=='final_a_completed'
-    outcome=c.read(first/'continuations/001/native-outcome.json')
-    assert outcome['stop_reason'] is None
-    assert outcome['budget_slice']['observed_tokens']==36
-    assert outcome['budget_slice']['limits']['max_observed_tokens']==30
+    original_limits=dict(original_outcome['budget_slice']['limits'])
+    assert original_limits==dict(max_observed_tokens=5000000,max_seconds=30)
+    # Only the mechanical next-turn input changes; retained task/session and
+    # original node target stay fixed while the explicit shared ceiling rises.
+    tokens=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4)
+    delta=dict(input_tokens=5000000,cached_input_tokens=3,output_tokens=4)
+    c.write(tmp_path/'metering.json',dict(mode='resume',baseline=tokens,delta=delta))
+    budget.amend(root,max_tokens=10000000,authorization_note='Explicit shared ceiling only')
+    result=continuation.start(root,1,after_interrupt=True,expected_attempt=0,
+        native_intent_ref=c.record_ref(first/'native-intent.json'))
+    current=wait_runner(root);outcome=c.read(current/'native-outcome.json')
+    intent=c.read(current/'native-intent.json')
+    assert result['role']=='H' and c.validate(c.workspace(root,1))==result
+    assert intent['continuation_kind']=='reentry' and intent['budget_slice']['previous_tokens']==14
+    assert intent['budget_slice']['shared_limits']['max_tokens']==10000000
+    assert outcome['stop_reason'] is None and outcome['returncode']==0 and outcome['terminal_observed'] is True
+    assert outcome['budget_slice']['limits']==original_limits
+    assert outcome['budget_slice']['observed_tokens']==5000018>original_limits['max_observed_tokens']
+    assert c.read(current/'usage.json')==delta and c.read(first/'usage.json')==tokens
+    assert native.usage(root)['observed_tokens']==5000018
+    head=accepted_budget.read(root)
+    assert head['dispatch_count']==2 and head['continuation_count']==0 and budget.used_steps(root)==1
+    assert {key:head['usage'][key] for key in tokens}==dict(input_tokens=5000010,cached_input_tokens=6,output_tokens=8)
+    assert c.read(first/'result-identity.json')['execution_ref']==execution.reference(root,1)
+    assert execution.raw(root,1)==current/'science-output.json'
     assert all(p.read_bytes()==raw for p,raw in before.items())
-    assert (first/'result-identity.json').exists()
+    assert native.wait_native(root,1)==result and len(execution.records(root,1))==2
+    assert not (first/'continuations/002').exists() and not (root/'jobs/002.json').exists()
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
 
 
 @pytest.mark.process_e2e
 def test_resume_budget_denial_restores_inactive_clock_and_keeps_attempt_unaccepted(tmp_path,monkeypatch):
-    root=instance(tmp_path);first=fail(root)
-    outcome=c.read(first/'native-outcome.json')
-    assert outcome['returncode']==7 and outcome['stop_reason'] is None
-    assert outcome['cleanup']=='observed_group_cleaned'
+    from scidiscovery.research_loop import accepted_budget
+    root,first,outcome=retain_metering_failed_original(tmp_path,monkeypatch)
     originals={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    budget.amend(root,max_tokens=native.usage(root)['accounted_tokens'],authorization_note='Reduced explicit shared budget to actual consumed usage')
+    original_ref=c.record_ref(first/'native-intent.json')
+    budget.amend(root,max_tokens=14,authorization_note='Explicit shared ceiling at the paid original lower bound')
     accept=budget.accept_continuation;refused=[]
     def observed_accept(*args,**kwargs):
         try:return accept(*args,**kwargs)
@@ -790,16 +810,38 @@ def test_resume_budget_denial_restores_inactive_clock_and_keeps_attempt_unaccept
             raise
     with monkeypatch.context() as patch:
         patch.setattr(budget,'accept_continuation',observed_accept)
-        result=controller.worker_resume(root,1)
-    assert refused==['worker_resume_budget_unavailable']
-    # The public controller collects the retained nonzero original after refusal.
-    assert result['status']=='native_outcome_unsealed',result
-    assert budget.snapshot(root)['clock_phase']=='paused'
-    assert not (first/'continuations/001/native-intent.json').exists()
+        for _ in range(2):
+            prior_seconds=budget.snapshot(root)['advance_seconds']
+            result=controller.worker_resume(root,1,after_interrupt=True,expected_attempt=0,native_intent_ref=original_ref)
+            assert result['status']=='worker_resume_unavailable' and result['reason']=='worker_resume_budget_unavailable'
+            snapshot=budget.snapshot(root)
+            assert snapshot['clock_phase']=='paused' and snapshot['advance_seconds']>=prior_seconds
+            head=accepted_budget.read(root)
+            assert head['dispatch_count']==1 and head['continuation_count']==0 and budget.used_steps(root)==1
+            assert {key:head['usage'][key] for key in ('input_tokens','cached_input_tokens','output_tokens')}==dict(
+                input_tokens=10,cached_input_tokens=3,output_tokens=4)
+            assert native.usage(root)['observed_tokens']==14 and len(execution.records(root,1))==1
+            assert not (first/'continuations/001/native-intent.json').exists()
+            assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+            assert all(p.read_bytes()==raw for p,raw in originals.items())
+            assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert refused==['worker_resume_budget_unavailable']*2
+    marker=c.read(first/'interruption.json')
+    assert marker['intent_ref']==original_ref and marker['budget_slice']['observed_tokens']==14
+    budget.amend(root,max_tokens=200,authorization_note='Explicit capacity restoration for the same original')
+    result=continuation.start(root,1,after_interrupt=True,expected_attempt=0,native_intent_ref=original_ref)
+    current=wait_runner(root);intent=c.read(current/'native-intent.json')
+    assert result['role']=='H' and intent['continuation_kind']=='reentry'
+    assert intent['interruption']==c.record_ref(first/'interruption.json') and intent['budget_slice']['previous_tokens']==14
+    assert native.usage(root)['observed_tokens']==28 and budget.used_steps(root)==1
+    head=accepted_budget.read(root)
+    assert head['dispatch_count']==2 and head['continuation_count']==0
+    assert {key:head['usage'][key] for key in ('input_tokens','cached_input_tokens','output_tokens')}==dict(
+        input_tokens=20,cached_input_tokens=6,output_tokens=8)
+    assert native.wait_native(root,1)==result and len(execution.records(root,1))==2
     assert all(p.read_bytes()==raw for p,raw in originals.items())
-    budget.amend(root,max_tokens=200,authorization_note='Explicit capacity restoration')
-    assert controller.worker_resume(root,1)['status']=='final_a_completed'
-    assert native.usage(root)['observed_tokens']==58
+    assert not (first/'continuations/002').exists() and not (root/'jobs/002.json').exists()
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
 
 
 @pytest.mark.process_e2e
