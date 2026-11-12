@@ -79,12 +79,12 @@ destination.write_text(json.dumps(payload))
 '''
 
 
-# A qualified H final-response repair only. The other legacy producers above
-# retain their missing metadata and execution-failure behavior.
+# H app-server final-response repair and explicit incomplete-final controls.
+# The legacy producers above retain their exact transport limitations.
 QUALIFIED_H_OUTPUT_REPAIR_NATIVE = r'''import json,os,pathlib,shlex,subprocess,sys,tomllib
 args=sys.argv[1:];work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);config={}
 assert os.environ['THIN_HWA_ROLE']=='H'
-kind=(work/'work/output-kind').read_text();assert kind in {'badjson','missingfield'}
+kind=(work/'work/output-kind').read_text();assert kind in {'badjson','missingfield','wrongtype','empty','missing-final','unknown'}
 def merge(target,update):
  for key,value in update.items():
   if isinstance(value,dict) and isinstance(target.get(key),dict):merge(target[key],value)
@@ -122,12 +122,13 @@ assert turn.get('effort')==config['model_reasoning_effort'] and turn.get('servic
 assert len(turn['input'])==1 and turn['input'][0]['type']=='text'
 prompt=turn['input'][0]['text'];turn_id='repair-turn' if resumed else 'original-turn'
 send(dict(id=request['id'],result=dict(turn=dict(id=turn_id,items=[],status='inProgress'))))
-home=pathlib.Path(os.environ['CODEX_HOME']);transcript=home/'sessions/opaque.jsonl'
+home=pathlib.Path(os.environ['CODEX_HOME']);assert home==pathlib.Path(os.environ['THIN_HWA_NATIVE_HOME'])
+transcript=home/'sessions/opaque.jsonl'
 with (work/'work/launches').open('a') as stream:stream.write('resume\n' if resumed else 'exec\n')
 if resumed:
  assert (work/'work/completed-experiment').read_text()=='one completed execution'
  assert 'Fix diagnosed JSON/layout only' in prompt and 'full JSON' in prompt and 'No work/rerun/resubmit' in prompt
- assert '"code":"'+('invalid_json' if kind=='badjson' else 'invalid_fields')+'"' in prompt
+ assert '"code":"'+('invalid_json' if kind in {'badjson','empty'} else 'invalid_fields')+'"' in prompt
  (work/'work/repair-prompt').write_text(prompt)
 else:
  transcript.parent.mkdir(parents=True,exist_ok=True);transcript.write_bytes(b'opaque native original\n')
@@ -141,15 +142,18 @@ payload=dict(summary='Retained finding',scientific_result='Completed experiment 
  limitations=['Mechanical transport only; no scientific qualification.'],implementation_selection=None,
  search_plan=None,next_action='wait',route_reason='Bounded output repaired')
 if not resumed and kind=='missingfield':del payload['summary']
-raw='{invalid JSON' if not resumed and kind=='badjson' else json.dumps(payload)
+if not resumed and kind=='wrongtype':payload['limitations']='not an array'
+raw=('{invalid JSON' if kind=='badjson' else '' if kind=='empty' else json.dumps(payload)) if not resumed else json.dumps(payload)
 (work/('work/repaired-final.json' if resumed else 'work/original-final.json')).write_text(raw)
-send(dict(method='item/completed',params=dict(threadId=thread,turnId=turn_id,
- item=dict(type='agentMessage',text=raw,phase='final_answer'))))
+if kind!='missing-final':
+ send(dict(method='item/completed',params=dict(threadId=thread,turnId=turn_id,
+  item=dict(type='agentMessage',text=raw,phase='final_answer'))))
+if kind=='unknown':raise SystemExit(0)
 send(dict(method='turn/completed',params=dict(threadId=thread,turn=dict(id=turn_id,status='completed'))))
 '''
 
 
-def qualified_h_repair_instance(tmp_path, monkeypatch, kind):
+def qualified_h_repair_instance(tmp_path, monkeypatch, kind, *, enabled=True):
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Repair one retained H final response without repeating work.')
     home=tmp_path/'native-home';home.mkdir();monkeypatch.setenv('CODEX_HOME',str(home))
@@ -160,7 +164,7 @@ def qualified_h_repair_instance(tmp_path, monkeypatch, kind):
         native_options=dict(workspace='workspace-write',network=False,web='disabled',subagents=False),
         node_budget_policy={role:dict(max_observed_tokens=100,max_seconds=20) for role in 'HWAE'},
         resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
-            output_repair=True,output_only=True,native_home=str(home)))
+            output_repair=enabled,**(dict(output_only=True,native_home=str(home)) if enabled else {})))
     c.build_job(root,1,'H',[])
     (c.workspace(root,1)/'work/output-kind').write_text(kind)
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','qualified_h_output_repair')
@@ -210,6 +214,10 @@ def repair_instance(tmp_path, role='H', kind='badjson', *, enabled=True, attempt
 @pytest.mark.parametrize('kind', ['badjson','missingfield'])
 @pytest.mark.process_e2e
 def test_completed_output_repair_is_same_role_node_session_without_experiment_replay(tmp_path,monkeypatch,kind):
+    assert_qualified_h_output_repair(tmp_path,monkeypatch,kind)
+
+
+def assert_qualified_h_output_repair(tmp_path,monkeypatch,kind):
     import hashlib
     from scidiscovery.research_loop import accepted_budget
     root=qualified_h_repair_instance(tmp_path,monkeypatch,kind)
@@ -229,8 +237,10 @@ def test_completed_output_repair_is_same_role_node_session_without_experiment_re
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
     before={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
     assert intent['continuation_kind']=='repair' and intent['native_profile']==c.read(first/'native-intent.json')['native_profile']
-    assert intent['output_repair']['code']==('invalid_json' if kind=='badjson' else 'invalid_fields')
+    assert intent['output_repair']['code']==('invalid_json' if kind in {'badjson','empty'} else 'invalid_fields')
     if kind=='missingfield':assert 'summary' not in json.loads((first/'science-output.json').read_text())
+    if kind=='wrongtype':assert json.loads((first/'science-output.json').read_text())['limitations']=='not an array'
+    if kind=='empty':assert (first/'science-output.json').read_bytes()==b''
     for record,name in ((first,'original-final.json'),(current,'repaired-final.json')):
         outcome=c.read(record/'native-outcome.json')
         assert outcome['budget_notification']['status']=='available'
@@ -252,43 +262,77 @@ def test_completed_output_repair_is_same_role_node_session_without_experiment_re
     assert (c.workspace(root,1)/'work/completed-experiment').read_text()=='one completed execution'
 
 
-@pytest.mark.parametrize('kind', ['missing','wrongtype','empty'])
+@pytest.mark.parametrize('kind', ['wrongtype','empty'])
 @pytest.mark.process_e2e
-def test_known_output_failure_keeps_execution_facts_and_repairs(tmp_path,kind):
-    root=repair_instance(tmp_path,kind=kind)
-    assert native.execute_native(root,1)['next_action']=='wait'
-    first=execution.origin(root,1);outcome=c.read(first/'native-outcome.json')
-    assert outcome['returncode']==0 and outcome['cleanup']=='observed_group_cleaned'
-    assert outcome['budget_slice']['usage_observed'] and outcome['thread_id']
-    if kind=='missing':
-        assert outcome['output_status']=='missing' and not (first/'science-output.json').exists()
-    else:
-        assert outcome['raw_ref']==c.file_ref(first/'science-output.json')
+def test_known_output_failure_keeps_execution_facts_and_repairs(tmp_path,monkeypatch,kind):
+    assert_qualified_h_output_repair(tmp_path,monkeypatch,kind)
 
 
 @pytest.mark.process_e2e
-def test_old_resume_policy_does_not_automatically_repair_successful_bad_output(tmp_path):
-    root=repair_instance(tmp_path,enabled=False)
-    with pytest.raises(OutputRepairRequired):native.execute_native(root,1)
-    wait_runner(root)
-    with pytest.raises(OutputRepairRequired):controller.worker_resume(root,1)
-    assert len(execution.records(root,1))==1
+def test_old_resume_policy_does_not_automatically_repair_successful_bad_output(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson',enabled=False)
+    settings=(root/'settings.json').read_bytes()
+    assert c.settings(root)['resume_policy']['output_repair'] is False
+    assert 'output_only' not in c.settings(root)['resume_policy'] and 'native_home' not in c.settings(root)['resume_policy']
+    with pytest.raises(OutputRepairRequired) as failure:native.execute_native(root,1)
+    assert failure.value.request()['code']=='invalid_json'
+    first=wait_runner(root);outcome=c.read(first/'native-outcome.json')
+    assert outcome['native_started'] is True and outcome['terminal_observed'] is True
+    assert outcome['returncode']==0 and outcome['stop_reason'] is None
+    assert outcome['budget_notification']['status']=='available'
+    assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+    assert outcome['native_identity']['session']['home']==str(execution.home(root,1))
+    assert outcome['thread_id']=='11111111-2222-4333-8444-555555555555'
+    assert c.read(first/'native-intent.json')['native_profile']==c.read(root/'jobs/001.json')['native_profile']
+    assert (first/'science-output.json').read_bytes()==(c.workspace(root,1)/'work/original-final.json').read_bytes()
+    original={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    inputs={p:p.read_bytes() for p in (root/'jobs/001.json',first/'science-result.schema.json',c.workspace(root,1)/'science-task.json')}
+    session=c.read(first/'native-outcome.json').get('native_identity',{}).get('session')
+    if session is not None:inputs[Path(session['path'])]=Path(session['path']).read_bytes()
+    with pytest.raises(OutputRepairRequired) as failure:native.wait_native(root,1)
+    assert failure.value.request()['code']=='invalid_json'
+    with pytest.raises(OutputRepairRequired) as failure:controller.worker_resume(root,1)
+    assert failure.value.request()['code']=='invalid_json'
+    assert len(execution.records(root,1))==1 and not (first/'result-identity.json').exists()
+    assert accepted_budget.read(root)['dispatch_count']==1 and budget.used_steps(root)==1
+    assert native.usage(root)['observed_tokens']==14
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert all(p.read_bytes()==raw for p,raw in original.items())
+    assert (root/'settings.json').read_bytes()==settings
+    assert all(p.read_bytes()==raw for p,raw in inputs.items())
+    assert not (root/'jobs/002.json').exists()
 
 
 @pytest.mark.process_e2e
-def test_default_without_resume_policy_retains_typed_output_error(tmp_path,monkeypatch):
+def test_custom_exec_without_resume_policy_retains_typed_output_error(tmp_path):
+    # The supported custom exec transport has no standard-Codex default policy.
+    # This policy boundary does not claim a qualified native session.
     root=instance(tmp_path,fake=REPAIR_FAKE,with_policy=False)
     c.build_job(root,1,'H',[])
     (c.workspace(root,1)/'work').mkdir(exist_ok=True)
     (c.workspace(root,1)/'work/output-kind').write_text('badjson')
     c.write(root/'host-started.json',budget.clock_stamp())
     budget.transition(root,'advance','fake_default_output')
-    with pytest.raises(OutputRepairRequired):native.execute_native(root,1)
-    wait_runner(root)
-    original=c.settings
-    monkeypatch.setattr(c,'settings',lambda value,job=None:dict(original(value,job),resume_policy=None))
-    with pytest.raises(OutputRepairRequired):continuation.seal_or_repair(root,1)
-    assert len(execution.records(root,1))==1
+    assert 'resume_policy' not in c.settings(root)
+    settings=(root/'settings.json').read_bytes()
+    with pytest.raises(OutputRepairRequired) as failure:native.execute_native(root,1)
+    assert failure.value.request()['code']=='invalid_json'
+    first=wait_runner(root)
+    assert c.read(first/'native-outcome.json')['raw_ref']==c.file_ref(first/'science-output.json')
+    original={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    inputs={p:p.read_bytes() for p in (root/'jobs/001.json',first/'science-result.schema.json',c.workspace(root,1)/'science-task.json')}
+    session=c.read(first/'native-outcome.json').get('native_identity',{}).get('session')
+    if session is not None:inputs[Path(session['path'])]=Path(session['path']).read_bytes()
+    with pytest.raises(OutputRepairRequired) as failure:native.wait_native(root,1)
+    assert failure.value.request()['code']=='invalid_json'
+    assert len(execution.records(root,1))==1 and not (first/'result-identity.json').exists()
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert native.usage(root)['observed_tokens']==14 and budget.used_steps(root)==1
+    assert all(p.read_bytes()==raw for p,raw in original.items())
+    assert (root/'settings.json').read_bytes()==settings
+    assert all(p.read_bytes()==raw for p,raw in inputs.items())
+    assert not (root/'jobs/002.json').exists()
 
 
 @pytest.mark.process_e2e
@@ -365,14 +409,80 @@ def test_output_repair_without_original_session_stops_without_fresh_fallback(tmp
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
-@pytest.mark.parametrize('kind', ['unknown','unsafe'])
+@pytest.mark.parametrize('kind,code,phase', [
+    pytest.param('missing-final','final_unavailable','turn_completion',id='missing-final'),
+    pytest.param('unknown','native_terminal_unreported','event_stream',id='unknown')])
 @pytest.mark.process_e2e
-def test_unknown_execution_or_unsafe_output_never_starts_repair(tmp_path,kind):
-    root=repair_instance(tmp_path,kind=kind)
-    with pytest.raises((ValueError,RuntimeError)):native.execute_native(root,1)
-    wait_runner(root)
-    assert len(execution.records(root,1))==1
+def test_incomplete_native_final_retains_unknown_original_without_repair(tmp_path,monkeypatch,kind,code,phase):
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,kind)
+    settings=(root/'settings.json').read_bytes()
+    with pytest.raises(ValueError,match='Terminal scientific output is unverified or changed'):
+        native.execute_native(root,1)
+    first=wait_runner(root);outcome=c.read(first/'native-outcome.json')
+    assert outcome['native_started'] is True and outcome['returncode']==1
+    # Transport diagnostics retain the unknown call; they are not turn.failed.
+    assert outcome['terminal_observed'] is False and outcome['stop_reason'] is None
+    assert outcome['native_failure'] is None
+    assert outcome['cleanup']=='observed_group_cleaned' and outcome['budget_notification']['status']=='available'
+    assert outcome['technical_diagnostic']==dict(phase=phase,code=code,original_call_state='unknown',thread_bound=True,turn_bound=True,next_action='reconcile_original_without_replay')
+    assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+    assert outcome['metering']['coverage']=='unknown' and outcome['metering']['reason']=='terminal_usage_unreported'
+    assert not (first/'science-output.json').exists() and not (first/'result.pending.json').exists()
+    assert 'output_status' not in outcome and outcome.get('raw_ref') is None
+    assert (outcome['terminal_evidence']['final'] is None)==(kind=='missing-final')
+    assert native.usage(root)['unknown_steps']==[1] and native.usage(root)['observed_tokens']==14
+    original={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    inputs={p:p.read_bytes() for p in (root/'jobs/001.json',first/'science-result.schema.json',c.workspace(root,1)/'science-task.json',Path(outcome['native_identity']['session']['path']))}
+    with pytest.raises(ValueError,match='Terminal scientific output is unverified or changed'):
+        native.wait_native(root,1)
+    assert len(execution.records(root,1))==1 and not (first/'result-identity.json').exists()
+    assert accepted_budget.read(root)['dispatch_count']==1 and budget.used_steps(root)==1
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert all(p.read_bytes()==raw for p,raw in original.items())
+    assert (root/'settings.json').read_bytes()==settings
+    assert all(p.read_bytes()==raw for p,raw in inputs.items())
+    assert not (root/'jobs/002.json').exists()
+
+
+@pytest.mark.process_e2e
+def test_redirected_native_final_original_never_starts_repair(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson')
+    first=execution.origin(root,1)
+    # Scheduling only: dispatch remains real; defer collection until this exact
+    # native writer has finished. Acceptance, output publication and guards run.
+    with monkeypatch.context() as patch:
+        patch.setattr(native,'wait_native',lambda *args,**kwargs:None)
+        native.execute_native(root,1)
+    end=time.monotonic()+10
+    while not (first/'native-outcome.json').exists():
+        assert time.monotonic()<end
+        time.sleep(.02)
+    wait_runner(root)
+    outcome=c.read(first/'native-outcome.json')
+    assert outcome['native_started'] is True and outcome['terminal_observed'] is True
+    assert outcome['returncode']==0 and outcome['stop_reason'] is None
+    assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+    raw=first/'science-output.json';retained=first/'retained-original-final.json'
+    original=raw.read_bytes()
+    assert original==(c.workspace(root,1)/'work/original-final.json').read_bytes()
+    assert outcome['raw_ref']==c.file_ref(raw)
+    raw.rename(retained);raw.symlink_to(retained)
+    originals={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    inputs={p:p.read_bytes() for p in (root/'jobs/001.json',first/'science-result.schema.json',c.workspace(root,1)/'science-task.json',Path(outcome['native_identity']['session']['path']))}
+    settings=(root/'settings.json').read_bytes()
+    for _ in range(2):
+        with pytest.raises(ValueError,match='^Expected an original regular file$'):native.wait_native(root,1)
+        assert raw.is_symlink() and raw.readlink()==retained and retained.read_bytes()==original
+        assert all(p.read_bytes()==data for p,data in originals.items())
+        assert len(execution.records(root,1))==1 and not (first/'result-identity.json').exists()
+        assert accepted_budget.read(root)['dispatch_count']==1 and budget.used_steps(root)==1
+        assert native.usage(root)['observed_tokens']==14
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+        assert (root/'settings.json').read_bytes()==settings
+        assert all(p.read_bytes()==data for p,data in inputs.items())
+        assert not (root/'jobs/002.json').exists()
 
 
 @pytest.mark.parametrize('mutation', ['raw','job','schema'])
