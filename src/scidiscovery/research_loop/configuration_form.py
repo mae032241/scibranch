@@ -20,6 +20,9 @@ except ModuleNotFoundError:  # Python 3.10
 
 from . import research_config, skill_supply, backends, model_catalog, supervision
 
+MAX_FIXED_VALUES = 256
+MAX_FIXED_TEXT_CHARS = 256_000
+
 
 @dataclass(frozen=True)
 class Field:
@@ -282,7 +285,8 @@ def _role_skill_items(document, role):
 
 
 def _skill_picker(fields, document, *, fixed_sets=None):
-    """Translate successful controls into the existing named-set schema."""
+    """Translate successful controls and return newly created named sets."""
+    created = {}
     sets = _get(document, 'skills.sets', {}) if fixed_sets is None else fixed_sets
     available_sets = set(sets) if isinstance(sets, dict) else set()
     if fixed_sets is None:
@@ -306,7 +310,8 @@ def _skill_picker(fields, document, *, fixed_sets=None):
             while name in available_sets:
                 name = prefix+'-'+str(number)
                 number += 1
-            _put(document, 'skills.sets.'+name, dict(items=items))
+            created[name] = dict(items=items)
+            _put(document, 'skills.sets.'+name, created[name])
             sets = _get(document, 'skills.sets')
             available_sets.add(name)
         _put(document, f'agent.roles.{role}.skill_set', name)
@@ -346,6 +351,7 @@ def _skill_picker(fields, document, *, fixed_sets=None):
             bind_items(role, sorted(selected))
         else:
             raise ValueError('研究技能：请选择支持的角色分配方式')
+    return created
 
 
 def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
@@ -549,7 +555,14 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
                 pending.add(identity)
     if set(nodes) - used - allowed:
         raise ValueError('结构字段没有有效的父对象')
-    _skill_picker(fields, result['document'], fixed_sets=_fixed_skill_sets)
+    created_sets = _skill_picker(fields, result['document'], fixed_sets=_fixed_skill_sets)
+    # Keep picker additions beside the submitted TOML without rewriting its
+    # comments or invalid draft text. Explicit TOML edits still take precedence.
+    result['advanced_fixed'].extend([[['skills', 'sets', name], value]
+        for name, value in created_sets.items()])
+    if created_sets and (len(result['advanced_fixed']) > MAX_FIXED_VALUES
+            or len(json.dumps(result['advanced_fixed'], ensure_ascii=False)) > MAX_FIXED_TEXT_CHARS):
+        raise ValueError('新增技能集合超过高级设置保留容量，请减少保留设置后重试')
     if selected_backend!=rendered_backend and not advanced_valid:
         # Unparsed options still belong to the rendered provider. Keep that
         # context until the text can be corrected before attempting a switch.
@@ -695,12 +708,12 @@ def advanced_toml(document):
 
 
 def _fixed_values(raw):
-    """Values TOML cannot express travel as exact JSON beside the text."""
+    """Retained values travel as exact JSON beside the editable TOML text."""
     try:
-        value = json.loads(raw) if len(raw) <= 256_000 else None
+        value = json.loads(raw) if len(raw) <= MAX_FIXED_TEXT_CHARS else None
     except (ValueError, TypeError, RecursionError):
         value = None
-    if (not isinstance(value, list) or len(value) > 256 or any(
+    if (not isinstance(value, list) or len(value) > MAX_FIXED_VALUES or any(
             not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], list) or not item[0]
             or any(not isinstance(key, str) for key in item[0]) for item in value)):
         raise ValueError('高级设置中保留的空值记录无效，请重新打开表单')
@@ -1038,7 +1051,9 @@ def render(draft, *, edit=False, catalogs=None):
     else:
         advanced_text, fixed = advanced_toml(extras)
     if fixed:
-        advanced_note += ('<p class="note">以下设置包含空值（null），TOML 无法表示，已原样保留：'
+        retained_note = ('以下设置包含空值（null），TOML 无法表示，已原样保留：'
+            if all(_has_null(value) for _, value in fixed) else '以下设置已原样保留：')
+        advanced_note += ('<p class="note">'+retained_note
             + escape('、'.join('.'.join(keys) for keys, _ in fixed))
             + '。如需修改，在上面写入同名键即可覆盖。</p>')
     configured = bool(advanced_text.strip() or fixed)

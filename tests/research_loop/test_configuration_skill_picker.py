@@ -1,5 +1,6 @@
 """Installed Skill selection serializes only the existing declaration schema."""
 import copy
+import json
 
 import pytest
 
@@ -137,6 +138,76 @@ def test_invalid_other_field_retains_successful_skill_selection(installed, tmp_p
     retry['cfg.budget.max_tokens'] = '1000'
     parsed = form.parse(retry, base=tmp_path)
     assert selected(parsed['document'], 'A') == ['alpha']
+
+
+def test_picker_keeps_commented_inline_toml_and_accepts_explicit_set_edits(installed, tmp_path):
+    fields = submitted(installed)
+    original_set = 'original = { items = ["beta"], future = false }'
+    advanced = '# Preserve my inline declaration.\nskills = { sets = { '+original_set+' } } # exact comment\n'
+    fields['advanced_toml'] = advanced
+    fields['skill_picker.item.W.0'] = 'alpha'
+    parsed = form.parse(fields, base=tmp_path)
+    retry = submitted(parsed)
+    assert retry['advanced_toml'] == advanced
+    retained = form.parse(retry, base=tmp_path)
+    assert selected(retained['document'], 'W') == ['alpha']
+    assert retained['document']['skills']['sets']['original'] == dict(items=['beta'], future=False)
+    # An explicit expert edit replaces the generated set on the next submit.
+    name = retained['document']['agent']['roles']['W']['skill_set']
+    retry['advanced_toml'] = advanced.replace(original_set,
+        original_set+', "'+name+'" = { items = ["beta"] }')
+    edited = form.parse(retry, base=tmp_path)
+    assert selected(edited['document'], 'W') == ['beta']
+    assert submitted(edited)['advanced_toml'] == retry['advanced_toml']
+    assert form.declaration(form.parse(submitted(edited), base=tmp_path)) == form.declaration(edited)
+
+
+def test_invalid_advanced_toml_retry_keeps_new_skill_selection(installed, tmp_path):
+    fields = submitted(installed)
+    advanced = '# Keep this comment while correcting the table.\n[broken'
+    fields['advanced_toml'] = advanced
+    fields['skill_picker.item.W.0'] = 'alpha'
+    with pytest.raises(form.FormError, match='高级设置（TOML）格式错误') as caught:
+        form.parse(fields, base=tmp_path)
+    retry = submitted(caught.value.draft)
+    assert retry['advanced_toml'] == advanced
+    assert retry['skill_picker.item.W.0'] == 'alpha'
+    retry['advanced_toml'] = advanced.replace('[broken', '[extension]\nflag = false\n')
+    parsed = form.parse(retry, base=tmp_path)
+    assert selected(parsed['document'], 'W') == ['alpha']
+    assert parsed['document']['extension'] == dict(flag=False)
+    assert submitted(parsed)['advanced_toml'] == retry['advanced_toml']
+
+
+def test_picker_can_roundtrip_at_retained_value_capacity(installed, tmp_path):
+    fields = submitted(installed)
+    fields['advanced_fixed'] = json.dumps([
+        [['executor', 'config', 'configuration', 'nullable_' + str(index)], None]
+        for index in range(252)])
+    fields['skill_picker.choice.H'] = 'none'
+    fields['skill_picker.item.W.0'] = 'alpha'
+    fields['skill_picker.item.A.1'] = 'beta'
+    fields['skill_picker.item.E.0'] = 'alpha'
+    fields['skill_picker.item.E.1'] = 'beta'
+    parsed = form.parse(fields, base=tmp_path)
+    assert len(parsed['advanced_fixed']) == 256
+    assert form.declaration(form.parse(submitted(parsed), base=tmp_path)) == form.declaration(parsed)
+
+
+@pytest.mark.parametrize('limit', ['count', 'text'])
+def test_picker_rejects_new_sets_that_exceed_retained_value_capacity(installed, tmp_path, limit):
+    fields = submitted(installed)
+    if limit == 'count':
+        fixed = [[["executor", "config", "configuration", "nullable_" + str(index)], None]
+            for index in range(256)]
+    else:
+        fixed = [[["executor", "config", "configuration", "nullable"], [None, '']]]
+        fixed[0][1][1] = 'x' * (256_000 - len(json.dumps(fixed, ensure_ascii=False)))
+    fields['advanced_fixed'] = json.dumps(fixed, ensure_ascii=False)
+    assert len(fields['advanced_fixed']) <= 256_000
+    fields['skill_picker.item.W.0'] = 'alpha'
+    with pytest.raises(ValueError, match='新增技能集合.*保留容量'):
+        form.parse(fields, base=tmp_path)
 
 
 def test_existing_instance_uses_only_frozen_sets_and_never_catalogs(installed, tmp_path, monkeypatch):
