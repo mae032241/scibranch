@@ -101,18 +101,25 @@ def test_partial_activation_restores_both_targets(tmp_path, monkeypatch):
     before = (runner.read_bytes(), config.read_bytes())
     replacement = json.loads(before[1])
     replacement["debug"]["initialization"]["wall_time_seconds"] = 30
-    request["configuration"] = base64.b64encode(json.dumps(replacement).encode()).decode()
+    replacement_raw = json.dumps(replacement).encode()
+    request["configuration"] = base64.b64encode(replacement_raw).decode()
     module.deploy(request)
-    write = module.write
-    def fail_runner(path, raw, mode=0o600):
-        if path == runner:
+    replace = module.os.replace
+    publication = runner.with_name(runner.name + ".deploy-" + request["transaction"])
+    injected = False
+    def fail_runner_publication(source, destination):
+        nonlocal injected
+        if not injected and Path(source) == publication and Path(destination) == runner:
+            assert config.read_bytes() == replacement_raw
+            assert runner.read_bytes() == before[0]
+            injected = True
             raise OSError("injected replacement failure")
-        return write(path, raw, mode)
-    monkeypatch.setattr(module, "write", fail_runner)
-    with pytest.raises(OSError):
+        return replace(source, destination)
+    monkeypatch.setattr(module.os, "replace", fail_runner_publication)
+    with pytest.raises(OSError, match="injected replacement failure"):
         module.deploy(dict(request, phase="activate"))
+    assert injected
     assert config.read_bytes() != before[1] and runner.read_bytes() == before[0]
-    monkeypatch.setattr(module, "write", write)
     module.deploy(dict(request, phase="rollback"))
     assert (runner.read_bytes(), config.read_bytes()) == before
 
