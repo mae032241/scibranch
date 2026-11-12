@@ -19,7 +19,7 @@ def recovery(tmp_path, monkeypatch):
     contracts.write(record / 'native-intent.json', dict(step=1))
     now = [1_800_000_000., 100., 100.]
     sleeps, phases, launches, snapshots = [], [], [], []
-    limits = dict(seconds_remaining=999., time_budget_basis='active')
+    limits = dict(seconds_remaining=999., time_budget_basis='active', waiting_consumes_budget=True)
     policy = dict(enabled=True, max_continues=2, max_retries=3,
         initial_backoff_seconds=30., max_backoff_seconds=300., jitter_fraction=.1, max_wait_seconds=1800.)
     decision = dict(action='retry', reason='temporary_capacity', source_attempt=0,
@@ -62,8 +62,11 @@ def recovery(tmp_path, monkeypatch):
         launches=launches, decision=decision, policy=policy, limits=limits, snapshots=snapshots)
 
 
-def test_backoff_counts_only_live_monotonic_wait_and_rearbitrates(recovery):
+@pytest.mark.parametrize('waiting_consumes_budget,seconds_remaining', [(True, 999.), (False, 2.)])
+def test_backoff_counts_only_live_monotonic_wait_and_rearbitrates(
+        recovery, waiting_consumes_budget, seconds_remaining):
     scene = recovery
+    scene.limits.update(waiting_consumes_budget=waiting_consumes_budget, seconds_remaining=seconds_remaining)
     controller._wait_automatic_recovery(scene.root, 1, scene.decision, inventory=None)
     saved = contracts.read(scene.record / 'automatic-recovery.json')
     assert sum(scene.sleeps) == 3.
@@ -263,23 +266,38 @@ def test_deadline_expiry_rechecks_arbiter_and_never_grants_launch(recovery, monk
     assert contracts.read(scene.record / 'automatic-recovery.json')['limitation'] == 'managed_execution_unknown'
 
 
-def test_one_controller_helper_consumes_native_recovery_exception(recovery, monkeypatch):
+@pytest.mark.parametrize('entry', ['launch_typed', 'explicit_resume_typed', 'collection_runtime_error'])
+def test_native_recovery_consumer_uses_one_original_entry(recovery, monkeypatch, entry):
     scene = recovery
     calls = []
 
-    def first(root, step):
-        calls.append('execute')
+    def first(root, step, *, expected_attempt=None):
+        calls.append(('original', step))
+        if entry == 'collection_runtime_error':
+            raise RuntimeError('Native turn failed before sealing')
         raise controller.continuation.AutomaticRecoveryRequired(scene.decision)
 
     def collect(root, step, *, _reentry_started=False):
         assert _reentry_started is True
-        calls.append('wait_original')
+        calls.append(('replacement', step))
         return dict(sealed=True)
 
-    monkeypatch.setattr(controller.native, 'execute_native', first)
+    monkeypatch.setattr(controller.continuation, 'automatic_decision',
+        lambda root, step, *, inventory: dict(scene.decision))
+    monkeypatch.setattr(controller, '_wait_automatic_recovery',
+        lambda root, step, decision, *, inventory: scene.launches.append(decision))
     monkeypatch.setattr(controller.native, 'wait_native', collect)
-    assert controller._native_call(scene.root, 1, launch=True) == dict(sealed=True)
-    assert calls == ['execute', 'wait_original'] and len(scene.launches) == 1
+    if entry == 'explicit_resume_typed':
+        monkeypatch.setattr(controller.continuation, 'start', first)
+        monkeypatch.setattr(controller.budget, 'historical_step_limit', lambda root: 1)
+        monkeypatch.setattr(controller, '_run', lambda root: dict(status='finish'))
+        assert controller._worker_resume_locked(scene.root, 1) == dict(status='finish')
+    else:
+        monkeypatch.setattr(controller.native, 'execute_native', first)
+        assert controller._native_call(scene.root, 1, launch=entry == 'launch_typed',
+            operation=first if entry == 'collection_runtime_error' else None) == dict(sealed=True)
+    assert calls == [('original', 1), ('replacement', 1)]
+    assert scene.launches == [scene.decision]
 
 
 @pytest.mark.parametrize('newly_started', [False, True])
@@ -379,28 +397,6 @@ def test_paused_completed_work_never_uses_partial_budget_exit(recovery, monkeypa
     assert caught.value.status == 'paused' and scene.launches == []
 
 
-def test_explicit_resume_uses_same_recovery_consumer_without_repeating_start(recovery, monkeypatch):
-    scene = recovery
-    starts, collections = [], []
-
-    def start(root, step, *, expected_attempt=None):
-        starts.append(step)
-        raise controller.continuation.AutomaticRecoveryRequired(scene.decision)
-
-    def collect(root, step, *, _reentry_started=False):
-        assert _reentry_started is True
-        collections.append(step)
-        return dict(sealed=True)
-
-    monkeypatch.setattr(controller.continuation, 'start', start)
-    monkeypatch.setattr(controller.native, 'wait_native', collect)
-    monkeypatch.setattr(controller.budget, 'historical_step_limit', lambda root: 1)
-    monkeypatch.setattr(controller, '_run', lambda root: dict(status='finish'))
-    assert controller._worker_resume_locked(scene.root, 1) == dict(status='finish')
-    assert starts == [1] and collections == [1]
-    assert len(scene.launches) == 1
-
-
 def test_explicit_resume_preserves_original_integrity_error_despite_recovery_stop(recovery, monkeypatch):
     scene = recovery
     original = ValueError('Original process receipt binding changed')
@@ -418,28 +414,6 @@ def test_explicit_resume_preserves_original_integrity_error_despite_recovery_sto
     assert caught.value is original
     assert scene.launches == [] and scene.sleeps == []
     assert contracts.read(scene.record / 'automatic-recovery.json')['status'] == 'stopped'
-
-
-def test_native_collection_exception_enters_same_finite_recovery_consumer(recovery, monkeypatch):
-    scene = recovery
-    calls = []
-
-    def failed(root, step):
-        calls.append('original')
-        raise RuntimeError('Native turn failed before sealing')
-
-    def collect(root, step, *, _reentry_started=False):
-        assert _reentry_started is True
-        calls.append('replacement')
-        return dict(sealed=True)
-
-    monkeypatch.setattr(controller.continuation, 'automatic_decision',
-        lambda root, step, *, inventory: dict(scene.decision))
-    monkeypatch.setattr(controller, '_wait_automatic_recovery',
-        lambda root, step, decision, *, inventory: scene.launches.append(decision))
-    monkeypatch.setattr(controller.native, 'wait_native', collect)
-    assert controller._native_call(scene.root, 1, operation=failed) == dict(sealed=True)
-    assert calls == ['original', 'replacement'] and scene.launches == [scene.decision]
 
 
 def test_completed_work_total_attempt_cap_retains_verified_partial_exit(recovery,monkeypatch):
