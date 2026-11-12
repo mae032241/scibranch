@@ -84,7 +84,7 @@ destination.write_text(json.dumps(payload))
 QUALIFIED_H_OUTPUT_REPAIR_NATIVE = r'''import json,os,pathlib,shlex,subprocess,sys,tomllib
 args=sys.argv[1:];work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);config={}
 assert os.environ['THIN_HWA_ROLE']=='H'
-kind=(work/'work/output-kind').read_text();assert kind in {'badjson','missingfield','wrongtype','empty','missing-final','unknown'}
+kind=(work/'work/output-kind').read_text();assert kind in {'valid','badjson','missingfield','wrongtype','empty','missing-final','unknown'}
 def merge(target,update):
  for key,value in update.items():
   if isinstance(value,dict) and isinstance(target.get(key),dict):merge(target[key],value)
@@ -125,6 +125,9 @@ send(dict(id=request['id'],result=dict(turn=dict(id=turn_id,items=[],status='inP
 home=pathlib.Path(os.environ['CODEX_HOME']);assert home==pathlib.Path(os.environ['THIN_HWA_NATIVE_HOME'])
 transcript=home/'sessions/opaque.jsonl'
 with (work/'work/launches').open('a') as stream:stream.write('resume\n' if resumed else 'exec\n')
+repair_number=(work/'work/launches').read_text().count('resume\n')
+bad=kind!='valid' and (not resumed or (work/'work/repeat-bad-output').exists() and
+ not ((work/'work/valid-after').exists() and repair_number>=int((work/'work/valid-after').read_text())))
 if resumed:
  assert (work/'work/completed-experiment').read_text()=='one completed execution'
  assert 'Fix diagnosed JSON/layout only' in prompt and 'full JSON' in prompt and 'No work/rerun/resubmit' in prompt
@@ -141,9 +144,9 @@ assert delivery.returncode==0,delivery.stderr
 payload=dict(summary='Retained finding',scientific_result='Completed experiment retained.',
  limitations=['Mechanical transport only; no scientific qualification.'],implementation_selection=None,
  search_plan=None,next_action='wait',route_reason='Bounded output repaired')
-if not resumed and kind=='missingfield':del payload['summary']
-if not resumed and kind=='wrongtype':payload['limitations']='not an array'
-raw=('{invalid JSON' if kind=='badjson' else '' if kind=='empty' else json.dumps(payload)) if not resumed else json.dumps(payload)
+if bad and kind=='missingfield':del payload['summary']
+if bad and kind=='wrongtype':payload['limitations']='not an array'
+raw=('{invalid JSON' if kind=='badjson' else '' if kind=='empty' else json.dumps(payload)) if bad else json.dumps(payload)
 (work/('work/repaired-final.json' if resumed else 'work/original-final.json')).write_text(raw)
 if kind!='missing-final':
  send(dict(method='item/completed',params=dict(threadId=thread,turnId=turn_id,
@@ -153,7 +156,7 @@ send(dict(method='turn/completed',params=dict(threadId=thread,turn=dict(id=turn_
 '''
 
 
-def qualified_h_repair_instance(tmp_path, monkeypatch, kind, *, enabled=True):
+def qualified_h_repair_instance(tmp_path, monkeypatch, kind, *, enabled=True, attempts=2):
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Repair one retained H final response without repeating work.')
     home=tmp_path/'native-home';home.mkdir();monkeypatch.setenv('CODEX_HOME',str(home))
@@ -163,12 +166,34 @@ def qualified_h_repair_instance(tmp_path, monkeypatch, kind, *, enabled=True):
         model='no-model',reasoning_effort='high',search_policy=None,experiment_mode='external',node_budget_mode='soft',
         native_options=dict(workspace='workspace-write',network=False,web='disabled',subagents=False),
         node_budget_policy={role:dict(max_observed_tokens=100,max_seconds=20) for role in 'HWAE'},
-        resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
+        resume_policy=dict(max_attempts=attempts,protocol='codex_exec_resume',usage_scope='turn',
             output_repair=enabled,**(dict(output_only=True,native_home=str(home)) if enabled else {})))
     c.build_job(root,1,'H',[])
     (c.workspace(root,1)/'work/output-kind').write_text(kind)
     c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','qualified_h_output_repair')
     return root
+
+
+def retain_qualified_h_bad_original(root,monkeypatch):
+    publish=c.seal_result_from_inventory
+    class RetainedBadFinal(RuntimeError):pass
+    def retain(root,step,*,inventory):
+        try:return publish(root,step,inventory=inventory)
+        except OutputRepairRequired as error:
+            assert inventory.record==execution.origin(root,step)
+            raise RetainedBadFinal('Original diagnosis retained before repair') from error
+    with monkeypatch.context() as patch:
+        patch.setattr(c,'seal_result_from_inventory',retain)
+        with pytest.raises(RetainedBadFinal) as failure:native.execute_native(root,1)
+    assert failure.value.__cause__.request()['code']=='invalid_json'
+    first=wait_runner(root);outcome=c.read(first/'native-outcome.json')
+    assert outcome['returncode']==0 and outcome['terminal_observed'] is True and outcome['stop_reason'] is None
+    assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+    assert outcome['metering']['coverage']=='terminal' and outcome['metering']['reconciliation']=='matched'
+    assert outcome['raw_ref']==c.file_ref(first/'science-output.json')
+    assert (first/'science-output.json').read_bytes()==(c.workspace(root,1)/'work/original-final.json').read_bytes()
+    assert native.usage(root)['observed_tokens']==14 and budget.used_steps(root)==1
+    return first
 
 
 def instance(tmp_path, *, cap=100, attempts=2, max_tokens=1000, steps=6, search_policy=None, delivery_policy=None,
@@ -336,63 +361,144 @@ def test_custom_exec_without_resume_policy_retains_typed_output_error(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_output_repair_shares_original_attempt_limit_and_retains_all_bad_outputs(tmp_path):
-    root=repair_instance(tmp_path,attempts=2)
+def test_output_repair_shares_original_attempt_limit_and_retains_all_bad_outputs(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson',attempts=2)
     (c.workspace(root,1)/'work/repeat-bad-output').touch()
-    with pytest.raises(continuation.ResumeUnavailable,match='worker_resume_limit'):
-        native.execute_native(root,1)
-    wait_runner(root)
-    paths=execution.records(root,1)
-    assert len(paths)==3 and native.usage(root)['observed_tokens']==42
-    assert all((p/'science-output.json').read_text()=='{invalid JSON' for p in paths)
-    with pytest.raises(continuation.ResumeUnavailable,match='worker_resume_limit'):
-        continuation.seal_or_repair(root,1)
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\nresume\n'
+    with pytest.raises(continuation.ResumeUnavailable,match='^worker_resume_limit$'):native.execute_native(root,1)
+    wait_runner(root);paths=execution.records(root,1);first=paths[0]
+    assert len(paths)==3 and native.usage(root)['observed_tokens']==42 and budget.used_steps(root)==3
+    for number,record in enumerate(paths):
+        outcome=c.read(record/'native-outcome.json');intent=c.read(record/'native-intent.json')
+        assert outcome['returncode']==0 and outcome['terminal_observed'] is True and outcome['stop_reason'] is None
+        assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+        assert outcome['metering']['coverage']=='terminal' and outcome['metering']['reconciliation']=='matched'
+        assert outcome['raw_ref']==c.file_ref(record/'science-output.json')
+        assert (record/'science-output.json').read_text()=='{invalid JSON'
+        assert outcome['budget_slice']['observed_tokens']==14*(number+1)
+        assert outcome['budget_slice']['dispatches']==number+1
+        if number:
+            assert intent['continuation_kind']=='repair' and intent['attempt']==number
+            assert intent['budget_slice']['previous_tokens']==14*number
+            assert intent['output_repair']['raw_ref']==c.file_ref(paths[number-1]/'science-output.json')
+            assert intent['output_repair']['source_attempt']==number-1
+            assert intent['native_profile']==c.read(paths[0]/'native-intent.json')['native_profile']
+    inputs={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json',
+        Path(c.read(first/'native-outcome.json')['native_identity']['session']['path']))}
+    retained={p:p.read_bytes() for record in paths for p in record.iterdir() if p.is_file()}
+    for _ in range(2):
+        with pytest.raises(continuation.ResumeUnavailable,match='^worker_resume_limit$'):native.wait_native(root,1)
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==3 and head['continuation_count']==2
+        assert len(execution.records(root,1))==3 and not (paths[0]/'continuations/003').exists()
+        assert native.usage(root)['observed_tokens']==42 and budget.used_steps(root)==3
+        assert all(p.read_bytes()==raw for p,raw in inputs.items())
+        assert all(p.read_bytes()==raw for p,raw in retained.items())
+        assert not (paths[0]/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\nresume\n'
 
 
 @pytest.mark.process_e2e
 def test_output_repair_does_not_replenish_insufficient_shared_budget(tmp_path,monkeypatch):
-    root=repair_instance(tmp_path)
-    with monkeypatch.context() as patch:
-        patch.setattr(continuation,'seal_or_repair',c.seal_result)
-        with pytest.raises(OutputRepairRequired):native.execute_native(root,1)
-    wait_runner(root)
-    budget.amend(root,max_tokens=native.usage(root)['accounted_tokens'],authorization_note='Explicit fixture reduction to actual consumed usage')
-    with pytest.raises(budget.NodeBudgetUnavailable):continuation.seal_or_repair(root,1)
-    assert len(execution.records(root,1))==1 and native.usage(root)['observed_tokens']==14
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson')
+    first=retain_qualified_h_bad_original(root,monkeypatch)
+    inputs={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json',
+        Path(c.read(first/'native-outcome.json')['native_identity']['session']['path']))}
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    amendment=budget.amend(root,max_tokens=native.usage(root)['accounted_tokens'],
+        authorization_note='Explicit fixture reduction to actual consumed usage after native completion')
+    assert amendment['after']['max_tokens']==14 and amendment['consumption']=='retained'
+    for _ in range(2):
+        with pytest.raises(budget.NodeBudgetUnavailable) as failure:native.wait_native(root,1)
+        assert failure.value.reason=='worker_resume_budget_unavailable'
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==1 and head['continuation_count']==0
+        assert len(execution.records(root,1))==1 and not (first/'continuations/001').exists()
+        assert native.usage(root)['observed_tokens']==14 and budget.used_steps(root)==1
+        assert budget.snapshot(root)['max_tokens']==14
+        assert all(p.read_bytes()==raw for p,raw in inputs.items())
+        assert all(p.read_bytes()==raw for p,raw in retained.items())
+        assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
 @pytest.mark.parametrize('attempts', [1,2])
 @pytest.mark.process_e2e
 def test_terminal_repair_rechecks_initial_bad_output_before_seal(tmp_path,monkeypatch,attempts):
-    root=repair_instance(tmp_path)
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson',attempts=attempts)
     first=execution.origin(root,1)
-    if attempts==2:(c.workspace(root,1)/'work/repeat-bad-output').touch()
-    original=c.seal_result
-    class DeferSeal(RuntimeError):pass
-    def terminal_before_seal(root,step):
-        current=execution.record(root,step)
-        if current!=first:
-            intent=c.read(current/'native-intent.json')
-            if intent['attempt']==attempts:
-                assert c.read(current/'native-outcome.json')['returncode']==0
-                raise DeferSeal('Known repaired turn retained before seal')
-        return original(root,step)
     if attempts==2:
-        # First repair is another bad response; the second is valid.
-        # Configure the already frozen fake behavior through a workspace flag.
-        (c.workspace(root,1)/'work/valid-after-second').touch()
+        (c.workspace(root,1)/'work/repeat-bad-output').touch()
+        (c.workspace(root,1)/'work/valid-after').write_text('2')
+    publish=c.seal_result_from_inventory
+    class DeferSeal(RuntimeError):pass
+    def terminal_before_seal(root,step,*,inventory):
+        if inventory.attempt==attempts:
+            assert inventory.payload['summary']=='Retained finding' and inventory.output_error is None
+            assert inventory.native_outcome['returncode']==0 and inventory.native_outcome['terminal_observed'] is True
+            raise DeferSeal('Known repaired turn retained before publication')
+        return publish(root,step,inventory=inventory)
     with monkeypatch.context() as patch:
-        patch.setattr(c,'seal_result',terminal_before_seal)
+        patch.setattr(c,'seal_result_from_inventory',terminal_before_seal)
         with pytest.raises(DeferSeal):native.execute_native(root,1)
-    wait_runner(root)
-    assert len(execution.records(root,1))==attempts+1
-    (first/'science-output.json').write_text('{changed original bad output')
-    with pytest.raises(ValueError,match='Original final output changed'):
-        c.seal_result(root,1)
-    assert not (first/'result-identity.json').exists()
-    assert len(execution.records(root,1))==attempts+1
+    wait_runner(root);paths=execution.records(root,1)
+    assert len(paths)==attempts+1 and native.usage(root)['observed_tokens']==14*(attempts+1)
+    assert budget.used_steps(root)==attempts+1
+    inputs={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json',
+        Path(c.read(first/'native-outcome.json')['native_identity']['session']['path']))}
+    retained={p:p.read_bytes() for record in paths for p in record.iterdir() if p.is_file()}
+    accept_terminal=accepted_budget.accept_terminal_from_base;collect_sources=c._repair_source_facts
+    observations=[]
+    def accept_bill(root,step,record,**kwargs):
+        head=accept_terminal(root,step,record,**kwargs)
+        row=head.row('attempt/'+record.relative_to(root).as_posix().replace('/',':'))
+        assert record==paths[-1] and row['status']=='closed' and row['meter']==kwargs['meter']
+        observations.append('bill')
+        return head
+    def collect_after_bill(intents,receipts):
+        assert observations==['bill']
+        observations.append('sources')
+        return collect_sources(intents,receipts)
+    # This observes composition on an already accepted bill, not its first ledger write.
+    with monkeypatch.context() as patch:
+        patch.setattr(accepted_budget,'accept_terminal_from_base',accept_bill)
+        patch.setattr(c,'_repair_source_facts',collect_after_bill)
+        # Each paid malformed source remains bound, including the intermediate turn.
+        for record in paths[:-1]:
+            raw=record/'science-output.json';original=raw.read_bytes()
+            assert original==b'{invalid JSON'
+            raw.write_text('{changed retained bad output')
+            observations.clear()
+            with pytest.raises(ValueError,match='Accepted repair raw original changed'):native.wait_native(root,1)
+            assert observations==['bill','sources']
+            assert raw.read_text()=='{changed retained bad output'
+            raw.write_bytes(original)
+            assert all(p.read_bytes()==raw for p,raw in inputs.items())
+            assert all(p.read_bytes()==data for p,data in retained.items())
+            head=accepted_budget.read(root)
+            assert head['dispatch_count']==attempts+1 and head['continuation_count']==attempts
+            assert len(execution.records(root,1))==attempts+1 and budget.used_steps(root)==attempts+1
+            assert native.usage(root)['observed_tokens']==14*(attempts+1)
+            assert not (first/'result-identity.json').exists() and not (first/f'continuations/{attempts+1:03d}').exists()
+        observations.clear()
+        assert native.wait_native(root,1)['next_action']=='wait'
+        assert observations==['bill','sources'] and (first/'result-identity.json').is_file()
+    def forbid_sources(*args,**kwargs):raise AssertionError('Sealed wait reread historical repair sources')
+    with monkeypatch.context() as patch:
+        patch.setattr(c,'_repair_source_facts',forbid_sources)
+        for _ in range(2):
+            assert native.wait_native(root,1)['next_action']=='wait'
+            head=accepted_budget.read(root)
+            assert head['dispatch_count']==attempts+1 and head['continuation_count']==attempts
+            assert len(execution.records(root,1))==attempts+1 and budget.used_steps(root)==attempts+1
+            assert native.usage(root)['observed_tokens']==14*(attempts+1)
+            assert all(p.read_bytes()==raw for p,raw in inputs.items())
+            assert all(p.read_bytes()==data for p,data in retained.items())
+            assert not (first/f'continuations/{attempts+1:03d}').exists()
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'+'resume\n'*attempts
+    assert not (root/'jobs/002.json').exists()
 
 
 @pytest.mark.process_e2e
@@ -485,36 +591,63 @@ def test_redirected_native_final_original_never_starts_repair(tmp_path,monkeypat
         assert not (root/'jobs/002.json').exists()
 
 
-@pytest.mark.parametrize('mutation', ['raw','job','schema'])
+@pytest.mark.parametrize('mutation', ['raw','task_binding','schema_missing','profile'])
 @pytest.mark.process_e2e
 def test_output_repair_does_not_soften_original_integrity_failure(tmp_path,monkeypatch,mutation):
-    root=repair_instance(tmp_path)
-    with monkeypatch.context() as patch:
-        patch.setattr(continuation,'seal_or_repair',c.seal_result)
-        with pytest.raises(OutputRepairRequired):native.execute_native(root,1)
-    first=wait_runner(root)
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson')
+    first=retain_qualified_h_bad_original(root,monkeypatch)
     if mutation=='raw':(first/'science-output.json').write_text('{different broken output')
-    elif mutation=='job':
-        job=c.read(root/'jobs/001.json');job['instruction']='changed';c.write(root/'jobs/001.json',job)
-    else:c.write(first/'science-result.schema.json',dict(type='object'))
-    with pytest.raises(ValueError):continuation.seal_or_repair(root,1)
-    assert len(execution.records(root,1))==1
+    elif mutation=='task_binding':
+        task_path=c.workspace(root,1)/'science-task.json'
+        task=c.read(task_path);task['global']['objective']='inputs/global/changed-objective.md';c.write(task_path,task)
+    elif mutation=='profile':
+        intent=c.read(first/'native-intent.json');intent['native_profile']['model']='changed';c.write(first/'native-intent.json',intent)
+    else:(first/'science-result.schema.json').unlink()
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    inputs={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json')}
+    for _ in range(2):
+        with pytest.raises(ValueError):native.wait_native(root,1)
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==1 and head['continuation_count']==0
+        assert not (first/'continuations/001').exists() and not (first/'result-identity.json').exists()
+        assert budget.used_steps(root)==1
+        assert {key:head['usage'][key] for key in ('input_tokens','cached_input_tokens','output_tokens')}==dict(
+            input_tokens=10,cached_input_tokens=3,output_tokens=4)
+        assert all(p.read_bytes()==raw for p,raw in retained.items()) and all(p.read_bytes()==raw for p,raw in inputs.items())
+        if mutation=='schema_missing':assert not (first/'science-result.schema.json').exists()
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n' and not (root/'jobs/002.json').exists()
 
 
 @pytest.mark.process_e2e
 def test_host_write_failure_retries_original_seal_without_model_reexecution(tmp_path,monkeypatch):
-    root=repair_instance(tmp_path,kind='valid')
-    original=c.write
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'valid')
+    original=c.write;faults=[]
     def fail_result(path,value):
-        if path.name=='result.json':raise OSError('Host disk fixture')
+        if path==execution.origin(root,1)/'result.json':
+            faults.append(path)
+            raise OSError('Host disk fixture')
         return original(path,value)
     with monkeypatch.context() as patch:
         patch.setattr(c,'write',fail_result)
-        with pytest.raises(OSError,match='Host disk fixture'):native.execute_native(root,1)
-    first=wait_runner(root);preserved=(first/'science-output.json').read_bytes()
-    assert continuation.seal_or_repair(root,1)['next_action']=='wait'
-    assert (first/'science-output.json').read_bytes()==preserved
-    assert len(execution.records(root,1))==1 and native.usage(root)['observed_tokens']==14
+        with pytest.raises(OSError,match='^Host disk fixture$'):native.execute_native(root,1)
+    first=wait_runner(root);outcome=c.read(first/'native-outcome.json')
+    assert faults==[first/'result.json'] and not (first/'result-identity.json').exists()
+    assert outcome['returncode']==0 and outcome['terminal_observed'] is True and outcome['stop_reason'] is None
+    assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+    assert outcome['metering']['coverage']=='terminal' and outcome['metering']['reconciliation']=='matched'
+    assert outcome['raw_ref']==c.file_ref(first/'science-output.json')
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    inputs={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json')}
+    for _ in range(2):
+        assert native.wait_native(root,1)['next_action']=='wait'
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==1 and head['continuation_count']==0
+        assert len(execution.records(root,1))==1 and native.usage(root)['observed_tokens']==14 and budget.used_steps(root)==1
+        assert all(p.read_bytes()==raw for p,raw in retained.items()) and all(p.read_bytes()==raw for p,raw in inputs.items())
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+        assert not (first/'continuations/001').exists() and not (root/'jobs/002.json').exists()
 
 
 @pytest.mark.process_e2e
@@ -671,44 +804,27 @@ def test_real_w_continuation_seals_a_and_reuses_successful_science(tmp_path):
 
 @pytest.mark.process_e2e
 def test_continuation_cannot_exceed_consumed_shared_step_budget(tmp_path,monkeypatch):
-    from test_history_handoff import finish
-    root=instance(tmp_path,steps=2)
-    finish(root,1,'H',[],action='experiment')
-    first=fail(root,2)
-    saved={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    settings=(root/'settings.json').read_bytes()
-    job=(root/'jobs/002.json').read_bytes()
-    outcome=c.read(first/'native-outcome.json')
-    assert outcome['returncode']==7 and outcome['budget_slice']['dispatches']==1
-    assert outcome['budget_slice']['observed_tokens']==14
-    assert outcome['budget_slice']['limits']==dict(max_observed_tokens=100,max_seconds=20)
-    assert budget.protected_final_report(c.settings(root))
-    assert budget.delivery_reserve(c.settings(root))==dict(tokens=0,seconds=0.,steps=0)
-    accept=budget.accept_continuation;refused=[]
-    def observed_accept(*args,**kwargs):
-        try:return accept(*args,**kwargs)
-        except budget.NodeBudgetUnavailable as error:
-            refused.append(error.reason)
-            raise
-    monkeypatch.setattr(budget,'accept_continuation',observed_accept)
-    # H and the failed original W consumed both authorized slots.
-    # A continuation requires another slot and cannot be accepted here.
-    for attempt in range(2):
-        result=controller.worker_resume(root,2)
-        assert refused==['worker_resume_budget_unavailable']*(attempt+1)
-        assert result['status']=='native_outcome_unsealed',result
-        assert controller.run(root)['status']=='native_outcome_unsealed'
-        assert len(execution.records(root,2))==1 and not (first/'continuations/001').exists()
-        assert not (first/'result-identity.json').exists() and not (root/'jobs/003.json').exists()
-        assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-        assert (c.workspace(root,2)/'work/checkpoint').read_text()=='original checkpoint'
-        assert budget.used_steps(root)==2 and budget.effective_max_steps(root)==2
-        assert native.usage(root)['observed_tokens']==24 and budget.final_a_barrier(root) is None
-        assert budget.snapshot(root)['clock_phase']=='paused'
-        assert all(p.read_bytes()==raw for p,raw in saved.items())
-        assert (root/'settings.json').read_bytes()==settings and (root/'jobs/002.json').read_bytes()==job
-
-
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson')
+    first=retain_qualified_h_bad_original(root,monkeypatch)
+    inputs={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json',
+        Path(c.read(first/'native-outcome.json')['native_identity']['session']['path']))}
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    amendment=budget.amend(root,max_steps=budget.used_steps(root),
+        authorization_note='Explicit fixture reduction to the original consumed step after native completion',
+        authorization_statement='Set the shared step ceiling to one; retain the completed original step.')
+    assert amendment['after_max_steps']==1 and amendment['consumption']=='retained'
+    for _ in range(2):
+        with pytest.raises(budget.NodeBudgetUnavailable) as failure:native.wait_native(root,1)
+        assert failure.value.reason=='worker_resume_budget_unavailable'
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==1 and head['continuation_count']==0
+        assert len(execution.records(root,1))==1 and not (first/'continuations/001').exists()
+        assert native.usage(root)['observed_tokens']==14 and budget.used_steps(root)==1 and budget.effective_max_steps(root)==1
+        assert all(p.read_bytes()==raw for p,raw in inputs.items())
+        assert all(p.read_bytes()==raw for p,raw in retained.items())
+        assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
 @pytest.mark.process_e2e
@@ -754,27 +870,42 @@ def test_missing_required_original_report_prevents_qualification(tmp_path):
 @pytest.mark.parametrize('tamper', ['intent', 'report'])
 @pytest.mark.process_e2e
 def test_success_before_seal_does_not_rebind_drifted_attempt(tmp_path,monkeypatch,tamper):
-    root=instance(tmp_path);first=fail(root)
-    seal=c.seal_result
-    def defer(*args):raise ValueError('Fixture leaves successful terminal before seal')
-    monkeypatch.setattr(c,'seal_result',defer)
-    monkeypatch.setattr(native,'seal_result',defer)
-    with pytest.raises(ValueError,match='Fixture leaves'):controller.worker_resume(root,1)
-    wait_runner(root)
-    monkeypatch.setattr(c,'seal_result',seal)
-    monkeypatch.setattr(native,'seal_result',seal)
-    current=execution.record(root,1)
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson')
+    publish=c.seal_result_from_inventory
+    class DeferSeal(RuntimeError):pass
+    def retain_success(root,step,*,inventory):
+        if inventory.attempt==1:
+            assert inventory.payload['summary']=='Retained finding' and inventory.output_error is None
+            assert inventory.native_outcome['returncode']==0 and inventory.native_outcome['terminal_observed'] is True
+            raise DeferSeal('Successful repair retained before publication')
+        return publish(root,step,inventory=inventory)
+    with monkeypatch.context() as patch:
+        patch.setattr(c,'seal_result_from_inventory',retain_success)
+        with pytest.raises(DeferSeal):native.execute_native(root,1)
+    current=wait_runner(root);first=execution.origin(root,1)
+    assert native.usage(root)['observed_tokens']==28 and budget.used_steps(root)==2
     if tamper=='intent':
         value=c.read(current/'native-intent.json');value['budget_slice']['previous_tokens']-=1
         c.write(current/'native-intent.json',value)
     else:
         value=c.read(current/'native-outcome.json');value['budget_slice']['observed_tokens']-=1
         c.write(current/'native-outcome.json',value)
-    with pytest.raises(ValueError):c.seal_result(root,1)
-    with pytest.raises(ValueError):controller.run(root)
-    assert not (first/'result-identity.json').exists()
-    assert not (first/'continuations/002').exists()
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
+    inputs={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/001.json',c.workspace(root,1)/'science-task.json',
+        Path(c.read(first/'native-outcome.json')['native_identity']['session']['path']))}
+    retained={p:p.read_bytes() for record in (first,current) for p in record.iterdir() if p.is_file()}
+    for _ in range(2):
+        with pytest.raises(ValueError):native.wait_native(root,1)
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==2 and head['continuation_count']==1
+        assert {key:head['usage'][key] for key in ('input_tokens','cached_input_tokens','output_tokens')}==dict(
+            input_tokens=20,cached_input_tokens=6,output_tokens=8)
+        assert budget.used_steps(root)==2
+        assert all(p.read_bytes()==raw for p,raw in inputs.items())
+        assert all(p.read_bytes()==raw for p,raw in retained.items())
+        assert not (first/'result-identity.json').exists() and not (first/'continuations/002').exists()
+        assert not (root/'jobs/002.json').exists()
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
 
 
 @pytest.mark.parametrize('tamper',['schema','task'])

@@ -1175,6 +1175,28 @@ class CurrentInventory:
     research_note_diagnostics: list = field(default_factory=list)
 
 
+def _repair_source_facts(intents,receipts):
+    """Observe only originals explicitly consumed by this unsealed repair chain."""
+    sources={}
+    for number,intent in enumerate(intents[1:],1):
+        if intent.get('output_repair') is None and intent.get('work_repair') is None:continue
+        prior,_,outcome,_,_=receipts[number-1]
+        raw=prior/'science-output.json'
+        missing=outcome.get('output_status')=='missing'
+        try:raw_stat=raw.lstat()
+        except FileNotFoundError:raw_stat=None
+        pending_present=False
+        if missing:
+            try:(prior/'result.pending.json').lstat()
+            except FileNotFoundError:pass
+            else:pending_present=True
+        sources[number]=dict(raw_present=raw_stat is not None,
+            raw_ref=dict(path=str(raw.absolute()),size_bytes=raw_stat.st_size)
+                if not missing and raw_stat is not None and stat.S_ISREG(raw_stat.st_mode) else None,
+            pending_present=pending_present)
+    return sources
+
+
 def accept_current_inventory(root: Path, step: int):
     """The sole current-node observation/acceptance owner after writers stop."""
     from . import execution, worker_delivery, history, checkpoint
@@ -1220,6 +1242,16 @@ def accept_current_inventory(root: Path, step: int):
         native_intent=intent,native_outcome=outcome,native_meter=meter,base=base,head=head,task_ref=task_ref,
         configuration_revision=job.get('configuration_revision'),chain=chain,intents=intents,
         process_receipts=receipts,material_sources=material_sources)
+    terminal_receipts=None
+    if len(chain)>1 and outcome.get('returncode')==0 and not outcome.get('stop_reason'):
+        # Real terminal consumption is already accepted above. A changed repair
+        # original blocks publication, including another missing-output repair,
+        # without discarding the current paid turn or replaying old diagnostics.
+        terminal_receipts=execution.terminal_receipts_for_inventory(root,job,inventory,
+            original_outcome=original_outcome,meter=meter)
+        repair_sources=_repair_source_facts(intents,terminal_receipts)
+        execution.validate_repair_sources_from_facts(job,intents,receipts=terminal_receipts,
+            sources=repair_sources,policy=policy)
     calls=(history._observe_managed_calls_for_inventory(root,job,inventory=inventory)
         if history._managed_config_for_inventory(job,inventory) else [])
     history._validate_managed_for_inventory(root,job,calls,inventory=inventory)
@@ -1328,9 +1360,8 @@ def accept_current_inventory(root: Path, step: int):
             selected_inputs=inventory.selected_inputs)
             if policy.get('search_policy') is not None and not job.get('formal_review') and not job.get('final_report')
             else dict(focus=None,allocation=None,diagnostics=[]))
-    if len(chain)>1 and outcome.get('returncode')==0 and not outcome.get('stop_reason'):
-        execution.accept_current_terminal_for_inventory(root,job,inventory,
-            original_outcome=original_outcome,meter=meter)
+    if terminal_receipts is not None:
+        execution.accept_current_terminal_for_inventory(root,job,inventory,receipts=terminal_receipts)
     inventory.input_coverage=history._accept_managed_input_coverage(root,job,calls) if calls else None
     if worker_delivery.repair_applicable(job) and (record/'science-output.json').exists():
         inventory.caller_correction=worker_delivery._caller_correction(root,job,record)

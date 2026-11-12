@@ -353,14 +353,51 @@ def accept_current_terminal(root, step, chain, outcome):
         task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),technical_facts=technical_facts)
 
 
-def accept_current_terminal_for_inventory(root,job,inventory,*,original_outcome,meter):
-    """Consume this owner's chain, current receipt and selected policy."""
+def terminal_receipts_for_inventory(root,job,inventory,*,original_outcome,meter):
+    """Acquire this operation's prior receipts once, retaining its current bill."""
     from . import budget
     receipts=[budget._attempt_receipt(root,job,path,intent=intent,
         interruption_ref=inventory.intents[index+1].get('interruption')
             if inventory.intents[index+1].get('continuation_kind')=='reentry' else None)
         for index,(path,intent) in enumerate(zip(inventory.chain[:-1],inventory.intents[:-1]))]
     receipts.append((inventory.record,inventory.native_intent,original_outcome,meter,False))
+    return receipts
+
+
+def validate_repair_sources_from_facts(job,intents,*,receipts,sources,policy):
+    """Bind accepted repairs to their exact sources, without replaying science."""
+    from . import budget
+    for number,intent in enumerate(intents[1:],1):
+        request=intent.get('work_repair') or intent.get('output_repair')
+        if request is None:continue
+        prior,_,outcome,_,interrupted=receipts[number-1]
+        if (intent.get('attempt')!=number or not isinstance(request,dict)
+                or type(request.get('source_attempt')) is not int or request['source_attempt']!=number-1
+                or not isinstance(request.get('code'),str) or not request['code']
+                or not isinstance(request.get('diagnostic'),str)
+                or request.get('outcome_ref')!=dict(path=str(prior/'native-outcome.json'))
+                or request.get('raw_ref')!=outcome.get('raw_ref') or interrupted
+                or type(outcome.get('returncode')) is not int or outcome['returncode']!=0
+                or outcome.get('stop_reason')
+                or outcome['usage']['unknown_steps'] and not budget.native_completion_known(outcome,policy)):
+            raise ValueError('Accepted repair changed its exact completed source')
+        source=sources[number]
+        if outcome.get('output_status')=='missing':
+            if outcome.get('raw_ref') is not None or source['raw_present'] or source['pending_present']:
+                raise ValueError('Accepted missing output source changed')
+        elif source['raw_ref'] is None or source['raw_ref']!=outcome.get('raw_ref'):
+            raise ValueError('Accepted repair raw original changed')
+        if intent.get('work_repair') is not None:
+            if (job['role']!='W' or job.get('formal_review') or job.get('final_only') or job.get('purpose')=='closeout'
+                    or outcome.get('output_status')=='missing' or request.get('code')!='worker_delivery_incomplete'
+                    or request.get('work_evidence_ref')!=dict(path=str(prior/'work-evidence.json'))):
+                raise ValueError('Accepted work repair changed its original scope')
+        elif request.get('work_evidence_ref') is not None:
+            raise ValueError('Output repair cannot acquire scientific work scope')
+
+
+def accept_current_terminal_for_inventory(root,job,inventory,*,receipts):
+    """Consume this owner's chain, current receipt and selected policy."""
     from . import continuation
     technical_facts=([continuation._prelaunch_original_facts(root,job['step'],path,attempt=index)
         for index,path in enumerate(inventory.chain[:-1])]
