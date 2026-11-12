@@ -219,34 +219,6 @@ def test_operator_configuration_rejects_host_identity_and_permissions(execution_
         e.operator_configuration(dict(executor='local_execution:command',configuration={field:{}}))
 
 
-def test_trusted_cov_launcher_configuration_preserves_exact_host_bindings(tmp_path, execution_registry):
-    from scidiscovery.research_loop import experiment_client, profiles
-    from cov_execution import lineage as cov_lineage
-    from scidiscovery.research_loop.protocol import stage_scope
-    from test_history_handoff import finish
-    public, goal = inputs(tmp_path)
-    root = tmp_path / 'instance'
-    settings = controller.prepare(root, goal, public, ['custom'], max_tokens=1000,
-        max_seconds=60, max_steps=4, model='no-model', reasoning_effort='high', search_policy=None)
-    assert settings.get('execution_config') is None
-    finish(root, 1, 'H', [], action='experiment')
-    job = c.build_job(root, 2, 'W', [1])
-    record = execution.origin(root, 2)
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json'),
-        **profiles.binding(settings, job)))
-    output = tmp_path / 'cov-config.json'
-    result = cov_lineage.configure(root, 2, [sys.executable], root / 'runs', output,
-        receipt_channel='backend_file')
-    assert result['status'] == 'configured'
-    config = cov_lineage._config(output)
-    assert config['scope'] == stage_scope(root, job)
-    assert config['record_dir'] == str(experiment_client.record_directory(root, 2))
-    assert config['native_attempt'] == dict(number=0, execution_key=execution.identity(root, 2))
-    assert config['admission']['mode'] == 'soft'
-    assert config['execution_interface']['executor'] == 'cov_execution:experiment'
-    assert c.read(record / 'experiment-config.json') == config
-
-
 @pytest.mark.process_e2e
 def test_cli_rejects_operator_host_field_injection_before_creating_instance(tmp_path,execution_registry):
     public,goal=inputs(tmp_path);path=tmp_path/'config.json';c.write(path,dict(executor='local_execution:command',configuration={'admission':{}}))

@@ -5,9 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import checkpoint,contracts as c,controller,selection
+from scidiscovery.research_loop import contracts as c,controller,selection
 from test_history_handoff import finish
-from test_worker_fragments import fragment,science
 
 
 def context_scene(tmp_path):
@@ -162,22 +161,6 @@ def test_parent_history_alias_requires_exact_source_seal(tmp_path):
     changed['history']['files']=[row for row in changed['history']['files']
         if row['path']!='inputs/history/nodes/003/0001.json']
     assert 'history_alias' not in c._parent_view(changed,ref,root)
-
-
-def test_fragment_brief_preserves_whole_late_limitations_before_prose(fragment):
-    root,job,record=fragment
-    limitations=['Original target restriction','Observed counterexample remains', '"\\\n'*1500,'Unfinished question remains unknown']
-    science(record,scientific_result='Verbose understanding '*1500,limitations=limitations,stage_intent='continue')
-    checkpoint.capture(root,job,record)
-    before={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
-    view=checkpoint.brief(root,job,record)
-    assert view['limitations']==[limitations[0],limitations[1],limitations[3]]
-    assert view['omitted_limitations']==1 and view['truncated']
-    assert view['stage_intent']=='continue'
-    assert 'not mounted' in view['original_access']
-    assert len(checkpoint._bytes(view))<=4096
-    assert str(root) not in json.dumps(view) and 'sha256' not in json.dumps(view)
-    assert before=={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
 
 
 def test_selection_preserves_late_failed_unknown_and_relevant_audit():

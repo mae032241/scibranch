@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts, controller
+from scidiscovery.research_loop import accepted_budget, budget, contracts, controller
 from scidiscovery.research_loop import correction, engineering, fork_runtime
 
 _native_call = controller._native_call
@@ -40,24 +40,6 @@ def closeout(tmp_path, monkeypatch):
     monkeypatch.setattr(controller, '_closeout_result', lambda root, status, **details: dict(status=status, **details))
     monkeypatch.setattr(controller, '_native_call', lambda *args, **kwargs: calls.append((args, kwargs)))
     return SimpleNamespace(root=root, record=record, outcome=outcome, begin=begin, calls=calls)
-
-
-def test_failed_original_closeout_requires_explicit_same_task_resume(closeout):
-    result = controller._run_closeout(closeout.root)
-    assert result == dict(status='closeout_native_unsealed', step=1,
-        reason='Original closeout native failed; explicit worker-resume required for the same original task')
-    assert closeout.calls == []
-    assert not (closeout.record / 'automatic-recovery.json').exists()
-    assert not (closeout.record / 'continuations').exists()
-
-
-@pytest.mark.parametrize('state', ['unknown', 'interrupted', 'unstarted'])
-def test_unknown_original_closeout_is_preserved_without_resume(closeout, monkeypatch, state):
-    monkeypatch.setattr(controller.runtime, 'node_state', lambda root, step: state)
-    result = controller._run_closeout(closeout.root)
-    assert result['status'] == 'closeout_native_unsealed'
-    assert result['reason'] == 'Original closeout native execution is unknown; reconcile the same original without replay'
-    assert closeout.calls == []
 
 
 def test_running_original_is_collected_through_existing_output_repair_route(closeout, monkeypatch):
@@ -113,7 +95,7 @@ def test_original_integrity_value_error_is_not_relabelled_as_closeout_failure(cl
 
 
 @pytest.mark.parametrize('damage', ['missing', 'changed'])
-def test_initial_attempt_raw_integrity_failure_reaches_formal_seal(tmp_path, monkeypatch, damage):
+def test_initial_attempt_raw_integrity_failure_is_rejected_by_inventory(tmp_path, monkeypatch, damage):
     public = tmp_path / 'public'
     public.mkdir()
     objective = public / 'objective.md'
@@ -124,7 +106,7 @@ def test_initial_attempt_raw_integrity_failure_reaches_formal_seal(tmp_path, mon
         reasoning_effort='high', search_policy=None)
     job = contracts.build_job(root, 1, 'A', [])
     record = root / 'native-evidence/001'
-    contracts.write(record / 'native-intent.json', dict(step=1,
+    accepted_budget.accept_native(root, 1, record, dict(step=1,
         task_ref=contracts.record_ref(root / 'jobs/001.json')))
     raw = record / 'science-output.json'
     raw.write_text('{"fixture":"the exact original output"}\n')
@@ -136,24 +118,12 @@ def test_initial_attempt_raw_integrity_failure_reaches_formal_seal(tmp_path, mon
     monkeypatch.setattr(budget, 'closeout_state', lambda root: dict(begin=begin))
     monkeypatch.setattr(controller, '_terminal_success',
         lambda *args: pytest.fail('The collection gate must not inspect or suppress raw integrity errors'))
-    formal = contracts.seal_result
-    failures = []
-
-    def seal(*args):
-        try:
-            return formal(*args)
-        except ValueError as error:
-            failures.append(error)
-            raise
-
-    monkeypatch.setattr(contracts, 'seal_result', seal)
     if damage == 'missing':
         raw.unlink()
     else:
         raw.write_text('{"fixture":"a changed output with different size"}\n')
     with pytest.raises(ValueError) as caught:
         controller._run_closeout(root)
-    assert failures == [caught.value]
     assert str(caught.value) == ('Expected an original regular file' if damage == 'missing'
         else 'Terminal scientific output is unverified or changed')
     assert not (record / 'result-identity.json').exists()

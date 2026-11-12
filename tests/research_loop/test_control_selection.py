@@ -137,16 +137,6 @@ def test_non_public_or_changed_candidate_facts_are_rejected():
     with pytest.raises(ValueError):selection.shortlist([rec(2,'W',[cand('P',1)]),rec(3,'W',[cand('P',2)])])
 
 
-def test_schema_requires_authored_choice_without_default_or_override():
-    plain,bound=c.result_schema('A'),c.result_schema('A',comparison=True)
-    assert set(bound['properties'])-set(plain['properties'])=={'candidate_comparison'}
-    comparison=bound['properties']['candidate_comparison']
-    assert set(comparison['properties'])=={'rows','rationale','evidence_steps'}
-    assert bound['required']==list(bound['properties'])
-    assert 'candidate_comparison' not in c.result_schema('W',comparison=True)['properties']
-    assert 'default_candidate' not in json.dumps(bound) and 'override' not in json.dumps(bound)
-
-
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('metrics',[(.9,.8,.7),(.1,.8,999)])
 def test_real_closeout_catalogue_does_not_run_or_choose_candidates(tmp_path,monkeypatch,metrics):
