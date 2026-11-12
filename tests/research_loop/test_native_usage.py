@@ -211,6 +211,7 @@ def test_qualified_inventory_without_callbacks_stops_once_at_terminal(tmp_path):
     assert reader.finish_context() == terminal
 
 
+@pytest.mark.process_e2e
 def test_failed_actual_hook_invocation_overrides_prior_live_receipt(tmp_path):
     import subprocess
     import sys
@@ -229,6 +230,7 @@ def test_failed_actual_hook_invocation_overrides_prior_live_receipt(tmp_path):
     assert metadata_stop(failed_observation, required=True) == 'native_metadata_unavailable'
 
 
+@pytest.mark.process_e2e
 def test_timed_out_actual_hook_invocation_cannot_reuse_old_live_coverage(tmp_path,monkeypatch):
     import subprocess
     import sys

@@ -33,6 +33,7 @@ def test_resource_attribution_is_one_bounded_identity_checked_sample(monkeypatch
     assert 'full_reference' not in diagnostic
 
 
+@pytest.mark.process_e2e
 def test_actual_resource_stop_keeps_private_attribution_and_original_cleanup(tmp_path,monkeypatch):
     limits=json.loads(guard.DEFAULT_CONFIG.read_text())['limits']
     limits=dict(limits,observed_tree_rss_stop_bytes=1,timeout_seconds=5)

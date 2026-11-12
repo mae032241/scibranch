@@ -214,9 +214,7 @@ def test_native_shell_payload_stops_original_group_with_live_child_and_never_rel
         command("cancel")
 
 
-def test_delivery_tar_ignores_retired_file_and_total_byte_limits(entry, tmp_path, monkeypatch):
-    monkeypatch.setattr(entry, "MAX_BUNDLE_FILE_BYTES", 1, raising=False)
-    monkeypatch.setattr(entry, "MAX_BUNDLE_BYTES", 1, raising=False)
+def test_delivery_tar_preserves_complete_small_payload_bytes(entry, tmp_path):
     archive = _tar(tmp_path / "delivery.tar", [("starter_code.R", b"complete starter"),
         ("helper_functions.R", b"complete helper")])
     files = entry.bundle_delivery_files(archive, "highdim-mediation-debiasing", tmp_path / "selected")

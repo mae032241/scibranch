@@ -48,6 +48,7 @@ def test_uncertain_usage_or_external_action_never_becomes_repair_funds(monkeypat
 
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('crash',[False,True])
 def test_soft_ordinary_repair_reaches_one_final_delivery_and_continuation(tmp_path,monkeypatch,crash):
     prepare=controller.prepare

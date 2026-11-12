@@ -9,6 +9,8 @@ from execution_fixtures import execution_registry
 from test_breadth_science import a, findings, h, prepare, run, worker
 from test_history_handoff import finish
 
+pytestmark = pytest.mark.process_e2e
+
 
 def revision(*, label='P', minimal_test='A corrected discriminating prediction', scope='Revised scientific scope'):
     return dict(scope=scope, commitments=[dict(label=label, minimal_test=minimal_test, existing_ref='h001.m1')],

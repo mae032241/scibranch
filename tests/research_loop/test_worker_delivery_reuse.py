@@ -7,6 +7,7 @@ from test_breadth_science import prepare, h, worker, run, findings, a
 from test_history_handoff import finish
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('p_observed',[True,False])
 def test_final_w_reuses_prior_p_without_new_call_or_cycle_and_a_checks_its_own_finding(tmp_path,execution_registry,p_observed):
     root=prepare(tmp_path,portfolio=True);h(root,labels=('P','Q'))

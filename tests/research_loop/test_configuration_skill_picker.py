@@ -1,44 +1,10 @@
 """Installed Skill selection serializes only the existing declaration schema."""
 import copy
-from html.parser import HTMLParser
 
 import pytest
 
 from scidiscovery.research_loop import configuration_form as form, research_config, skill_supply
-
-
-class Controls(HTMLParser):
-    """Collect successful controls, including hidden originals, without JavaScript."""
-    def __init__(self, html):
-        super().__init__()
-        self.fields = {}
-        self.textarea = None
-        self.select = None
-        self.feed(html)
-
-    def handle_starttag(self, tag, attributes):
-        attrs = dict(attributes)
-        name = attrs.get('name')
-        if tag == 'input' and name and (attrs.get('type') != 'checkbox' or 'checked' in attrs):
-            self.fields[name] = attrs.get('value', '')
-        if tag == 'textarea':
-            self.textarea = name
-            self.fields[name] = ''
-        if tag == 'select':
-            self.select = name
-            self.fields[name] = ''
-        if tag == 'option' and 'selected' in attrs:
-            self.fields[self.select] = attrs.get('value', '')
-
-    def handle_endtag(self, tag):
-        if tag == 'textarea':
-            self.textarea = None
-        if tag == 'select':
-            self.select = None
-
-    def handle_data(self, data):
-        if self.textarea:
-            self.fields[self.textarea] += data
+from test_configuration_form import Controls
 
 
 @pytest.fixture
@@ -54,7 +20,6 @@ def installed(tmp_path, monkeypatch):
     executable = tmp_path / 'codex'
     executable.write_text('#!/bin/sh\nexit 99\n')
     executable.chmod(0o700)
-    monkeypatch.setattr(research_config.shutil, 'which', lambda _: str(executable))
     (tmp_path / 'public').mkdir()
     return form.imported(dict(version=1,
         research=dict(root='instance', public_root='public', objective_text='Compare exact alternatives.'),

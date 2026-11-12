@@ -94,11 +94,10 @@ def test_guidance_accepts_exact_byte_bound_and_rejects_one_extra_byte():
         guidance.policy(too_large)
 
 
-@pytest.mark.parametrize('marker', [1])
-def test_prepared_literal_and_current_fallback_are_not_rewritten(tmp_path, monkeypatch, marker):
+def test_prepared_literal_and_current_fallback_are_not_rewritten(tmp_path, monkeypatch):
     custom = {**guidance.DEFAULT, 'A': 'Frozen global assessment: compare existing evidence and retain limitations.'}
-    expected = custom['A'] if marker == 1 else guidance.ADVISORY_WORKER_FIRST['A']
-    root = prepare(tmp_path, custom if marker == 1 else None, marker=marker)
+    expected = custom['A']
+    root = prepare(tmp_path, custom)
     finish(root, 1, 'H', [], action='analyze')
     job, work, record = finish(root, 2, 'A', [1])
     paths = [root / 'settings.json', root / 'jobs/002.json', work / 'science-task.json',
