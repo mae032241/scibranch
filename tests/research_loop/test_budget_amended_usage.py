@@ -3,9 +3,8 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import accepted_budget,budget,contracts as c,controller,delivery,execution,native,profiles
+from scidiscovery.research_loop import accepted_budget,budget,contracts as c,controller,execution,native,profiles
 from test_history_handoff import finish
-from test_delivery import descriptor,delivery_policy
 
 
 @pytest.mark.parametrize('coverage',['terminal','unknown'])
@@ -13,15 +12,11 @@ def test_amended_step_six_counts_usage_and_keeps_its_unknown_distinct(tmp_path,c
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md'
     objective.write_text('Retain prior usage and account for a bounded review.')
     root=tmp_path/'instance'
-    harness=public/'harness';harness.mkdir()
-    for name in ('exp_cli.py','runner.py','train.csv','val.csv','meta.json'):
-        (harness/name).write_text('Frozen fixture input; never executed.\n')
     controller.prepare(root,objective,public,['fixture-never-launch'],max_tokens=2000,max_seconds=200,max_steps=5,
         model='fixture',reasoning_effort='high',node_budget_mode='soft',
-        research_strategy_version=None,search_policy=None,  # Meter-only legacy H/W prefix, not v3 routing.
-        node_budget_policy={r:dict(max_observed_tokens=1000,max_seconds=50) for r in 'HWAE'},
-        delivery_policy=delivery_policy(descriptor(root,public)))
-    finish(root,1,'H',[],action='experiment')
+        search_policy=None,supervision_policy=None,
+        node_budget_policy={r:dict(max_observed_tokens=1000,max_seconds=50) for r in 'HWAE'})
+    finish(root,1,'W',[])
     old_job=c.build_job(root,2,'W',[1]);original=execution.origin(root,2)
     old_meter=dict(input_tokens=100,cached_input_tokens=50,output_tokens=20)
     old_observation=dict(coverage='unknown',source='turn.completed',reason='terminal_usage_unreported',
@@ -64,12 +59,9 @@ def test_amended_step_six_counts_usage_and_keeps_its_unknown_distinct(tmp_path,c
     settings=(root/'settings.json').read_bytes()
     budget.amend(root,max_steps=24,authorization_note='Finite additional review steps.',authorization_statement='Finish retained work.')
     assert native.usage(root)==before  # A step grant neither refunds usage nor covers old unknowns.
-    # This meter-only review deliberately selects the exact sealed H original,
-    # not the W observation. W is nevertheless properly sealed before admission;
-    # its accepted native consumption and unknown billing remain unchanged.
-    sources=delivery.freeze_sources(root,[dict(step=1,seal_ref=c.record_ref(execution.origin(root,1)/'result-identity.json'))])
-    budget.begin_closeout(root,2,6,'fixture_bounded_review',delivery_sources=sources)
-    job=c.build_job(root,6,'A',[1],purpose='closeout',source_cutoff=2,delivery_sources=sources)
+    # The later ordinary A reads the exact sealed W original. Metering this
+    # bounded advice requires no delivery adapter or scientific qualification.
+    job=c.build_job(root,6,'A',[1])
     record=execution.origin(root,6)
     accepted_budget.accept_native(root,6,record,dict(step=6,task_ref=c.record_ref(root/'jobs/006.json'),
         budget_slice=budget.accept_node(root,job),**profiles.binding(c.settings(root),job)))

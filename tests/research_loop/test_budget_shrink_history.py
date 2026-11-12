@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 import pytest
 
-from scidiscovery.research_loop import (accepted_budget, backends, budget, contracts as c, continuation,
+from scidiscovery.research_loop import (accepted_budget, backends, budget, checkpoint, contracts as c, continuation,
     controller, execution, instance_control as control,
     instance_science as science, native, runtime)
 from scidiscovery.research_loop.instance_ui import InstanceUI
@@ -22,9 +22,7 @@ def prepare(tmp_path, *, fragments=False):
         worker_fragment_policy=dict(context='new_context')) if fragments else {}
     controller.prepare(root, objective, public, [sys.executable], max_tokens=2000, max_seconds=200,
         max_steps=5, model='fixture', reasoning_effort='high', search_policy=None,
-        # This retained-history fixture intentionally exercises the H-W-A route,
-        # not the current default W-first scientific strategy.
-        research_strategy_version=1, supervision_policy=None, **options)
+        supervision_policy=None, **options)
     return root
 
 
@@ -40,10 +38,7 @@ def finish(root, step, role, parents, *, action='wait', instruction='', artifact
     if role == 'W':payload.update(stage_intent='decision', mechanism_findings=None)
     if role == 'H':payload['search_plan'] = None
     if role == 'A':payload.update(search_review=None, candidate_recommendation=None, progress_assessment=None,
-        decision_request=(dict(decision='mechanism',
-            question='Which retained observation resolves the remaining fixture gap?',
-            change_criterion='An independent observation addressing that gap changes the assessment.')
-            if action in {'continue_w', 'revise_h', 'extract'} else None), portfolio_review=None)
+        decision_request=None, portfolio_review=None)
     if role in {'H', 'A'}:payload.update(next_action=action, route_reason='Review the retained scientific contribution.')
     if artifact:(c.workspace(root, step) / 'artifacts/result.txt').write_text('Exact original A deliverable.\n')
     c.write(record / 'science-output.json', payload)
@@ -69,11 +64,10 @@ def finish(root, step, role, parents, *, action='wait', instruction='', artifact
 
 
 def three(root, *, last_sealed=True):
-    job = finish(root, 1, 'H', [], action='experiment')
-    route = controller._route(root, 1, 'H', c.validate(c.workspace(root, 1)), job, None, None)
-    job = finish(root, 2, 'W', route[1], instruction=route[2])
-    route = controller._route(root, 2, 'W', c.validate(c.workspace(root, 2)), job, 1, None)
-    return finish(root, 3, 'A', route[1], action='continue_w', instruction=route[2], artifact=True, seal=last_sealed)
+    # Three accepted originals exercise retained costs; routing is not the subject.
+    finish(root, 1, 'W', [])
+    finish(root, 2, 'W', [1])
+    return finish(root, 3, 'A', [2], action='continue_w', artifact=True, seal=last_sealed)
 
 
 def shrink(root):
@@ -298,7 +292,8 @@ def test_previously_accepted_fragment_chain_survives_shrink_but_next_turn_does_n
             intent.update(attempt=number, continuation_kind='fragment', context_mode='new_context',
                 native_home=str(root / 'native-homes/001' / f'context-{number:03d}'),
                 root_intent_ref=c.record_ref(first / 'native-intent.json'), previous=execution.proof(prior),
-                fragment_checkpoint=dict(path=proof.relative_to(root).as_posix(), ))
+                fragment_checkpoint=dict(path=proof.relative_to(root).as_posix()),
+                science_resume=checkpoint.brief(checkpoint=c.read(proof)))
         accepted_budget.accept_native(root, 1, record, intent)
         meter = dict(input_tokens=7, cached_input_tokens=2, output_tokens=3)
         c.write(record / 'usage.json', meter)
