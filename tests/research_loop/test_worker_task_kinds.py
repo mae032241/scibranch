@@ -2,6 +2,7 @@
 import pytest
 
 from scidiscovery.research_loop import contracts as c, controller, search
+from scidiscovery.research_loop.output_repair import OutputRepairRequired
 from test_history_handoff import finish
 
 
@@ -23,7 +24,7 @@ def hypothesis(root,focus):
 @pytest.mark.parametrize('action',['improve','validate'])
 def test_h_can_explicitly_request_local_work_without_repeating_breadth(tmp_path,action):
     root=instance(tmp_path)
-    hypothesis(root,dict(label='P',action=action))
+    hypothesis(root,dict(index=1,action=action))
     job=c.build_job(root,2,'W',[1])
     assert search.launch_reason(root,job) is None
     assert job['search']['focus']==dict(mechanism_ref='h001.m1',action=action)
@@ -35,36 +36,38 @@ def test_h_can_explicitly_request_local_work_without_repeating_breadth(tmp_path,
     assert c.validate(c.workspace(root,2))['role']=='W'
 
 
-def test_a_can_explicitly_return_to_combination_screening(tmp_path):
+def test_ordinary_a_advice_cannot_return_w_to_combination_screening(tmp_path):
     root=instance(tmp_path)
-    hypothesis(root,dict(label='P',action='improve'))
+    hypothesis(root,dict(index=1,action='improve'))
     finish(root,2,'W',[1],mechanism_findings=None)
     finish(root,3,'A',[1,2],action='continue_w',search_choice=dict(dispositions=[],
         next_focus=dict(mechanism_ref=None,action='screen')))
     job=c.build_job(root,4,'W',[1,2,3])
     assert search.launch_reason(root,job) is None
-    assert job['search']['focus']['action']=='screen'
-    assert {row['mechanism_ref'] for row in job['search']['coverage_obligation']}=={'h001.m1','h001.m2'}
-    assert len(job['search']['breadth']['mechanisms'])==2
+    assessor=c.read(root/'jobs/003.json')
+    assert assessor['research_strategy_version']==3 and assessor['advisory_scope_version']==1
+    assert c.validate(c.workspace(root,3))['decision_request'] is None
+    assert job['search']['focus']==dict(mechanism_ref='h001.m1',action='improve')
+    assert job['search']['coverage_obligation']==[]
+    assert [row['mechanism_ref'] for row in job['search']['breadth']['mechanisms']]==['h001.m1']
+    assert search.project(root,4)['mechanisms']['h001.m2']['status']=='pending'
 
 
-def test_missing_author_task_choice_is_not_invented_as_screen(tmp_path):
+@pytest.mark.parametrize('focus',[None,*[dict(index=None,action=action) for action in ('improve','repair','validate')]],
+    ids=['missing','null-improve','null-repair','null-validate'])
+def test_h_cannot_seal_an_experiment_without_an_unambiguous_task_choice(tmp_path,focus):
     root=instance(tmp_path)
-    hypothesis(root,None)
-    job=c.build_job(root,2,'W',[1])
-    assert search.launch_reason(root,job)=='science_task_action_required'
-    assert job['search']['focus'] is None
-    seal=c.read(c.host_record(c.workspace(root,1))/'result-identity.json')
-    assert seal['control_outcome']['search_status']=='unresolved'
-
-
-@pytest.mark.parametrize('action',['improve','repair','validate'])
-def test_null_mechanism_does_not_authorize_ambiguous_local_task(tmp_path,action):
-    root=instance(tmp_path)
-    hypothesis(root,dict(label=None,action=action))
-    job=c.build_job(root,2,'W',[1])
-    assert search.launch_reason(root,job) is not None
-    assert job['search']['focus'] is None
+    c.build_job(root,1,'H',[])
+    original=(root/'jobs/001.json').read_bytes()
+    with pytest.raises(OutputRepairRequired,match='search_plan.focus'):
+        hypothesis(root,focus)
+    record=c.host_record(c.workspace(root,1))
+    payload=c.read(record/'science-output.json')
+    assert payload['search_plan']['focus']==focus
+    assert payload['scientific_result']=='A bounded scientific finding'
+    assert (root/'jobs/001.json').read_bytes()==original
+    assert not (record/'result-identity.json').exists()
+    assert not (root/'jobs/002.json').exists()
 
 
 def test_nonsearch_worker_has_no_combination_obligation(tmp_path):

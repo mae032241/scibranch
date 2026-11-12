@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, correction, guidance, native
+from scidiscovery.research_loop import accepted_budget, contracts as c, controller, guidance, native, protocol
 from test_history_handoff import finish
 
 RECIPE = 'Run algorithm Z on an exact 148-cell perturbation grid and fixed seed matrix; reconsider the global robustness gap.'
@@ -62,11 +62,13 @@ def a_source(root, *, action='continue_w'):
         candidate_recommendation=None,progress_assessment=None,decision_request=None,portfolio_review=None,
         next_action=action,route_reason=RECIPE)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
+    accepted_budget.accept_native(root,2,record,c.read(record/'native-intent.json'))
     c.write(record/'science-output.json',payload);c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
+    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
     return job,c.seal_result(root,2)
 
 
+@pytest.mark.process_e2e
 def test_real_codex_transport_uses_frozen_role_and_source_tagged_a_direction(tmp_path):
     root=prepare(tmp_path,real=True)
     result=controller.run(root)
@@ -89,30 +91,39 @@ def test_real_codex_transport_uses_frozen_role_and_source_tagged_a_direction(tmp
 
 
 @pytest.mark.parametrize('same_instruction',[True,False])
-def test_a_revise_h_is_macro_context_but_different_host_instruction_is_not_a_proposal(tmp_path,same_instruction):
-    root=prepare(tmp_path);a_source(root,action='revise_h')
+def test_ordinary_a_advice_does_not_replace_an_explicit_host_question(tmp_path,same_instruction):
+    root=prepare(tmp_path);assessor,result=a_source(root)
+    assert guidance.advisory_assessment(assessor)
+    assert assessor['research_strategy_version']==3 and assessor['advisory_scope_version']==1
+    route=controller._route(root,2,'A',result,assessor,1,None)
+    assert route.role=='W' and RECIPE not in route.instruction
     instruction=RECIPE if same_instruction else 'Exact host constraint: comparator C is mandatory'
-    job=c.build_job(root,3,'H',[1,2],instruction=instruction)
+    job=c.build_job(root,3,'W',list(route.parents),instruction=instruction)
     view=c.science_view(job,root)
-    if same_instruction:
-        assert view['question']!=RECIPE and view['decision_context']['original_instruction']==RECIPE
-    else:
-        # Same immediate A predecessor; only the original-text equality guard distinguishes this case.
-        assert 'decision_context' not in job and view['question']==instruction
+    # Even identical authored advice is not a binding W task proposal.
+    assert 'decision_context' not in job and job['instruction']==instruction
+    assert view['question'].startswith(instruction+'\n') and view['question'].count(instruction)==1
+    assert view['question'].count('Own research and adapt in this W session.')==1
+    assert 'inputs/parents/002/conclusion.json' in [row['path'] for row in job['direct_refs']]
 
 
-def test_e_question_and_return_keep_exact_requester_instruction(tmp_path):
-    root=prepare(tmp_path);job,result=a_source(root,action='extract')
-    role,parents,instruction,target,h,w=controller._route(root,2,'A',result,job,1,None)
-    c.build_job(root,3,role,parents,instruction=instruction,evidence_return=target)
-    finish(root,3,'E',parents)
-    e=c.read(root/'jobs/003.json');ev=c.science_view(e,root)
-    assert ev['question']==RECIPE and 'decision_context' not in ev
-    returned=controller._route(root,3,'E',c.validate(c.workspace(root,3)),e,h,w)
-    a=c.build_job(root,4,returned[0],returned[1],instruction=returned[2])
-    av=c.science_view(a,root)
-    assert av['question']==RECIPE and 'decision_context' not in av
-    assert 'inputs/parents/003/conclusion.json' in [row['path'] for row in a['direct_refs']]
+def test_w_e_question_and_return_keep_the_exact_requester_original(tmp_path):
+    root=prepare(tmp_path)
+    finish(root,1,'H',[],action='experiment',text='Original H scope and comparator C constraint')
+    worker,_,record=finish(root,2,'W',[1],stage_intent='extract',consultation_question=RECIPE)
+    original=(record/'science-output.json').read_bytes()
+    request=c.validate(c.workspace(root,2))
+    route=controller._route(root,2,'W',request,worker,1,None)
+    e=c.build_job(root,3,route.role,list(route.parents),instruction=route.instruction,evidence_return=route.evidence_return)
+    ev=c.science_view(e,root)
+    assert RECIPE in ev['question'] and 'decision_context' not in ev
+    assert e['evidence_return']==dict(role='W',step=2)
+    finish(root,3,'E',route.parents)
+    returned=controller._route(root,3,'E',c.validate(c.workspace(root,3)),e,route.current_h,route.current_w)
+    resumed=c.build_job(root,4,returned.role,list(returned.parents),instruction=returned.instruction)
+    assert resumed['role']=='W' and 'original objective' in c.science_view(resumed,root)['question']
+    assert {'inputs/parents/002/conclusion.json','inputs/parents/003/conclusion.json'} <= {row['path'] for row in resumed['direct_refs']}
+    assert (record/'science-output.json').read_bytes()==original
 
 
 def test_current_prepared_job_literal_stays_frozen_when_future_default_changes(tmp_path,monkeypatch):
@@ -121,53 +132,59 @@ def test_current_prepared_job_literal_stays_frozen_when_future_default_changes(t
     # A null compatibility argument still prepares the current marker, frozen as 1.
     assert c.settings(root)['handoff_authority_version']==job['handoff_authority_version']==1
     literal=job['native_role_instruction']
+    question=c.science_view(job,root)['question']
+    assert job['instruction']==RECIPE and question.startswith(RECIPE+'\n')
+    assert question.count(RECIPE)==1
     paths=[root/'settings.json',root/'settings-identity.json',root/'jobs/003.json',c.workspace(root,3)/'science-task.json',c.host_record(c.workspace(root,3))/'science-result.schema.json']
     original={path:path.read_bytes() for path in paths}
     monkeypatch.setitem(guidance.DEFAULT,'W','Changed advice for future settings')
     assert c.build_job(root,3,'W',[1,2],instruction=RECIPE)==job
     assert job['native_role_instruction']==literal
-    assert c.science_view(job,root)['decision_context']['original_instruction']==RECIPE
+    assert c.science_view(job,root)['question']==question and 'decision_context' not in job
     assert all(path.read_bytes()==data for path,data in original.items())
     assert not (c.host_record(c.workspace(root,3))/'native-intent.json').exists()
 
 
-def test_marker_absent_prepared_packet_is_preserved_when_current_rebuild_rejects_it(tmp_path,monkeypatch):
+def test_missing_advisory_scope_refuses_rebuild_without_changing_originals(tmp_path,monkeypatch):
     root=prepare(tmp_path);a_source(root)
     job=c.build_job(root,3,'W',[1,2],instruction=RECIPE)
-    # Retain an unaccepted archive packet without the old authority marker.
-    # This is a refusal fixture, not a claim that incomplete packets qualify.
-    job.pop('handoff_authority_version')
+    # The current scientific behavior gate requires the frozen advisory scope.
+    # Missing optional authority metadata is not an unsupported scientific contract.
+    job.pop('advisory_scope_version')
     c.write(root/'jobs/003.json',job)
     paths=[root/'jobs/003.json',c.workspace(root,3)/'science-task.json',c.host_record(c.workspace(root,3))/'science-result.schema.json']
     original={path:path.read_bytes() for path in paths}
     monkeypatch.setitem(guidance.DEFAULT,'W','Changed advice for future settings')
-    with pytest.raises(ValueError,match='^Frozen scientific task changed$'):
+    with pytest.raises(protocol.UnsupportedProtocol,match='Scientific job scientific behavior'):
         c.build_job(root,3,'W',[1,2],instruction=RECIPE)
     assert all(path.read_bytes()==data for path,data in original.items())
     assert not (c.host_record(c.workspace(root,3))/'native-intent.json').exists()
     assert not (root/'jobs/004.json').exists()
 
 
-def test_n4_revise_h_request_is_bound_before_context_and_seals(tmp_path):
-    from scidiscovery.research_loop import search
-    root=prepare(tmp_path,search_policy=search.DEFAULT_POLICY,correction_policy=dict(review_after=1,pause_after=1))
-    plan=dict(scope='Original mechanism scope',commitments=[dict(label='M',minimal_test='Comparator C',existing_ref=None)],focus=dict(label='M',action='screen'))
+def test_final_a_retains_one_bounded_correction_and_then_finish(tmp_path):
+    from scidiscovery.research_loop import delivery_review, search
+    root=prepare(tmp_path,search_policy=search.DEFAULT_POLICY)
+    plan=dict(scope='Original mechanism scope',commitments=[dict(label='M',minimal_test='Comparator C',existing_ref=None)],focus=dict(index=1,action='improve'))
     finish(root,1,'H',[],action='experiment',search_choice=plan)
-    w=c.build_job(root,2,'W',[1],instruction='Exact scientific question')
-    labels={row['mechanism_ref']:row['label'] for row in w['search']['breadth']['mechanisms']}
-    finish(root,2,'W',[1],mechanism_findings=[dict(mechanism=labels[row['mechanism_ref']],basis='blocked',
-        finding='This authority fixture performs no managed scientific observation.') for row in w['search']['coverage_obligation']])
-    record=c.host_record(c.workspace(root,2))
-    delivery=c.read(record/'result-identity.json')['control_outcome']['worker_delivery']
-    assert delivery['status']=='partial' and delivery['reason']=='scientific_blocked'
-    assert c.read(record/'work-evidence.json')['evidence']==[]
-
-    finish(root,3,'A',[1,2],action='revise_h',progress={'verdict':'no_progress'})
-    job=c.read(root/'jobs/003.json');result=c.validate(c.workspace(root,3))
-    correction.publish(root,3)
-    route=correction.effective_route(root,3,result,job,controller._route(root,3,'A',result,job,1,2))
-    h=c.build_job(root,4,route[0],route[1],instruction=route[2],correction_request=route[6])
-    assert h['correction_request'] is not None and 'decision_context' not in h
-    assert c.science_view(h,root)['question']==route[2]
-    finish(root,4,'H',route[1],action='wait')
-    assert c.validate(c.workspace(root,4))['next_action']=='wait'
+    worker,_,_=finish(root,2,'W',[1],stage_intent='decision')
+    route=controller._route(root,2,'W',c.validate(c.workspace(root,2)),worker,1,None)
+    final=c.build_job(root,3,route.role,list(route.parents),instruction=route.instruction,evidence_return=route.evidence_return)
+    assert delivery_review.scope(final)=='delivery_review' and not guidance.advisory_assessment(final)
+    assert c.result_schema('A',**c.response_options(final))['properties']['next_action']['enum']==['deliver','finish','continue_w']
+    finish(root,3,'A',route.parents,action='continue_w')
+    gap=c.validate(c.workspace(root,3))
+    assert gap['decision_request'] is not None
+    correction_route=controller._route(root,3,'A',gap,final,1,2)
+    corrected=c.build_job(root,4,correction_route.role,list(correction_route.parents),
+        instruction=correction_route.instruction,evidence_return=correction_route.evidence_return)
+    assert delivery_review.scope(corrected)=='delivery_correction'
+    assert corrected['search']['focus']['mechanism_ref']=='h001.m1'
+    finish(root,4,'W',correction_route.parents,stage_intent='decision')
+    reassess_route=controller._route(root,4,'W',c.validate(c.workspace(root,4)),corrected,1,2)
+    reassessment=c.build_job(root,5,reassess_route.role,list(reassess_route.parents),
+        instruction=reassess_route.instruction,evidence_return=reassess_route.evidence_return)
+    assert reassessment['evidence_return']['corrections_used']==1
+    assert c.result_schema('A',**c.response_options(reassessment))['properties']['next_action']['enum']==['deliver','finish']
+    finish(root,5,'A',reassess_route.parents,action='finish')
+    assert c.validate(c.workspace(root,5))['next_action']=='finish'

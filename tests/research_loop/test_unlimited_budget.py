@@ -5,7 +5,7 @@ native process, provider or scientific experiment is launched by this module.
 """
 import pytest
 
-from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, native
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, native, protocol
 from test_final_a_completion_contract import accept, complete
 from test_history_handoff import finish
 from test_node_budget import policy
@@ -101,7 +101,15 @@ def test_unlimited_advice_has_no_shared_risk_but_retains_finite_target_notices(t
     accepted_budget.accept_native(root, 1, record, intent)
     meter = dict(input_tokens=100, cached_input_tokens=99, output_tokens=3)
     c.write(record / 'usage.json', meter)
-    budget.write_node_hint(root, job, intent, budget.snapshot(root), meter, observed=True)
+    head = accepted_budget.read(root)
+    shared = accepted_budget.usage_from_facts(head, job_rows=accepted_budget.load_usage_rows(head),
+        current_native=dict(record=head['current_native']['record'], meter=meter,
+            metering=None, outcome_present=False, interrupted=False))
+    facts = dict(settings=c.settings(root), head=head, shared=shared, stamp=budget.clock_stamp(),
+        task=intent['task_ref'], scope=protocol.stage_scope(root, job),
+        native_attempt=dict(number=0, execution_key=intent['task_ref']),
+        final_return=None, closeout_preparation_seconds=None)
+    budget.write_node_hint(root, job, intent, budget.snapshot(root), meter, facts=facts, observed=True)
 
     hint = c.read(c.workspace(root, 1) / 'work/budget-status.json')
     assert hint['shared_observed_tokens_remaining_upper_bound'] is None

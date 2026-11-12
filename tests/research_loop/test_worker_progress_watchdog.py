@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import budget, budget_notice as notice, contracts as c, execution, experiments, native, protocol
+from scidiscovery.research_loop import accepted_budget, budget, budget_notice as notice, checkpoint, contracts as c, execution, experiments, protocol
+from test_soft_node_budget import scene, start_clock
 
 
 def save(work, value):
@@ -14,34 +15,35 @@ def save(work, value):
     return path
 
 
-def published(*, active_seconds=10., target_seconds=10.):
+def published(*, windows=3):
     progress = notice.worker_progress_notice(dict(role='W'), {},
-        active_seconds=active_seconds, target_seconds=target_seconds, fragment_enabled=True)
+        active_seconds=1000., target_seconds=10., fragment_enabled=True, max_context_windows=2,
+        context_observation=dict(context_windows=dict(coverage='live', windows_started=windows)))
     value = dict(scope=notice.SCOPE, updated_at_unix=123., inflight_usage_unknown=True,
-        target_state='reached' if active_seconds >= target_seconds else 'within')
+        target_state='reached' if windows > 2 else 'within')
     if progress is not None:
         value['closeout_notices'] = dict(progress=progress)
     return value
 
 
-def test_first_logical_time_window_delivers_once_across_fragments_and_later_windows(tmp_path):
-    save(tmp_path, published(active_seconds=9.999))
+def test_first_context_handoff_delivers_once_across_fragments_and_later_windows(tmp_path):
+    save(tmp_path, published(windows=2))
     assert notice.hook_output(tmp_path, 0) is None
     value = published()
     save(tmp_path, value)
     output = notice.hook_output(tmp_path, 0)
     assert output == dict(hookSpecificOutput=dict(hookEventName='PostToolUse',
-        additionalContext=notice.WORKER_PROGRESS_TEXT))
-    assert len(notice.WORKER_PROGRESS_TEXT.encode()) <= notice.MAX_NOTICE_BYTES
-    for attempt, seconds in ((0, 10.), (1, 20.), (2, 1000.), (999, 100000.)):
-        save(tmp_path, published(active_seconds=seconds))
+        additionalContext=notice.WORKER_CONTEXT_TEXT))
+    assert len(notice.WORKER_CONTEXT_TEXT.encode()) <= notice.MAX_NOTICE_BYTES
+    for attempt, windows in ((0, 3), (1, 4), (2, 10), (999, 1000)):
+        save(tmp_path, published(windows=windows))
         assert notice.hook_output(tmp_path, attempt) is None
     assert (tmp_path / 'work/.budget-notice-progress').is_file()
     assert set((tmp_path / 'work').iterdir()) == {
         tmp_path / 'work/budget-status.json', tmp_path / 'work/.budget-notice-progress'}
     next_w = tmp_path / 'next-logical-w'
     save(next_w, value)
-    assert notice.hook_output(next_w, 0)['hookSpecificOutput']['additionalContext'] == notice.WORKER_PROGRESS_TEXT
+    assert notice.hook_output(next_w, 0)['hookSpecificOutput']['additionalContext'] == notice.WORKER_CONTEXT_TEXT
     assert set(output) == {'hookSpecificOutput'}
     assert not {'decision', 'continue', 'toolResponse', 'updatedInput'} & set(output['hookSpecificOutput'])
 
@@ -94,10 +96,10 @@ def test_preserved_worker_without_fragment_policy_has_no_watchdog():
 
 @pytest.mark.parametrize('mutation', [
     dict(scope='authorization'), dict(target_state='within'),
-    dict(closeout_notices=dict(progress=dict(cause='shared', text=notice.WORKER_PROGRESS_TEXT))),
+    dict(closeout_notices=dict(progress=dict(cause='shared', text=notice.WORKER_CONTEXT_TEXT))),
     dict(closeout_notices=dict(progress=dict(cause='node', text='Grant new work'))),
     dict(closeout_notices=dict(progress=dict(cause='node', text='x' * 201))),
-    dict(closeout_notices=dict(progress=dict(cause='node', text=notice.WORKER_PROGRESS_TEXT, grant=True))),
+    dict(closeout_notices=dict(progress=dict(cause='node', text=notice.WORKER_CONTEXT_TEXT, grant=True))),
 ])
 def test_invalid_progress_projection_cannot_supply_instructions_or_authorization(tmp_path, mutation):
     value = published()
@@ -122,25 +124,23 @@ def test_oversized_projection_is_ignored_without_reading_other_records(tmp_path)
 
 
 def test_no_tool_boundary_cannot_interrupt_running_work_or_launch_a(tmp_path):
-    save(tmp_path, published(active_seconds=10.))
-    save(tmp_path, published(active_seconds=100.))
+    save(tmp_path, published(windows=3))
+    save(tmp_path, published(windows=100))
     assert list((tmp_path / 'work').iterdir()) == [tmp_path / 'work/budget-status.json']
     channel = notice.public_channel(dict(status='available', mechanism='codex_post_tool_use'))
     assert 'Next local tool boundary only' in channel['limitation']
     assert 'cannot be interrupted' in channel['limitation']
-    assert notice.hook_output(tmp_path, 0)['hookSpecificOutput']['additionalContext'] == notice.WORKER_PROGRESS_TEXT
-    assert 'independent A' in notice.WORKER_PROGRESS_TEXT and 'no replay' in notice.WORKER_PROGRESS_TEXT
+    assert notice.hook_output(tmp_path, 0)['hookSpecificOutput']['additionalContext'] == notice.WORKER_CONTEXT_TEXT
+    assert 'never replay unknown calls' in notice.WORKER_CONTEXT_TEXT
 
 
 def test_token_soft_target_does_not_mechanically_require_a_but_shared_notice_remains_bounded():
     alert = notice.closeout_notice(dict(role='W'), {}, dimension='token',
         target_reached=True, shared_reached=False, followup_tokens=dict(A=100))
-    assert 'Soft token targets alone do not require A' in alert['text']
-    assert 'continue useful work' in alert['text'] and 'Wrap up' not in alert['text']
+    assert alert is None
     shared = notice.closeout_notice(dict(role='W'), {}, dimension='token',
         target_reached=True, shared_reached=True)
     assert 'Shared token budget reached' in shared['text'] and 'No new work/replay' in shared['text']
-    assert len(alert['text'].encode()) <= notice.MAX_NOTICE_BYTES
     assert len(shared['text'].encode()) <= notice.MAX_NOTICE_BYTES
 
 
@@ -169,43 +169,58 @@ def test_logical_elapsed_duration_includes_original_consumption_after_a_new_frag
         duration = budget._node_duration(tmp_path, job, resumed, dict(ceilings, advance_seconds=1001.))
         assert duration == 10.
         assert notice.worker_progress_notice(job, resumed,
-            active_seconds=duration, target_seconds=10., fragment_enabled=True)['text'] == notice.WORKER_PROGRESS_TEXT
+            active_seconds=duration, target_seconds=10., fragment_enabled=True) is None
 
 
 @pytest.fixture
-def hint_producer(tmp_path, monkeypatch):
-    work = tmp_path / 'workspace'
-    (work / 'work').mkdir(parents=True)
-    state = dict(duration=9.999)
-    targets = dict(max_observed_tokens=1000, max_seconds=10.)
-    monkeypatch.setattr(protocol, 'require_current', lambda *args: None)
-    monkeypatch.setattr(c, 'settings', lambda *args: dict(worker_fragment_policy=dict(context='same_session')))
-    monkeypatch.setattr(c, 'workspace', lambda *args: work)
-    monkeypatch.setattr(budget, 'node_mode', lambda *args, **kwargs: 'soft')
-    monkeypatch.setattr(budget, 'publish_review', lambda *args, **kwargs: None)
-    monkeypatch.setattr(budget, 'node_limits', lambda *args, **kwargs: targets)
-    monkeypatch.setattr(budget, '_node_duration', lambda *args: state['duration'])
-    monkeypatch.setattr(budget, 'delivery_reserve', lambda *args: dict(tokens=0, seconds=0, steps=0))
-    monkeypatch.setattr(native, 'usage', lambda *args: dict(observed_tokens=14, unknown_steps=[]))
-    limits = dict(max_tokens=100000, max_seconds=100000., seconds_remaining=99999., advance_seconds=1000.)
-    meter = dict(input_tokens=10, output_tokens=4)
+def loaded_advice(tmp_path):
+    root = scene(tmp_path, tokens=1000, seconds=10., total_tokens=100000, total_seconds=100000.)
+    job = c.build_job(root, 1, 'W', [])
+    start_clock(root, 'Loaded advice observations only; no native process')
+    intent = dict(task_ref=c.record_ref(root / 'jobs/001.json'), budget_slice=budget.accept_node(root, job))
+    head = accepted_budget.accept_native(root, 1, execution.origin(root, 1), intent)
+    settings = dict(c.settings(root), worker_fragment_policy=checkpoint.policy(dict(
+        context='same_session', max_context_windows=2, context_handoff_version=2), frozen=True))
+    state = dict(duration=9.999, unknown=False, observed_tokens=14, settings=settings,
+        limits=budget.snapshot(root), meter=dict(input_tokens=10, cached_input_tokens=0, output_tokens=4),
+        observation=dict(context_windows=dict(coverage='live', windows_started=2),
+            context=dict(status='last_reported', current_window=True, observed_at=budget.clock_stamp()['at_unix'],
+                total_tokens=71, model_context_window=100)))
+    return root, job, intent, head, state
+
+
+@pytest.fixture
+def hint_producer(loaded_advice):
+    root, original_job, original, head, state = loaded_advice
+    work = c.workspace(root, 1)
     def publish(job=None, intent=None):
-        budget.write_node_hint(tmp_path, job or dict(role='W', step=1), intent or {},
-            limits, meter, observed=True)
-        return json.loads((work / 'work/budget-status.json').read_text())
+        current_job = job or original_job
+        current_intent = dict(original, **(intent or {}))
+        limits = dict(state['limits'], advance_seconds=original['budget_slice']['advance_seconds'] + state['duration'])
+        facts = dict(settings=state['settings'], head=head,
+            shared=dict(observed_tokens=14, accounted_tokens=14, unknown_steps=[]),
+            stamp=budget.clock_stamp(), task=original['task_ref'], scope=protocol.stage_scope(root, current_job),
+            native_attempt=dict(number=0, execution_key=original['task_ref']),
+            final_return=None, closeout_preparation_seconds=None)
+        budget.write_node_hint(root, current_job, current_intent, limits, state['meter'],
+            facts=facts, observed=True, context_observation=state['observation'])
+        return c.read(work / 'work/budget-status.json')
     return work, state, publish
 
 
-def test_producer_uses_loaded_logical_duration_and_current_soft_time_target(hint_producer):
+def test_producer_uses_loaded_duration_and_current_context_handoff(hint_producer):
     work, state, publish = hint_producer
     before = publish()
     assert 'progress' not in before.get('closeout_notices', {})
     state['duration'] = 10.
+    assert 'progress' not in publish().get('closeout_notices', {})
+    state['observation']['context_windows']['windows_started'] = 3
     reached = publish()
-    assert reached['closeout_notices']['progress']['text'] == notice.WORKER_PROGRESS_TEXT
-    assert reached['active_seconds'] == 10. and reached['targets']['max_seconds'] == 10.
-    assert 'Node token targets alone do not require A' in reached['instruction']
-    assert 'running model requests and hosted web cannot be interrupted' in reached['instruction']
+    assert reached['closeout_notices']['progress']['text'] == notice.WORKER_CONTEXT_TEXT
+    assert reached['active_seconds'] == 10. and reached['targets'] is None
+    assert reached['target_kind'] == 'context_window_only'
+    assert 'Missing occupancy remains unknown' in reached['instruction']
+    assert 'never replay' in reached['instruction']
     assert len((work / 'work/budget-status.json').read_bytes()) <= 4096
 
 
@@ -213,61 +228,49 @@ def test_producer_uses_loaded_logical_duration_and_current_soft_time_target(hint
 def test_new_special_scope_projection_drops_previous_ordinary_progress_hint(hint_producer, intent):
     work, state, publish = hint_producer
     state['duration'] = 10.
+    state['observation']['context_windows']['windows_started'] = 3
     assert 'progress' in publish()['closeout_notices']
     repair = publish(intent=intent)
     assert 'progress' not in repair.get('closeout_notices', {})
     output = notice.hook_output(work, 1)
-    assert notice.WORKER_PROGRESS_TEXT not in json.dumps(output)
+    assert notice.WORKER_CONTEXT_TEXT not in json.dumps(output)
     assert not (work / 'work/.budget-notice-progress').exists()
 
 
 @pytest.fixture
-def review_producer(tmp_path, monkeypatch):
-    record = tmp_path / 'record'
-    record.mkdir()
-    targets = dict(max_observed_tokens=1000, max_seconds=10.)
-    state = dict(duration=10., unknown=False, observed_tokens=14,
-        settings=dict(managed_admission_version=experiments.ADMISSION_VERSION,
-            worker_fragment_policy=dict(context='same_session'), max_tokens=100000, max_seconds=100000.),
-        limits=dict(max_tokens=100000, max_seconds=100000., seconds_remaining=99999., consumed_seconds=1.),
-        meter=dict(input_tokens=10, output_tokens=4))
-    job = dict(role='W', step=1, managed_admission_version=experiments.ADMISSION_VERSION)
-    monkeypatch.setattr(protocol, 'require_current', lambda *args: None)
-    monkeypatch.setattr(protocol, 'stage_scope', lambda *args: dict(stage_owner='original-task'))
-    monkeypatch.setattr(c, 'settings', lambda *args: state['settings'])
-    monkeypatch.setattr(c, 'record_ref', lambda *args: 'original-task')
-    monkeypatch.setattr(budget, 'node_mode', lambda *args: 'soft')
-    monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(boot_id='original-boot', at_unix=123., at_boottime=10.))
-    monkeypatch.setattr(budget, 'snapshot', lambda *args, **kwargs: state['limits'])
-    monkeypatch.setattr(budget, 'node_limits', lambda *args: targets)
-    monkeypatch.setattr(budget, '_node_duration', lambda *args: state['duration'])
-    monkeypatch.setattr(budget, 'delivery_reserve', lambda *args: dict(tokens=0, seconds=0, steps=0))
-    monkeypatch.setattr(budget, '_usage_unknown', lambda *args: state['unknown'])
-    monkeypatch.setattr(native, 'usage', lambda *args: dict(observed_tokens=state['observed_tokens']))
-    monkeypatch.setattr(execution, 'record', lambda *args: record)
-    monkeypatch.setattr(execution, 'records', lambda *args: [record])
-    monkeypatch.setattr(execution, 'identity', lambda *args: 'original-execution')
+def review_producer(loaded_advice):
+    root, job, original, head, state = loaded_advice
+    state['duration'] = 10.
+    state['observation']['context_windows']['windows_started'] = 3
     def publish(*, job_changes=None, intent_changes=None):
-        intent = dict(task_ref='original-task')
-        intent.update(intent_changes or {})
-        c.write(record / 'native-intent.json', intent)
-        c.write(record / 'usage.json', state['meter'])
+        intent = dict(original, **(intent_changes or {}))
+        if (intent_changes or {}).get('budget_slice') is not None:
+            intent['budget_slice'] = dict(original['budget_slice'], **intent_changes['budget_slice'])
         current_job = dict(job, **(job_changes or {}))
-        budget.publish_review(tmp_path, current_job, None, None, None, observed=False)
-        return c.read(tmp_path / 'host-runtime/experiment-control/001/review.json')
+        limits = dict(state['limits'], advance_seconds=original['budget_slice']['advance_seconds'] + state['duration'])
+        shared = dict(observed_tokens=state['observed_tokens'], accounted_tokens=state['observed_tokens'],
+            blocking_unknown_count=int(state['unknown']),
+            blocking_unknown_steps=[2] if state['unknown'] else [], unknown_steps=[2] if state['unknown'] else [])
+        facts = dict(settings=state['settings'], head=head, shared=shared, stamp=budget.clock_stamp(),
+            task=original['task_ref'], scope=protocol.stage_scope(root, current_job),
+            native_attempt=dict(number=0, execution_key=original['task_ref']))
+        budget.publish_review(root, current_job, intent, limits, state['meter'],
+            facts=facts, observed=True, context_observation=state['observation'])
+        return c.read(root / 'host-runtime/experiment-control/001/review.json')
     return state, publish
 
 
-def test_fresh_review_projection_enforces_independent_a_cadence_and_keeps_token_only_target_soft(review_producer):
+def test_fresh_review_projection_uses_context_cadence_and_keeps_token_only_target_soft(review_producer):
     state, publish = review_producer
-    assert publish()['reason'] == 'worker_progress_review_due'
+    assert publish()['reason'] == 'worker_context_review_due'
     state['duration'] = 9.999
+    state['observation']['context_windows']['windows_started'] = 2
     assert publish()['reason'] is None
     state['meter'] = dict(input_tokens=1000, output_tokens=0)
-    assert publish()['reason'] == 'target_tokens_reached'
+    assert publish()['reason'] is None
     state['settings']['worker_fragment_policy'] = None
     state['duration'] = 10.
-    assert publish()['reason'] == 'target_time_reached'
+    assert publish()['reason'] is None
 
 
 def test_shared_limits_and_unknown_usage_keep_priority_over_worker_review_cadence(review_producer):
@@ -289,14 +292,41 @@ def test_shared_limits_and_unknown_usage_keep_priority_over_worker_review_cadenc
     ({}, dict(continuation_kind='author_closeout')),
     ({}, dict(budget_slice=dict(final_return='original'))),
 ])
-def test_special_stage_scopes_keep_original_soft_time_review_reason(review_producer, job_changes, intent_changes):
-    state, publish = review_producer
-    assert publish(job_changes=job_changes, intent_changes=intent_changes)['reason'] == 'target_time_reached'
+def test_special_stage_scopes_keep_finite_target_advice_and_exclude_ordinary_context_cadence(job_changes, intent_changes):
+    # Scope reduction consumes supplied facts; no altered job is presented as
+    # the original frozen job to the instance or acceptance owners.
+    job = dict(dict(role='W'), **job_changes)
+    assert notice.worker_progress_due(job, intent_changes, active_seconds=10., target_seconds=10.,
+        fragment_enabled=True, max_context_windows=2,
+        context_observation=dict(context_windows=dict(coverage='live', windows_started=3))) is False
+    alert = notice.closeout_notice(job, intent_changes, dimension='time',
+        target_reached=True, shared_reached=False)
+    assert alert is not None and alert['cause'] == 'node'
+    assert len(alert['text'].encode()) <= notice.MAX_NOTICE_BYTES
+
+
+@pytest.mark.parametrize('role', ['H', 'A', 'E'])
+def test_real_non_worker_scope_retains_finite_time_target_review(tmp_path, role):
+    root = scene(tmp_path, tokens=1000, seconds=10., total_tokens=100000, total_seconds=100000.)
+    job = c.build_job(root, 1, role, [])
+    start_clock(root, 'Accepted non-worker advice fixture; no native process')
+    intent = dict(task_ref=c.record_ref(root / 'jobs/001.json'), budget_slice=budget.accept_node(root, job))
+    head = accepted_budget.accept_native(root, 1, execution.origin(root, 1), intent)
+    meter = dict(input_tokens=10, cached_input_tokens=0, output_tokens=4)
+    shared = accepted_budget.usage_from_facts(head, job_rows=accepted_budget.load_usage_rows(head),
+        current_native=dict(record=head['current_native']['record'], meter=meter, metering=None,
+            outcome_present=False, interrupted=False))
+    facts = dict(settings=c.settings(root), head=head, shared=shared, stamp=budget.clock_stamp(),
+        task=intent['task_ref'], scope=protocol.stage_scope(root, job),
+        native_attempt=dict(number=0, execution_key=intent['task_ref']))
+    limits = dict(budget.snapshot(root), advance_seconds=intent['budget_slice']['advance_seconds'] + 10.)
+    budget.publish_review(root, job, intent, limits, meter, facts=facts, observed=True)
+    assert c.read(root / 'host-runtime/experiment-control/001/review.json')['reason'] == 'target_time_reached'
 
 
 @pytest.mark.parametrize('intent', [dict(output_repair=True), dict(work_repair=True)])
 def test_repaired_worker_checkpoint_retains_original_independent_review_cadence(review_producer, intent):
     state, publish = review_producer
-    assert publish(intent_changes=intent)['reason'] == 'worker_progress_review_due'
+    assert publish(intent_changes=intent)['reason'] == 'worker_context_review_due'
     assert notice.worker_progress_notice(dict(role='W'), intent,
         active_seconds=10., target_seconds=10., fragment_enabled=True) is None

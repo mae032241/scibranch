@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, native, search
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, native, protocol, search
 from test_history_handoff import finish
 from test_worker_resume import wait_runner
 
@@ -61,6 +61,7 @@ def start_clock(root, reason):
 
 
 @pytest.mark.parametrize('role','HWAE')
+@pytest.mark.process_e2e
 def test_each_role_can_cross_targets_and_seal_its_original_conclusion(tmp_path,role):
     root=scene(tmp_path)
     step=1 if role=='H' else 2
@@ -79,6 +80,7 @@ def test_each_role_can_cross_targets_and_seal_its_original_conclusion(tmp_path,r
     assert 'no per-request budget admission' in prompt and 'Unknown usage is not zero' in prompt
 
 
+@pytest.mark.process_e2e
 def test_soft_w_old_search_threshold_does_not_kill_but_identity_still_does(tmp_path):
     limits=dict(max_w_seconds=.05,max_w_observed_tokens=10,max_requested_repairs=2)
     root=scene(tmp_path,search_policy=limits)
@@ -89,6 +91,7 @@ def test_soft_w_old_search_threshold_does_not_kill_but_identity_still_does(tmp_p
     with pytest.raises(ValueError):budget.stop_node(root,job,intent,budget.snapshot(root),dict(input_tokens=15,output_tokens=0))
 
 
+@pytest.mark.process_e2e
 def test_known_failure_above_soft_target_resumes_same_node_without_refund(tmp_path):
     root=scene(tmp_path,mode='known_failure',resume=True)
     assert controller.run(root)['status']=='native_stopped';first=wait_runner(root)
@@ -101,6 +104,7 @@ def test_known_failure_above_soft_target_resumes_same_node_without_refund(tmp_pa
     assert 'zero is not a new grant' in (c.workspace(root,1)/'work/prompt.txt').read_text()
 
 
+@pytest.mark.process_e2e
 def test_unknown_usage_never_becomes_a_soft_resume_grant(tmp_path):
     root=scene(tmp_path,mode='no_usage',resume=True)
     assert controller.run(root)['status']!='wait';first=wait_runner(root)
@@ -114,6 +118,14 @@ def test_hint_symlink_does_not_write_outside_workspace(tmp_path):
     outside=tmp_path/'untouched';outside.write_text('Original outside file')
     path=c.workspace(root,1)/'work/budget-status.json';path.symlink_to(outside)
     intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=anchor)
-    c.write(execution.record(root,1)/'native-intent.json',intent)
-    budget.write_node_hint(root,job,intent,budget.snapshot(root),dict(input_tokens=0,output_tokens=0),observed=False)
+    head=accepted_budget.accept_native(root,1,execution.origin(root,1),intent)
+    shared=accepted_budget.usage_from_facts(head,job_rows=accepted_budget.load_usage_rows(head),
+        current_native=dict(record=head['current_native']['record'],meter=None,metering=None,
+            outcome_present=False,interrupted=False))
+    facts=dict(settings=c.settings(root),head=head,shared=shared,stamp=budget.clock_stamp(),
+        task=intent['task_ref'],scope=protocol.stage_scope(root,job),
+        native_attempt=dict(number=0,execution_key=intent['task_ref']),
+        final_return=None,closeout_preparation_seconds=None)
+    budget.write_node_hint(root,job,intent,budget.snapshot(root),dict(input_tokens=0,output_tokens=0),
+        facts=facts,observed=False)
     assert outside.read_text()=='Original outside file' and path.is_symlink()

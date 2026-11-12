@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import accepted_budget, budget, cli, contracts as c, controller, execution, experiments, native
+from scidiscovery.research_loop import accepted_budget, budget, checkpoint, cli, contracts as c, controller, execution, experiments, native, protocol
 from scidiscovery.research_loop.protocol import CURRENT
 from test_history_handoff import finish
 from test_soft_node_budget import FAKE, scene, start_clock
@@ -89,50 +89,60 @@ def test_cli_and_prepare_cannot_create_hard_token_nodes(tmp_path):
     assert c.settings(root)['node_budget_mode'] == 'soft'
 
 
-def test_w_token_crossing_requests_review_without_stopping_original_node(tmp_path):
+def test_w_token_crossing_keeps_review_optional_without_stopping_original_node(tmp_path):
     root = scene(tmp_path, tokens=10, seconds=20, search_policy=None)
     finish(root, 1, 'H', [], action='experiment')
     job = c.build_job(root, 2, 'W', [1])
     start_clock(root, 'Original W reaches soft token target')
     record = execution.record(root, 2)
     intent = dict(task_ref=c.record_ref(root / 'jobs/002.json'), budget_slice=budget.accept_node(root, job))
-    c.write(record / 'native-intent.json', intent)
     accepted_budget.accept_native(root, 2, record, intent)
     meter = dict(input_tokens=12, cached_input_tokens=5, output_tokens=3)
     c.write(record / 'usage.json', meter)
     admission = budget.review_configuration(root, job)
     projection = c.read(Path(admission['directory']) / 'review.json')
     config = dict(admission=admission, scope=projection['scope'], native_attempt=projection['native_attempt'])
-    assert experiments.review_status(config)['reason'] == 'target_tokens_reached'
-    assert experiments.review_status(config)['requested'] is True
-    assert experiments.review_status(config)['enforced'] is False
+    assert experiments.review_status(config)['reason'] is None
+    assert experiments.review_status(config)['requested'] is False
+    assert projection['targets'] is None
+    assert experiments.review_status(config)['enforced'] is True  # Host channel remains enforced even with no review due.
     assert budget.stop_node(root, job, intent, budget.snapshot(root), meter) is None
 
 
 @pytest.mark.parametrize('coverage,windows,ratio,expected',[
-    ('live',1,.99,None),('live',2,.85,'worker_context_review_due'),
-    ('unknown',1,.1,'worker_context_observation_unknown')])
+    ('live',1,.99,None),('live',3,.85,'worker_context_review_due'),
+    ('unknown',1,.1,None)])
 def test_context_policy_replaces_w_time_and_token_review_but_preserves_shared_budget(
-        tmp_path, monkeypatch, coverage, windows, ratio, expected):
+        tmp_path, coverage, windows, ratio, expected):
     root = scene(tmp_path, tokens=10, seconds=20, search_policy=None)
     finish(root, 1, 'H', [], action='experiment')
     job = c.build_job(root, 2, 'W', [1])
     start_clock(root, 'Observe W context cadence beyond the legacy time target')
     record = execution.record(root, 2)
     intent = dict(task_ref=c.record_ref(root / 'jobs/002.json'), budget_slice=budget.accept_node(root, job))
-    c.write(record / 'native-intent.json', intent)
     accepted_budget.accept_native(root, 2, record, intent)
     meter = dict(input_tokens=12, cached_input_tokens=5, output_tokens=3)
     c.write(record / 'usage.json', meter)
     c.write(record / 'usage-observation.json', dict(context_windows=dict(
-        coverage=coverage, windows_started=windows,peak_ratio=ratio), context=dict(ratio=ratio)))
-    original_settings = c.settings
-    def context_settings(*args, **kwargs):
-        return dict(original_settings(*args, **kwargs),
-            worker_fragment_policy=dict(context='same_session', max_context_windows=2))
-    monkeypatch.setattr(c, 'settings', context_settings)
-    monkeypatch.setattr(budget, '_node_duration', lambda *args, **kwargs: 901.)
-    admission = budget.review_configuration(root, job)
+        coverage=coverage, windows_started=windows), context=dict(status='last_reported',
+        total_tokens=int(ratio * 100), model_context_window=100, current_window=True,
+        observed_at=budget.clock_stamp()['at_unix'])))
+    head = accepted_budget.read(root)
+    shared = accepted_budget.usage_from_facts(head, job_rows=accepted_budget.load_usage_rows(head),
+        current_native=dict(record=head['current_native']['record'], meter=meter,
+            metering=None, outcome_present=False, interrupted=False))
+    facts = dict(settings=dict(c.settings(root),
+            worker_fragment_policy=checkpoint.policy(dict(context='same_session',
+                max_context_windows=2, context_handoff_version=2), frozen=True)),
+        head=head, shared=shared, stamp=budget.clock_stamp(), task=intent['task_ref'],
+        scope=protocol.stage_scope(root, job),
+        native_attempt=dict(number=0, execution_key=intent['task_ref']))
+    limits = dict(budget.snapshot(root), advance_seconds=intent['budget_slice']['advance_seconds'] + 901.)
+    observation = c.read(record / 'usage-observation.json')
+    budget.publish_review(root, job, intent, limits, meter, facts=facts, observed=True,
+        context_observation=observation)
+    admission = dict(version=experiments.ADMISSION_VERSION, mode='soft',
+        directory=str(root / 'host-runtime/experiment-control/002'), stage_anchor=intent['task_ref'])
     projection = c.read(Path(admission['directory']) / 'review.json')
     config = dict(admission=admission, scope=projection['scope'], native_attempt=projection['native_attempt'])
     review = experiments.review_status(config)
@@ -142,19 +152,24 @@ def test_context_policy_replaces_w_time_and_token_review_but_preserves_shared_bu
     assert budget.stop_node(root, job, intent, budget.snapshot(root), meter) is None
 
 
-def test_author_token_hint_is_soft_while_finite_author_time_stays_bounded(tmp_path, monkeypatch):
+def test_author_token_hint_is_soft_while_finite_author_time_stays_bounded(tmp_path):
     root = scene(tmp_path, tokens=1000, seconds=20, search_policy=None)
     job = c.build_job(root, 1, 'H', [])
     start_clock(root, 'Verified author allowance advisory projection')
     intent = dict(task_ref=c.record_ref(root / 'jobs/001.json'), budget_slice=budget.accept_node(root, job),
                   continuation_kind='author_closeout')
     intent['budget_slice'].update(previous_tokens=50, previous_seconds=2.)
-    c.write(execution.record(root, 1) / 'native-intent.json', intent)
-    monkeypatch.setattr(budget, 'publish_review', lambda *args, **kwargs: None)
-    monkeypatch.setattr(budget, '_node_duration', lambda *args: 7.)
-    monkeypatch.setattr(native, 'usage', lambda *args: dict(observed_tokens=65, accounted_tokens=65, unknown_steps=[]))
-    budget.write_node_hint(root, job, intent, budget.snapshot(root),
-                           dict(input_tokens=12, cached_input_tokens=5, output_tokens=3), observed=True,
+    # A pure advice cut supplies the prior original's consumption explicitly;
+    # it does not accept or launch an author continuation.
+    head = accepted_budget.read(root)
+    facts = dict(settings=c.settings(root), head=head,
+        shared=dict(observed_tokens=65, accounted_tokens=65, unknown_steps=[]),
+        stamp=budget.clock_stamp(), task=intent['task_ref'], scope=protocol.stage_scope(root, job),
+        native_attempt=dict(number=0, execution_key=intent['task_ref']),
+        final_return=None, closeout_preparation_seconds=None)
+    limits = dict(budget.snapshot(root), advance_seconds=intent['budget_slice']['advance_seconds'] + 5.)
+    budget.write_node_hint(root, job, intent, limits,
+                           dict(input_tokens=12, cached_input_tokens=5, output_tokens=3), facts=facts, observed=True,
                            author_limits=dict(max_observed_tokens=10, max_seconds=8))
     hint = c.read(c.workspace(root, 1) / 'work/budget-status.json')
     assert hint['target_kind'] == 'soft_target' and hint['target_state'] == 'reached'

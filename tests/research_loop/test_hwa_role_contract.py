@@ -19,9 +19,13 @@ def test_prepared_ordinary_assessment_answers_w_without_global_planning(tmp_path
     original=(root/'jobs/003.json').read_bytes()
     contract=job['role_purpose_instruction']
     assert task['role_contract']==contract==guidance.role_contract(job)
-    assert 'meaningful judgment' in contract and 'deliver/finish/continue_w' in contract
-    assert 'decision_request{decision:candidate|mechanism|compliance,question,change_criterion}' in contract
-    assert 'mechanical checks/W' in contract
+    assert job['research_strategy_version']==3 and job['advisory_scope_version']==1
+    assert guidance.advisory_assessment(job)
+    assert 'Return continue_w with decision_request=null' in contract
+    assert 'W judges advice and chooses' in contract
+    assert 'never a binding work order or finalization request' in contract
+    assert 'delivery_selection' not in task
+    assert c.result_schema('A',**c.response_options(job))['properties']['next_action']['enum']==['continue_w']
     assert not {'search_review','portfolio_review','final_coverage'} & set(job['scientific_response_fields'])
     assert not {'breadth_response','portfolio_response','final_coverage_response','portfolio_assessment'} & set(task)
     prompt,instruction,_=native.render_scientific_request(job,task,{},backend_name=backend_name,
@@ -42,7 +46,7 @@ def test_prepared_ordinary_assessment_answers_w_without_global_planning(tmp_path
     ('protected_closeout', dict(purpose='closeout',final_only=True)),
 ])
 @pytest.mark.parametrize('backend_name', ['codex', 'protocol'])
-def test_all_a_modes_retain_high_level_scope_and_their_own_authority(scope, flags, backend_name):
+def test_bare_a_modes_retain_their_distinct_scope_and_frozen_custom_literal(scope, flags, backend_name):
     literal='Preserve this exact custom scientific assessment literal.'
     job=dict(role='A',handoff_protocol=c.HANDOFF_PROTOCOL,native_role_instruction=literal,**flags)
     contract=guidance.role_contract(job)
@@ -53,10 +57,12 @@ def test_all_a_modes_retain_high_level_scope_and_their_own_authority(scope, flag
     prompt,instruction,_=native.render_scientific_request(job,task,{},backend_name=backend_name,
         instruction_transport='prompt')
     assert guidance.purpose(job)==scope
-    assert guidance.ASSESSMENT_SCOPE in contract
-    for text in ('file identity', 'interfaces', 'metric checks', 'exact originals/qualification/limits',
-            'hidden scores', 'unique generator', 'perfect certainty'):
-        assert text in contract
+    assert not guidance.advisory_assessment(job)  # Bare rendering is not a prepared ordinary-A contract.
+    if scope!='protected_closeout':
+        assert guidance.ASSESSMENT_SCOPE in contract
+        for text in ('file identity', 'interfaces', 'metric checks', 'exact originals/qualification/limits',
+                'hidden scores', 'unique generator', 'perfect certainty'):
+            assert text in contract
     if scope=='worker_consultation':
         assert 'meaningful judgment' in contract and 'then return to W' in contract
         assert 'candidate choice' in contract and 'deliver/finish/continue_w' not in contract
@@ -64,10 +70,13 @@ def test_all_a_modes_retain_high_level_scope_and_their_own_authority(scope, flag
         assert 'exact independent subject' in task['role_contract']
         assert contract not in instruction
         assert 'Do not edit the subject' in prompt
-    elif scope in {'closeout','protected_closeout'}:
+    elif scope=='protected_closeout':
+        assert 'No new work' in contract and 'Exact deliver authorizes' in contract
+    elif scope=='closeout':
         assert 'no new exploration' in contract
     else:
-        assert 'deliver/finish/continue_w' in contract
+        assert 'continue_w with decision_request=null' in contract
+        assert 'W chooses methods' in contract
     if scope!='formal_review':
         assert instruction.startswith(literal+'\n')
         assert prompt.count(literal)==1
@@ -77,15 +86,18 @@ def test_worker_owns_mechanism_handoff_and_invokes_h_a_only_when_useful():
     job=dict(role='W',handoff_protocol=c.HANDOFF_PROTOCOL,
         worker_fragment_policy=dict(context='same_session'))
     task=c.response_instructions(job)
-    assert 'Handoff freezes new/revised mechanisms without A' in guidance.DEFAULT['W']
-    assert 'Batches/progress/windows alone do not require A' in task['role_contract']
-    assert 'decision=request A assessment' in task['stage_response']
+    assert 'Own research/methods' in guidance.DEFAULT['W']
+    assert 'judge H/A advice against evidence' in guidance.DEFAULT['W']
+    assert 'W chooses E' in task['role_contract']
+    assert 'revise_h=H advice;review=A advice' in task['stage_response']
+    assert 'decision=pre-delivery Final A' in task['stage_response']
+    assert 'Advice returns W; no grant' in task['stage_response']
     assert 'decision=formal A' not in json.dumps(task)
-    assert 'consult H when useful' in guidance.DEFAULT['H']
+    assert "Answer W's concrete question" in guidance.DEFAULT['H']
 
 
 @pytest.mark.parametrize('policy', [{}, dict(decision_contract_version=None), dict(decision_contract_version=1)])
-def test_ordinary_a_always_accepts_its_required_decision_request(policy):
+def test_bare_a_exposes_required_decision_request_without_prepared_advisory_scope(policy):
     job=dict(role='A')
     fields=c.response_fields(job,policy)
     assert fields==['decision_request']

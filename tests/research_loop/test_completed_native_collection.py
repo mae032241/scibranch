@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import backends, contracts as c, continuation, controller, execution, native, native_recovery
+from scidiscovery.research_loop import accepted_budget, backends, contracts as c, continuation, controller, execution, native, native_recovery
 from scidiscovery.research_loop.output_repair import OutputRepairRequired
 
 
@@ -101,11 +101,15 @@ def test_resume_collects_original_and_seals_without_native_or_home_access(tmp_pa
     c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1)
     retained(record)
-    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_native(root, 1, record,
+        dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
     identity = c.record_ref(root / 'jobs/001.json')
     for name, pid in [('native-process.json', 999999998), ('runner-process.json', 999999999)]:
         c.write(record / name, dict(task_ref=identity, pid=pid, pgid=pid, sid=pid,
-            start_ticks=1, boot_id='retained-original-boot'))
+            ppid=1, start_ticks=1, boot_id='retained-original-boot'))
+    accepted_budget.accept_terminal(root, 1, record, meter=METER,
+        unknown=1 in c.native_outcome(record).get('usage', {}).get('unknown_steps', []),
+        metering=c.native_outcome(record)['metering'])
     original = {record / name: (record / name).read_bytes() for name in
         ('native-intent.json', 'native-outcome.json', 'usage.json', 'native.jsonl', 'result.pending.json')}
     def unavailable(*args, **kwargs):
@@ -136,7 +140,8 @@ def test_retained_completed_invalid_output_keeps_existing_repair_binding(tmp_pat
     record = execution.origin(root, 1)
     payload = {key: value for key, value in PAYLOAD.items() if key != 'summary'}
     retained(record, payload=payload)
-    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_native(root, 1, record,
+        dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
     identity = c.record_ref(root / 'jobs/001.json')
     for name, pid in [('native-process.json', 999999998), ('runner-process.json', 999999999)]:
         c.write(record / name, dict(task_ref=identity, pid=pid, pgid=pid, sid=pid,
@@ -147,11 +152,15 @@ def test_retained_completed_invalid_output_keeps_existing_repair_binding(tmp_pat
     outcome['budget_slice'] = dict(role='H', dispatches=1, observed_tokens=120,
         limits=dict(max_observed_tokens=1000, max_seconds=60), usage_observed=True)
     c.write(record / 'native-outcome.json', outcome)
+    accepted_budget.accept_terminal(root, 1, record, meter=METER,
+        unknown=1 in c.native_outcome(record).get('usage', {}).get('unknown_steps', []),
+        metering=c.native_outcome(record)['metering'])
     frozen = {record / name: (record / name).read_bytes() for name in
         ('native-outcome.json', 'usage.json', 'native.jsonl', 'result.pending.json')}
+    inventory = c.accept_current_inventory(root, 1)
     with pytest.raises(OutputRepairRequired):
-        c.seal_result(root, 1)
-    request = continuation.output_request(root, 1, record)
+        c.seal_result_from_inventory(root, 1, inventory=inventory)
+    request = continuation.output_request(root, 1, record, inventory=inventory)
     assert request['code'] == 'invalid_fields'
     assert request['source_attempt'] == 0
     assert request['outcome_ref'] == c.record_ref(record / 'native-outcome.json')
@@ -161,10 +170,9 @@ def test_retained_completed_invalid_output_keeps_existing_repair_binding(tmp_pat
         active.setattr(continuation.runtime, 'process_matches', lambda *args: True)
         with pytest.raises(continuation.ResumeUnavailable, match='worker_resume_original_running'):
             continuation._eligible_original(root, 1, [record], successful=True)
-    intent = dict(attempt=1, output_repair=request)
-    accepted = record / 'continuations/001/native-intent.json'
-    accepted.parent.mkdir(parents=True)
-    c.write(accepted, intent)
+    intent = dict(attempt=1, output_repair=request, task_ref=identity,
+        root_intent_ref=c.record_ref(record / 'native-intent.json'))
+    accepted_budget.accept_native(root, 1, record / 'continuations/001', intent)
     assert continuation._accepted_repair_request(root, 1, intent, record) == request
     assert not (record / 'result-identity.json').exists()
     assert all(path.read_bytes() == value for path, value in frozen.items())
@@ -184,12 +192,16 @@ def test_recovered_sealed_original_supports_fork_source_consumers(tmp_path, corr
     c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1)
     retained(record)
-    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_native(root, 1, record,
+        dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
     identity = c.record_ref(root / 'jobs/001.json')
     for name, pid in [('native-process.json', 999999998), ('runner-process.json', 999999999)]:
         c.write(record / name, dict(task_ref=identity, pid=pid, pgid=pid, sid=pid,
             ppid=1, start_ticks=1, boot_id='retained-original-boot'))
     (record / 'runner.lock').touch()
+    accepted_budget.accept_terminal(root, 1, record, meter=METER,
+        unknown=1 in c.native_outcome(record).get('usage', {}).get('unknown_steps', []),
+        metering=c.native_outcome(record)['metering'])
     original_bytes = {name: (record / name).read_bytes() for name in
         ('native-intent.json', 'native-outcome.json', 'usage.json', 'native.jsonl', 'result.pending.json')}
     c.seal_result(root, 1)
@@ -245,7 +257,11 @@ def test_status_projects_original_completion_without_changing_receipt(tmp_path, 
     c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1)
     retained(record)
-    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_native(root, 1, record,
+        dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_terminal(root, 1, record, meter=METER,
+        unknown=1 in c.native_outcome(record).get('usage', {}).get('unknown_steps', []),
+        metering=c.native_outcome(record)['metering'])
     original = (record / 'native-outcome.json').read_bytes()
     node = instance_control.status(root, live_feedback=False)['nodes'][0]
     assert node['stop_reason'] is None and node['returncode'] == 0
@@ -271,7 +287,13 @@ def test_completed_worker_keeps_original_unresolved_execution_wait(tmp_path, mon
     retained(record, payload=dict(summary='The original execution remains unresolved.',
         scientific_result='No terminal scientific result has been consumed.',
         limitations=['Await the same accepted execution.'], stage_intent='review'))
-    (record / 'science-output.json').hardlink_to(record / 'result.pending.json')
+    accepted_budget.accept_native(root, 1, record,
+        dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json')))
+    identity = c.record_ref(root / 'jobs/001.json')
+    for name, pid in [('native-process.json', 999999998), ('runner-process.json', 999999999)]:
+        c.write(record / name, dict(task_ref=identity, pid=pid, pgid=pid, sid=pid,
+            ppid=1, start_ticks=1, boot_id='retained-original-boot'))
+    inventory = c.accept_current_inventory(root, 1)
     waiting = dict(calls=[dict(call_id='original-unresolved-call')])
     c.write(record / managed_wait.NAME, waiting)
     original = {path: path.read_bytes() for path in
@@ -283,6 +305,6 @@ def test_completed_worker_keeps_original_unresolved_execution_wait(tmp_path, mon
     monkeypatch.setattr(managed_wait, 'validate', validate)
     monkeypatch.setattr(managed_wait.e, 'load', lambda *_: pytest.fail('The existing waiting checkpoint must not query or submit another call'))
     with pytest.raises(managed_wait.ExecutionWaiting):
-        managed_wait.before_seal(root, job, record)
+        managed_wait.before_seal(root, job, record, inventory=inventory)
     assert checked == [(root, job, record)]
     assert all(path.read_bytes() == value for path, value in original.items())

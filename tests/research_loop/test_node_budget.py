@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, execution, native, runtime, search
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, native, profiles, runtime, search
 from scidiscovery.research_loop.cli import status
 from scidiscovery.research_loop.protocol import CURRENT
 from test_history_handoff import finish
@@ -124,6 +124,7 @@ def test_valid_policy_is_explicit_and_does_not_mutate_caller():
 
 
 
+@pytest.mark.process_e2e
 def test_cached_input_is_not_a_second_charge_in_actual_native_guard(tmp_path):
     root = instance(tmp_path, limits=policy(tokens=110), observed=(100, 99, 1))
     result = controller.run(root)
@@ -175,6 +176,7 @@ def test_changed_accepted_identity_cannot_refund_or_launch(tmp_path, field):
 
 
 @pytest.mark.parametrize('node_tokens,search_tokens', [(50, 100), (100, 50)])
+@pytest.mark.process_e2e
 def test_new_w_uses_smaller_search_or_node_target_with_one_anchor(tmp_path, node_tokens, search_tokens):
     search_limits = dict(search.DEFAULT_POLICY, max_w_observed_tokens=search_tokens)
     root = instance(tmp_path, limits=policy(tokens=node_tokens),
@@ -195,6 +197,7 @@ def test_new_w_uses_smaller_search_or_node_target_with_one_anchor(tmp_path, node
     assert search.project(root, 3)['accepted_slices'][0]['meter']['observed_tokens'] == 75
 
 
+@pytest.mark.process_e2e
 def test_successful_w_statistics_reuse_same_budget_anchor(tmp_path):
     root = instance(tmp_path, limits=policy(tokens=100), search_policy=search.DEFAULT_POLICY)
     target(root, 'W', with_search=True)
@@ -214,6 +217,7 @@ def test_successful_w_statistics_reuse_same_budget_anchor(tmp_path):
 
 
 @pytest.mark.parametrize('dimension', ['tokens', 'seconds'])
+@pytest.mark.process_e2e
 def test_controller_uses_actual_tokens_and_retains_finite_time_window(tmp_path, dimension):
     root = instance(tmp_path, limits=policy(tokens=100, seconds=10),
                     max_tokens=99 if dimension == 'tokens' else 1000,
@@ -238,8 +242,8 @@ def test_amend_rejects_original_n6_intent_without_terminal_outcome(tmp_path):
     budget.transition(root, 'advance', 'original accepted node')
     job = c.build_job(root, 1, 'H', [])
     record = c.host_record(c.workspace(root, 1))
-    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json'),
-                                              budget_slice=budget.accept_node(root, job)))
+    accepted_budget.accept_native(root, 1, record,
+        dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json'), budget_slice=budget.accept_node(root, job)))
     paths = [root / 'settings.json', record / 'native-intent.json',
              *sorted((root / 'control-ledger').glob('*.json'))]
     preserved = {path: path.read_bytes() for path in paths}
@@ -250,6 +254,7 @@ def test_amend_rejects_original_n6_intent_without_terminal_outcome(tmp_path):
     assert not (record / 'native-outcome.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_amend_after_success_preserves_old_slice_report_and_consumption(tmp_path):
     root = instance(tmp_path, limits=policy())
     assert controller.run(root)['status'] == 'wait'
@@ -281,8 +286,9 @@ def test_actual_popen_rechecks_late_budget_before_native_submission(tmp_path, mo
     budget.transition(root, 'advance', 'accepted original node')
     job = c.build_job(root, 1, 'H', [])
     record = c.host_record(c.workspace(root, 1))
-    c.write(record / 'native-intent.json', dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json'),
-                                              budget_slice=budget.accept_node(root, job)))
+    accepted_budget.accept_native(root, 1, record,
+        dict(step=1, task_ref=c.record_ref(root / 'jobs/001.json'), budget_slice=budget.accept_node(root, job),
+            **profiles.binding(c.settings(root, job), job)))
     now[0] = 160.  # The original intent is retained; no shared active time remains.
     monkeypatch.setattr(native.subprocess, 'Popen', lambda *a, **kw: pytest.fail('Late budget must block native Popen'))
     native.run_native(root, 1)
@@ -341,6 +347,7 @@ def test_controller_restart_rejoins_same_slice_and_counts_one_dispatch(tmp_path)
 
 
 @pytest.mark.parametrize('legacy_w_guard', [False, True])
+@pytest.mark.process_e2e
 def test_absent_node_policy_keeps_current_protocol_and_original_w_transport(tmp_path, legacy_w_guard):
     search_limits = dict(search.DEFAULT_POLICY, max_w_observed_tokens=50) if legacy_w_guard else None
     root = instance(tmp_path, limits=None, mode='normal',
@@ -408,13 +415,13 @@ def test_admission_reuses_one_local_observation_and_next_boundary_reads_mutation
     root = instance(tmp_path, limits=policy(tokens=1000), max_tokens=100)
     job = c.build_job(root, 1, 'H', [])
     record = execution.origin(root, 1)
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_native(root, 1, record, dict(task_ref=c.record_ref(root / 'jobs/001.json')))
     reads = []
-    original = budget._read_events
+    original = budget._events
     def observed(*args, **kwargs):
         reads.append(True)
         return original(*args, **kwargs)
-    monkeypatch.setattr(budget, '_read_events', observed)
+    monkeypatch.setattr(budget, '_events', observed)
     # Missing billing coverage leaves an observed lower bound; it is not an
     # execution-completion fact and cannot turn into a guessed token charge.
     assert budget.node_admission(root, job) is None
@@ -433,14 +440,22 @@ def test_admission_reuses_one_local_observation_and_next_boundary_reads_mutation
     c.write(record / 'native-outcome.json', dict(returncode=0, stop_reason=None,
         native_backend='codex', cleanup='observed_group_cleaned',
         metering=dict(source='turn.completed', coverage='unknown', reason='billing_unreported')))
-    assert budget.native_completion_known(c.read(record / 'native-outcome.json'), c.settings(root))
+    outcome = c.read(record / 'native-outcome.json')
+    assert budget.native_completion_known(outcome, c.settings(root))
+    accepted_budget.accept_terminal(root, 1, record,
+        meter=c.read(record / 'usage.json'), unknown=True, metering=outcome['metering'])
     assert not budget.execution_blocked(root)
     assert native.usage(root)['unknown_steps'] == [1]
     budget._amend_locked(root, max_tokens=101, authorization_note='One more reported token')
     reads.clear()
     assert budget.node_admission(root, job) is None
     assert len(reads) == 1
-    c.write(record / 'usage.json', dict(input_tokens=91, cached_input_tokens=80, output_tokens=10))
+    original_meter = (record / 'usage.json').read_bytes()
+    with pytest.raises(ValueError, match='Closed native accounting changed'):
+        accepted_budget.accept_terminal(root, 1, record,
+            meter=dict(input_tokens=91, cached_input_tokens=80, output_tokens=10), unknown=True)
+    assert (record / 'usage.json').read_bytes() == original_meter
+    budget._amend_locked(root, max_tokens=100, authorization_note='Restore the explicit consumed token ceiling')
     assert budget.node_admission(root, job) == 'node_budget_unavailable_tokens'
 
 
