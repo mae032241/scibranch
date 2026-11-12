@@ -3,10 +3,10 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import (budget, contracts as c, controller,
+from scidiscovery.research_loop import (accepted_budget, budget, contracts as c, controller,
     execution, experiment_client, experiments, feedback, native, search)
 from execution_fixtures import execution_registry
-from test_final_a_completion import LAUNCHER
+from test_final_a_completion import LAUNCHER, node_hint_facts
 from test_history_handoff import finish
 
 
@@ -26,11 +26,12 @@ def instance(tmp_path, *, remaining=211692, mode='soft', action='experiment'):
             inflight_tokens=50000,cleanup_seconds=30,submit_seconds=0,confirm_seconds=0,adapter=None))
     plan=dict(scope='Compare adaptation with the retained controls',
         commitments=[dict(label='Adaptation',minimal_test='Compare the paired recovery measurement',existing_ref=None)],
-        focus=dict(label='Adaptation',action='improve')) if action=='experiment' else None
+        focus=dict(index=1,action='improve')) if action=='experiment' else None
     finish(root,1,'H',[],action=action,search_choice=plan)
     return root
 
 
+@pytest.mark.process_e2e
 def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_path,monkeypatch,execution_registry):
     remaining=211692
     root=instance(tmp_path,remaining=remaining)
@@ -47,7 +48,9 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
         intent=dict(step=step,task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=anchor,
             search_slice=search.accept(root,job))
         c.write(record/'native-intent.json',intent)
-        budget.write_node_hint(root,job,intent,budget.snapshot(root),dict(input_tokens=0,output_tokens=0),observed=False)
+        accepted_budget.accept_native(root,step,record,intent)
+        limits,facts=node_hint_facts(root,job,intent,dict(input_tokens=0,cached_input_tokens=0,output_tokens=0),observed=False)
+        budget.write_node_hint(root,job,intent,limits,dict(input_tokens=0,cached_input_tokens=0,output_tokens=0),facts=facts,observed=False)
         hint=feedback.budget_hint(c.workspace(root,step))
         assert hint['reserve_state']=='within'
         assert hint['current_work_observed_tokens_remaining_upper_bound']==remaining
@@ -60,7 +63,7 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
         assert result['status']=='known_success',result
         accepted.extend(experiments.Records(config).calls())
         payload=dict(summary='Returned the authorized observation',scientific_result='Mechanical admission only; no scientific qualification.',
-            limitations=['Deterministic fixture'],implementation_selection=None,mechanism_findings=None,stage_intent='review',
+            limitations=['Deterministic fixture'],implementation_selection=None,mechanism_findings=None,stage_intent='decision',
             candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(
                 mechanism_ref=row['mechanism_ref'],reason='The mechanical command produces no scientifically suitable model candidate.')
                 for row in job['candidate_nomination_mechanisms'] if row['status']!='waived']))
@@ -80,6 +83,7 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
     assert (root/'settings.json').read_bytes()==settings
 
 
+@pytest.mark.process_e2e
 @pytest.mark.parametrize('remaining',[0,-1])
 def test_actual_shared_exhaustion_skips_ordinary_improve_and_runs_one_final(tmp_path,remaining):
     root=instance(tmp_path,remaining=remaining)
@@ -99,9 +103,8 @@ def test_actual_shared_exhaustion_skips_ordinary_improve_and_runs_one_final(tmp_
 
 
 @pytest.mark.parametrize('role','HWAE')
-@pytest.mark.parametrize('mode',['soft'])
-def test_positive_shared_balance_does_not_require_future_role_tokens(tmp_path,role,mode):
-    root=instance(tmp_path,remaining=1,mode=mode)
+def test_positive_shared_balance_does_not_require_future_role_tokens(tmp_path,role):
+    root=instance(tmp_path,remaining=1)
     assert budget.node_admission(root,dict(step=2,role=role)) is None
 
 

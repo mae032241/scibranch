@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import stat
 import threading
-from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +13,6 @@ from execution_fixtures import execution_registry, remote_registry
 from scidiscovery.operations.execution import LocalFileDescriptor
 from scidiscovery.research_loop import atomic_files as files, contracts as c, experiments as e
 from scidiscovery.research_loop.protocol import CURRENT
-from scidiscovery.research_loop import shared_originals as shared
 
 
 @pytest.mark.parametrize('replace', [False, True])
@@ -260,23 +258,21 @@ def test_existing_damaged_or_linked_original_is_never_overwritten(tmp_path):
     assert target.is_symlink() and source.read_bytes() == b'exact'
 
 
-def test_tcad_first_freeze_interruption_preserves_unowned_legacy_partial(tmp_path):
+def test_tcad_receipt_publication_is_idempotent_and_preserves_unowned_partial(tmp_path):
     from tcad_artifact import managed_execution as tcad
-    source, target = tmp_path / 'source', tmp_path / 'target'
-    source.write_bytes(b't' * (2 * 1024 * 1024))
-    descriptor = LocalFileDescriptor(name='target', local_path=str(source),
-        size_bytes=source.stat().st_size, media_type='application/octet-stream')
-    legacy_partial = tmp_path / '.target.partial'
+    target=tmp_path/'receipt.json'
+    legacy_partial=tmp_path/'.receipt.json.partial'
     legacy_partial.write_bytes(b'Unowned bytes from a prior writer')
-    with pytest.raises(TimeoutError):
-        tcad._retain_original(descriptor,target,InterruptedCopy(),root=tmp_path,policy=None)
-    assert not target.exists()
-    assert legacy_partial.read_bytes() == b'Unowned bytes from a prior writer'
-    assert list(tmp_path.glob('.*.partial')) == [legacy_partial]
-    tcad._retain_original(descriptor,target,SimpleNamespace(remaining_seconds=lambda: 1),root=tmp_path,policy=None)
-    assert target.read_bytes() == source.read_bytes()
-    assert stat.S_IMODE(target.stat().st_mode) == 0o400
-    assert target.stat().st_ino == next((tmp_path/'host-history/objects').iterdir()).stat().st_ino
+    value=dict(call_id='original-call',status='unknown')
+    tcad._write_original(target,value)
+    original=e.proof(target)
+    tcad._write_original(target,value)
+    assert e.proof(target)==original
+    with pytest.raises(e.IntegrityError,match='TCAD retained original changed'):
+        tcad._write_original(target,dict(value,status='known_success'))
+    assert c.read(target)==value and e.proof(target)==original
+    assert legacy_partial.read_bytes()==b'Unowned bytes from a prior writer'
+    assert list(tmp_path.glob('.*.partial'))==[legacy_partial]
 
 
 def test_original_submission_and_collection_recover_without_resubmission(tmp_path, monkeypatch, remote_registry):
@@ -314,19 +310,20 @@ def test_original_submission_and_collection_recover_without_resubmission(tmp_pat
     assert records.external(descriptor.name) is None
     assert adapter.lookup_submission(descriptor) == (external, state)
     records.bind_external(descriptor.name, external, state)
-    original_link = shared.link
+    original_write=e.write
 
-    def interrupted_retention(source, target, **options):
-        if target.parent.name == 'observed-originals' and options['size_bytes'] == descriptor.size_bytes:
-            raise TimeoutError('Original collection deadline reached')
-        return original_link(source, target, **options)
+    def interrupted_observation(path,value,**options):
+        if Path(path).name=='execution-observation.json':
+            raise OSError(errno.ENOSPC,'Injected observation publication interruption')
+        return original_write(path,value,**options)
 
     with monkeypatch.context() as patch:
-        patch.setattr(shared, 'link', interrupted_retention)
-        with pytest.raises(TimeoutError):
+        patch.setattr(e,'write',interrupted_observation)
+        with pytest.raises(OSError,match='observation publication interruption'):
             e.record_observation(config, adapter, descriptor.name)
     directory = records.directory(descriptor.name)
-    assert not list((directory / 'observed-originals').glob('*'))
+    assert not (directory / 'observed-originals').exists()
+    assert source.read_bytes()==b'p'*(2*1024*1024)
     assert not (directory / 'execution-observation.json').exists()
     observed = e.record_observation(config, adapter, descriptor.name)
     assert observed['status'] == 'known_success'
@@ -354,19 +351,22 @@ def test_seal_namespace_contention_precedes_history_and_conclusion_materializati
     native_identity = execution.identity(root, 2)
     raw_identity = c.file_ref(record / 'science-output.json')
     assert job['execution_authority']
+    inventory=c.accept_current_inventory(root,2)
     with authority.writer(root):
         before = tree(root)
         with pytest.raises(BlockingIOError):
-            c.seal_result(root, 2)
+            c.seal_result_from_inventory(root,2,inventory=inventory)
         assert tree(root) == before
     assert not (record / 'pending-execution-set.json').exists()
     assert not (work / 'conclusion.json').exists()
     assert not (record / 'result.json').exists()
     assert not (record / 'result-identity.json').exists()
-    c.seal_result(root, 2)
+    c.seal_result_from_inventory(root,2,inventory=inventory)
     assert c.record_ref(root / 'jobs/002.json') == job_identity
     assert execution.identity(root, 2) == native_identity
     assert c.file_ref(record / 'science-output.json') == raw_identity
     assert len(execution.records(root, 2)) == 1
     assert c.read(record / 'result-identity.json')['job_ref'] == job_identity
-    assert (work / 'conclusion.json').read_bytes() == (record / 'science-output.json').read_bytes()
+    seal=c.read(record/'result-identity.json')
+    assert seal['raw_ref']==e.proof(record/'science-output.json')
+    assert not (work/'conclusion.json').exists()

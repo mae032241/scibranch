@@ -194,11 +194,9 @@ def test_source_projection_consumers_do_not_load_or_accept(scene, monkeypatch):
         monkeypatch.setattr(originals, name, forbidden)
     for _ in range(3):
         assert c._parent_view(job, ref, source=source)['role'] == 'H'
-        assert c._decision_context(job, sources={1: facts}) is None
         assert c._assessment_handoff(job, sources={1: facts}, members={1: member}, policy={}) is None
         assert c._assessment_original(prior, sources={1: facts})['source'] == str(facts['raw_path'])
         assert c._public_materials([material]) == [{key: value for key, value in material.items() if key != 'file_stat'}]
-        assert c._decision_context(worker,sources={1:a_source})['source_action']=='continue_w'
         handoff=c._assessment_handoff(assessment,sources={1:a_source,2:w_source},members=members,policy={})
         assert handoff['previous_a']['step']==1 and handoff['current_w']==w_ref['path']
 
@@ -301,7 +299,11 @@ def test_nomination_dict_consumes_supplied_sealed_source_without_loading(monkeyp
     monkeypatch.setattr(originals, 'source_job', forbidden)
     monkeypatch.setattr(originals, 'source_record', forbidden)
     monkeypatch.setattr(originals, 'resolve_ref', forbidden)
-    assert candidate_nominations.resolve(Path('/consumer'), job, declaration, source_facts=facts) == declaration
+    resolved = candidate_nominations.resolve(Path('/consumer'), job, declaration, source_facts=facts)
+    assert resolved['representatives'][0]['candidate'] is None
+    assert declaration['representatives'][0]['candidate'] == dict(call_id='missing-call', artifact='result')
+    with pytest.raises(ValueError, match='exact source task'):
+        candidate_nominations.resolve(Path('/consumer'), dict(job, step=2), declaration, source_facts=facts)
 
 
 def test_inherited_projection_reuses_owner_mapping_without_renaming_science(monkeypatch):

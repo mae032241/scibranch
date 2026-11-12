@@ -1,5 +1,4 @@
-"""Scientific decision declarations, exact request admission and bounded clarification."""
-import copy
+"""Ordinary A returns advice without authoring W's next scientific decision."""
 
 import pytest
 
@@ -18,7 +17,6 @@ def prepare(tmp_path, *, enabled=True):
     controller.prepare(root, objective, public, ['never-launched'], max_tokens=100_000,
         max_seconds=3600, max_steps=16, model='fixture', reasoning_effort='high',
         decision_contract_version=1 if enabled else None,
-        research_strategy_version=None,
         search_policy=None)
     finish(root, 1, 'H', [], action='experiment')
     finish(root, 2, 'W', [1], text='Negative controlled result; target uncertainty remains.')
@@ -49,75 +47,30 @@ def author(root, step, parents, request, *, action='continue_w', review=None, om
     return job, payload
 
 
-def next_worker(root, *, text):
-    c.build_job(root, 4, 'W', [1, 2, 3], instruction='Exact scientific question')
-    finish(root, 4, 'W', [1, 2, 3], text=text)
-
-
-@pytest.mark.parametrize('action', ['continue_w', 'revise_h', 'extract'])
-@pytest.mark.parametrize('authored_request',[None,{},dict(decision='mechanism',question='',change_criterion=''),
-    dict(decision='mechanism',question='Concrete missing target observation',change_criterion='  ')])
-def test_further_research_requires_same_output_concrete_request(tmp_path, action, authored_request):
-    root=prepare(tmp_path)
-    with pytest.raises(OutputRepairRequired,match='decision_request'):
-        author(root,3,[1,2],authored_request,action=action)
-    record=c.host_record(c.workspace(root,3))
-    raw=c.read(record/'science-output.json')
-    assert raw['decision_request']==authored_request and raw['next_action']==action
-    assert not (record/'result-identity.json').exists()
-    assert not (root/'jobs/004.json').exists()
-
-
-@pytest.mark.parametrize('action', ['continue_w', 'revise_h', 'extract'])
-def test_omitted_request_cannot_fall_back_to_generic_route_reason(tmp_path,action):
-    root=prepare(tmp_path)
-    with pytest.raises(OutputRepairRequired,match='change_criterion'):
-        author(root,3,[1,2],None,action=action,omit_request=True)
-    assert 'decision_request' not in c.read(c.host_record(c.workspace(root,3))/'science-output.json')
-
-
-def test_exact_completed_request_without_new_original_is_rejected_but_negative_new_result_is_allowed(tmp_path):
+def test_ordinary_a_cannot_author_a_binding_decision_request(tmp_path):
     root = prepare(tmp_path)
-    original, original_payload = author(root, 3, [1, 2], REQUEST)
-    prior_raw = c.read(c.host_record(c.workspace(root, 2)) / 'science-output.json')['scientific_result']
-    next_worker(root, text=prior_raw)
-    # Reassess the same original W, rather than treating equal bytes at a new
-    # producer as proof that the scientific source is the same.
-    job, payload = author(root, 5, [1, 2, 3], copy.deepcopy(REQUEST))
-    assert c.read(c.host_record(c.workspace(root, 5)) / 'result-identity.json')['control_outcome']['decision_status'] == 'unresolved'
-    assert decision.reason(root, job, payload) == 'a_decision_request_repeated'
-    # A different negative finding is new evidence; no proxy/unknown-value filter is applied.
-    root2 = prepare(tmp_path / 'other')
-    author(root2, 3, [1, 2], REQUEST)
-    next_worker(root2, text='New controlled counterexample contradicts retention; target performance is still unknown.')
-    job2, payload2 = author(root2, 5, [1, 4], REQUEST)
-    assert decision.reason(root2, job2, payload2) is None
-    assert c.read(c.host_record(c.workspace(root2, 5)) / 'result-identity.json')['control_outcome']['decision_status'] == 'applied'
-    focus = c.read(c.host_record(c.workspace(root, 3)) / 'result-identity.json')['control_outcome']['resolved_focus']
-    assert focus is None  # This instance has no search policy or resolved mechanism.
-    assert decision._key(original, original_payload, focus)[-2] is None
+    with pytest.raises(OutputRepairRequired, match='decision_request=null'):
+        author(root, 3, [1, 2], REQUEST)
+    record = c.host_record(c.workspace(root, 3))
+    assert c.read(record / 'science-output.json')['decision_request'] == REQUEST
+    assert not (record / 'result-identity.json').exists()
 
 
-@pytest.mark.parametrize('action', ['audit', 'finish', 'wait'])
-def test_nonresearch_choices_do_not_need_decision_request(tmp_path, action):
+def test_omitted_request_does_not_satisfy_explicit_advice_return(tmp_path):
     root = prepare(tmp_path)
-    job, payload = author(root, 3, [1, 2], None, action=action)
+    with pytest.raises(OutputRepairRequired, match='decision_request=null'):
+        author(root, 3, [1, 2], None, omit_request=True)
+    record = c.host_record(c.workspace(root, 3))
+    assert 'decision_request' not in c.read(record / 'science-output.json')
+    assert not (record / 'result-identity.json').exists()
+
+
+def test_advice_returns_to_w_without_a_decision_request(tmp_path):
+    root = prepare(tmp_path)
+    job, payload = author(root, 3, [1, 2], None)
+    assert decision.advice_returned(job, payload)
     assert decision.reason(root, job, payload) is None
     assert c.read(c.host_record(c.workspace(root, 3)) / 'result-identity.json')['control_outcome']['decision_status'] == 'applied'
-
-
-def test_no_completed_dependency_does_not_consume_request_and_changed_prose_is_not_semantic_duplicate(tmp_path):
-    root = prepare(tmp_path)
-    author(root, 3, [1, 2], REQUEST)
-    job, payload = author(root, 4, [1, 2, 3], REQUEST)
-    assert decision.reason(root, job, payload) is None  # A itself is not a W response.
-    assert decision._completed(c.read(root/'jobs/003.json'), c.read(c.host_record(c.workspace(root,3))/'science-output.json'),
-                               {4: (job, payload, {}, '')}) is False
-    changed = copy.deepcopy(payload)
-    changed['decision_request']['question'] += ' Is there another explanation?'
-    focus = c.read(c.host_record(c.workspace(root, 4)) / 'result-identity.json')['control_outcome']['resolved_focus']
-    assert focus is None  # Both requests assess the same absence of search focus.
-    assert decision._key(job, changed, focus) != decision._key(job, payload, focus)
 
 
 def test_minimal_schema_and_current_tasks_stay_frozen_without_decision_contract(tmp_path):
@@ -126,18 +79,18 @@ def test_minimal_schema_and_current_tasks_stay_frozen_without_decision_contract(
     assert set(schema['required']) == {'summary', 'scientific_result', 'limitations', 'next_action', 'route_reason'}
     assert 'decision_request' not in schema['properties']
     root = prepare(tmp_path, enabled=False)
-    job, _ = author(root, 3, [1, 2], None, action='wait')
+    job, _ = author(root, 3, [1, 2], None)
     originals = {path:path.read_bytes() for path in (root/'settings.json', root/'jobs/003.json',
                  c.workspace(root,3)/'science-task.json', c.host_record(c.workspace(root,3))/'result-identity.json')}
     assert job['handoff_protocol'] == protocol.CURRENT and 'decision_contract_version' not in c.settings(root)
     assert c.build_job(root, 3, 'A', [1, 2]) == job
     assert all(path.read_bytes() == raw for path,raw in originals.items())
-    assert c.build_job(root, 4, 'H', [3])['handoff_protocol'] == protocol.CURRENT
+    assert c.build_job(root, 4, 'W', [1, 2, 3])['handoff_protocol'] == protocol.CURRENT
     assert all(path.read_bytes() == raw for path,raw in originals.items())
 
 
-@pytest.mark.parametrize('retired', [8, 9, 10])
-def test_retired_schemas_and_task_writes_reject_without_changing_originals(tmp_path, retired):
+def test_retired_schema_and_task_writer_reject_without_changing_originals(tmp_path):
+    retired = 10
     with pytest.raises(protocol.UnsupportedProtocol, match='Scientific result schema'):
         c.result_schema('A', retired)
     # Preserved archive bytes are fixtures, not an invocation of a retired writer.

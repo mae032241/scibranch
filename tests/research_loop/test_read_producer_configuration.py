@@ -150,6 +150,8 @@ def test_reservation_keeps_its_policy_after_a_later_save(tmp_path, monkeypatch):
     edit(root, model='reserved-model')
     base = c.settings(root)
     first, _, before = updates.bind_new_job_facts(root, 1, base=base)
+    job = c.build_job(root, 1, 'H', [])
+    assert job['configuration_revision'] == first
     edit(root, model='later-model')
     read = c.read
     paths = []
@@ -157,6 +159,21 @@ def test_reservation_keeps_its_policy_after_a_later_save(tmp_path, monkeypatch):
     def observed(path):
         paths.append(Path(path))
         return read(path)
+
+    accepted_read = accepted.read
+    heads = []
+    def fresh(current):
+        state = accepted_read(current)
+        heads.append(state)
+        return state
+    with monkeypatch.context() as patch:
+        patch.setattr(accepted, 'read', fresh)
+        for select, expected in ((lambda: updates.current(root), 'later-model'),
+                (lambda: updates.for_new_job(root, 1), 'reserved-model'),
+                (lambda: updates.for_job(root, job), 'reserved-model')):
+            heads.clear()
+            assert select()['model'] == expected
+            assert len(heads) == 1
 
     with budget._operator_writer(root):
         monkeypatch.setattr(c, 'settings', _forbidden)

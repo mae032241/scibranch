@@ -7,7 +7,7 @@ import pytest
 
 from scidiscovery.research_loop import (
     backends, budget, configuration_updates, continuation, contracts as c,
-    native_recovery, search,
+    native_recovery, native_usage, search,
 )
 from test_automatic_recovery import format_error
 from test_final_a_completion_contract import accept, prepare
@@ -83,44 +83,34 @@ def test_public_interpret_keeps_no_work_early_returns(tmp_path, monkeypatch, job
         state={}, focus=None, allocation=None, diagnostics=[])
 
 
-def missing_meter_receipt(record, *, format_fallback=False, change=None):
-    event = (format_error() if format_fallback else
-        dict(type='turn.failed', error=dict(code='rate_limit_exceeded', status=429)))
-    events = [dict(type='thread.started', thread_id='original'), dict(type='turn.started'), event]
-    if format_fallback:
-        events.append(dict(type='turn.failed', error=dict(message=event['message'])))
-    if change == 'permanent':
-        events[-1] = dict(type='turn.failed', error=dict(code='insufficient_quota'))
-    elif change == 'activity':
-        events.insert(2, dict(type='item.started', item=dict(type='agent_message')))
-    elif change == 'no_rejection':
-        events = events[:2]
-    raw = ''.join(json.dumps(value) + '\n' for value in events).encode()
+def missing_meter_receipt(record, *, source='automatic'):
+    event = (format_error() if source == 'format' else
+        dict(type='turn.failed', error=dict(code=(
+            'insufficient_quota' if source == 'permanent' else 'rate_limit_exceeded'))))
+    raw = (json.dumps(event) + '\n').encode()
     (record / 'native.jsonl').write_bytes(raw)
     limits = dict(max_observed_tokens=100, max_seconds=10)
     task_ref = dict(path='jobs/001.json')
     intent = dict(task_ref=task_ref, budget_slice=dict(role='W', limits=limits))
     original = dict(returncode=7, stop_reason='native_failure_event', cleanup='observed_group_cleaned',
-        terminal_observed=False, native_activity_observed=True,
-        thread_id='other' if change == 'thread' else 'original',
-        native_failure=native_recovery.classify(dict(type='error')),
+        terminal_observed=False, native_activity_observed=False, thread_id='original',
+        native_failure=native_recovery.classify(event), native_format_rejected=source == 'format',
+        native_stream=native_usage.stream_binding(record / 'native.jsonl'),
         usage=dict(unknown_steps=[1]), budget_slice=dict(role='W', limits=limits,
             usage_observed=False, dispatches=1, input_tokens=0, cached_input_tokens=0,
             output_tokens=0, observed_tokens=0, advance_seconds=3.))
     return (record, intent, original, None, False), limits, task_ref, raw
 
 
-@pytest.mark.parametrize('format_fallback', [False, True])
-def test_missing_meter_consumes_receipts_but_verifies_original_stream(
-        tmp_path, monkeypatch, format_fallback):
-    receipt, limits, task_ref, raw = missing_meter_receipt(tmp_path,
-        format_fallback=format_fallback)
+@pytest.mark.parametrize('source', ['automatic', 'format', 'permanent'])
+def test_recovery_consumes_writer_facts_and_preserves_missing_meter(tmp_path, monkeypatch, source):
+    receipt, limits, task_ref, raw = missing_meter_receipt(tmp_path, source=source)
     retained = copy.deepcopy(receipt[1:])
     forbid_control_loaders(monkeypatch)
 
     result = budget._attempt_consumption_from_facts(tmp_path, dict(role='W', step=1), [receipt],
         policy=dict(native_launcher_argv=['codex']), limits=limits, task_ref=task_ref,
-        automatic_recovery=dict(format_fallback=True) if format_fallback else {})
+        automatic_recovery=dict(format_fallback=True) if source == 'format' else {})
 
     assert result == (0, 3.)
     assert receipt[1:] == retained
@@ -128,23 +118,35 @@ def test_missing_meter_consumes_receipts_but_verifies_original_stream(
     assert not (tmp_path / 'usage.json').exists()
 
 
-@pytest.mark.parametrize('format_fallback,change,message', [
-    (False, 'permanent', 'Missing billing'),
-    (False, 'thread', 'failure evidence changed'),
-    (True, 'activity', 'Missing billing'),
-    (True, 'no_rejection', 'Missing billing'),
-    (True, 'thread', 'format evidence changed'),
+@pytest.mark.parametrize('source,change,message', [
+    ('automatic', 'stream', 'Original native stream changed'),
+    ('format', 'binding', 'native_compact_control_facts_unavailable'),
+    ('automatic', 'control', 'Native writer control facts are unavailable'),
 ])
-def test_missing_meter_still_rejects_changed_or_absent_native_evidence(
-        tmp_path, monkeypatch, format_fallback, change, message):
-    receipt, limits, task_ref, _ = missing_meter_receipt(tmp_path,
-        format_fallback=format_fallback, change=change)
+def test_recovery_rejects_changed_or_absent_writer_facts(
+        tmp_path, monkeypatch, source, change, message):
+    receipt, _, _, _ = missing_meter_receipt(tmp_path, source=source)
+    _, intent, outcome, _, _ = receipt
+    if change == 'stream':
+        (tmp_path / 'native.jsonl').write_text('Changed retained original.\n')
+    elif change == 'binding':
+        outcome.pop('native_stream')
+    else:
+        outcome['terminal_observed'] = None
     forbid_control_loaders(monkeypatch)
-
+    consume = (continuation._format_source_from_facts if source == 'format'
+        else continuation._automatic_source_from_facts)
     with pytest.raises(ValueError, match=message):
-        budget._attempt_consumption_from_facts(tmp_path, dict(role='W', step=1), [receipt],
-            policy=dict(native_launcher_argv=['codex']), limits=limits, task_ref=task_ref,
-            automatic_recovery=dict(format_fallback=True) if format_fallback else {})
+        consume(tmp_path, policy=dict(native_launcher_argv=['codex']), intent=intent, outcome=outcome)
+
+
+def test_format_recovery_requires_its_produced_rejection(tmp_path, monkeypatch):
+    receipt, _, _, _ = missing_meter_receipt(tmp_path, source='format')
+    _, intent, outcome, _, _ = receipt
+    outcome['native_format_rejected'] = False
+    forbid_control_loaders(monkeypatch)
+    assert continuation._format_source_from_facts(tmp_path,
+        policy=dict(native_launcher_argv=['codex']), intent=intent, outcome=outcome) is None
 
 
 def test_public_recovery_sources_keep_unsupported_backend_early_returns(tmp_path, monkeypatch):
@@ -153,7 +155,7 @@ def test_public_recovery_sources_keep_unsupported_backend_early_returns(tmp_path
 
     monkeypatch.setattr(configuration_updates, 'for_step', lambda *args: {})
     monkeypatch.setattr(backends, 'selected',
-        lambda *args: SimpleNamespace(name='other', standard=False))
+        lambda *args: SimpleNamespace(recovery_capability=lambda name: dict(status='unsupported')))
     monkeypatch.setattr(c, 'read', unexpected)
     monkeypatch.setattr(c, 'native_outcome', unexpected)
     assert continuation.format_source(tmp_path, 1, tmp_path) is None

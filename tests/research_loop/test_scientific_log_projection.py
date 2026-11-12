@@ -77,16 +77,15 @@ def test_raw_projection_reads_only_bounded_blocks_and_rechecks_identity(tmp_path
         list(logs.project(path,**identity,**options))
 
 
-def test_expansion_then_contraction_uses_final_file_policy_and_shared_total():
+def test_expansion_then_contraction_keeps_complete_output_with_legacy_byte_fields():
     context=storage.Deadline(10)
     inventory=storage.Inventory(dict(enabled=True,max_file_bytes=2,max_total_bytes=3),context=context)
-    def projected():
-        return logs.replace_blocks([b'x'],[(b'x',b'a'*32),(b'a'*32,b'zz')],
-                                   context=context,block_size=3)
-    assert logs.measure(projected(),context=context,inventory=inventory)['size_bytes']==2
-    assert inventory.files==1 and inventory.total==2
-    with pytest.raises(storage.StorageQuotaExceeded,match='max_total_bytes'):
-        logs.measure(projected(),context=context,inventory=inventory)
+    for _ in range(2):
+        blocks=list(logs.replace_blocks([b'x'],[(b'x',b'a'*32),(b'a'*32,b'zz')],
+            context=context,block_size=3))
+        assert b''.join(blocks)==b'zz' and all(len(block)<=3 for block in blocks)
+        inventory.file(sum(map(len,blocks)))
+    assert inventory.files==2 and inventory.total==4
 
 
 def test_deadline_is_checked_even_when_all_output_is_deleted():

@@ -1,6 +1,4 @@
 """Synthetic current-comparison admission; no model, runtime or trial inputs."""
-import copy
-
 import pytest
 
 from scidiscovery.research_loop import accepted_budget, accepted_search, breadth, search
@@ -43,7 +41,7 @@ def accepted_comparison(*, compared=('h001.m4', 'h001.m3')):
     return state, value, head
 
 
-def admission(monkeypatch, value, state, head):
+def admission(monkeypatch, state, head):
     monkeypatch.setattr(breadth, '_catalog_root', lambda frozen, scope: ('/fixture', state['focus']))
     monkeypatch.setattr(accepted_budget, 'read', lambda root: head)
     return dict(step=4, job_ref=dict(path='/fixture/jobs/004.json'))
@@ -53,7 +51,7 @@ def test_current_two_mechanism_comparison_preserves_primary_and_each_number_bind
     state, value, head = accepted_comparison()
     assert state['focus'] == dict(mechanism_ref='h001.m4', action='improve')
     assert [row['mechanism_ref'] for row in value['mechanisms']] == ['h001.m4', 'h001.m3']
-    scope = admission(monkeypatch, value, state, head)
+    scope = admission(monkeypatch, state, head)
     accepted = []
     for number in ('4', '3'):
         binding = breadth.admit(value, number, scope, accepted)
@@ -75,7 +73,7 @@ def test_current_two_mechanism_comparison_preserves_primary_and_each_number_bind
 def test_single_focus_scope_and_missing_number_behavior_remain(monkeypatch):
     state, value, head = accepted_comparison(compared=('h001.m4',))
     assert [row['mechanism_ref'] for row in value['mechanisms']] == ['h001.m4']
-    scope = admission(monkeypatch, value, state, head)
+    scope = admission(monkeypatch, state, head)
     assert breadth.admit(value, '4', scope, [])['mechanism_ref'] == 'h001.m4'
     with pytest.raises(breadth.OpportunityRequired) as error:
         breadth.admit(value, None, scope, [])
@@ -87,7 +85,7 @@ def test_single_focus_scope_and_missing_number_behavior_remain(monkeypatch):
 def test_comparison_does_not_reopen_a_scientific_waiver(monkeypatch):
     state, value, head = accepted_comparison()
     head['search']['table']['mechanisms']['h001.m3']['status'] = 'waived'
-    scope = admission(monkeypatch, value, state, head)
+    scope = admission(monkeypatch, state, head)
     with pytest.raises(breadth.OpportunityRequired) as error:
         breadth.admit(value, '3', scope, [])
     assert error.value.reason == 'mechanism_waived'
@@ -97,7 +95,6 @@ def test_comparison_does_not_reopen_a_scientific_waiver(monkeypatch):
 @pytest.mark.parametrize('change', ['responded', 'older_author', 'deferred', 'withdrawn', 'other_route', 'no_pending'])
 def test_old_or_inactive_comparison_never_expands_focused_scope(change):
     state, _, _ = accepted_comparison()
-    state = copy.deepcopy(state)
     summary = state['summary']
     work = summary['current_facts'][accepted_search.key('work', 'A003-D001')]
     if change == 'responded':

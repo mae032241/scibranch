@@ -1,6 +1,4 @@
 """Retired package entry points and direct sealed-node consumers; no native runs."""
-import json
-
 import pytest
 
 from scidiscovery.research_loop import contracts as c, controller, cli
@@ -17,20 +15,6 @@ def scene(tmp_path):
     material = root / 'project/nodes/001/work/artifacts/writer.lock'
     material.parent.mkdir(parents=True); material.write_bytes(b'An ordinary scientific filename, not an owner lock.\n')
     return root, material
-
-
-def entries(package):
-    return [json.loads(line) for line in (package / 'manifest.jsonl').read_bytes().splitlines()]
-
-
-def rewrite_manifest(package, values):
-    # Update the outer descriptor so the semantic/path consumer rejects the
-    # deliberately malformed package.
-    (package / 'manifest.jsonl').write_bytes(b''.join(archive.files.canonical(value) + b'\n' for value in values))
-    meta = json.loads((package / 'archive.json').read_bytes())
-    proof = archive.files.stat_file(package / 'manifest.jsonl')
-    meta['manifest'] = dict(path='manifest.jsonl',size_bytes=proof['size_bytes'])
-    archive.files.durable_json(package / 'archive.json', meta)
 
 
 def sealed_scene(tmp_path, monkeypatch):

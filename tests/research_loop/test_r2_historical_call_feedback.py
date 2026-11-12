@@ -208,32 +208,8 @@ def test_retained_unfinished_call_claim_stays_unknown(server,monkeypatch,command
     assert c.read(server.claims/'S001/outcome.json')['calls']==[]
 
 
-def test_unaccepted_unknown_preparation_retains_original_call_and_does_not_reexecute(server,tmp_path,monkeypatch):
-    call_id='unresolved-preparation-call';executions=[];preparations=[]
-    def execute(server,arguments,**kwargs):
-        executions.append(arguments)
-        return dict(code=2,result=dict(status='unknown',call_id=call_id))
-    def retained(root,records,*,context):
-        preparations.append((root,records))
-        return [dict(call_id=call_id,resolved=False)]
-    monkeypatch.setattr(bridge,'_execute',execute)
-    monkeypatch.setattr('scidiscovery.research_loop.experiment_client.root_for_configuration',
-        lambda config,**kwargs:tmp_path)
-    monkeypatch.setattr('scidiscovery.research_loop.preparation_recovery.retained_preparations',retained)
-    raw=_request(['run','--script','work/script.py'])
-
-    bridge._handle(server,raw)
-    first=c.read(server.directory/'response.json')['result']
-    bridge._handle(server,raw)
-
-    result=c.read(server.directory/'response.json')['result']
-    assert first['status']==result['status']=='unknown'
-    assert first['call_id']==result['call_id']==call_id
-    assert c.read(server.claims/'S001/outcome.json')['calls']==[]
-    assert len(executions)==len(preparations)==1
-
-
-def test_new_query_cannot_reclassify_an_unknown_preparation(server,tmp_path,monkeypatch):
+@pytest.fixture
+def unknown_preparation(server,tmp_path,monkeypatch):
     call_id='unresolved-preparation-call';executions=[];preparations=[]
     def execute(server,arguments,**kwargs):
         executions.append(arguments)
@@ -246,13 +222,32 @@ def test_new_query_cannot_reclassify_an_unknown_preparation(server,tmp_path,monk
     monkeypatch.setattr('scidiscovery.research_loop.experiment_client.root_for_configuration',
         lambda config,**kwargs:tmp_path)
     monkeypatch.setattr('scidiscovery.research_loop.preparation_recovery.retained_preparations',retained)
-    original=_request(['run','--script','work/script.py'])
-    bridge._handle(server,original)
+    raw=_request(['run','--script','work/script.py'])
+    return SimpleNamespace(call_id=call_id,raw=raw,executions=executions,preparations=preparations)
+
+
+def test_unaccepted_unknown_preparation_retains_original_call_and_does_not_reexecute(server,unknown_preparation):
+    scene=unknown_preparation
+
+    bridge._handle(server,scene.raw)
+    first=c.read(server.directory/'response.json')['result']
+    bridge._handle(server,scene.raw)
+
+    result=c.read(server.directory/'response.json')['result']
+    assert first['status']==result['status']=='unknown'
+    assert first['call_id']==result['call_id']==scene.call_id
+    assert c.read(server.claims/'S001/outcome.json')['calls']==[]
+    assert len(scene.executions)==len(scene.preparations)==1
+
+
+def test_new_query_cannot_reclassify_an_unknown_preparation(server,unknown_preparation):
+    scene=unknown_preparation
+    bridge._handle(server,scene.raw)
     claim=server.claims/'S001'
     originals={name:(claim/name).read_bytes()
         for name in ('submit.json','binding.json','response.json','outcome.json')}
 
-    bridge._handle(server,_request(['query',f'--call-id={call_id}'],reference='S002'))
+    bridge._handle(server,_request(['query',f'--call-id={scene.call_id}'],reference='S002'))
 
     result=c.read(server.directory/'response.json')['result']
     assert result['status']=='caller_error' and result['accepted'] is False
@@ -260,14 +255,14 @@ def test_new_query_cannot_reclassify_an_unknown_preparation(server,tmp_path,monk
     assert 'unknown submission' in result['note'] and 'original owner' in result['note']
     assert all((claim/name).read_bytes()==value for name,value in originals.items())
     preserved=c.read(claim/'response.json')['result']
-    assert preserved['status']=='unknown' and preserved['call_id']==call_id
+    assert preserved['status']=='unknown' and preserved['call_id']==scene.call_id
     assert c.read(server.claims/'S002/outcome.json')['calls']==[]
-    assert len(executions)==len(preparations)==1
+    assert len(scene.executions)==len(scene.preparations)==1
 
-    bridge._handle(server,original)
+    bridge._handle(server,scene.raw)
     restored=c.read(server.directory/'response.json')['result']
-    assert restored['status']=='unknown' and restored['call_id']==call_id
-    assert len(executions)==len(preparations)==1
+    assert restored['status']=='unknown' and restored['call_id']==scene.call_id
+    assert len(scene.executions)==len(scene.preparations)==1
 
 
 def test_refused_collect_preserves_existing_historical_implementation_read(server,tmp_path,monkeypatch):

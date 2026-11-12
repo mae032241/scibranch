@@ -4,10 +4,9 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import accepted_budget, breadth, contracts as c, controller, search
+from scidiscovery.research_loop import accepted_budget, breadth, contracts as c, controller, handoff_state, search
 from test_direct_input_bindings import stopped_seals
 from test_history_handoff import finish
-from test_search import assess
 
 
 @pytest.fixture
@@ -79,14 +78,16 @@ def test_method_only_h_seals_and_binds_exact_numbered_w_catalog_and_reducer(scen
     scope = dict(step=2, job_ref=c.record_ref(root / 'jobs/002.json'))
     for row in rows:
         ref = row['mechanism_ref']
-        assert row['source_h'] == table[ref]['source_h'] == 1
-        assert row['source_h_ref'] == table[ref]['source_h_ref']
+        assert row['source_step'] == table[ref]['source_step'] == 1
+        assert row['source_role'] == table[ref]['source_role'] == 'H'
+        assert row['source_ref'] == table[ref]['source_ref']
         assert row['origin_ref'] == table[ref]['origin_ref']
         assert row['origin_ref']['mechanism_ref'] == ref
-        assert row['origin_ref']['source_h'] == 1
+        assert row['origin_ref']['source_step'] == 1
+        assert row['origin_ref']['source_role'] == 'H'
         selected = breadth.resolve_choice(worker['search']['breadth'], row['ordinal'], scope)
         assert all(selected[key] == row[key] for key in (
-            'mechanism_ref', 'ordinal', 'origin_ref', 'source_goal_id', 'source_h', 'source_h_ref', 'minimal_test'))
+            'mechanism_ref', 'ordinal', 'origin_ref', 'source_goal_id', 'source_step', 'source_ref', 'source_role', 'minimal_test'))
 
     reduced = dict(mechanisms={}, authorized=set(), extra_grant=None, order=dict(remaining=[]))
     search.apply_source(root, job, payload, seal, reduced)
@@ -161,45 +162,27 @@ def test_method_only_revision_cannot_invent_an_existing_mechanism(tmp_path):
     assert result['focus'] is None
 
 
-def test_method_only_revision_retains_exact_ordinal_and_original_sources(scene):
+def test_w_requested_h_revision_retains_ordinal_and_original_sources(scene):
     root, raw = scene
-    finish(root, 1, 'H', [], action='analyze', search_choice=methods())
-    finish(root, 2, 'A', [1], action='revise_h')
+    finish(root, 1, 'H', [], action='experiment', search_choice=methods())
+    requester, _, _ = finish(root, 2, 'W', [1], stage_intent='revise_h')
+    route = controller._route(root, 2, 'W', handoff_state.read_sealed(root, 2), requester, 1, None)
+    consultant = c.build_job(root, 3, route.role, list(route.parents), instruction=route.instruction,
+        evidence_return=route.evidence_return)
     plan = dict(commitments=[dict(label='Revised interface direction', existing_ref='h001.m2')],
         focus=dict(index=1, action='screen'))
-    _, _, record = finish(root, 3, 'H', [2], action='experiment', search_choice=plan)
-    worker = c.build_job(root, 4, 'W', [3])
-    row, = worker['search']['breadth']['mechanisms']
-    assert row['mechanism_ref'] == 'h001.m2'
-    assert row['ordinal'] == 2 and row['source_h'] == 3
-    assert row['origin_ref']['source_h'] == 1
+    _, _, record = finish(root, 3, 'H', list(route.parents), action='wait', search_choice=plan)
+    returned = controller._route(root, 3, 'H', handoff_state.read_sealed(root, 3), consultant,
+        route.current_h, route.current_w)
+    worker = c.build_job(root, 4, returned.role, list(returned.parents), instruction=returned.instruction,
+        evidence_return=returned.evidence_return)
+    row = next(row for row in worker['search']['breadth']['mechanisms'] if row['mechanism_ref'] == 'h001.m2')
+    assert row['ordinal'] == 2 and row['source_step'] == 3 and row['source_role'] == 'H'
+    assert row['source_ref'] == c.record_ref(record / 'result-identity.json')
+    assert row['origin_ref']['source_step'] == 1 and row['origin_ref']['source_role'] == 'H'
     assert row['minimal_test'] == 'Revised interface direction'
     table = accepted_budget.read(root)['search']['table']['mechanisms']
-    assert len(table) == 3 and table['h001.m2']['original_h'] == 1
-    assert table['h001.m1']['source_h'] == table['h001.m3']['source_h'] == 1
+    assert len(table) == 3 and table['h001.m2']['original_step'] == 1
+    assert table['h001.m1']['source_step'] == table['h001.m3']['source_step'] == 1
     assert c.read_scientific_output(record / 'science-output.json')['search_plan'] == plan
-    assert (root / 'native-evidence/001/science-output.json').read_bytes() == raw[1]
-
-
-@pytest.mark.parametrize('action', ['screen', 'improve', 'validate'])
-def test_a_retains_its_choice_of_needed_work_after_method_only_h(scene, action, monkeypatch):
-    root, raw = scene
-    finish(root, 1, 'H', [], action='analyze', search_choice=methods())
-    review = dict(dispositions=[], next_focus=dict(mechanism_ref='h001.m2', action=action))
-    seal = c.seal_result
-    def accept_assessment(root, step):
-        record = c.host_record(c.workspace(root, step))
-        # The shared assessment writer predates explicit native acceptance.
-        accepted_budget.accept_native(root, step, record,
-            c.read(c.regular(record / 'native-intent.json')))
-        return seal(root, step)
-    monkeypatch.setattr(c, 'seal_result', accept_assessment)
-    _, _, record = assess(root, 2, [1], action='continue_w', search_choice=review)
-    outcome = c.read(record / 'result-identity.json')['control_outcome']
-    assert outcome['search_status'] == 'applied'
-    assert outcome['decision_status'] == 'applied'
-    worker = c.build_job(root, 3, 'W', [1, 2])
-    assert worker['search']['focus'] == dict(mechanism_ref='h001.m2', action=action)
-    assert search.launch_reason(root, worker) is None
-    assert c.read_scientific_output(record / 'science-output.json')['search_review'] == review
     assert (root / 'native-evidence/001/science-output.json').read_bytes() == raw[1]

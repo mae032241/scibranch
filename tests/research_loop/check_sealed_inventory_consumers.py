@@ -18,7 +18,7 @@ def test_sealed_subject_and_requesters_do_not_reaccept_inventory(tmp_path, monke
         max_seconds=120, max_steps=6, model='fixture', reasoning_effort='high',
         search_policy=None, experiment_mode='external')
     finish(root, 1, 'E', [], files={'subject.txt': 'An authored synthetic subject, not scientific evidence.'})
-    job, _, _ = finish(root, 2, 'A', [1], action='wait')
+    job, _, _ = finish(root, 2, 'A', [1])
     producer = c.read(root / 'native-evidence/001/result-identity.json')
     selected = dict(origin_step=1, origin_result_ref=producer['result_ref'],
         material={key: value for key, value in producer['materials'][0].items() if key != 'file_stat'})

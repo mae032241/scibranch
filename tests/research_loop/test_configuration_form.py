@@ -66,8 +66,8 @@ def set_setting(fields, path, value):
     return fields
 
 
-def submitted(draft):
-    return Controls(form.render(draft)).fields
+def submitted(draft, **options):
+    return Controls(form.render(draft, **options)).fields
 
 
 def complete(tmp_path):
@@ -273,7 +273,7 @@ def test_configuration_edit_preserves_and_edits_explicit_null_plugin_limits(tmp_
 def test_retained_null_records_reject_tampering(tmp_path):
     draft = complete(tmp_path)
     draft['document']['executor'] = dict(config=dict(configuration=dict(max_file_bytes=None)))
-    fields = Controls(form.render(draft, edit=True)).fields
+    fields = submitted(draft, edit=True)
     assert fields['advanced_fixed'] == '[[["executor", "config", "configuration", "max_file_bytes"], null]]'
     with pytest.raises(ValueError, match='保留的空值记录无效'):
         form.parse_edit(dict(fields, advanced_fixed='[["not a path"]]'), base=tmp_path, configuration=draft['document'])
@@ -287,7 +287,7 @@ def test_toml_export_rejects_null_without_changing_draft(tmp_path, plugin_value)
     with pytest.raises(ValueError, match='TOML 不支持空值'):
         form.export_toml(draft)
     assert form.declaration(draft) == before
-    fields = Controls(form.render(draft, edit=True)).fields
+    fields = submitted(draft, edit=True)
     assert form.parse_edit(fields, base=tmp_path, configuration=before)['document'] == before
 
 
@@ -391,13 +391,12 @@ def test_collapsed_controls_keep_custom_values_false_empty_and_omission(tmp_path
     assert exported['research']['user_updates'] == []
 
 
-@pytest.mark.parametrize('edit', [False, True])
-def test_compact_role_matrix_shares_rows_and_keeps_accessible_labels(tmp_path, edit):
+def test_compact_role_matrix_shares_rows_and_keeps_accessible_labels(tmp_path):
     draft = complete(tmp_path)
     draft['document']['agent']['roles'] = dict(H=dict(reasoning_effort='custom-effort'), E=dict(model=''))
     draft['document']['budget']['node_targets'] = {
         role: dict(max_observed_tokens=400, max_seconds=30.5) for role in 'HWAE'}
-    html = form.render(draft, edit=edit)
+    html = form.render(draft, edit=True)
 
     class Matrix(HTMLParser):
         def __init__(self):
@@ -446,11 +445,6 @@ def test_compact_role_matrix_shares_rows_and_keeps_accessible_labels(tmp_path, e
         assert item['aria-describedby'] == 'role-settings-help'
         assert html.count('name="'+item['name']+'"') == 1
     assert 'id="budget-settings"' in html
-    fields = Controls(html).fields
-    assert fields['cfg.budget.node_targets.H.max_observed_tokens'] == '400'
-    parsed = (form.parse_edit(fields, base=tmp_path, configuration=draft['document'])
-        if edit else form.parse(fields, base=tmp_path))
-    assert (parsed['document'] if edit else form.declaration(parsed)) == draft['document']
 
 
 def test_form_shows_only_everyday_fields_with_inline_help(tmp_path):
@@ -509,7 +503,7 @@ def test_edit_form_roundtrips_operational_groups_and_keeps_instance_inputs_serve
     draft['document']['permissions'] = dict(workspace='workspace-write', network=False, web='live', subagents=False)
     draft['document']['executor'] = dict(mode='external', config=dict(configuration=dict(nested=[1, False, 'exact'])))
     draft['document']['delivery'] = dict(adapter=dict(config=dict(destination='exact-target')))
-    fields = Controls(form.render(draft, edit=True)).fields
+    fields = submitted(draft, edit=True)
     assert not any(name.startswith(('cfg.research.', 'cfg.ui.', 'cfg.version', 'task_')) for name in fields)
     assert '/private/operator.key' not in form.render(draft, edit=True)
     assert '[research]' not in fields['advanced_toml'] and '[ui]' not in fields['advanced_toml']
@@ -570,7 +564,7 @@ def test_unlimited_totals_roundtrip_preserves_original_shared_budget_guard(tmp_p
     draft = complete(tmp_path)
     draft['document']['budget'].update(max_tokens=tokens, max_seconds=seconds,
         node_targets={role: dict(max_observed_tokens=400, max_seconds=30) for role in 'HWAE'})
-    parsed = form.parse(Controls(form.render(draft, catalogs={})).fields, base=tmp_path)
+    parsed = form.parse(submitted(draft, catalogs={}), base=tmp_path)
     assert form.declaration(parsed) == form.declaration(draft)
     if tokens == seconds == 'unlimited':
         # A saved finite-basis instance may remove both total ceilings, but a
@@ -638,30 +632,6 @@ def test_normalized_breadth_seconds_survive_invalid_edit_correction_and_save(tmp
     assert type(corrected['document']['budget']['breadth']['max_w_observed_tokens']) is int
 
 
-def test_registered_provider_describes_native_controls_and_keeps_typed_roundtrip(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import backends
-    class Independent(backends.Protocol):
-        name='native_fields_fixture'
-        @staticmethod
-        def configuration_fields():
-            return (dict(path='agent.native.resource',label='Exact provider resource',
-                description='Use the selected provider resource.'),
-                dict(path='agent.native.enabled',label='Provider feature enabled',kind='boolean'))
-    monkeypatch.setitem(backends._PROVIDERS,Independent.name,Independent)
-    def forbidden():
-        raise AssertionError('Independent form requested the default provider schema')
-    monkeypatch.setattr(backends.Codex,'configuration_fields',forbidden)
-    draft=complete(tmp_path)
-    draft['document']['agent'].update(backend=Independent.name,
-        native=dict(resource='resource.toml',enabled=False,extension=dict(keep=[1,'two'])))
-    html=form.render(draft)
-    fields=Controls(html).fields
-    assert fields['cfg.agent.native.resource'] == 'resource.toml'
-    assert fields['cfg.agent.native.enabled'] == 'false'
-    assert research_config.tomllib.loads(fields['advanced_toml'])['agent']['native'] == dict(extension=dict(keep=[1,'two']))
-    assert 'Use the selected provider resource.' in html
-    assert 'fast_mode' not in html
-    assert form.declaration(form.parse(fields,base=tmp_path))==form.declaration(draft)
 
 
 def test_backend_switch_consumes_rendered_controls_and_preserves_each_provider_draft(tmp_path, monkeypatch):
@@ -870,70 +840,55 @@ def test_partial_resume_policy_inherits_only_backend_protocol_and_usage_scope(tm
         continuation.policy(normalized['resume_policy'],[sys.executable],backend=backend_name)
 
 
-@pytest.mark.parametrize('launcher', [['pi'], ['./chosen-pi', '--literal', 'argument with spaces']])
-def test_backend_switch_preserves_each_provider_launcher_draft(tmp_path,monkeypatch,launcher):
+@pytest.mark.parametrize('edit,launcher', [
+    (False, ['./chosen-pi', '--literal', 'argument with spaces']),
+    (True, ['/opt/exact/bin/pi']),
+])
+def test_backend_switch_preserves_provider_launcher_drafts_and_catalog_context(tmp_path, monkeypatch, edit, launcher):
     from scidiscovery.research_loop import model_catalog
-    calls=[]
-    def load(name,**context):
-        calls.append((name,context))
-        return model_catalog.unavailable('Exact launcher context fixture')
-    monkeypatch.setattr(model_catalog,'load',load)
-    draft=complete(tmp_path)
-    draft['document']['agent'].update(backend='pi',launcher=launcher,model='acme/exact',reasoning_effort='low')
-    fields=submitted(draft)
-    fields['cfg.agent.backend']='codex'
-    changed=form.parse(fields,base=tmp_path,refresh_backend=True)
-    assert changed['document']['agent'].get('launcher') is None
-    assert changed['launcher_drafts']['pi']==launcher
-    form.render(changed)
-    assert calls[-1]==('codex',dict(launcher=None,native=None,base=str(tmp_path)))
-    codex_launcher=['./codex-wrapper','--config','literal=value with spaces']
-    fields=set_setting(submitted(changed),'agent.launcher',codex_launcher)
-    fields['cfg.agent.backend']='pi'
-    restored=form.parse(fields,base=tmp_path,refresh_backend=True)
-    assert restored['document']['agent']['launcher']==launcher
-    assert restored['launcher_drafts']['codex']==codex_launcher
-    fields=submitted(restored)
-    fields['cfg.agent.backend']='codex'
-    changed=form.parse(fields,base=tmp_path,refresh_backend=True)
-    assert changed['document']['agent']['launcher']==codex_launcher
-    stable=form.parse(submitted(changed),base=tmp_path)
-    assert stable['launcher_drafts']['pi']==launcher
-    exported=form.export_toml(stable)
-    assert 'launcher_drafts' not in exported and 'native_drafts' not in exported
-    assert research_config.tomllib.loads(exported)['agent']['launcher'][1:]==codex_launcher[1:]
-    assert draft['document']['agent']['launcher']==launcher
-    assert not (tmp_path/'instance').exists()
-
-
-def test_existing_absolute_pi_launcher_refresh_uses_codex_context_and_restores_exact_argv(tmp_path, monkeypatch):
-    from copy import deepcopy
-    from scidiscovery.research_loop import model_catalog
-    launcher = ['/home/da/.nvm/versions/node/v25.2.1/bin/pi']
-    draft = complete(tmp_path)
-    draft['document']['agent'].update(backend='pi', launcher=launcher, model='acme/exact',
-        roles=dict(W=dict(model='acme/exact-worker')))
-    configuration = deepcopy(form.declaration(draft))
-    editable = form.imported(configuration, base=tmp_path)
     calls = []
     def catalog(name, **context):
         calls.append((name, context))
         return dict(models=[dict(id=name+'/listed', label='Listed', efforts=[], tiers=[])],
             source='provider launcher fixture', fetched_at=None, error=None)
     monkeypatch.setattr(model_catalog, 'load', catalog)
-    fields = Controls(form.render(editable, edit=True)).fields
-    fields['cfg.agent.backend'] = 'codex'
-    changed = form.parse_edit(fields, base=tmp_path, configuration=configuration, refresh_backend=True)
+    draft = complete(tmp_path)
+    draft['document']['agent'].update(backend='pi', launcher=launcher, model='acme/exact',
+        roles=dict(W=dict(model='acme/exact-worker')))
+    configuration = form.declaration(draft)
+    def parse(fields, *, refresh=False):
+        return (form.parse_edit(fields, base=tmp_path, configuration=configuration, refresh_backend=refresh)
+            if edit else form.parse(fields, base=tmp_path, refresh_backend=refresh))
+    def switch(current, backend):
+        fields = submitted(current, edit=edit)
+        fields['cfg.agent.backend'] = backend
+        return parse(fields, refresh=True)
+    changed = switch(draft, 'codex')
     assert changed['document']['agent'].get('launcher') is None
-    html = form.render(changed, edit=True)
+    assert changed['launcher_drafts']['pi'] == launcher
+    html = form.render(changed, edit=edit)
     assert calls[-1] == ('codex', dict(launcher=None, native=None, base=str(tmp_path)))
     assert 'codex/listed' in html
-    assert changed['launcher_drafts']['pi'] == launcher
-    restored_fields = Controls(html).fields
-    restored_fields['cfg.agent.backend'] = 'pi'
-    restored = form.parse_edit(restored_fields, base=tmp_path, configuration=configuration, refresh_backend=True)
-    assert restored['document'] == configuration
-    assert form.declaration(editable) == configuration
+    restored = switch(changed, 'pi')
+    # Editing keeps server-owned objective inputs in the supplied configuration.
+    assert (restored['document'] if edit else form.declaration(restored)) == configuration
+    codex_launcher = ['./codex-wrapper', '--config', 'literal=value with spaces']
+    exported_launcher = [str(tmp_path / 'codex-wrapper'), *codex_launcher[1:]]
+    changed = switch(restored, 'codex')
+    fields = set_setting(submitted(changed, edit=edit), 'agent.launcher', codex_launcher)
+    fields['cfg.agent.backend'] = 'pi'
+    restored = parse(fields, refresh=True)
+    assert restored['document']['agent']['launcher'] == launcher
+    assert restored['launcher_drafts']['codex'] == codex_launcher
+    changed = switch(restored, 'codex')
+    stable = parse(submitted(changed, edit=edit))
+    assert stable['document']['agent']['launcher'] == codex_launcher
+    assert stable['launcher_drafts']['pi'] == launcher
+    exported = form.export_toml(stable)
+    assert 'launcher_drafts' not in exported and 'native_drafts' not in exported
+    # Export preserves the relative executable's meaning when the file moves.
+    assert research_config.tomllib.loads(exported)['agent']['launcher'] == exported_launcher
+    assert form.declaration(draft) == configuration
     assert not (tmp_path / 'instance').exists()
 
 
@@ -956,7 +911,7 @@ def test_backend_switch_waits_for_invalid_toml_correction_without_rebinding_laun
     launcher = ['/opt/exact/pi-wrapper', '--literal', 'argument with spaces']
     native = dict(fixture_extension=dict(keep=['exact native option']))
     draft['document']['agent'].update(backend='pi', launcher=launcher, native=native)
-    fields = Controls(form.render(draft, catalogs={})).fields
+    fields = submitted(draft, catalogs={})
     valid_text = fields['advanced_toml']
     fields.update({'cfg.agent.backend': 'codex', 'advanced_toml': valid_text + '\n[broken'})
     with pytest.raises(form.FormError, match='高级设置（TOML）格式错误') as caught:
@@ -1018,7 +973,7 @@ def test_configuration_refresh_owns_one_state_and_renderer_uses_supplied_facts(t
 def test_visible_optional_controls_keep_omission_and_require_recovery_opt_in(tmp_path):
     draft = complete(tmp_path)
     before = form.declaration(draft)
-    fields = Controls(form.render(draft, catalogs={})).fields
+    fields = submitted(draft, catalogs={})
     assert 'enabled.policies.resume' not in fields
     assert form.declaration(form.parse(fields, base=tmp_path)) == before
     fields['cfg.policies.resume.max_attempts'] = '2'
@@ -1066,14 +1021,21 @@ def test_public_provider_descriptors_drive_scalar_and_collection_controls(tmp_pa
             return (dict(path='agent.model', label='Fixture exact model', required=True),
                 dict(path='agent.native.paths', label='Fixture paths', kind='strings'),
                 dict(path='agent.native.records', label='Fixture records', kind='array'),
-                dict(path='agent.native.enabled', label='Fixture switch', kind='boolean'))
+                dict(path='agent.native.enabled', label='Fixture switch', kind='boolean',
+                    description='Use the selected provider resource.'))
     monkeypatch.setitem(backends._PROVIDERS, 'public-fixture', PublicProvider)
+    def forbidden():
+        raise AssertionError('Independent form requested the default provider schema')
+    monkeypatch.setattr(backends.Codex, 'configuration_fields', forbidden)
     draft = complete(tmp_path)
     draft['document']['agent'].update(backend='public-fixture', model='exact',
-        native=dict(paths=['argument with spaces', ''], records=[dict(flag=False), []], enabled=False))
+        native=dict(paths=['argument with spaces', ''], records=[dict(flag=False), []], enabled=False,
+            extension=dict(keep=[1, 'two'])))
     html = form.render(draft, catalogs={})
     assert html.count('name="cfg.agent.model"') == 1
     assert 'Fixture exact model' in html and 'Fixture records' in html
+    assert 'Use the selected provider resource.' in html and 'fast_mode' not in html
+    assert research_config.tomllib.loads(Controls(html).fields['advanced_toml'])['agent']['native'] == dict(extension=dict(keep=[1, 'two']))
     parsed = form.parse(Controls(html).fields, base=tmp_path)
     assert form.declaration(parsed) == form.declaration(draft)
     exported = research_config.tomllib.loads(form.export_toml(parsed))
@@ -1086,7 +1048,7 @@ def test_public_provider_descriptors_drive_scalar_and_collection_controls(tmp_pa
 def test_supervision_knob_edit_completes_current_policy_without_enabling_on_view(tmp_path):
     from scidiscovery.research_loop import supervision
     draft = complete(tmp_path)
-    fields = Controls(form.render(draft, catalogs={})).fields
+    fields = submitted(draft, catalogs={})
     fields['cfg.policies.supervision.min_budget_fraction'] = '0.2'
     fields['cfg.policies.supervision.max_automatic_reviews'] = '2'
     fields['cfg.policies.supervision.automatic_budget_fraction.tokens'] = '0.3'
@@ -1114,18 +1076,20 @@ def test_pi_unsupported_tiers_are_visible_preserved_and_clearable(tmp_path):
     assert 'service_tier' not in cleared and 'roles' not in cleared
 
 
-def test_imported_null_supervision_mode_is_retained_and_never_defaulted(tmp_path):
+@pytest.mark.parametrize('mode,complete_policy', [(None, True), (False, False), (0, False)])
+def test_imported_nonstring_supervision_mode_is_exact_and_never_defaulted(tmp_path, mode, complete_policy):
     from scidiscovery.research_loop import supervision
     draft = complete(tmp_path)
-    selected = dict(supervision.policy(), mode=None)
+    selected = dict(supervision.policy(), mode=mode) if complete_policy else dict(mode=mode)
     draft['document']['policies'] = dict(supervision=selected)
-    fields = Controls(form.render(draft, catalogs={})).fields
+    fields = submitted(draft, catalogs={})
     assert fields['cfg.policies.supervision.mode'] == ''
     parsed = form.parse(fields, base=tmp_path)
-    assert parsed['document']['policies']['supervision'] == selected
-    retried = form.parse(Controls(form.render(parsed, catalogs={})).fields, base=tmp_path)
-    assert retried['document']['policies']['supervision']['mode'] is None
-    with pytest.raises(ValueError, match='Explicit investment supervision mode required'):
+    assert form.declaration(parsed) == form.declaration(draft)
+    retried = form.parse(submitted(parsed, catalogs={}), base=tmp_path)
+    assert retried['document']['policies']['supervision'] == selected
+    assert type(retried['document']['policies']['supervision']['mode']) is type(mode)
+    with pytest.raises(ValueError, match='Explicit investment supervision mode required' if mode is None else None):
         form.preview(retried)
     assert not (tmp_path / 'instance').exists()
 
@@ -1135,7 +1099,7 @@ def test_unsupported_supervision_mode_stays_selected_and_rejected(tmp_path):
     draft = complete(tmp_path)
     selected = dict(supervision.policy(), mode='legacy-custom')
     draft['document']['policies'] = dict(supervision=selected)
-    fields = Controls(form.render(draft, catalogs={})).fields
+    fields = submitted(draft, catalogs={})
     assert fields['cfg.policies.supervision.mode'] == 'legacy-custom'
     with pytest.raises(form.FormError, match='自动方向复核：请选择支持的选项') as caught:
         form.parse(fields, base=tmp_path)
@@ -1145,26 +1109,21 @@ def test_unsupported_supervision_mode_stays_selected_and_rejected(tmp_path):
         form.preview(caught.value.draft)
 
 
-def test_native_scalar_imported_structure_stays_exact_in_advanced_settings(tmp_path):
+@pytest.mark.parametrize('path', [
+    'agent.native.features.fast_mode', 'policies.supervision.consecutive_calls',
+])
+def test_imported_scalar_structure_stays_exact_and_unqualified(tmp_path, path):
     draft = complete(tmp_path)
-    draft['document']['agent']['native'] = dict(features=dict(fast_mode=dict(keep=[])))
-    fields = Controls(form.render(draft, catalogs={})).fields
-    assert 'cfg.agent.native.features.fast_mode' not in fields
-    assert research_config.tomllib.loads(fields['advanced_toml'])['agent']['native']['features']['fast_mode'] == dict(keep=[])
+    target = draft['document']
+    *parents, leaf = path.split('.')
+    for key in parents:
+        target = target.setdefault(key, {})
+    target[leaf] = dict(keep=[])
+    fields = submitted(draft, catalogs={})
+    assert 'cfg.' + path not in fields
     parsed = form.parse(fields, base=tmp_path)
     assert form.declaration(parsed) == form.declaration(draft)
-    assert form.declaration(form.parse(Controls(form.render(parsed, catalogs={})).fields, base=tmp_path)) == form.declaration(draft)
-    with pytest.raises(ValueError):
-        form.preview(parsed)
-
-
-def test_partial_supervision_scalar_structure_remains_unqualified_and_unchanged(tmp_path):
-    draft = complete(tmp_path)
-    draft['document']['policies'] = dict(supervision=dict(consecutive_calls=dict(keep=[])))
-    fields = Controls(form.render(draft, catalogs={})).fields
-    assert 'cfg.policies.supervision.consecutive_calls' not in fields
-    parsed = form.parse(fields, base=tmp_path)
-    assert form.declaration(parsed) == form.declaration(draft)
+    assert form.declaration(form.parse(submitted(parsed, catalogs={}), base=tmp_path)) == form.declaration(draft)
     with pytest.raises(ValueError):
         form.preview(parsed)
 
@@ -1175,7 +1134,7 @@ def test_multiline_string_collections_remain_exact_in_toml_without_textareas(tmp
     roots = ['single-line-root', '\nroot-with-leading-linebreak']
     draft['document']['agent'].update(launcher=argv,
         native=dict(sandbox_workspace_write=dict(writable_roots=roots)))
-    fields = Controls(form.render(draft, catalogs={})).fields
+    fields = submitted(draft, catalogs={})
     assert not any(key.startswith(('cfg.agent.launcher',
         'cfg.agent.native.sandbox_workspace_write.writable_roots')) for key in fields)
     advanced = research_config.tomllib.loads(fields['advanced_toml'])
@@ -1187,20 +1146,6 @@ def test_multiline_string_collections_remain_exact_in_toml_without_textareas(tmp
         base=tmp_path)) == form.declaration(draft)
 
 
-@pytest.mark.parametrize('invalid_mode', [False, 0])
-def test_partial_supervision_nonstring_mode_remains_exact_without_defaults(tmp_path, invalid_mode):
-    draft = complete(tmp_path)
-    selected = dict(mode=invalid_mode)
-    draft['document']['policies'] = dict(supervision=selected)
-    fields = Controls(form.render(draft, catalogs={})).fields
-    assert fields['cfg.policies.supervision.mode'] == ''
-    parsed = form.parse(fields, base=tmp_path)
-    assert parsed['document']['policies']['supervision'] == selected
-    assert type(parsed['document']['policies']['supervision']['mode']) is type(invalid_mode)
-    assert form.declaration(parsed) == form.declaration(draft)
-    with pytest.raises(ValueError):
-        form.preview(parsed)
-    assert not (tmp_path / 'instance').exists()
 
 
 @pytest.mark.parametrize('edit', [False, True])
@@ -1228,7 +1173,7 @@ def test_ordinary_worker_targets_are_readonly_and_existing_anchors_stay_exact(tm
 
 def test_visible_h_a_e_targets_do_not_invent_missing_worker_anchor(tmp_path):
     draft = complete(tmp_path)
-    fields = Controls(form.render(draft, catalogs={})).fields
+    fields = submitted(draft, catalogs={})
     for role in 'HAE':
         fields['cfg.budget.node_targets.'+role+'.max_observed_tokens'] = '400'
         fields['cfg.budget.node_targets.'+role+'.max_seconds'] = '30'

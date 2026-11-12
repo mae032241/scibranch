@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from scidiscovery.research_loop import budget, contracts as c, controller, delivery, execution, native
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, delivery, execution, native
 from test_history_handoff import finish
 
 
@@ -33,7 +33,9 @@ def accept(root, role='A', *, final=True):
     job = final_job(root) if final else c.build_job(root, 2, role, [1])
     intent = dict(step=2, task_ref=c.record_ref(root / 'jobs/002.json'),
                   budget_slice=budget.accept_node(root, job))
-    c.write(execution.origin(root, 2) / 'native-intent.json', intent)
+    record = execution.origin(root, 2)
+    c.write(record / 'native-intent.json', intent)
+    accepted_budget.accept_native(root, 2, record, intent)
     return job, intent
 
 
@@ -54,7 +56,7 @@ def complete(root, job, intent, *, unknown=False):
     c.write(record / 'usage-observation.json', observation)
     payload = dict(summary='Retained bounded findings', scientific_result='Fixture observation',
         limitations=['No experiment or model was run'], implementation_selection=None,
-        candidate_recommendation=None, search_review=None, progress_assessment=None,
+        candidate_recommendation=None, final_coverage=None, search_review=None, progress_assessment=None,
         decision_request=None, portfolio_review=None, next_action='finish',
         route_reason='The original finite report is complete')
     c.write(record / 'science-output.json', payload)
@@ -88,7 +90,7 @@ def test_new_prepare_freezes_one_original_final_a_grant(original_final):
 
 
 def test_prepared_protected_final_validates_original_inputs_before_native_launch(tmp_path, monkeypatch):
-    from test_soft_external_closeout import external_scene
+    from test_final_a_completion import external_scene
     root = external_scene(tmp_path, monkeypatch)
     nodes = [dict(step=step, seal_ref=c.record_ref(execution.origin(root, step) / 'result-identity.json'))
              for step in (1, 2)]
@@ -146,7 +148,10 @@ def test_final_grant_ledger_replay_rejects_changed_admission(original_final, cha
     root, job, intent = original_final
     accepted = budget.final_a_return(root, job, intent)
     path = root / 'control-ledger' / f'{accepted["seq"]:06d}.json'
-    altered = copy.deepcopy(accepted)
+    original = c.read(path)
+    previous = [c.read(root/'control-ledger'/f'{seq:06d}.json') for seq in range(1, accepted['seq'])]
+    budget._validate_final_a_event(root, c.settings(root), original, previous)
+    altered = copy.deepcopy(original)
     if change in {'version', 'attempt'}:
         altered[change] += 1
     elif change == 'role':
@@ -157,9 +162,9 @@ def test_final_grant_ledger_replay_rejects_changed_admission(original_final, cha
         altered['reserve']['tokens'] += 1
     else:
         altered['basis'] = 'invented_return'
-    c.write(path, altered)
     with pytest.raises(ValueError, match='final A|Final A'):
-        budget.final_a_barrier(root)
+        budget._validate_final_a_event(root, c.settings(root), altered, previous)
+    assert c.read(path) == original
 
 
 def test_final_receipt_retains_actual_cached_usage_and_original_ceilings(original_final):
@@ -289,7 +294,9 @@ def test_budget_amendment_preserves_the_original_final_claim_and_consumption(ori
     assert ledger_path.read_bytes() == ledger_bytes
     grants = [c.read(path) for path in (root / 'control-ledger').glob('*.json')
               if c.read(path)['kind'] == 'final_a_return']
-    assert grants == [original]
+    assert len(grants) == 1
+    assert original['ref'] == c.record_ref(ledger_path)
+    assert all(grants[0][key] == value for key, value in original.items() if key != 'ref')
     assert budget.effective_max_steps(root) == 6
     # This explicit FINAL fixture has no saved normal cursor to reopen.
     for role in 'HWAE':

@@ -12,7 +12,7 @@ from execution_fixtures import execution_registry
 from test_registered_experiments import managed
 from test_soft_node_budget import scene, start_clock
 from test_history_handoff import finish
-from scidiscovery.research_loop import budget, contracts as c, execution, execution_authority, experiments, native, runtime
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, execution, execution_authority, experiments, native, runtime
 
 
 def soft(managed, *, max_seconds=None):
@@ -235,6 +235,7 @@ def original_stage(tmp_path):
     record=execution.record(root,1)
     intent=dict(task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job))
     c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
     return root,job,record,intent
 
 
@@ -251,11 +252,13 @@ def test_restart_and_same_stage_attempt_reconstruct_cumulative_review_without_re
     c.write(first/'usage.json',meter)
     report=dict(budget.node_report(root,job,intent,meter),usage_observed=True)
     c.write(first/'native-outcome.json',dict(returncode=1,budget_slice=report))
+    accepted_budget.accept_terminal(root,1,first,meter=meter,unknown=False)
     anchor=budget.accept_continuation(root,job,[first])
     next_record=first/'continuations/001'
     next_intent=dict(attempt=1,task_ref=intent['task_ref'],previous=execution.proof(first),
         root_intent_ref=c.record_ref(first/'native-intent.json'),budget_slice=anchor)
     c.write(next_record/'native-intent.json',next_intent)
+    accepted_budget.accept_native(root,1,next_record,next_intent)
     current=experiments.configure(root,1,'local_execution:command',dict(run_argv=[sys.executable]),config)
     assert current['scope']==initial['scope'] and current['admission']==initial['admission']
     assert current['native_attempt']['number']==1
@@ -270,31 +273,23 @@ def test_restart_and_same_stage_attempt_reconstruct_cumulative_review_without_re
     assert experiments.review_feedback(initial)['requested'] is None
 
 
-def test_publisher_ignores_stale_arguments_and_recomputes_nonsticky_original_facts(tmp_path):
+def test_review_publication_observes_new_meter_without_resetting_original_facts(tmp_path):
     root=scene(tmp_path,tokens=2,seconds=20,total_seconds=60,search_policy=None)
     finish(root,1,'H',[],action='experiment')
     start_clock(root,'Current W with a sealed original H')
     job=c.build_job(root,2,'W',[1]);record=execution.record(root,2)
     intent=dict(task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
     c.write(record/'native-intent.json',intent)
-    old_limits=budget.snapshot(root);old_meter=dict(input_tokens=0,cached_input_tokens=0,output_tokens=0)
+    accepted_budget.accept_native(root,2,record,intent)
     admission=budget.review_configuration(root,job)
     projection=Path(admission['directory'])/'review.json'
-    previous_meter=execution.record(root,1)/'usage.json'
-    original_bytes=previous_meter.read_bytes()
-    previous_meter.unlink()  # Unknown billing coverage is retained; it does not request review.
-    budget.publish_review(root,job,intent,old_limits,old_meter,observed=False)
     value=c.read(projection)
-    usage=native.usage(root)
-    assert 1 in usage['unknown_steps'] and 1 not in usage['blocking_unknown_steps']
+    assert 2 in native.usage(root)['unknown_steps']  # The open W has no meter yet.
     assert value['reason'] is None and value['pending'] is False
     assert value['observed_tokens_lower_bound']==0 and value['inflight_usage_unknown'] is True
-    previous_meter.write_bytes(original_bytes)
-    budget.publish_review(root,job,intent,old_limits,old_meter,observed=False)
+    c.write(record/'usage.json',dict(input_tokens=2,cached_input_tokens=0,output_tokens=0))
+    budget.review_configuration(root,job)
     value=c.read(projection)
     assert value['reason'] is None and value['pending'] is False
-    c.write(record/'usage.json',dict(input_tokens=2,cached_input_tokens=0,output_tokens=0))
-    budget.publish_review(root,job,intent,old_limits,old_meter,observed=False)
-    value=c.read(projection)
-    assert value['reason']=='target_tokens_reached' and value['observed_tokens_lower_bound']==2
+    assert value['observed_tokens_lower_bound']==2
     assert value['inflight_usage_unknown'] is True

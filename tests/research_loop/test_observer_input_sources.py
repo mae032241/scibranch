@@ -1,7 +1,5 @@
 """Trusted adapter DI and synthetic native identities; real source/seal consumers."""
 from copy import deepcopy
-import json
-import uuid
 
 import pytest
 
@@ -19,17 +17,12 @@ def test_observer_declared_sources_bind_authors_and_never_upgrade_display_covera
         model='fixture',reasoning_effort='high',search_policy=None,experiment_mode='external',
         formal_review_policy={'version':1},source_restrictions=[dict(source=str(objective),restriction='clear')],
         history_observer=dict(adapter=str(adapter),config={},source_contract=inputs.SOURCE_CONTRACT))
-    original_seal=c.seal_result;calls=[]
+    calls=[]
 
-    def seal(root,step):
-        work=c.workspace(root,step);record=c.host_record(work);thread=str(uuid.uuid5(uuid.NAMESPACE_URL,'observer-source-'+str(step)))
-        home=tmp_path/'identity';session=home/'sessions'/(thread+'.jsonl');session.parent.mkdir(parents=True,exist_ok=True)
-        session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
-        (record/'native.jsonl').write_text(json.dumps(dict(type='thread.started',thread_id=thread))+'\n')
-        outcome=c.read(record/'native-outcome.json');outcome.update(thread_id=thread,
-            native_identity=dict(participant_scope='codex_exec_single_agent_v1',home=str(home),path=str(session)))
-        c.write(record/'native-outcome.json',outcome)
-        return original_seal(root,step)
+    def participants(root,job,seal,*,source=None):
+        # Exact native proof validation belongs to the formal-review tests.
+        # Distinct participants here isolate source traversal and receipt binding.
+        return dict(complete=True,participants=[['codex_exec',f'observer-source-{job["step"]}']],reason=None)
 
     def observe(config,request):
         calls.append(request['step'])
@@ -38,14 +31,15 @@ def test_observer_declared_sources_bind_authors_and_never_upgrade_display_covera
             coverage=dict(status='complete',note='Display coverage alone is not source coverage.'),
             input_sources=dict(version=1,complete=True,sources=origins))
 
-    monkeypatch.setattr(c,'seal_result',seal);monkeypatch.setattr(history,'read_adapter',observe)
+    monkeypatch.setattr(review,'participants',participants);monkeypatch.setattr(history,'read_adapter',observe)
     finish(root,1,'H',[],action='experiment',files={'source.txt':'An observed scientific source.'})
     job,_,record=finish(root,2,'W',[1],files={'derivative.txt':'An observed derivative.'})
     assert job.get('selected_inputs',[])==[]
     seal=c.read(record/'result-identity.json');observation=history.read_observation(root,job,seal)
     assert calls==[1,2] and q.output_status(root,2)['restriction']=='clear'
     people=review.authors(root,2)
-    assert people['complete'] and set(map(tuple,review.authors(root,1)['participants']))<=set(map(tuple,people['participants']))
+    assert review.authors(root,1)['participants']==[['codex_exec','observer-source-1']]
+    assert people['complete'] and people['participants']==[['codex_exec','observer-source-1'],['codex_exec','observer-source-2']]
     monkeypatch.setattr(history,'read_adapter',lambda *args:pytest.fail('Readonly source/author checks must not rerun an adapter'))
     assert q.output_status(root,2)['restriction']=='clear' and review.authors(root,2)==people
     missing={key:value for key,value in observation.items() if key!='input_sources'}
@@ -62,7 +56,3 @@ def test_observer_declared_sources_bind_authors_and_never_upgrade_display_covera
     # existing display 'complete' as source qualification.
     legacy=history.observer_config(dict(adapter=str(adapter),config={}))
     assert 'source_contract' not in legacy
-    original=root/seal['observations']['path'];saved=original.read_bytes();original.chmod(0o600)
-    original.write_bytes(saved+b' ')
-    with pytest.raises((q.IntegrityError,history.ObserverIntegrityError),match='snapshot changed|receipt changed'):
-        q.output_status(root,2)

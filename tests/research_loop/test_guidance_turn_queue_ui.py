@@ -70,8 +70,11 @@ def test_guidance_claim_actions_freeze_until_proven_unsubmitted_release(claim_st
         turn_input=dict(status=claim_status, step=3, role='H'))
     state = ui_guidance.state(row, manager=True)
     assert not state['editable'] and not state['revocable']
-    released = dict(row, last_turn_input=dict(status='unavailable'))
-    released.pop('turn_input')
+
+
+def test_proven_unsubmitted_release_restores_actions_without_reloading_page():
+    released = dict(guidance_id='a'*32, status='pending', scope='research',
+        last_turn_input=dict(status='unavailable'))
     state = ui_guidance.state(released, manager=True)
     assert state['editable'] and state['revocable']
     assert '未提交证明' in state['note']

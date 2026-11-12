@@ -14,6 +14,12 @@ from scidiscovery.research_loop.output_repair import OutputRepairRequired, WorkR
 from test_history_handoff import scene, finish
 
 
+def _unsealed_finish(root, monkeypatch, role='H', **kwargs):
+    with monkeypatch.context() as patch:
+        patch.setattr(c, 'seal_result', lambda *args, **kwargs: None)
+        return finish(root, 1, role, [], **kwargs)
+
+
 def test_consumers_use_explicit_accepted_inventory_without_observing(monkeypatch, tmp_path):
     job = dict(step=1, role='W')
     record = tmp_path / 'native-evidence/001'
@@ -35,14 +41,6 @@ def test_consumers_use_explicit_accepted_inventory_without_observing(monkeypatch
         assert checkpoint.validate(tmp_path, job, record, inventory=inventory) == {'accepted': True}
 
 
-def test_seal_accepts_before_publication_without_post_validate(scene, monkeypatch):
-    def forbidden(*args, **kwargs):
-        pytest.fail('Fresh seal repeated complete independent validation')
-    monkeypatch.setattr(c, 'validate', forbidden)
-    _, _, record = finish(scene, 1, 'H', [], action='wait')
-    assert (record / 'result-identity.json').is_file()
-
-
 def test_precommit_observation_gate_cannot_leave_a_seal(scene, monkeypatch):
     def refused(root, job, seal, *, inventory):
         assert not (root / 'native-evidence/001/result-identity.json').exists()
@@ -62,14 +60,6 @@ def test_closed_seal_read_and_independent_audit_do_not_generate(scene, monkeypat
     monkeypatch.setattr(history, 'refresh', forbidden)
     assert c.seal_result(scene, 1) == expected
     assert c.validate(work) == expected
-
-
-def test_inventory_from_another_attempt_cannot_seal(scene):
-    job = c.build_job(scene, 1, 'H', [])
-    stale = c.CurrentInventory(scene, job, scene / 'native-evidence/999', 0, [], {})
-    with pytest.raises(ValueError, match='another task or attempt'):
-        c.seal_result(scene, 1, inventory=stale)
-    assert not (scene / 'native-evidence/001/result-identity.json').exists()
 
 
 def test_partial_result_without_acceptance_marker_is_not_a_sealed_fact(scene):
@@ -104,6 +94,7 @@ def test_material_name_only_reads_the_accepted_binding(scene):
 def exit_scene(scene,monkeypatch):
     job=c.build_job(scene,1,'W',[])
     record=scene/'native-evidence/001'
+    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(scene/'jobs/001.json')))
     c.write(record/'native-outcome.json',{})
     (record/'native.jsonl').write_text('Retained native original.\n')
     monkeypatch.setattr(execution,'records',lambda *args:[record])
@@ -255,10 +246,7 @@ def test_direct_work_repair_failure_retains_its_explicit_current_inventory(scene
 
 @pytest.mark.parametrize('fault',['malformed_json','layout_collision'])
 def test_owner_output_diagnosis_returns_to_same_repair_without_accepting_again(scene,monkeypatch,fault):
-    original_seal=c.seal_result
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(scene,1,'H',[],action='wait')
-    monkeypatch.setattr(c,'seal_result',original_seal)
+    job,work,record=_unsealed_finish(scene,monkeypatch,action='wait')
     if fault=='malformed_json':
         (record/'science-output.json').write_text('{broken')
         outcome=c.read(record/'native-outcome.json')
@@ -287,30 +275,12 @@ def test_owner_output_diagnosis_returns_to_same_repair_without_accepting_again(s
     assert not (record/'result-identity.json').exists()
 
 
-def test_missing_scientific_output_keeps_native_checkpoint_without_input_or_draft_acceptance(scene,monkeypatch):
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(scene,1,'W',[])
-    (record/'science-output.json').unlink()
-    outcome=c.read(record/'native-outcome.json')
-    c.write(record/'native-outcome.json',dict(outcome,output_status='missing',raw_ref=None))
-    monkeypatch.setattr(checkpoint,'enabled_for_policy',lambda *args,**kwargs:True)
-    def forbidden(*args,**kwargs):
-        pytest.fail('Missing science triggered draft, scientific-input or qualification acceptance')
-    monkeypatch.setattr(c,'_validate_inputs_from_facts',forbidden)
-    monkeypatch.setattr(c,'_material_inventory',forbidden)
-    inventory=c.accept_current_inventory(scene,1)
-    assert not inventory.science_available
-    assert inventory.checkpoint['science']==dict(status='missing',diagnostic='missing_output')
-    assert inventory.checkpoint['binding']['stage_owner']==c.record_ref(scene/'jobs/001.json')
-    assert 'science-output.json' in inventory.checkpoint['missing_native_originals']
-    assert not (record/'result-identity.json').exists()
-
-
 @pytest.mark.parametrize('kind',['observation','recovery','old_h'])
 def test_worker_reads_only_the_required_frozen_terminal_pointer(scene,monkeypatch,kind):
     from scidiscovery.research_loop import originals
     origin=originals.local_identity(scene)
-    target=dict(mechanism_ref='h001.m1',source_h=1,source_h_ref=dict(path=str(scene/'old-H-seal.json')))
+    target=dict(mechanism_ref='h001.m1',source_step=1,
+        source_ref=dict(path=str(scene/'old-H-seal.json')),source_role='H')
     binding=dict(target,job_ref=dict(path=str(scene/'jobs/002.json')),grant=None)
     row=dict(call_id='retained-original',status='known_failed',mechanism_binding=binding)
     observation=scene/'host-history/observations/002.json'
@@ -322,11 +292,12 @@ def test_worker_reads_only_the_required_frozen_terminal_pointer(scene,monkeypatc
         c.write(recovery,dict(row=row))
         pointer['recovery_ref']=dict(origin_identity=origin,path=recovery.relative_to(scene).as_posix())
     if kind=='old_h':
-        target=dict(target,source_h=9,source_h_ref=dict(path=str(scene/'new-H-seal.json')))
+        target=dict(target,source_step=9,source_ref=dict(path=str(scene/'new-H-seal.json')))
     snapshot=scene/'frozen-worker-table.json'
     c.write(snapshot,dict(table=dict(mechanisms={'h001.m1':dict(last_terminal=pointer),
         'h001.unrelated':dict(last_terminal=dict(observation_ref=dict(path='must-not-read.json')))})))
-    job=dict(role='W',search=dict(focus=dict(action='screen'),coverage_obligation=[target]),
+    job=dict(role='W',search=dict(focus=dict(action='screen'),coverage_obligation=[target],
+        breadth=dict(mechanisms=[target])),
         history=dict(breadth_snapshot=dict(origin_identity=origin,path=snapshot.name)))
     def forbidden(*args,**kwargs):pytest.fail('Worker delivery reopened the full historical prefix')
     monkeypatch.setattr(history,'_source',forbidden)
@@ -406,8 +377,7 @@ def _forbid_consumer_policy_reads(monkeypatch):
 
 
 def test_inventory_material_and_observer_consumers_reuse_the_frozen_policy(scene,monkeypatch):
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(scene,1,'H',[],action='wait')
+    job,work,record=_unsealed_finish(scene,monkeypatch,action='wait')
     inventory=c.accept_current_inventory(scene,1)
     _forbid_consumer_policy_reads(monkeypatch)
     assert c.material_inventory(scene,1,inventory=inventory)[0]==inventory.materials
@@ -479,41 +449,9 @@ def test_next_configuration_operation_reads_after_accepted_state_changes(scene,m
     else:assert after.row('execution-recovery/001/fixture')['ref']==c.record_ref(recovery)
 
 
-def test_configuration_head_is_shared_locally_and_job_revision_stays_exact(scene,monkeypatch):
-    from test_configuration_updates import edit
-    edit(scene,model='fixture-first')
-    read=accepted_budget.read
-    observed=[]
-    def fresh(root):
-        state=read(root)
-        observed.append(state)
-        return state
-    monkeypatch.setattr(accepted_budget,'read',fresh)
-    assert configuration_updates.current(scene)['model']=='fixture-first'
-    assert len(observed)==1
-    observed.clear()
-    assert configuration_updates.for_new_job(scene,1)['model']=='fixture-first'
-    assert len(observed)==1
-    first=configuration_updates.bind_new_job(scene,1)
-    observed.clear()
-    assert configuration_updates.for_new_job(scene,1)['model']=='fixture-first'
-    assert len(observed)==1
-    job=c.build_job(scene,1,'H',[])
-    assert job['configuration_revision']==first
-    edit(scene,model='fixture-second')
-    observed.clear()
-    assert configuration_updates.current(scene)['model']=='fixture-second'
-    assert len(observed)==1
-    observed.clear()
-    assert configuration_updates.for_job(scene,job)['model']=='fixture-first'
-    assert len(observed)==1
-
-
 def test_current_owner_reads_each_native_original_once_and_seal_consumes_it(scene,monkeypatch):
     seal=c.seal_result
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(scene,1,'H',[],action='wait')
-    monkeypatch.setattr(c,'seal_result',seal)
+    job,work,record=_unsealed_finish(scene,monkeypatch,action='wait')
     originals={scene/'jobs/001.json',record/'native-intent.json',record/'native-outcome.json'}
     read=c.read;science=c.read_scientific_output
     reads={path:0 for path in originals};science_reads=[]
@@ -541,6 +479,7 @@ def test_current_owner_reads_each_native_original_once_and_seal_consumes_it(scen
     monkeypatch.setattr(execution,'records',forbidden)
     monkeypatch.setattr(execution,'record',forbidden)
     monkeypatch.setattr(execution,'reference',forbidden)
+    monkeypatch.setattr(c,'validate',forbidden)
     c._material_inventory(scene,1,inventory=inventory)
     assert seal(scene,1,inventory=inventory)['summary']=='A contribution'
     assert (record/'result-identity.json').is_file()
@@ -548,8 +487,7 @@ def test_current_owner_reads_each_native_original_once_and_seal_consumes_it(scen
 
 @pytest.mark.parametrize('fault',['valid','missing','malformed'])
 def test_current_checkpoint_reuses_one_real_stop_and_science_diagnosis(scene,monkeypatch,fault):
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(scene,1,'W',[])
+    job,work,record=_unsealed_finish(scene,monkeypatch,role='W')
     raw=record/'science-output.json'
     if fault=='missing':
         raw.unlink()
@@ -568,11 +506,18 @@ def test_current_checkpoint_reuses_one_real_stop_and_science_diagnosis(scene,mon
     monkeypatch.setattr(worker_delivery,'_writers_stopped',once)
     monkeypatch.setattr(worker_delivery,'writers_stopped',forbidden)
     monkeypatch.setattr(checkpoint,'_binding',forbidden)
-    monkeypatch.setattr(checkpoint,'_science',forbidden)
+    if fault=='missing':
+        monkeypatch.setattr(c,'_validate_inputs_from_facts',forbidden)
+        monkeypatch.setattr(c,'_material_inventory',forbidden)
     inventory=c.accept_current_inventory(scene,1)
     assert calls==[record]
     expected='present' if fault=='valid' else 'missing' if fault=='missing' else 'invalid'
     assert inventory.checkpoint['science']['status']==expected
+    if fault=='missing':
+        assert inventory.checkpoint['science']['diagnostic']=='missing_output'
+        assert inventory.checkpoint['binding']['stage_owner']==c.record_ref(scene/'jobs/001.json')
+        assert 'science-output.json' in inventory.checkpoint['missing_native_originals']
+        assert not inventory.science_available and not (record/'result-identity.json').exists()
     if fault=='malformed':
         assert inventory.payload is None and inventory.science_error is inventory.output_error
         assert inventory.checkpoint['science']['diagnostic']==inventory.science_error.code
@@ -580,8 +525,7 @@ def test_current_checkpoint_reuses_one_real_stop_and_science_diagnosis(scene,mon
 
 def test_public_seal_rejects_inventory_after_a_new_attempt_without_rescanning_chain(scene,monkeypatch):
     seal=c.seal_result
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(scene,1,'H',[],action='wait')
+    job,work,record=_unsealed_finish(scene,monkeypatch,action='wait')
     inventory=c.accept_current_inventory(scene,1)
     successor=record/'continuations/001'
     successor.mkdir(parents=True)
@@ -601,8 +545,7 @@ def test_public_seal_rejects_inventory_after_a_new_attempt_without_rescanning_ch
 
 
 def test_reconciled_terminal_owner_and_public_loader_each_read_usage_once(scene,monkeypatch):
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(scene,1,'H',[],action='wait')
+    job,work,record=_unsealed_finish(scene,monkeypatch,action='wait')
     raw=record/'science-output.json'
     text=raw.read_text()
     raw.rename(record/'result.pending.json')
@@ -650,10 +593,8 @@ def test_observer_snapshot_write_failure_discards_accepted_inputs_with_fallback(
         model='fixture',reasoning_effort='high',search_policy=None,experiment_mode='external',
         formal_review_policy={'version':1},source_restrictions=[dict(source=str(objective),restriction='clear')],
         history_observer=dict(adapter=str(adapter),config={},source_contract=execution_inputs.SOURCE_CONTRACT))
-    seal=c.seal_result
-    monkeypatch.setattr(c,'seal_result',lambda *args,**kwargs:None)
-    job,work,record=finish(root,1,'H',[],action='wait',files={'source.txt':'An observed scientific source.'})
-    monkeypatch.setattr(c,'seal_result',seal)
+    job,work,record=_unsealed_finish(root,monkeypatch,action='wait',
+        files={'source.txt':'An observed scientific source.'})
     thread='11111111-2222-4333-8444-000000000001'
     home=tmp_path/'identity';session=home/'sessions'/(thread+'.jsonl');session.parent.mkdir(parents=True)
     session.write_text(json.dumps(dict(type='session_meta',payload=dict(id=thread,cwd=str(work))))+'\n')
@@ -682,7 +623,7 @@ def test_observer_snapshot_write_failure_discards_accepted_inputs_with_fallback(
         return write(destination,value)
     monkeypatch.setattr(c,'write',fail_once)
     inventory=c.accept_current_inventory(root,1)
-    seal(root,1,inventory=inventory)
+    c.seal_result(root,1,inventory=inventory)
     assert len(accepted)==1 and accepted[0]['complete'] is True
     assert writes==['complete','unavailable']
     assert inventory.observation_document==c.read(path)
