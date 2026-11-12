@@ -70,7 +70,8 @@ def test_context_export_cleanup_follows_native_group_cleanup(tmp_path, monkeypat
     import inspect
     from types import SimpleNamespace
     from scidiscovery.research_loop import code_versions, local_experiments, runtime
-    events=[]
+    events=[];turn_input_context=object()
+    backend=SimpleNamespace(end_turn_input=lambda context:events.append(('turn_input_ended',context)))
     identity=dict(task_ref=dict(path='original-task'),pgid=900000001)
     def bridge_close():
         events.append('bridge_stopped')
@@ -90,17 +91,18 @@ def test_context_export_cleanup_follows_native_group_cleanup(tmp_path, monkeypat
     finalizer=next(node for node in tree.body[0].body if isinstance(node,ast.Try)).finalbody
     code=compile(ast.fix_missing_locations(ast.Module(body=finalizer,type_ignores=[])),'native-finalizer','exec')
     scope=dict(native.__dict__,root=tmp_path,job=dict(step=3,role='W',experiment_mode='local'),
+        backend=backend,turn_input_context=turn_input_context,
         scientific_lifetime=SimpleNamespace(close=bridge_close),process=process,process_id=identity,
         experiment_config=dict(execution_interface=dict(executor='local_execution:command')),
         code_exports=[(2,'a'*32)],launch_started=True,bridge_stopped=False,
         cleanup=None,stop=None,error=None)
     exec(code,scope)
-    assert events[:4]==['bridge_stopped','native_reaped','native_group_stopped','backend_stopped']
+    assert events[:5]==[('turn_input_ended',turn_input_context),'bridge_stopped','native_reaped','native_group_stopped','backend_stopped']
     if unknown is None:
-        assert events[4:]==[('export_removed',2,'a'*32)]
+        assert events[5:]==[('export_removed',2,'a'*32)]
         assert scope['stop'] is None
     else:
-        assert events[4:]==[] and scope['cleanup']=='cleanup_unknown'
+        assert events[5:]==[] and scope['cleanup']=='cleanup_unknown'
         assert scope['stop']=='cleanup_unknown'
     events.clear()
     native._cleanup_code_exports(tmp_path,[(2,'a'*32)],launch_started=True,

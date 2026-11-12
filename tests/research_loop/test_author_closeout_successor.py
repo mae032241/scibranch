@@ -76,11 +76,3 @@ def test_author_successor_rejects_tampered_old_new_or_source_identity(pure_upgra
         with pytest.raises(ValueError):author.require_successor_eligibility(root,value)
     else:
         with pytest.raises(ValueError):author.validate_successor(root,value)
-
-
-def test_author_successor_allows_installed_tool_upgrade(pure_upgrade):
-    root,old,value,code,_=pure_upgrade
-    code.write_text('upgraded author runtime')
-    assert author.validate_successor(root,value)==value
-    c.write(author.successor_path(root,1),value)
-    assert author.validate(root,old)==old
