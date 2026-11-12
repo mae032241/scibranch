@@ -1,5 +1,6 @@
 """Native control consumes Backend observations without inspecting its meter."""
 import copy
+import json
 
 import pytest
 
@@ -97,3 +98,58 @@ def test_missing_turn_does_not_authorize_replay_of_an_unknown_original_call():
     assert used == original_used
     assert not native_recovery.never_started(outcome)
     assert not native_recovery.recoverable_source(outcome)
+
+
+@pytest.mark.process_e2e
+def test_terminal_below_independent_live_meter_keeps_lower_bound_and_original(tmp_path, monkeypatch):
+    root = prepare(tmp_path)
+    record = intent(root)
+    original_intent = (record / 'native-intent.json').read_bytes()
+    opaque_meter = object()
+    live = dict(input_tokens=20, cached_input_tokens=10, output_tokens=5)
+    observation = dict(source='independent_backend_observation', coverage='live', reason=None,
+        has_observation=True, baseline_tokens=None, tokens=live, context=dict(status='unavailable'),
+        context_windows=dict(coverage='unknown', windows_started=0, reason='context_capability_unavailable'))
+
+    def snapshot(self, meter):
+        assert meter is opaque_meter
+        return copy.deepcopy(observation)
+
+    def configure(self, meter, *args, required):
+        assert meter is opaque_meter and not required
+
+    def observe(self, meter, event):
+        assert meter is opaque_meter
+
+    # Backend observations are an independent provider seam. The real protocol
+    # script, admission, namespace, process and terminal owner remain unchanged.
+    monkeypatch.setattr(backends.Protocol, 'meter', lambda *a, **k: opaque_meter)
+    monkeypatch.setattr(backends.Protocol, 'snapshot_observation', snapshot)
+    monkeypatch.setattr(backends.Protocol, 'poll_observation', snapshot)
+    monkeypatch.setattr(backends.Protocol, 'finish_observation', lambda self, meter, **k: snapshot(self, meter))
+    monkeypatch.setattr(backends.Protocol, 'configure_observation', configure)
+    monkeypatch.setattr(backends.Protocol, 'observe', observe)
+    monkeypatch.setattr(backends.Protocol, 'observation_fault', lambda self, meter: None)
+
+    outcome = native.run_native(root, 1)
+
+    assert outcome['returncode'] == 0 and outcome['stop_reason'] is None
+    assert outcome['cleanup'] == 'observed_group_cleaned' and outcome['terminal_observed'] is True
+    assert outcome['metering']['coverage'] == 'unknown'
+    assert outcome['metering']['reason'] == 'terminal_usage_below_live_observation'
+    assert c.read(record / 'usage.json') == live
+    assert native.usage(root)['observed_tokens'] == 25 and native.usage(root)['unknown_steps'] == [1]
+    raw = (record / 'native.jsonl').read_bytes()
+    events = [json.loads(line) for line in raw.splitlines()]
+    assert events[-1] == dict(type='completed', usage=dict(input_tokens=12, output_tokens=3))
+    scientific = (record / 'science-output.json').read_bytes()
+    assert json.loads(scientific) == next(event['result'] for event in events if event['type'] == 'result')
+    result = native.wait_native(root, 1)
+    originals = {path: path.read_bytes() for path in record.iterdir() if path.is_file()}
+    monkeypatch.setattr(native.subprocess, 'Popen', lambda *a, **k: pytest.fail('Retained original cannot replay'))
+    assert native.wait_native(root, 1) == result
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    assert (record / 'native.jsonl').read_bytes() == raw
+    assert (record / 'science-output.json').read_bytes() == scientific
+    assert (record / 'native-intent.json').read_bytes() == original_intent
+    assert not (root / 'jobs/002.json').exists() and not (record / 'continuations').exists()

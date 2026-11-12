@@ -164,6 +164,10 @@ def test_resumed_terminal_subtraction_requires_exact_independent_hook_sum(tmp_pa
     terminal = dict(input_tokens=120, cached_input_tokens=83, output_tokens=7)
     assert terminal_attempt_tokens(terminal, observation) == dict(input_tokens=20, cached_input_tokens=3, output_tokens=2)
     assert terminal_attempt_tokens(dict(terminal, output_tokens=8), observation)['input_tokens'] == 120
+    delta = dict(input_tokens=20, cached_input_tokens=3, output_tokens=2)
+    assert terminal_attempt_tokens(delta, observation) == delta
+    different_cache = dict(terminal, cached_input_tokens=84)
+    assert terminal_attempt_tokens(different_cache, observation) == different_cache
 
 
 @pytest.mark.parametrize('body_first', [False, True])
