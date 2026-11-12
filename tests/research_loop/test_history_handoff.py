@@ -95,14 +95,13 @@ def finish(root, step, role, parents, text='A bounded scientific finding', actio
     work = contracts.workspace(root, step)
     record = contracts.host_record(work)
     payload = dict(summary=summary, scientific_result=text, limitations=limitations if limitations is not None else ['Fixture only'])
-    if job.get('handoff_protocol', 1) >= 7:
-        payload['implementation_selection'] = selection
-    if (role == 'A' and job.get('handoff_protocol', 1) >= 4) or recommendation is not None:
+    payload['implementation_selection'] = selection
+    if role == 'A' or recommendation is not None:
         payload['candidate_recommendation'] = recommendation
         payload['selection_explanation'] = selection_explanation() if recommendation is not None else None
-    if job.get('handoff_protocol', 1) >= 5 and role in {'H', 'A'}:
+    if role in {'H', 'A'}:
         payload['search_plan' if role == 'H' else 'search_review'] = search_choice
-    if job.get('handoff_protocol', 1) >= 6 and role == 'A':
+    if role == 'A':
         payload['progress_assessment'] = progress
     if role=='W':
         if consultation_question is DEFAULT_CONSULTATION:
