@@ -1690,7 +1690,7 @@ def validate_recommendation(job, payload, *, root=None):
     if job.get('handoff_protocol', 1) >= 9 and payload.get('next_action') == 'audit':
         return []  # An unavailable audit request preserves science and returns a host diagnostic.
     from . import candidate_refs
-    if recommendation is not None and (job['role'] != 'A' or not candidate_refs.is_available(root,job,recommendation)):
+    if recommendation is not None and (not isinstance(recommendation,str) or job['role'] != 'A' or not candidate_refs.is_available(root,job,recommendation)):
         subject=recommendation if isinstance(recommendation,str) and c.json_field_representable('reference',recommendation) else 'candidate_recommendation'
         return [dict(code='candidate_recommendation_unresolved',subject=subject)]
     return []
