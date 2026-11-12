@@ -49,6 +49,26 @@ def test_choice_accepts_method_labels_and_exact_revision_without_test_notes():
     assert plan == original
 
 
+def test_search_consumption_ignores_extensions_and_defaults_optional_keys():
+    plan = methods()
+    plan['note'] = dict(scientific='Authored plan detail')
+    plan['commitments'][0]['note'] = dict(scientific='Authored method detail')
+    plan['focus'] = dict(index=1, action='screen', detail=['unrestricted'])
+    payload = dict(search_plan=plan)
+    original = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    normalized = search._choice(dict(role='H', step=1), payload)
+    assert normalized == dict(scope=None,
+        commitments=[dict(label=row['label'], minimal_test=row['label'], existing_ref=None)
+            for row in plan['commitments']], focus=dict(index=1, action='screen'))
+    assert json.dumps(payload, ensure_ascii=False).encode('utf-8') == original
+
+
+@pytest.mark.parametrize('value',[{'commitments':[{}]},{'focus':{'action':'unsupported'}},{'commitments':'prose'}])
+def test_malformed_consumed_search_keys_do_not_crash_or_grant_focus(value,monkeypatch):
+    monkeypatch.setattr(c,'scientific_field',lambda job,payload,field:payload.get(field))
+    with pytest.raises(search.UnresolvedSearch):search._choice(dict(role='H'),dict(search_plan=value))
+
+
 def test_method_only_h_seals_and_binds_exact_numbered_w_catalog_and_reducer(scene):
     root, raw = scene
     plan = methods()

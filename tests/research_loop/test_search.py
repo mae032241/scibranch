@@ -344,22 +344,6 @@ def test_exact_requested_repair_chain_is_bounded_and_restart_deduplicated(scene)
     assert search.project(scene, 8)['mechanisms']['h001.m1']['status'] == 'pending'
 
 
-def test_search_consumption_ignores_extensions_and_defaults_optional_keys(monkeypatch):
-    monkeypatch.setattr(c,'scientific_field',lambda job,payload,field:payload.get(field))
-    job=dict(role='A')
-    value=dict(dispositions=[dict(mechanism_ref='h001.m1',status='pending',reason='Reopen',note={'scientific':'detail'})],
-        next_focus=dict(mechanism_ref='h001.m1',action='screen',detail=['unrestricted']))
-    normalized=search._choice(job,dict(search_review=value))
-    assert normalized==dict(dispositions=[dict(mechanism_ref='h001.m1',status='pending',reason='Reopen')],
-        next_focus=dict(mechanism_ref='h001.m1',action='screen'))
-
-
-@pytest.mark.parametrize('value',[{'commitments':[{}]},{'focus':{'action':'unsupported'}},{'commitments':'prose'}])
-def test_malformed_consumed_search_keys_do_not_crash_or_grant_focus(value,monkeypatch):
-    monkeypatch.setattr(c,'scientific_field',lambda job,payload,field:payload.get(field))
-    with pytest.raises(search.UnresolvedSearch):search._choice(dict(role='H'),dict(search_plan=value))
-
-
 def test_same_boot_slice_anchor_paused_time_and_cached_tokens(scene, monkeypatch):
     start(scene)
     job = c.read(scene / 'jobs/002.json')
