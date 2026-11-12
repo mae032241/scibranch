@@ -16,9 +16,6 @@ from scidiscovery.research_loop import budget, contracts as c, execution, experi
 from scidiscovery.research_loop import controller
 from test_history_handoff import finish
 
-pytestmark = pytest.mark.process_e2e
-
-
 SCIENTIFIC_SOURCE = '''import json,os,pathlib,socket
 here=pathlib.Path.cwd()
 probe=json.loads((here/'probe.json').read_text()) if (here/'probe.json').exists() else json.loads((here/'work/probe.json').read_text())
@@ -264,14 +261,17 @@ def _default_local_case(tmp_path, monkeypatch, directory, network_enabled, *, ex
 
 @pytest.mark.parametrize('directory',[True,False],ids=['directory-snapshot','source-only'])
 @pytest.mark.parametrize('network_enabled',[False,True],ids=['declared-network-denied','declared-network-allowed'])
+@pytest.mark.process_e2e
 def test_execute_native_default_local_owns_real_generic_backend(tmp_path,monkeypatch,directory,network_enabled):
     _default_local_case(tmp_path,monkeypatch,directory,network_enabled)
 
 
+@pytest.mark.process_e2e
 def test_real_backend_excluded_tmpdir_keeps_native_workspace_grant(tmp_path,monkeypatch):
     _default_local_case(tmp_path,monkeypatch,False,False,exclude_tmpdir=True)
 
 
+@pytest.mark.process_e2e
 def test_real_backend_imports_only_alternate_venv_module(tmp_path,monkeypatch):
     """One lightweight stdlib-only venv, with real sandbox and fake model I/O."""
     import importlib.util
@@ -363,11 +363,13 @@ def _check_active_backend_shutdown(root,work,target):
             local_experiments.cleanup(root,c.read(root/'jobs/002.json'))
 
 
+@pytest.mark.process_e2e
 def test_native_exit_cleans_the_active_real_backend_without_replay(tmp_path,monkeypatch):
     _default_local_case(tmp_path,monkeypatch,False,False,lifecycle_exit=True)
 
 
 @pytest.mark.parametrize('standard',[False,True],ids=['custom-launcher','named-permissions'])
+@pytest.mark.process_e2e
 def test_unproven_native_permissions_refuse_managed_launch_without_overrides(tmp_path, standard):
     from scidiscovery.research_loop import native_execution
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Inert permission negative control.')
@@ -392,6 +394,7 @@ def test_unproven_native_permissions_refuse_managed_launch_without_overrides(tmp
 
 
 @pytest.mark.parametrize('overlap',['control-ancestor','native-home-ancestor','native-home-child','runtime','temporary-mount'])
+@pytest.mark.process_e2e
 def test_declared_public_root_overlap_refuses_before_scientific_launch(tmp_path,monkeypatch,overlap):
     from scidiscovery.research_loop import native_execution
     actual=actual_native()
@@ -451,6 +454,7 @@ def test_tmp_exclusions_use_each_native_namespace_and_relative_native_tmpdir(tmp
 
 
 @pytest.mark.parametrize('resume',[False,True],ids=['exec-parser','exec-resume-parser'])
+@pytest.mark.process_e2e
 def test_real_exec_parser_accepts_the_applied_legacy_permission_arguments(tmp_path,monkeypatch,resume):
     from scidiscovery.research_loop import native_execution
     actual=actual_native()
@@ -480,15 +484,21 @@ def test_real_exec_parser_accepts_the_applied_legacy_permission_arguments(tmp_pa
     assert 'Usage:' in parsed.stdout
 
 
-# These exact G1 nodes inherit process_e2e from the module, but only construct
-# source metadata/argv: Git, namespace probes and process entry points are mocked.
+# These G1 nodes inspect metadata and argv without executing Git or a backend.
 def _fixed_local_code(tmp_path,monkeypatch,*,directory=True):
     """Source/argv fixture only; no Git, namespace or backend is executed."""
-    from scidiscovery.research_loop import local_experiments
-    root=tmp_path/'instance';root.mkdir(parents=True)
-    work=c.workspace(root,1);work.mkdir(parents=True)
-    c.write(root/'jobs/001.json',dict(step=1,role='W',worker_view_version=1,
-        global_materials=[],direct_refs=[],direct_materials=[]))
+    from scidiscovery.research_loop import local_experiments, protocol
+    def forbidden(*args,**kwargs):pytest.fail('Pure G1 argv fixture reached a process')
+    for name in ('Popen','run','call'):monkeypatch.setattr(subprocess,name,forbidden)
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'objective.md';objective.write_text('Engineering argv inspection only.')
+    root=tmp_path/'instance'
+    controller.prepare(root,objective,public,['argv-only-launcher'],
+        max_tokens=1000,max_seconds=30,max_steps=2,model='no-model',reasoning_effort='high',search_policy=None)
+    # The existing task producer owns the empty accepted prefix and input facts.
+    # This creates no native intent, qualification verdict or execution call.
+    job=c.build_job(root,1,'W',[]);work=c.workspace(root,1)
+    scope=protocol.stage_scope(root,job)
     code=work/'code';code.mkdir()
     source=code/'run.py';source.write_text("print('fixed source')\n")
     if directory:
@@ -500,7 +510,7 @@ def _fixed_local_code(tmp_path,monkeypatch,*,directory=True):
     export=root/'host-runtime/code-versions/exports/001'/call_id/'tree';export.mkdir(parents=True)
     for name in ('run.py','helper.py','resource.txt') if directory else ('run.py',):
         (export/name).write_bytes((code/name).read_bytes())
-    body=dict(run_argv=[sys.executable],max_seconds=30,cwd=str(work),scope=dict(step=1,role='W'),
+    body=dict(run_argv=[sys.executable],max_seconds=30,cwd=str(work),scope=scope,
         record_dir=str(root/'host-runtime/experiment-control/001/records'))
     interface=dict(version=1,executor='local_execution:command',config_record=body)
     adapter=local_experiments.LocalExecution(body,frozen_interface=interface)
@@ -511,25 +521,21 @@ def _fixed_local_code(tmp_path,monkeypatch,*,directory=True):
     runtime_cwd.mkdir(parents=True,exist_ok=True)
     options=dict(source_script=str(source),arguments=['explicit-argument'])
     if directory:options['experiment_directory']=str(runtime_cwd)
-    from scidiscovery.research_loop import shared_input_views
-    def forbidden(*args,**kwargs):pytest.fail('Pure G1 argv fixture reached a process')
-    for name in ('Popen','run','call'):monkeypatch.setattr(subprocess,name,forbidden)
-    # The existing HEAD alias inventory is independently covered by its tiny
-    # fixture. This seam isolates only the new whole-code overlay.
-    monkeypatch.setattr(shared_input_views,'mount_arguments',lambda *args,**kwargs:[])
     return root,work,adapter,payload,version,export,source,runtime_cwd,options
 
 
 def _local_code_launch_inputs(tmp_path,fixed):
-    from scidiscovery.research_loop import local_experiments, native_execution
+    from scidiscovery.research_loop import experiment_client, local_experiments, native_execution
     root,work,adapter,payload,version,export,source,cwd,options=fixed
-    metadata=adapter.acceptance_metadata(payload,command_options=options,_code_version=version)
+    facts=experiment_client.load_client_facts(adapter.config)
+    metadata=adapter.acceptance_metadata(payload,command_options=options,_code_version=version,client_facts=facts)
     accepted=dict(metadata,call_id=payload.name,scope=adapter.config['scope'],code_version=version,snapshot_files=[])
     config=dict(adapter.config,execution_interface=adapter.frozen_interface)
-    public=tmp_path/'public';public.mkdir()
+    public=tmp_path/'public'
     home=tmp_path/'native-home';home.mkdir();(home/'config.toml').write_text('')
     policy=dict(writable_roots=[],network_access=False,exclude_tmpdir_env_var=False,exclude_slash_tmp=False)
     value=dict(workspace=str(work),home=str(home),python=sys.executable,runtime_roots=list(dict.fromkeys((sys.base_prefix,sys.prefix))),
+        native_attempt=dict(number=0),
         bwrap=dict(path='/usr/bin/bwrap'),native=dict(path='/usr/bin/true'),policy=policy,
         backend_configuration=e.proof(home/'config.toml'),
         backend_permission_profile=dict(configuration=native_execution._profile(policy,cwd,'/task-tmp',virtual=True)))
@@ -543,25 +549,30 @@ def test_local_code_metadata_uses_fixed_payload_and_frozen_runtime_inputs(tmp_pa
     root,work,adapter,payload,version,export,source,cwd,options=_fixed_local_code(tmp_path,monkeypatch)
     from test_mutable_run_inputs import _frozen_material
     logical=cwd/'data.txt'
-    material,reference,original=_frozen_material(root,work,logical,name='local-argv-data')
+    material,_,original=_frozen_material(root,work,logical,name='local-argv-data')
+    reference=e.proof(original)
     outside,_,_=_frozen_material(root,work,work/'inputs/outside.txt',name='local-outside-data')
-    excluded,_,_=_frozen_material(root,work,cwd/'artifacts/frozen.txt',name='local-output-data')
-    job=c.read(root/'jobs/001.json');job['global_materials']=[material,outside,excluded]
+    job=c.read(root/'jobs/001.json');job['global_materials'].extend([material,outside])
     c.write(root/'jobs/001.json',job)
     (cwd/'scratch').mkdir();(cwd/'scratch/local.txt').write_text('runtime scratch')
     (cwd/'stdout.log').write_text('runtime log')
     for name in ('artifacts','.git','.agents','.codex','.aws'):
         (cwd/name).mkdir(exist_ok=True);(cwd/name/'local.txt').write_text('runtime state')
     source.unlink()
-    requested=[];input_reference=experiment_client.input_reference
-    def frozen_reference(config,path):
+    load_facts=experiment_client.load_client_facts
+    facts=load_facts(adapter.config)
+    requested=[];input_reference=experiment_client._observe_input_reference
+    def frozen_reference(config,path,*,facts):
         requested.append(Path(path));assert Path(path)==logical
-        return input_reference(config,path)
+        assert facts is owner_facts
+        return input_reference(config,path,facts=facts)
+    owner_facts=facts
     def no_inventory(*args,**kwargs):
         pytest.fail('A code version must not inventory its runtime directory')
-    monkeypatch.setattr(experiment_client,'input_reference',frozen_reference)
+    monkeypatch.setattr(experiment_client,'_observe_input_reference',frozen_reference)
+    monkeypatch.setattr(experiment_client,'load_client_facts',no_inventory)
     monkeypatch.setattr(local_experiments.LocalExecution,'files',no_inventory)
-    metadata=adapter.acceptance_metadata(payload,command_options=options,_code_version=version)
+    metadata=adapter.acceptance_metadata(payload,command_options=options,_code_version=version,client_facts=facts)
     assert requested==[logical]
     assert metadata['script']==e.proof(export/'run.py')
     assert metadata['source_script']==str(source)
@@ -569,6 +580,12 @@ def test_local_code_metadata_uses_fixed_payload_and_frozen_runtime_inputs(tmp_pa
     assert metadata['cwd']==metadata['experiment_directory']==str(cwd)
     assert metadata['snapshot_files']==[dict(reference,name='data.txt')]
     assert not {'code_version','entry','source_reference','source_input'}&metadata.keys()
+    # Readonly scientific material cannot be relabeled as writable artifacts.
+    excluded,_,_=_frozen_material(root,work,cwd/'artifacts/frozen.txt',name='local-output-data')
+    job['global_materials'].append(excluded);c.write(root/'jobs/001.json',job)
+    rejected_facts=load_facts(adapter.config)
+    with pytest.raises(ValueError,match='artifacts overlap'):
+        adapter.acceptance_metadata(payload,command_options=options,_code_version=version,client_facts=rejected_facts)
 
 
 @pytest.mark.parametrize('draft',['missing','changed'])
@@ -587,13 +604,17 @@ def test_local_code_native_argv_uses_whole_fixed_export_and_independent_cwd(tmp_
     def fixed_export(instance,**kwargs):
         materialized.append((instance,{key:item for key,item in kwargs.items() if key!='context'}))
         return export
-    monkeypatch.setattr(experiment_client,'input_reference',no_draft_reference)
+    monkeypatch.setattr(experiment_client,'_observe_input_reference',no_draft_reference)
     monkeypatch.setattr(shared_input_views,'ensure_capability',lambda **kwargs:'/usr/bin/bwrap')
     monkeypatch.setattr(code_versions,'materialize',fixed_export)
     argv,host_cwd,finish=native_execution._launch(value,config,accepted,accepted['command'],accepted['cwd'],public=public,root=root)
     assert materialized==[(root,dict(step=1,call_id=payload.name,code_version=version))]
     bindings=[argv[index:index+3] for index,argument in enumerate(argv) if argument in ('--bind','--ro-bind')]
-    assert [row for row in bindings if row[2]==str(work/'code')]==[['--ro-bind',str(export),str(work/'code')]]
+    code_bindings=[(index,row) for index,row in enumerate(bindings) if row[2]==str(work/'code')]
+    last_code_index,last_code_binding=code_bindings[-1]
+    assert last_code_binding==['--ro-bind',str(export),str(work/'code')]
+    assert all(row[0]=='--ro-bind' for _,row in code_bindings)
+    assert not any(Path(row[2]).is_relative_to(work/'code') for row in bindings[last_code_index+1:])
     assert not any(row[2]==str(source) for row in bindings)
     assert argv[-len(accepted['command']):]==[sys.executable,str(source),'explicit-argument']
     assert argv[argv.index('--chdir')+1]==str(cwd)
@@ -611,7 +632,7 @@ def test_local_code_native_argv_uses_whole_fixed_export_and_independent_cwd(tmp_
 
 @pytest.mark.parametrize('directory',[False,True],ids=['single-code-file','whole-code-directory'])
 def test_local_code_native_argv_masks_a_replaced_draft_entry_symlink(tmp_path,monkeypatch,directory):
-    """Pure argv regression despite this module's inherited process_e2e mark."""
+    """The readonly code tree masks a mutable entry without reading its target."""
     from scidiscovery.research_loop import code_versions, native_execution, shared_input_views, experiment_client
     fixed=_fixed_local_code(tmp_path,monkeypatch,directory=directory)
     root,work,adapter,payload,version,export,source,cwd,options=fixed
@@ -625,14 +646,18 @@ def test_local_code_native_argv_masks_a_replaced_draft_entry_symlink(tmp_path,mo
         return export
     def forbidden(*args,**kwargs):
         pytest.fail('Fixed code argv must not read its mutable entry or start a process')
-    monkeypatch.setattr(experiment_client,'input_reference',forbidden)
+    monkeypatch.setattr(experiment_client,'_observe_input_reference',forbidden)
     for name in ('Popen','run','call'):monkeypatch.setattr(subprocess,name,forbidden)
     monkeypatch.setattr(shared_input_views,'ensure_capability',lambda **kwargs:'/argv-only/bwrap')
     monkeypatch.setattr(code_versions,'materialize',fixed_export)
     argv,host_cwd,finish=native_execution._launch(value,config,accepted,accepted['command'],accepted['cwd'],public=public,root=root)
     assert materialized==[(root,dict(step=1,call_id=payload.name,code_version=version))]
     bindings=[argv[index:index+3] for index,argument in enumerate(argv) if argument in ('--bind','--ro-bind')]
-    assert [row for row in bindings if row[2]==str(work/'code')]==[['--ro-bind',str(export),str(work/'code')]]
+    code_bindings=[(index,row) for index,row in enumerate(bindings) if row[2]==str(work/'code')]
+    last_code_index,last_code_binding=code_bindings[-1]
+    assert last_code_binding==['--ro-bind',str(export),str(work/'code')]
+    assert all(row[0]=='--ro-bind' for _,row in code_bindings)
+    assert not any(Path(row[2]).is_relative_to(work/'code') for row in bindings[last_code_index+1:])
     assert not any(row[2]==str(source) for row in bindings)
     assert argv[-len(accepted['command']):]==[sys.executable,str(source),'explicit-argument']
     assert argv[argv.index('--chdir')+1]==str(cwd) and host_cwd is finish is None
@@ -653,6 +678,8 @@ def test_local_code_native_argv_refuses_changed_bindings_before_launch(tmp_path,
     assert str(export) in baseline[0]
     expected=e.IntegrityError
     def unavailable_export(*args,**kwargs):
+        # The real mount owner discovers this alias after the fixed tree exists.
+        if changed=='scientific-mount':return export
         if changed!='code-pin':pytest.fail('Invalid logical bindings must fail before code materialization')
         assert kwargs['code_version']==accepted['code_version']
         raise ValueError('Original code pin differs')
@@ -665,8 +692,9 @@ def test_local_code_native_argv_refuses_changed_bindings_before_launch(tmp_path,
         accepted['code_version']=dict(version,commit='b'*40)
     elif changed=='scientific-mount':
         original=root/'frozen-data.txt';original.write_text('fixed scientific input')
-        monkeypatch.setattr(shared_input_views,'mount_arguments',lambda *args,**kwargs:
-            ['--ro-bind',str(original),str(work/'code/helper.py')])
+        job=c.read(root/'jobs/001.json')
+        job['global_materials'].append(dict(path='code/helper.py',source=str(original),size_bytes=original.stat().st_size))
+        c.write(root/'jobs/001.json',job)
         expected=e.UnsupportedExecution
     elif changed=='artifact-alias':
         (cwd/'artifacts').rmdir();(cwd/'artifacts').symlink_to(work/'code');expected=e.UnsupportedExecution
