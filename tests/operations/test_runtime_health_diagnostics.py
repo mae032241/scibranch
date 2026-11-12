@@ -64,10 +64,10 @@ def test_readonly_command_probe_uses_one_configured_total_query_budget(tmp_path,
     transport = SSHTCADTransport(Remote(), local_result_root=tmp_path / "ssh-results")
     def run(argv, **kwargs):
         request = json.loads(kwargs["input"])
-        assert request["payload"] == payload
+        assert request == {"schema_version": 2, "operation": operation, "payload": payload}
         calls.append((request["operation"], kwargs["timeout"]))
         return SimpleNamespace(returncode=0, stderr=b"", stdout=json.dumps({
-            "schema_version": 1, "operation": operation, "ok": True,
+            "schema_version": 2, "operation": operation, "ok": True,
             "payload": transport.handle(request["operation"], request["payload"])}).encode())
     monkeypatch.setattr(command_adapter, "run_bounded", run)
     adapter = command_adapter.CommandTCADExecutorAdapter(command_adapter.CommandAdapterConfig(
@@ -96,10 +96,10 @@ class Remote:
             private_release_evidence_sha256='b'*64, capability_sha256='c'*64)
         return {'id':request['id'], 'result':{'structuredContent':{'capabilities':[capability]}}}
 request = json.load(sys.stdin)
-assert request == {'schema_version':1, 'operation':'capabilities', 'payload':{}}
+assert request == {'schema_version':2, 'operation':'capabilities', 'payload':{}}
 transport = SSHTCADTransport(Remote(), local_result_root=Path(__file__).parent/'remote-results')
 value = transport.handle(request['operation'], request['payload'])
-print(json.dumps({'schema_version':1, 'operation':request['operation'], 'ok':True, 'payload':value}))
+print(json.dumps({'schema_version':2, 'operation':request['operation'], 'ok':True, 'payload':value}))
 ''')
     adapter = CommandTCADExecutorAdapter(CommandAdapterConfig(executable=sys.executable,
         arguments=(str(script),), environment={"PYTHONPATH": os.pathsep.join(sys.path)},

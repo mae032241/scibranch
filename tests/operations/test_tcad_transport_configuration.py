@@ -59,6 +59,15 @@ def test_tcad_nested_preflight_reports_safe_action_before_runtime(tmp_path, monk
     monkeypatch.setattr(experiments, 'registration', lambda executor: (managed.REGISTRATION, executor.partition(':')[2]))
     monkeypatch.setattr(managed, 'build_adapter', lambda *a, **k: pytest.fail('preflight constructed adapter'))
     ssh = transport_config(tmp_path, transfer_chunk_bytes=0 if problem == 'ssh_invalid' else 65536)
+    if problem == 'credential_missing':
+        executable = tmp_path / 'ssh'
+        executable.write_text('#!/bin/sh\nexit 99\n')
+        executable.chmod(0o700)
+        identity = tmp_path / 'identity'
+        identity.write_text('must not read credential contents')
+        transport = json.loads(ssh.read_text())
+        transport.update(ssh_executable=str(executable), identity_file=str(identity))
+        ssh.write_text(json.dumps(transport))
     command = tmp_path / 'command.json'
     body = command_config(ssh).model_dump(mode='json')
     body['arguments'][-1] = ssh.name
@@ -67,6 +76,7 @@ def test_tcad_nested_preflight_reports_safe_action_before_runtime(tmp_path, monk
     if problem == 'command_missing': command.unlink()
     elif problem == 'command_invalid': command.write_text('{"private_token":"secret",')
     elif problem == 'ssh_missing': ssh.unlink()
+    elif problem == 'credential_missing': identity.unlink()
     elif problem == 'blank_socket': plugin.write_text('transport = "socket"\nsocket_path = ""\n')
     selection = dict(executor='tcad_execution:' + ('misspelled' if problem == 'binding' else 'tcad'), config_file=str(plugin))
     before = sorted(tmp_path.iterdir())
@@ -77,6 +87,7 @@ def test_tcad_nested_preflight_reports_safe_action_before_runtime(tmp_path, monk
     assert error.plugin_id == 'tcad_execution'
     assert error.field_path == ('executor.config.executor' if problem == 'binding' else 'executor.config.config_file')
     if problem == 'ssh_invalid': assert 'transfer_chunk_bytes' in error.hint
+    if problem == 'credential_missing': assert 'identity_file' in error.hint
     for private in (str(tmp_path), 'private-host', '/private/key', 'secret'):
         assert private not in public
     assert sorted(tmp_path.iterdir()) == before

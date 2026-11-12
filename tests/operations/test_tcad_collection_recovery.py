@@ -191,8 +191,8 @@ def _managed_receipt_case(tmp_path):
     return wrapper, backend, payload.name, trace
 
 
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('interruption', ['exception', 'process_exit'])
+@pytest.mark.parametrize('interruption', ['exception',
+    pytest.param('process_exit', marks=pytest.mark.process_e2e)])
 def test_managed_result_resumes_terminal_receipt_before_collected(tmp_path, interruption):
     from scidiscovery.research_loop import experiments as e
     from tcad_artifact.managed_execution import TCADManagedExecution
