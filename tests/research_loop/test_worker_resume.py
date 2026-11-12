@@ -79,6 +79,94 @@ destination.write_text(json.dumps(payload))
 '''
 
 
+# A qualified H final-response repair only. The other legacy producers above
+# retain their missing metadata and execution-failure behavior.
+QUALIFIED_H_OUTPUT_REPAIR_NATIVE = r'''import json,os,pathlib,shlex,subprocess,sys,tomllib
+args=sys.argv[1:];work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);config={}
+assert os.environ['THIN_HWA_ROLE']=='H'
+kind=(work/'work/output-kind').read_text();assert kind in {'badjson','missingfield'}
+def merge(target,update):
+ for key,value in update.items():
+  if isinstance(value,dict) and isinstance(target.get(key),dict):merge(target[key],value)
+  else:target[key]=value
+for index,arg in enumerate(args[:-1]):
+ if arg=='-c':merge(config,tomllib.loads(args[index+1]))
+def send(value):print(json.dumps(value,separators=(',',':')),flush=True)
+def receive():return json.loads(sys.stdin.readline())
+request=receive();assert request['method']=='initialize';send(dict(id=request['id'],result={}))
+assert receive()['method']=='initialized';request=receive()
+if request['method']=='hooks/list':
+ assert request['params']==dict(cwds=[str(work)])
+ hooks=[]
+ for name,key,event in [('PostToolUse','post_tool_use','postToolUse'),('PostModelRequest','post_model_request','postModelRequest'),('PostCompact','post_compact','postCompact')]:
+  if name not in config.get('hooks',{}):continue
+  handler=config['hooks'][name][0]['hooks'][0]
+  hooks.append(dict(key='/<session-flags>/config.toml:'+key+':0:0',eventName=event,
+   enabled=True,isManaged=False,trustStatus='untrusted',currentHash='sha256:'+'0'*64,
+   source='sessionFlags',sourcePath='/<session-flags>/config.toml',handlerType='command',
+   command=handler['command'],timeoutSec=handler['timeout'],additionalContextLimit=handler.get('additionalContextLimit')))
+ send(dict(id=request['id'],result=dict(data=[dict(cwd=str(work),hooks=hooks,warnings=[],errors=[])])))
+ raise SystemExit(0)
+assert request['method'] in {'thread/start','thread/resume'}
+start=request['params'];resumed=request['method']=='thread/resume';thread='11111111-2222-4333-8444-555555555555'
+assert start['cwd']==str(work) and start['approvalPolicy']=='never'
+assert '--dangerously-bypass-hook-trust' in args and start['config']==dict(bypass_hook_trust=True)
+assert start['sandbox']=='workspace-write' and config['features']['multi_agent'] is False
+assert not resumed or start['threadId']==thread and start['excludeTurns'] is True
+send(dict(id=request['id'],result=dict(thread=dict(id=thread,turns=[]),model=start['model'],cwd=str(work),
+ approvalPolicy='never',sandbox=dict(type='workspaceWrite',writableRoots=[],networkAccess=False),
+ reasoningEffort=config['model_reasoning_effort'],serviceTier=start.get('serviceTier'))))
+request=receive();assert request['method']=='turn/start';turn=request['params']
+assert turn['threadId']==thread and turn['model']==start['model'] and turn['approvalPolicy']=='never'
+assert turn.get('effort')==config['model_reasoning_effort'] and turn.get('serviceTier')==start.get('serviceTier')
+assert len(turn['input'])==1 and turn['input'][0]['type']=='text'
+prompt=turn['input'][0]['text'];turn_id='repair-turn' if resumed else 'original-turn'
+send(dict(id=request['id'],result=dict(turn=dict(id=turn_id,items=[],status='inProgress'))))
+home=pathlib.Path(os.environ['CODEX_HOME']);transcript=home/'sessions/opaque.jsonl'
+with (work/'work/launches').open('a') as stream:stream.write('resume\n' if resumed else 'exec\n')
+if resumed:
+ assert (work/'work/completed-experiment').read_text()=='one completed execution'
+ assert 'Fix diagnosed JSON/layout only' in prompt and 'full JSON' in prompt and 'No work/rerun/resubmit' in prompt
+ assert '"code":"'+('invalid_json' if kind=='badjson' else 'invalid_fields')+'"' in prompt
+ (work/'work/repair-prompt').write_text(prompt)
+else:
+ transcript.parent.mkdir(parents=True,exist_ok=True);transcript.write_bytes(b'opaque native original\n')
+ (work/'work/completed-experiment').write_text('one completed execution')
+handler=config['hooks']['PostModelRequest'][0]['hooks'][0]
+event=dict(session_id=thread,cwd=str(work),transcript_path=str(transcript),hook_event_name='PostModelRequest',
+ status='completed',token_usage=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4))
+delivery=subprocess.run(shlex.split(handler['command']),input=json.dumps(event),text=True,capture_output=True,timeout=handler['timeout'])
+assert delivery.returncode==0,delivery.stderr
+payload=dict(summary='Retained finding',scientific_result='Completed experiment retained.',
+ limitations=['Mechanical transport only; no scientific qualification.'],implementation_selection=None,
+ search_plan=None,next_action='wait',route_reason='Bounded output repaired')
+if not resumed and kind=='missingfield':del payload['summary']
+raw='{invalid JSON' if not resumed and kind=='badjson' else json.dumps(payload)
+(work/('work/repaired-final.json' if resumed else 'work/original-final.json')).write_text(raw)
+send(dict(method='item/completed',params=dict(threadId=thread,turnId=turn_id,
+ item=dict(type='agentMessage',text=raw,phase='final_answer'))))
+send(dict(method='turn/completed',params=dict(threadId=thread,turn=dict(id=turn_id,status='completed'))))
+'''
+
+
+def qualified_h_repair_instance(tmp_path, monkeypatch, kind):
+    public=tmp_path/'public';public.mkdir()
+    objective=public/'objective.md';objective.write_text('Repair one retained H final response without repeating work.')
+    home=tmp_path/'native-home';home.mkdir();monkeypatch.setenv('CODEX_HOME',str(home))
+    launcher=tmp_path/'codex';launcher.write_text('#!'+sys.executable+'\n'+QUALIFIED_H_OUTPUT_REPAIR_NATIVE);launcher.chmod(0o700)
+    root=tmp_path/'instance'
+    controller.prepare(root,objective,public,[str(launcher)],max_tokens=1000,max_seconds=120,max_steps=6,
+        model='no-model',reasoning_effort='high',search_policy=None,experiment_mode='external',node_budget_mode='soft',
+        native_options=dict(workspace='workspace-write',network=False,web='disabled',subagents=False),
+        node_budget_policy={role:dict(max_observed_tokens=100,max_seconds=20) for role in 'HWAE'},
+        resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn',
+            output_repair=True,output_only=True,native_home=str(home)))
+    c.build_job(root,1,'H',[])
+    (c.workspace(root,1)/'work/output-kind').write_text(kind)
+    c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','qualified_h_output_repair')
+    return root
+
+
 def instance(tmp_path, *, cap=100, attempts=2, max_tokens=1000, steps=6, search_policy=None, delivery_policy=None,
              fake=FAKE, output_repair=False, with_policy=True):
     public=tmp_path/'public';public.mkdir()
@@ -119,12 +207,15 @@ def repair_instance(tmp_path, role='H', kind='badjson', *, enabled=True, attempt
     return root
 
 
-@pytest.mark.parametrize('role', list('HWAE'))
 @pytest.mark.parametrize('kind', ['badjson','missingfield'])
 @pytest.mark.process_e2e
-def test_completed_output_repair_is_same_role_node_session_without_experiment_replay(tmp_path,role,kind):
-    root=repair_instance(tmp_path,role,kind)
-    assert native.execute_native(root,1)['role']==role
+def test_completed_output_repair_is_same_role_node_session_without_experiment_replay(tmp_path,monkeypatch,kind):
+    import hashlib
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,kind)
+    first=execution.origin(root,1)
+    inputs={p:p.read_bytes() for p in (root/'jobs/001.json',first/'science-result.schema.json',c.workspace(root,1)/'science-task.json')}
+    assert native.execute_native(root,1)['role']=='H'
     first=execution.origin(root,1);current=execution.record(root,1)
     assert current==first/'continuations/001'
     assert c.read(first/'native-outcome.json')['returncode']==0
@@ -132,12 +223,31 @@ def test_completed_output_repair_is_same_role_node_session_without_experiment_re
     intent=c.read(current/'native-intent.json')
     assert intent['output_repair']['raw_ref']==c.file_ref(first/'science-output.json')
     assert intent['session']['workspace']==str(c.workspace(root,1))
-    assert intent['session']['home']==str(root/'native-homes/001')
+    assert intent['session']['home']==str(root.parent/'native-home')
     assert intent['session']['thread_id']=='11111111-2222-4333-8444-555555555555'
     assert native.usage(root)['observed_tokens']==28 and budget.used_steps(root)==2
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
     before={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    assert continuation.seal_or_repair(root,1)['role']==role
+    assert intent['continuation_kind']=='repair' and intent['native_profile']==c.read(first/'native-intent.json')['native_profile']
+    assert intent['output_repair']['code']==('invalid_json' if kind=='badjson' else 'invalid_fields')
+    if kind=='missingfield':assert 'summary' not in json.loads((first/'science-output.json').read_text())
+    for record,name in ((first,'original-final.json'),(current,'repaired-final.json')):
+        outcome=c.read(record/'native-outcome.json')
+        assert outcome['budget_notification']['status']=='available'
+        assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+        assert outcome['metering']['coverage']=='terminal' and outcome['metering']['reconciliation']=='matched'
+        raw=(record/'science-output.json').read_bytes()
+        assert raw==(c.workspace(root,1)/'work'/name).read_bytes()
+        assert outcome['terminal_evidence']['final']==dict(sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+    head=accepted_budget.read(root)
+    assert head['dispatch_count']==2 and head['continuation_count']==1
+    repaired={p:p.read_bytes() for p in current.iterdir() if p.is_file()}
+    assert native.wait_native(root,1)['role']=='H'
+    assert all(p.read_bytes()==data for p,data in inputs.items())
+    assert all(p.read_bytes()==data for p,data in repaired.items())
+    assert len(execution.records(root,1))==2 and not (root/'jobs/002.json').exists()
+    assert native.usage(root)['observed_tokens']==28 and budget.used_steps(root)==2
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
     assert all(p.read_bytes()==data for p,data in before.items())
     assert (c.workspace(root,1)/'work/completed-experiment').read_text()=='one completed execution'
 
