@@ -52,6 +52,10 @@ def test_advice_returns_exact_requester_and_assessment_originals(scene):
     assert_original(scene, job, 1)
     assert_original(scene, job, 2)
     assert not job.get('execution_qualifications')
+    paths = [scene / 'jobs/003.json', c.workspace(scene, 3) / 'science-task.json']
+    frozen = [path.read_bytes() for path in paths]
+    assert c.build_job(scene, 3, 'W', [1, 2], instruction=job['instruction']) == job
+    assert [path.read_bytes() for path in paths] == frozen
 
 
 def test_advice_declared_artifacts_are_reusable_but_work_scratch_is_not(scene):
@@ -61,7 +65,9 @@ def test_advice_declared_artifacts_are_reusable_but_work_scratch_is_not(scene):
     scratch = author / 'work/private-check.py'
     materials = {row['path']: row for row in job['direct_materials']}
     declared = {'inputs/parents/002/artifacts/check.py', 'inputs/parents/002/artifacts/report.txt'}
-    assert declared <= materials.keys()
+    assert materials.keys() == declared | {'inputs/parents/001/artifacts/observation.txt'}
+    assert_original(scene, job, 2)
+    c._validate_inputs(scene, c.workspace(scene, 3), job)
     argv = shared_input_views.mount_arguments(scene, job, c.workspace(scene, 3), include_skills=False)
     for path in declared:
         actual = originals.material_path(scene, materials[path])
@@ -77,14 +83,6 @@ def test_advice_declared_artifacts_are_reusable_but_work_scratch_is_not(scene):
     assert originals.material_path(scene, successor['selected_inputs'][0]['material']) == author / 'artifacts/check.py'
     assert [row['material']['path'] for row in successor['selected_inputs']] == [
         'inputs/parents/002/artifacts/check.py']
-
-
-def test_consultation_job_and_public_view_stay_frozen(scene):
-    job = advice(scene)
-    paths = [scene / 'jobs/003.json', c.workspace(scene, 3) / 'science-task.json']
-    frozen = [path.read_bytes() for path in paths]
-    assert c.build_job(scene, 3, 'W', [1, 2], instruction=job['instruction']) == job
-    assert [path.read_bytes() for path in paths] == frozen
 
 
 @pytest.mark.parametrize('field,value', [
@@ -118,16 +116,6 @@ def test_changed_advice_declared_material_is_rejected(scene):
     original.write_text('print(43)\n')
     with pytest.raises(ValueError, match='changed|identity|original'):
         shared_input_views.mount_arguments(scene, job, c.workspace(scene, 3), include_skills=False)
-
-
-def test_requester_and_advice_materials_both_reach_returned_w(scene):
-    job = advice(scene, files={'check.py': 'x' * 63, 'small-report.txt': 'x'})
-    assert {row['path'] for row in job['direct_materials']} == {
-        'inputs/parents/001/artifacts/observation.txt',
-        'inputs/parents/002/artifacts/check.py',
-        'inputs/parents/002/artifacts/small-report.txt'}
-    assert_original(scene, job, 2)
-    c._validate_inputs(scene, c.workspace(scene, 3), job)
 
 
 def test_selected_fork_retains_advice_declared_originals(scene):

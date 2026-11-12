@@ -824,19 +824,31 @@ def test_operator_pause_does_not_accept_a_new_continuation(tmp_path,monkeypatch)
 
 
 @pytest.mark.process_e2e
-def test_unaccepted_intent_is_not_replayed_or_given_another_attempt(tmp_path):
-    root=instance(tmp_path);first=fail(root)
-    from scidiscovery.research_loop import continuation
-    job=c.read(root/'jobs/001.json')
-    budget.transition(root,'advance','accepted fixture before runner')
-    anchor=budget.accept_continuation(root,job,[first])
-    record=first/'continuations/001';record.mkdir(parents=True)
-    c.write(record/'native-intent.json',dict(step=1,attempt=1,task_ref=c.record_ref(root/'jobs/001.json'),
-        root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first),
-        session=continuation.session(root,1,first),budget_slice=anchor))
-    with pytest.raises(RuntimeError,match='unknown'):controller.worker_resume(root,1)
-    assert not (first/'continuations/002').exists()
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+def test_unaccepted_intent_is_not_replayed_or_given_another_attempt(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget
+    root,first,outcome=retain_metering_failed_original(tmp_path,monkeypatch)
+    original={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    record=first/'continuations/001'
+    orphan=dict(c.read(first/'native-intent.json'),attempt=1,continuation_kind='reentry',
+        root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first))
+    c.write(record/'native-intent.json',orphan)
+    assert accepted_budget.native_attempt(root,1,record) is None
+    retained=(record/'native-intent.json').read_bytes()
+    for _ in range(2):
+        with pytest.raises(ValueError,match='^Original native intent has not been accepted$'):
+            continuation.start(root,1,after_interrupt=True,expected_attempt=0,
+                native_intent_ref=c.record_ref(first/'native-intent.json'))
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==1 and head['continuation_count']==0
+        assert {key:head['usage'][key] for key in ('input_tokens','cached_input_tokens','output_tokens')}==dict(
+            input_tokens=10,cached_input_tokens=3,output_tokens=4)
+        assert native.usage(root)['observed_tokens']==14 and budget.used_steps(root)==1
+        assert accepted_budget.native_attempt(root,1,record,head=head) is None
+        assert not (record/'runner-process.json').exists() and not (record/'native-outcome.json').exists()
+        assert not (first/'continuations/002').exists() and not (first/'result-identity.json').exists()
+        assert not (root/'jobs/002.json').exists() and (record/'native-intent.json').read_bytes()==retained
+        assert all(p.read_bytes()==raw for p,raw in original.items())
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
 @pytest.mark.process_e2e
@@ -903,29 +915,33 @@ def test_two_explicit_continuations_never_auto_loop_or_refund_attempts(tmp_path)
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\nresume\n'
 
 
-@pytest.mark.parametrize('value',[0,-1,True,float('nan')])
-@pytest.mark.process_e2e
-def test_stored_previous_token_anchor_cannot_refund_exact_prior_meter(tmp_path,value):
-    root=instance(tmp_path);first=fail(root)
-    from scidiscovery.research_loop import continuation
-    job=c.read(root/'jobs/001.json');budget.transition(root,'advance','accepted negative fixture')
-    anchor=budget.accept_continuation(root,job,[first]);anchor['previous_tokens']=value
-    record=first/'continuations/001';record.mkdir(parents=True)
-    intent=dict(step=1,attempt=1,task_ref=c.record_ref(root/'jobs/001.json'),
-        root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first),
-        session=continuation.session(root,1,first),budget_slice=anchor)
-    # A malicious raw receipt can contain NaN even though the host writer rejects it.
-    (record/'native-intent.json').write_text(json.dumps(intent))
-    with pytest.raises(ValueError):budget.stop_node(root,job,intent,budget.snapshot(root),dict(input_tokens=0,output_tokens=0))
-    assert not (record/'native-process.json').exists()
+@pytest.mark.parametrize('mutation,value',[
+    ('previous_tokens',0),('previous_tokens',-1),('previous_tokens',True),('previous_tokens',float('nan')),
+    ('required_report',None)])
+def test_required_original_budget_facts_cannot_refund_or_hide_paid_usage(tmp_path,mutation,value):
+    # Explicit owner receipts: no native process, accepted ledger or scientific qualification.
+    root=tmp_path/'instance';job=dict(step=1,role='H');task_ref=dict(path=str(root/'jobs/001.json'))
+    limits=dict(max_observed_tokens=100,max_seconds=20)
+    receipts=[]
+    for number,(meter,previous,total,seconds) in enumerate([
+        (dict(input_tokens=10,cached_input_tokens=3,output_tokens=4),0,14,2.),
+        (dict(input_tokens=2,cached_input_tokens=1,output_tokens=1),14,17,3.)]):
+        intent=dict(task_ref=task_ref,budget_slice=dict(role='H',limits=limits,previous_tokens=previous,
+            previous_seconds=0. if number==0 else 2.))
+        report=dict(role='H',limits=limits,usage_observed=True,dispatches=number+1,
+            observed_tokens=total,advance_seconds=seconds,**meter)
+        receipts.append((root/str(number),intent,dict(budget_slice=report),meter,False))
+    def consume():
+        return budget._attempt_consumption_from_facts(root,job,receipts,policy={},limits=limits,task_ref=task_ref)
+    assert consume()==(17,3.)
+    paid=dict(receipts[0][3]);current=dict(receipts[1][3])
+    if mutation=='previous_tokens':receipts[1][1]['budget_slice']['previous_tokens']=value
+    else:del receipts[0][2]['budget_slice']['input_tokens']
+    with pytest.raises(ValueError,match='^Original node usage report or identity changed$'):consume()
+    assert receipts[0][3]==paid and receipts[1][3]==current
+    assert not root.exists()
 
 
-@pytest.mark.process_e2e
-def test_missing_required_original_report_prevents_qualification(tmp_path):
-    root=instance(tmp_path);first=fail(root)
-    outcome=c.read(first/'native-outcome.json');del outcome['budget_slice']['input_tokens'];c.write(first/'native-outcome.json',outcome)
-    with pytest.raises(ValueError):controller.worker_resume(root,1)
-    assert not (first/'continuations/001').exists()
 
 
 @pytest.mark.parametrize('tamper', ['intent', 'report'])
