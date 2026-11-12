@@ -221,6 +221,30 @@ def wait_runner(root, step=1):
     return record
 
 
+def retain_metering_failed_original(tmp_path,monkeypatch):
+    from test_native_cli import metering_instance
+    from scidiscovery.research_loop import runtime
+    tokens=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4)
+    root=metering_instance(tmp_path,monkeypatch,'resume',baseline=tokens,delta=tokens)
+    assert controller.run(root)['status']=='technical_pause'
+    first=wait_runner(root);outcome=c.read(first/'native-outcome.json')
+    assert outcome['stop_reason']=='native_failure_event' and outcome['cleanup']=='observed_group_cleaned'
+    assert outcome['returncode']==1 and outcome['native_started'] is True and outcome['terminal_observed'] is False
+    assert outcome['native_identity']['session']['source']=='native_metadata_hooks'
+    assert c.read(first/'usage.json')==tokens and native.usage(root)['observed_tokens']==14
+    assert (c.workspace(root,1)/'work/checkpoint').read_text()=='original checkpoint'
+    # The detached watchdog observes the outcome on its own polling turn,
+    # after the runner has stopped. Settle that exact original owner before
+    # asking recovery to prove every retained writer is stopped.
+    watchdog=c.read(first/'watchdog-process.json');binding=c.record_ref(root/'jobs/001.json')
+    assert watchdog['task_ref']==binding
+    until=time.monotonic()+3
+    while runtime.process_matches(watchdog,binding):
+        assert time.monotonic()<until,dict(phase='original_watchdog_cleanup',record=str(first),watchdog=watchdog)
+        time.sleep(.02)
+    return root,first,outcome
+
+
 def fail(root, step=1):
     assert controller.run(root)['status']=='native_stopped'
     return wait_runner(root, step)
@@ -674,27 +698,51 @@ def test_known_failure_same_thread_success_keeps_originals_and_cumulative_budget
     assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
 
 
-@pytest.mark.parametrize('mutation', ['root_intent', 'process_receipt', 'session_header', 'schema', 'task'])
+@pytest.mark.parametrize('mutation', ['root_intent', 'process_receipt', 'session_path', 'schema_missing'])
 @pytest.mark.process_e2e
-def test_original_binding_tamper_never_creates_continuation(tmp_path, mutation):
-    root=instance(tmp_path);first=fail(root)
+def test_original_binding_tamper_never_creates_continuation(tmp_path, monkeypatch, mutation):
+    from scidiscovery.research_loop import accepted_budget
+    tokens=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4)
+    root,first,outcome=retain_metering_failed_original(tmp_path,monkeypatch)
+    work=c.workspace(root,1);session_file=Path(outcome['native_identity']['session']['path'])
+    session_bytes=session_file.read_bytes()
+    assert (work/'work/checkpoint').read_text()=='original checkpoint'
     if mutation=='root_intent':
         value=c.read(first/'native-intent.json');value['task_ref']=dict(path='/wrong/original.json')
         c.write(first/'native-intent.json',value)
     elif mutation=='process_receipt':
         value=c.read(first/'native-process.json');value['task_ref']=dict(path='/different/accepted-intent.json')
         c.write(first/'native-process.json',value)
-    elif mutation=='session_header':
-        p=root/'native-homes/001/sessions/rollout.jsonl'
-        value=json.loads(p.read_text());value['payload']['cwd']='/incorrect-workspace';p.write_text(json.dumps(value)+'\n')
-    elif mutation=='task':
-        work=c.workspace(root,1);value=c.read(work/'science-task.json');value['goal_text']='Injected objective';c.write(work/'science-task.json',value)
-    elif mutation=='schema':
-        c.write(first/'science-result.schema.json',dict(type='object',properties={},required=[],additionalProperties=False))
-    expected='^Original execution process identity is invalid$' if mutation=='process_receipt' else None
-    with pytest.raises(ValueError,match=expected):controller.worker_resume(root,1)
-    assert not (first/'continuations/001/native-intent.json').exists()
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    elif mutation=='session_path':
+        # Native transcript bytes are opaque and mutable; redirecting the
+        # retained original path is the rejected binding change.
+        retained=session_file.with_name('retained-opaque.jsonl');retained.write_bytes(session_file.read_bytes())
+        session_file.unlink();session_file.symlink_to(retained)
+    else:
+        (first/'science-result.schema.json').unlink()
+    expected=dict(root_intent='Original accepted native intent identity changed',
+        process_receipt='unexpected_recovery_original_process_identity_invalid',
+        session_path='Original native session binding changed',schema_missing='Expected an original regular file')[mutation]
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    for _ in range(2):
+        with pytest.raises(ValueError,match='^'+expected+'$'):
+            continuation.start(root,1,after_interrupt=True,expected_attempt=0,
+                native_intent_ref=c.record_ref(first/'native-intent.json'))
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==1 and head['continuation_count']==0
+        assert {key:head['usage'][key] for key in tokens}==tokens
+        assert c.read(first/'usage.json')==tokens and budget.used_steps(root)==1
+        assert accepted_budget.native_attempt(root,1,first,head=head) is not None
+        assert not (first/'continuations/001/native-intent.json').exists()
+        if mutation=='root_intent':
+            with pytest.raises(ValueError,match='^Original accepted native intent identity changed$'):
+                execution.records(root,1)
+        else:assert len(execution.records(root,1))==1
+        assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+        assert all(p.read_bytes()==raw for p,raw in retained.items())
+        assert (work/'work/launches').read_text()=='exec\n'
+    if mutation=='schema_missing':assert not (first/'science-result.schema.json').exists()
+    if mutation=='session_path':assert session_file.is_symlink() and session_file.read_bytes()==session_bytes
 
 
 @pytest.mark.process_e2e
@@ -755,11 +803,24 @@ def test_resume_budget_denial_restores_inactive_clock_and_keeps_attempt_unaccept
 
 
 @pytest.mark.process_e2e
-def test_operator_pause_does_not_accept_a_new_continuation(tmp_path):
-    root=instance(tmp_path);first=fail(root)
+def test_operator_pause_does_not_accept_a_new_continuation(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget
+    root=qualified_h_repair_instance(tmp_path,monkeypatch,'badjson')
+    first=retain_qualified_h_bad_original(root,monkeypatch)
     c.write(root/'pause.request',dict(reason='user pause'))
-    assert controller.worker_resume(root,1)['reason']=='worker_resume_paused_or_closeout'
-    assert not (first/'continuations/001/native-intent.json').exists()
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    for _ in range(2):
+        with pytest.raises(continuation.ResumeUnavailable,match='^worker_resume_paused_or_closeout$'):
+            native.wait_native(root,1)
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==1 and head['continuation_count']==0
+        assert {key:head['usage'][key] for key in ('input_tokens','cached_input_tokens','output_tokens')}==dict(
+            input_tokens=10,cached_input_tokens=3,output_tokens=4)
+        assert native.usage(root)['observed_tokens']==14 and budget.used_steps(root)==1
+        assert not (first/'continuations/001/native-intent.json').exists() and len(execution.records(root,1))==1
+        assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+        assert (root/'pause.request').exists() and all(p.read_bytes()==raw for p,raw in retained.items())
+        assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
 @pytest.mark.process_e2e
@@ -908,25 +969,60 @@ def test_success_before_seal_does_not_rebind_drifted_attempt(tmp_path,monkeypatc
         assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
 
 
-@pytest.mark.parametrize('tamper',['schema','task'])
+@pytest.mark.parametrize('tamper',['task','schema_missing'])
 @pytest.mark.process_e2e
 def test_accepted_continuation_rechecks_task_and_schema_before_actual_popen(tmp_path,monkeypatch,tamper):
-    root=instance(tmp_path);first=fail(root)
-    from scidiscovery.research_loop import runtime
-    start=runtime.start
+    from scidiscovery.research_loop import accepted_budget, runtime
+    tokens=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4)
+    root,first,outcome=retain_metering_failed_original(tmp_path,monkeypatch)
+    work=c.workspace(root,1);assert (work/'work/checkpoint').read_text()=='original checkpoint'
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    start=runtime.start;admitted=[]
     def drift(root,step,attempt=0):
-        if tamper=='schema':
-            c.write(first/'science-result.schema.json',dict(type='object'))
+        current=first/'continuations/001';intent=c.read(current/'native-intent.json')
+        assert attempt==1 and intent['continuation_kind']=='reentry' and intent['budget_slice']['previous_tokens']==14
+        assert accepted_budget.read(root)['dispatch_count']==2
+        if tamper=='schema_missing':
+            (first/'science-result.schema.json').unlink()
         else:
-            work=c.workspace(root,step);value=c.read(work/'science-task.json');value['goal_text']='Late injection';c.write(work/'science-task.json',value)
+            value=c.read(work/'science-task.json');value['global']['objective']='inputs/global/different-objective.md'
+            c.write(work/'science-task.json',value)
+        admitted.append(attempt)
         return start(root,step,attempt)
     monkeypatch.setattr(runtime,'start',drift)
-    with pytest.raises(ValueError):controller.worker_resume(root,1)
-    current=first/'continuations/001'
-    assert (current/'native-outcome.json').exists() and not (current/'native-process.json').exists()
-    assert not (first/'result-identity.json').exists()
-    assert len(execution.records(root,1))==2
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    for check in range(2):
+        if tamper=='task':
+            error=RuntimeError;reason='Original native execution is unknown; preserved without replay'
+        else:
+            # The first call collects the caught pre-Popen refusal. A repeated
+            # exact recovery source checks the still-missing schema before
+            # reusing its accepted successor; neither path submits again.
+            error=ValueError;reason=('Terminal scientific output is unverified or changed' if check==0
+                else 'Expected an original regular file')
+        with pytest.raises(error,match='^'+reason+'$'):
+            continuation.start(root,1,after_interrupt=True,expected_attempt=0,
+                native_intent_ref=c.record_ref(first/'native-intent.json'))
+        current=wait_runner(root)
+        if tamper=='task':
+            assert 'ValueError: Frozen scientific task changed its input binding' in (current/'runner.stderr').read_text()
+            assert not (current/'native-outcome.json').exists()
+        else:
+            assert 'ValueError: Expected an original regular file' in (current/'runner.stderr').read_text()
+            refusal=c.read(current/'native-outcome.json')
+            assert refusal['limitation']=='Expected an original regular file'
+            assert refusal['native_started'] is False and refusal['returncode'] is None
+            assert refusal['stop_reason']=='native_error_unknown' and refusal['terminal_observed'] is False
+            assert refusal['cleanup'] is None and not (first/'science-result.schema.json').exists()
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==2 and head['continuation_count']==0
+        assert {key:head['usage'][key] for key in tokens}==tokens and budget.used_steps(root)==1
+        assert c.read(first/'usage.json')==tokens
+        assert all(p.read_bytes()==raw for p,raw in retained.items() if tamper!='schema_missing' or p.name!='science-result.schema.json')
+        assert not (current/'native-process.json').exists()
+        assert len(execution.records(root,1))==2 and not (first/'continuations/002').exists()
+        assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+        assert (work/'work/launches').read_text()=='exec\n'
+    assert admitted==[1]
 
 
 
@@ -978,20 +1074,38 @@ def test_native_session_hook_wrong_workspace_does_not_accept_resume(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_native_session_header_identity_drift_cannot_launch_accepted_resume(tmp_path):
-    root=instance(tmp_path);first=fail(root);session_file=root/'native-homes/001/sessions/rollout.jsonl'
-    reference=continuation.session(root,1,first);job=c.read(root/'jobs/001.json')
-    budget.transition(root,'advance','exact original session identity negative control')
-    anchor=budget.accept_continuation(root,job,[first]);record=first/'continuations/001';record.mkdir(parents=True)
-    c.write(record/'native-intent.json',dict(step=1,attempt=1,task_ref=c.record_ref(root/'jobs/001.json'),
-        root_intent_ref=c.record_ref(first/'native-intent.json'),previous=execution.proof(first),
-        session=reference,budget_slice=anchor))
-    value=json.loads(session_file.read_text());value['payload']['cwd']='/different/original-workspace'
-    session_file.write_text(json.dumps(value)+'\n')
-    with pytest.raises(ValueError,match='^Native session identity or workspace changed$'):native.run_native(root,1,1)
-    assert not (record/'native-process.json').exists()
-    assert not (first/'continuations/002').exists()
-    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+def test_retained_session_path_redirect_cannot_launch_accepted_resume(tmp_path,monkeypatch):
+    from scidiscovery.research_loop import accepted_budget, runtime
+    tokens=dict(input_tokens=10,cached_input_tokens=3,output_tokens=4)
+    root,first,outcome=retain_metering_failed_original(tmp_path,monkeypatch)
+    work=c.workspace(root,1);assert (work/'work/checkpoint').read_text()=='original checkpoint'
+    session_file=Path(outcome['native_identity']['session']['path']);original=session_file.read_bytes()
+    retained={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
+    start=runtime.start;admitted=[]
+    def redirect(root,step,attempt=0):
+        current=first/'continuations/001';intent=c.read(current/'native-intent.json')
+        assert attempt==1 and intent['continuation_kind']=='reentry' and intent['session']==outcome['native_identity']['session']
+        assert intent['budget_slice']['previous_tokens']==14 and accepted_budget.read(root)['dispatch_count']==2
+        target=session_file.with_name('retained-opaque.jsonl');target.write_bytes(original)
+        session_file.unlink();session_file.symlink_to(target);admitted.append(attempt)
+        return start(root,step,attempt)
+    monkeypatch.setattr(runtime,'start',redirect)
+    for _ in range(2):
+        with pytest.raises(RuntimeError,match='^Original native execution is unknown; preserved without replay$'):
+            continuation.start(root,1,after_interrupt=True,expected_attempt=0,
+                native_intent_ref=c.record_ref(first/'native-intent.json'))
+        current=wait_runner(root)
+        assert 'ValueError: Original native session binding changed' in (current/'runner.stderr').read_text()
+        head=accepted_budget.read(root)
+        assert head['dispatch_count']==2 and head['continuation_count']==0
+        assert {key:head['usage'][key] for key in tokens}==tokens and budget.used_steps(root)==1
+        assert c.read(first/'usage.json')==tokens and all(p.read_bytes()==raw for p,raw in retained.items())
+        assert session_file.is_symlink() and session_file.read_bytes()==original
+        assert not (current/'native-process.json').exists() and not (current/'native-outcome.json').exists()
+        assert len(execution.records(root,1))==2 and not (first/'continuations/002').exists()
+        assert not (first/'result-identity.json').exists() and not (root/'jobs/002.json').exists()
+        assert (work/'work/launches').read_text()=='exec\n'
+    assert admitted==[1]
 
 
 @pytest.mark.parametrize('schema_bytes', [None,
