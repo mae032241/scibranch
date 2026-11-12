@@ -40,8 +40,12 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
     if role=='W':assert job['step']==1 and job['direct_refs']==[]
     assert c.settings(root)['role_guidance']==guidance.ADVISORY_WORKER_FIRST
     assert 'Goals remain.' in prompt
-    assert ('work/budget-status.json: stale/partial/no grant; unknown!=0; input has cache. '
-        'Targets soft; limits/permissions bind.') in prompt
+    assert 'work/budget-status.json: stale/partial/no grant; unknown!=0; input has cache.' in prompt
+    if role=='W':
+        assert 'Original limits/permissions bind.' in prompt
+        assert 'Targets soft;' not in prompt
+    else:
+        assert 'Targets soft; limits/permissions bind.' in prompt
     assert task['role_contract']==guidance.role_contract(job)
     if role=='W':
         # guidance.role_contract and contracts.response_instructions deliberately
@@ -54,15 +58,30 @@ def test_role_planning_uses_control_allowance_without_rewriting_science(tmp_path
             'Shared tokens<=0 or time<=0: retain originals/gaps; final-return admission and permissions hold.') in prompt
         assert 'delivery_selection' not in c.response_instructions(job)
         assert 'deliver eligible candidate or finish with gaps from originals' not in prompt
-    else:
+    elif role=='H':
         assert 'Follow-up targets advise; no grant/required handoff.' in prompt
     if role=='W':
+        assert 'Follow-up targets advise' not in prompt
+        assert 'stage_intent:continue=W;' in task['stage_response']
         assert prompt.count('Wait 10-30s on pending originals within deadlines.')==1
         assert 'decision=pre-delivery Final A. Advice returns W; no grant.' in task['stage_response']
         assert 'review=A advice' in task['stage_response']
     else:
         assert 'Wait 10-30s' not in prompt
-    assert json.JSONDecoder().raw_decode(prompt.splitlines()[-1])[0]==status
+    # The renderer serializes status after the request body's first paragraph;
+    # prompt transport prepends the complete instruction, and W has trailing advice.
+    if transport=='prompt':
+        assert prompt.startswith(instruction+'\n')
+        body=prompt[len(instruction)+1:]
+    else:
+        body=prompt
+    serialized_status=body.split('\n',1)[1]
+    delivered_status,status_end=json.JSONDecoder().raw_decode(serialized_status)
+    assert delivered_status==status
+    if role=='W':
+        assert serialized_status[status_end:].endswith(' engineering_check: sample, no training/audit.')
+    else:
+        assert serialized_status[status_end:]==''
     assert schema==c.result_schema(role,job['handoff_protocol'],'selection' in job,**c.response_options(job))
     assert instruction.startswith(job['native_role_instruction']+'\n')
     assert all(path.read_bytes()==value for path,value in originals.items())
@@ -169,8 +188,10 @@ def test_work_unit_task_retains_exact_requirements_with_decision_led_improvement
     assert instruction.startswith(job['native_role_instruction']+'\n')
     assert 'Own research/methods' in instruction
     assert 'No unknown-call replay' in instruction
-    assert 'Targets soft; limits/permissions bind.' in prompt
-    assert 'Follow-up targets advise; no grant/required handoff.' in prompt
+    assert 'Original limits/permissions bind.' in prompt
+    assert 'Targets soft;' not in prompt and 'Follow-up targets advise' not in prompt
+    assert 'stage_intent:continue=W;' in task['stage_response']
+    assert prompt.endswith(' engineering_check: sample, no training/audit.')
     for text in expected:assert text in task['question']
     assert all(path.read_bytes()==value for path,value in originals.items())
 
@@ -190,8 +211,10 @@ def test_worker_handoff_distinguishes_final_scientific_response_from_pending_wai
     assert prompt.count('handoff.action:finalize_response=JSON;return_control=wait.')==1
     assert 'poll pending originals' not in prompt
     assert prompt.count('Wait 10-30s on pending originals within deadlines.')==1
-    assert 'Follow-up targets advise; no grant/required handoff.' in prompt
-    assert 'Targets soft; limits/permissions bind.' in prompt
+    assert 'Original limits/permissions bind.' in prompt
+    assert 'Targets soft;' not in prompt and 'Follow-up targets advise' not in prompt
+    assert prompt.count('engineering_check: sample, no training/audit.')==1
+    assert 'stage_intent:continue=W;' in task['stage_response']
     assert instruction.startswith(job['native_role_instruction']+'\n')
     assert 'decision=pre-delivery Final A. Advice returns W; no grant.' in task['stage_response']
     assert schema==c.result_schema('W',job['handoff_protocol'],'selection' in job,**c.response_options(job))
