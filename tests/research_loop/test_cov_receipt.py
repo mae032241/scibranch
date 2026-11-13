@@ -310,8 +310,12 @@ def _fixed_cov_completion(tmp_path,monkeypatch,*,status='known_success',legacy=F
     from copy import deepcopy
     from cov_execution.experiments import CovExecution
     from scidiscovery.research_loop import contracts as c
-    from test_cov_command_contract import _fixed_cov_launcher
-    case=_fixed_cov_launcher(tmp_path,monkeypatch)
+    from test_cov_command_contract import _fixed_cov_call
+    case=_fixed_cov_call(tmp_path,monkeypatch)
+    # Inert exported tree; the retained call forbids any materialize/verify entry.
+    case.version=case.accepted['code_version'];case.materialized=[];case.verified=[]
+    case.export=case.root/'host-runtime/code-versions/exports/001'/case.accepted['call_id']/'tree'
+    case.export.mkdir(parents=True);(case.export/'run.py').write_bytes(case.source.read_bytes())
     job_path=case.root/'jobs/001.json'
     c.write(job_path,dict(c.read(job_path),handoff_protocol=CURRENT))
     job_ref=c.record_ref(job_path)

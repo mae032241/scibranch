@@ -16,7 +16,12 @@ def compiled_client(chain):
     result = e.compile_implementation(config, e.load(config), author, c.read(aliases), public)
     assert result['status'] == 'compiled' and not backend.prepared and not backend.submits
     job = c.read(root / 'jobs/002.json')
-    materials = c.collect_materials(root, 2)
+    # Acceptance is not under test here: supply the stopped node's observed inventory.
+    record = c.host_record(work)
+    intent = c.read(record / 'native-intent.json') if (record / 'native-intent.json').exists() else None
+    inventory = c.CurrentInventory(root, job, record, 0, [], {}, policy={}, native_intent=intent)
+    inventory.materials, inventory.mutable_materials = c._material_inventory(root, 2, inventory=inventory)
+    materials = c.collect_materials(root, 2, inventory=inventory)
     rows = inputs.capture(root, job, materials)
     assert len(rows) == 1
     row = rows[0]

@@ -20,7 +20,7 @@ def completed_source(tmp_path):
         if path.name=='native-outcome.json':value=dict(value,native_started=False)
         return write(path,value)
     with patch.object(c,'write',stopped_write):
-        for step, role, parents, action in [(1, 'H', [], 'analyze'), (2, 'A', [1], 'finish')]:
+        for step, role, parents, action in [(1, 'H', [], 'analyze'), (2, 'A', [1], 'continue_w')]:
             finish(root, step, role, parents, action=action)
     with controller._writer(root):
         pass
@@ -35,7 +35,7 @@ def test_parent_quiescence_does_not_require_latest_finished_step(tmp_path, monke
         c.write(root / 'jobs' / f'{step:03d}.json', dict(step=step, role='A' if finished else 'H'))
         # Sparse markers isolate latest-job selection from full seal validation.
         c.write(root / 'native-evidence' / f'{step:03d}' / 'result-identity.json', {})
-        endpoint_results[c.workspace(root, step)] = dict(next_action='finish' if finished else 'analyze')
+        endpoint_results[c.workspace(root, step)] = dict(next_action='continue_w' if finished else 'analyze')
     validate = c.validate
     validated = []
 
@@ -110,7 +110,7 @@ def test_completed_parent_with_original_unknown_managed_call_cannot_fork(tmp_pat
         finish(root, 2, 'W', [1], preserve_native_intent=True, mechanism_findings=[
             dict(mechanism=label, basis='blocked', finding='Original backend call remains pending.')
             for label in ('P', 'Q')])
-    finish(root, 3, 'A', [1, 2], action='finish')
+    finish(root, 3, 'A', [1, 2], action='continue_w')
     seal = c.read(execution.origin(root, 2) / 'result-identity.json')
     observed = c.read(root / seal['observations']['path'])
     assert observed['managed_calls'][0]['status'] == 'unknown'

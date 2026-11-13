@@ -90,15 +90,22 @@ def notice_context_bytes(job,intent,backend,**context):
     for dimension in ('token','time'):
         followups=[None]
         if ordinary and dimension=='token' and roles:followups.append(dict.fromkeys(roles,1))
-        total+=max(len(budget_notice.closeout_notice(job,intent,dimension=dimension,
+        notices=(budget_notice.closeout_notice(job,intent,dimension=dimension,
             target_reached=True,shared_reached=shared,shared_exhausted=exhausted,
             shared_expired=dimension=='time' and shared,followup_tokens=followup,
-            author=author,final_return=final_return)['text'].encode())
+            author=author,final_return=final_return)
             for shared,exhausted in ((False,False),(False,True),(True,True))
             for followup in followups)
-    progress=budget_notice.worker_progress_notice(job,intent,active_seconds=1,target_seconds=1,
-        fragment_enabled=bool(job.get('worker_fragment_policy')),author=author,final_return=final_return)
-    if progress is not None:total+=len(progress['text'].encode())
+        # A branch with no reachable advice contributes no text.
+        total+=max((len(notice['text'].encode()) for notice in notices if notice is not None),default=0)
+    # Cadence advice follows native context telemetry; an eligible W can reach any of these texts.
+    probe=budget_notice.worker_progress_notice(job,intent,active_seconds=1,target_seconds=1,
+        fragment_enabled=bool(job.get('worker_fragment_policy')),author=author,final_return=final_return,
+        max_context_windows=1,context_observation=dict(context_windows=dict(coverage='unknown')))
+    if probe is not None:
+        total+=max(len(text.encode()) for text in (budget_notice.WORKER_CONTEXT_TEXT,
+            budget_notice.WORKER_CONTEXT_UNKNOWN_TEXT,budget_notice.WORKER_CONTEXT_90_TEXT,
+            budget_notice.WORKER_CONTEXT_NEAR_TEXT))
     return total
 
 
@@ -116,8 +123,10 @@ def test_fixed_contract_counts_progress_notice_only_for_eligible_worker(scope):
     elif scope=='closeout':job['purpose']='closeout'
     enabled=notice_context_bytes(job,intent,backend,**context)
     disabled=notice_context_bytes(dict(job,worker_fragment_policy=None),intent,backend,**context)
-    assert enabled-disabled==(len(budget_notice.WORKER_PROGRESS_TEXT.encode())
-        if scope in {'ordinary','wake'} else 0)
+    longest=max(len(text.encode()) for text in (budget_notice.WORKER_CONTEXT_TEXT,
+        budget_notice.WORKER_CONTEXT_UNKNOWN_TEXT,budget_notice.WORKER_CONTEXT_90_TEXT,
+        budget_notice.WORKER_CONTEXT_NEAR_TEXT))
+    assert enabled-disabled==(longest if scope in {'ordinary','wake'} else 0)
 
 
 def rendered_contract(tmp_path,job,task,intent,backend,**context):

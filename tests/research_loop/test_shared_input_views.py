@@ -9,7 +9,15 @@ import time
 import pytest
 
 from scidiscovery.research_loop import contracts as c, shared_input_views as views
-from scidiscovery.research_loop.experiments import UnsupportedExecution
+from scidiscovery.research_loop.experiments import CallerError, UnsupportedExecution
+from scidiscovery.research_loop.protocol import CURRENT
+
+def history_job(root):
+    """A current task whose accepted public history prefix is empty."""
+    from scidiscovery.research_loop import accepted_prefix
+    prefix = accepted_prefix.empty(root, dict(goal_id='shared-view'))
+    (Path(root) / prefix['visibility_root']['path']).mkdir(parents=True, exist_ok=True)
+    return dict(step=1, history=dict(prefix=prefix))
 
 
 @pytest.fixture
@@ -23,6 +31,18 @@ def layout(tmp_path, monkeypatch):
     return root,work,source,alias,canonical
 
 
+def mount_triples(arguments):
+    """Bind rows of a mixed bubblewrap argument list (single-path options are skipped)."""
+    rows, index = [], 0
+    while index < len(arguments):
+        if arguments[index] in {'--bind', '--ro-bind'}:
+            rows.append(tuple(arguments[index:index + 3]))
+            index += 3
+        else:
+            index += 2 if arguments[index] in {'--tmpfs', '--remount-ro', '--dir'} else 1
+    return rows
+
+
 def require_mounts():
     try:views.ensure_capability()
     except UnsupportedExecution as error:pytest.skip(str(error))
@@ -30,11 +50,14 @@ def require_mounts():
 
 def test_exact_aliases_and_dynamic_root_order(layout):
     root,work,source,alias,canonical=layout
+    # Host framework files keep their protection through any workspace hardlink alias.
+    framework=work/'conclusion.json';framework.write_text('{}');framework.chmod(0o400)
+    framework_alias=work/'artifacts/framework-alias.json';os.link(framework,framework_alias)
     initial=views.workspace_arguments(root,work)
-    final=views.mount_arguments(root,{},work,private=True)
+    final=views.mount_arguments(root,history_job(root),work,private=True)
     assert initial==['--bind',str(work),str(work),'--bind',str(work/'work'),str(work/'work')]
-    triples=list(zip(final[::3],final[1::3],final[2::3]))
-    assert ('--ro-bind',str(alias),str(alias)) in triples
+    triples=mount_triples(final)
+    assert ('--ro-bind',str(framework_alias),str(framework_alias)) in triples
     assert ('--ro-bind',str(canonical.parent),str(canonical.parent)) in triples
     assert all(('--ro-bind',str(work/'work'/name),str(work/'work'/name)) in triples for name in views.DYNAMIC_ROOTS)
     assert str(root) not in final
@@ -64,16 +87,17 @@ def test_metadata_capability_limit_is_independent_of_storage_quota(layout,monkey
     root,work,*_=layout
     monkeypatch.setattr(views,'ALIAS_MAX_ENTRIES',1)
     with pytest.raises(UnsupportedExecution,match='metadata capability limit'):
-        views.mount_arguments(root,{},work)
+        views.mount_arguments(root,history_job(root),work)
 
 
 def test_projection_mapping_keeps_private_roots_out(layout):
     root,work,*_=layout
     context=root/'host-recovery/context';context.mkdir(parents=True)
     (context/'inputs').mkdir();(context/'inputs/display.txt').write_text('science display')
-    result=views.mount_arguments(root,{},work,target_work='/task',mounts=[(context/'inputs','/task/inputs')],include_skills=False)
-    triples=list(zip(result[::3],result[1::3],result[2::3]))
-    assert ('--ro-bind',str(context/'inputs'),'/task/inputs') in triples
+    shown=context/'inputs/display.txt'
+    result=views.mount_arguments(root,history_job(root),work,target_work='/task',mounts=[(shown,'/task/inputs/display.txt')],include_skills=False)
+    triples=mount_triples(result)
+    assert ('--ro-bind',str(shown),'/task/inputs/display.txt') in triples
     assert not any('host-history/objects' in value for value in result)
     assert not any(value=='/task' for value in result)
 
@@ -280,16 +304,18 @@ def test_host_publishers_refuse_same_name_replacement_before_any_publish(layout,
     assert list(retained.iterdir())==[]
 
 
-def test_legacy_public_compile_refuses_before_builder_or_shared_publication(layout,monkeypatch):
+def test_public_output_compile_refuses_before_builder_or_shared_publication(layout,monkeypatch):
     from types import SimpleNamespace
     from scidiscovery.research_loop import execution_authority, execution_inputs
     root,work,*_=layout
     views.dynamic_root(root,work,'retained-implementations')
+    c.write(root/'jobs/001.json',dict(step=1,role='W',worker_view_version=1))
     monkeypatch.setattr(execution_authority,'_remaining',lambda *a:(None,5))
     monkeypatch.setattr(c,'settings',lambda *a:dict(storage_policy=None))
-    host=SimpleNamespace(root=root,job=dict(step=1),config={})
+    host=SimpleNamespace(root=root,config={},job=dict(step=1,handoff_protocol=CURRENT,
+        research_strategy_version=3,advisory_scope_version=1,worker_view_version=1,lineage_projection_version=1))
     output=work/'artifacts/package'
-    with pytest.raises(UnsupportedExecution,match='Legacy public compile'):
+    with pytest.raises(CallerError,match='host-owned output namespace'):
         execution_inputs.NativeInputHost.compile(host,work/'work/author.json',output,slots=[],aliases={},
             capability={},contract={},builder=lambda *a:pytest.fail('must reject before compilation'))
     assert not output.exists()
@@ -338,7 +364,7 @@ def registered_namespace(monkeypatch):
         def select(self,**filters):
             return [Entry()] if registrations and filters.get('name','namespace_fixture')=='namespace_fixture' else []
     monkeypatch.setattr(skill_supply.importlib.metadata,'entry_points',lambda:Entries())
-    monkeypatch.setattr(skill_supply,'_module_identity',lambda module:dict(name=module,path='/private/provider.py',**identity))
+    monkeypatch.setattr(skill_supply,'_module_identity',lambda module:dict(name=module,**identity))
     return registrations,identity
 
 
@@ -401,7 +427,7 @@ def test_complete_record_publisher_refuses_replaced_holder_before_receipt_write(
     views.dynamic_root(root,work,'retained-experiments')
     views._pin_holders(root,work,[directory])
     directory.rename(directory.with_name('old-records'));directory.mkdir()
-    records=experiments.Records(dict(record_dir=str(directory),scope=dict(step=1)))
+    records=experiments.Records(dict(record_dir=str(directory),scope=dict(handoff_protocol=CURRENT,step=1)))
     assert records.calls()==[]
     with pytest.raises(UnsupportedExecution,match='private original holder was replaced'):
         records.publish('original-call','terminal.json',{})
@@ -418,7 +444,7 @@ def test_adapter_record_effect_refuses_replaced_holder_before_lock_or_adapter_wr
     views._pin_holders(root,work,[directory])
     directory.rename(directory.with_name('old-records'));directory.mkdir()
     class Adapter:
-        config=dict(record_dir=str(directory),scope=dict(step=1))
+        config=dict(record_dir=str(directory),scope=dict(handoff_protocol=CURRENT,step=1))
         records=experiments.Records(config)
         @experiments.record_effect
         def status_details(self):

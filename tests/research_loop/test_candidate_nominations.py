@@ -20,6 +20,8 @@ def accepted_worker(root,tmp_path):
     node_anchor=budget.accept_node(root,job)
     anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,job))
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**anchor))
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_native(root,2,record,c.read(record/'native-intent.json'))
     selected=c.settings(root,job).get('execution_config') or dict(executor='local_execution:command',configuration=dict(run_argv=[sys.executable],max_seconds=30))
     config=experiments.configure(root,2,selected['executor'],selected['configuration'],c.workspace(root,2)/'work/experiment-config.json')
     return job,config
@@ -48,14 +50,14 @@ def declaration():
 
 def test_five_mechanism_representatives_allow_seven_distinct_models_without_ranking(monkeypatch):
     job=nomination_job(monkeypatch);value=declaration();before=copy.deepcopy(value)
-    nominations.require(None,job,dict(candidate_nominations=value))
+    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
     assert value==before and len(value['representatives'])+len(value['extras'])==7
     job['candidate_nomination_policy']=nominations.configuration(0)
-    nominations.require(None,job,dict(candidate_nominations=value))
+    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
 
 
 @pytest.mark.parametrize('damage',['missing','duplicate','unknown','extra-is-representative','too-many','reason'])
-def test_structural_nominations_repair_without_scientific_scoring(monkeypatch,damage):
+def test_structural_nomination_damage_never_gates_output_or_scores_science(monkeypatch,damage):
     job=nomination_job(monkeypatch);value=declaration()
     if damage=='missing':value['representatives'].pop(1)  # deferred still needs coverage
     if damage=='duplicate':value['representatives'].append(value['representatives'][0])
@@ -63,21 +65,22 @@ def test_structural_nominations_repair_without_scientific_scoring(monkeypatch,da
     if damage=='extra-is-representative':value['extras'][0]['candidate']='model-1'
     if damage=='too-many':value['extras'].append(dict(candidate='model-9',reason='Additional science'))
     if damage=='reason':value['representatives'][0]['reason']=' '
-    nominations.require(None,job,dict(candidate_nominations=value))
+    # Advice is previewed and projected later; structural damage is never an output-repair gate.
+    assert nominations.require(None,job,dict(candidate_nominations=value),inventory=None) is None
 
 
 def test_gaps_and_shared_model_keep_mechanisms_without_inventing_candidates(monkeypatch):
     job=nomination_job(monkeypatch);value=declaration()
     value['representatives'][1].update(candidate='model-1',reason='This one model explicitly tests both mechanisms under the stated conditions.')
     value['gaps']=[dict(mechanism_ref=value['representatives'].pop()['mechanism_ref'],reason='The original model is unsuitable under the revised conditions.')]
-    nominations.require(None,job,dict(candidate_nominations=value))
+    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
     job['history']['candidate_ids']=[]
     value=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],reason='No successful usable model is available.')
         for row in job['candidate_nomination_mechanisms']])
-    nominations.require(None,job,dict(candidate_nominations=value))
+    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
     job['candidate_nomination_mechanisms'][-1]['status']='waived'
     value['gaps'].pop()
-    nominations.require(None,job,dict(candidate_nominations=value))
+    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
 
 
 @pytest.mark.parametrize('slots',[None,0,4,-1])
@@ -170,7 +173,7 @@ def test_long_reasons_preserve_every_representative_and_link_complete_conclusion
 
 def test_plain_task_has_no_synthetic_mechanism_requirement(monkeypatch):
     monkeypatch.setattr(history,'managed_calls',lambda *args:pytest.fail('Plain task must not create a mechanism pool'))
-    nominations.require(None,dict(role='W'),{})
+    nominations.require(None,dict(role='W'),{},inventory=None)
     fields=c.response_fields(dict(role='W'),{})
     assert 'candidate_nominations' not in fields
 
@@ -184,6 +187,12 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
         root_intent_ref=c.record_ref(origin/'native-intent.json'),
         previous={'native-intent.json':c.record_ref(origin/'native-intent.json')}))
     c.write(later/'experiment-config.json',c.read(origin/'experiment-config.json'))
+    # Accept the continuation through its real owner before result files exist.
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_terminal(root,2,origin,meter=None,unknown=True)
+    accepted_budget.accept_native(root,2,later,c.read(later/'native-intent.json'))
+    chain=execution.records(root,2)
+    assert chain==[origin,later]
     for directory in (origin,later):
         for name in ('native-outcome.json','science-output.json','usage.json'):
             (directory/name).write_text('Intentionally invalid execution result; identity must not read it.')
@@ -197,13 +206,13 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
                 if Path(path).name in {'native-outcome.json','science-output.json','usage.json','result-identity.json'}:forbidden()
                 return _original(path,*args,**kwargs)
             pure.setattr(c,name,guarded)
-        assert history._execution_interface(root,accepted)==config['execution_interface']
+        assert history._execution_interface_from_chain(root,accepted,chain)==config['execution_interface']
         wrong=dict(accepted,interface={})
         with pytest.raises(history.ObserverIntegrityError,match='differs from frozen'):
-            history._execution_interface(root,wrong)
+            history._execution_interface_from_chain(root,wrong,chain)
         wrong=dict(accepted,scope=dict(config['scope'],role='A'))
         with pytest.raises(history.ObserverIntegrityError,match='differs from frozen'):
-            history._execution_interface(root,wrong)
+            history._execution_interface_from_chain(root,wrong,chain)
     damaged=c.read(later/'native-intent.json');damaged['root_intent_ref']='0'*64
     c.write(later/'native-intent.json',damaged)
     with pytest.raises(ValueError,match='continuation identity changed'):

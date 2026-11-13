@@ -8,8 +8,10 @@ import pytest
 
 from cov_execution import experiments as cov_execution
 from scidiscovery.operations.execution import LocalFileDescriptor
+from scidiscovery.research_loop.protocol import CURRENT
 from scidiscovery.research_loop import (code_versions, contracts as c, execution, execution_inputs as inputs,
-    execution_authority as authority, experiments as e, local_experiments as local, qualification as q)
+    execution_authority as authority, experiments as e, local_experiments as local, material_references,
+    originals, qualification as q)
 
 
 def _saved(path, value):
@@ -29,7 +31,8 @@ def _code_control(tmp_path, *, directory=False):
     _saved(root/'jobs/001.json',dict(step=1,role='W',worker_view_version=1))
     config=dict(record_dir=str(root/'host-runtime/experiment-control/001/records'),
         scope=dict(step=1,role='W'),execution_interface=dict(
-            executor='local_execution:command' if directory else 'fixture:command'))
+            executor='local_execution:command' if directory else 'fixture:command',
+            public_capabilities=e._public_capabilities(local.LocalExecution) if directory else []))
     version=dict(version=1,object_format='sha1',commit='a'*40,tree_path='.',
         selection='directory' if directory else 'file',entry='package/main' if directory else 'main',logical_root='code')
     accepted=dict(call_id='exact-call',scope=config['scope'],parent=dict(candidate_id=None),
@@ -62,7 +65,7 @@ def test_directory_code_control_keeps_runtime_cwd_separate_from_code_root(tmp_pa
     assert path.read_bytes()==saved
 
 
-@pytest.mark.parametrize('change',['experiment_as_code','nested_code_root','nonlocal','source_in_cwd'])
+@pytest.mark.parametrize('change',['experiment_as_code','nested_code_root','capability_removed','source_in_cwd'])
 def test_directory_code_control_rejects_changed_code_scope(tmp_path,change):
     root,config,accepted,path=_code_control(tmp_path,directory=True)
     work=c.workspace(root,1)
@@ -72,7 +75,7 @@ def test_directory_code_control_rejects_changed_code_scope(tmp_path,change):
     if change in {'experiment_as_code','nested_code_root'}:
         accepted['code_version']['logical_root']='experiments/example' if change=='experiment_as_code' else 'code/package'
         accepted['source_script']=str(work/accepted['code_version']['logical_root']/accepted['code_version']['entry'])
-    elif change=='nonlocal':config['execution_interface']['executor']='fixture:command'
+    elif change=='capability_removed':config['execution_interface']['public_capabilities']=[]
     else:accepted['source_script']=str(work/'experiments/example'/accepted['code_version']['entry'])
     _saved(path,accepted)
     with pytest.raises(e.IntegrityError,match='code version'):
@@ -121,7 +124,7 @@ def _source_call(tmp_path, monkeypatch, *, executor='local_execution:command'):
     _saved(root/'settings.json',dict(skills=None,goal_id='source-fixture'))
     _saved(root/'settings-identity.json',dict(path='settings.json'))
     job=root/'jobs/001.json';_saved(job,dict(step=1,role='W',worker_view_version=1))
-    scope=dict(step=1,role='W',job_ref=c.record_ref(job));attempt=dict(number=0)
+    scope=dict(handoff_protocol=CURRENT,step=1,role='W',job_ref=c.record_ref(job));attempt=dict(number=0)
     body=dict(scope=scope,native_attempt=attempt,max_seconds=10,
         record_dir=str(root/'host-runtime/experiment-control/001/records'))
     interface=dict(version=e.VERSION,executor=executor,terminal_evidence='local_process',
@@ -205,8 +208,10 @@ def test_source_projection_preserves_real_alternate_file_and_legacy_callback(tmp
 
 
 def test_local_code_completion_keeps_controls_and_omits_exact_export_proof(tmp_path,monkeypatch):
-    value=_source_call(tmp_path,monkeypatch);adapter=object.__new__(local.LocalExecution);adapter.config=value['config']
+    value=_source_call(tmp_path,monkeypatch);adapter=object.__new__(local.LocalExecution);adapter.config=value['config'];adapter.records=e.Records(value['config'])
     _forbid_source_consumption(monkeypatch)
+    # An already saved completion is returned as-is; derive the proof list afresh.
+    (value['directory']/'completed.json').unlink()
     result=adapter.completion(value['directory'],value['accepted'],0,True,True)
     assert result['proofs']==value['completed']['proofs']
     assert value['accepted']['script'] not in result['proofs']
@@ -273,14 +278,20 @@ def _compiler_source_call(tmp_path,monkeypatch,*,mixed=None,input_slots=False):
     root=tmp_path/'compiler-instance';call='compiler-consumer';identity='d'*32
     _saved(root/'settings.json',dict(skills=None,goal_id='compiler-source-fixture'))
     _saved(root/'settings-identity.json',dict(path='settings.json'))
-    step=2 if input_slots else 1;requester=step+1;frozen=[];slots=[];input_seal=None
+    step=2 if input_slots else 1;requester=step+1;frozen=[];frozen_refs=[];slots=[];input_seal=None
     if input_slots:
-        _saved(root/'jobs/001.json',dict(step=1,role='W',worker_view_version=1))
+        first=dict(step=1,role='W',worker_view_version=1,material_refs=[],selected_inputs=[])
+        _saved(root/'jobs/001.json',first)
         input_material=dict(path='inputs/parents/001/artifacts/data.dat',
             source=str(c.workspace(root,1)/'artifacts/data.dat'),size_bytes=10)
         other=deepcopy(input_material);other['path']=other['path'].replace('data.dat','more.dat')
         input_seal=root/'native-evidence/001/result-identity.json'
-        _saved(input_seal,dict(job_ref=c.record_ref(root/'jobs/001.json'),materials=[input_material,other]))
+        input_value=dict(job_ref=c.record_ref(root/'jobs/001.json'),
+            raw_ref=_saved(root/'native-evidence/001/science-output.json',dict(fixture='sealed raw output')),
+            materials=[input_material,other])
+        _saved(input_seal,input_value)
+        input_sources={1:dict(owner=originals.node(root,1),job=first,seal=input_value)}
+        frozen_refs=material_references.references([input_material],sources=input_sources)
         original=dict(instance_id='compiler-source-fixture',producer_step=1,producer_seal=q._ref(root,input_seal),
             material_path=input_material['path'],size_bytes=input_material['size_bytes'])
         frozen=[input_material]
@@ -288,7 +299,7 @@ def _compiler_source_call(tmp_path,monkeypatch,*,mixed=None,input_slots=False):
             media_type='application/octet-stream',original=deepcopy(original)) for name in ('slot-a','slot-b')]
     assert all(set(row)=={'path','source','size_bytes'} for row in frozen)
     producer_job=root/'jobs'/f'{step:03d}.json'
-    _saved(producer_job,dict(step=step,role='W',worker_view_version=1,direct_materials=frozen,selected_inputs=[]))
+    _saved(producer_job,dict(step=step,role='W',worker_view_version=1,material_refs=frozen_refs,selected_inputs=[]))
     producer_scope=dict(step=step,role='W',job_ref=c.record_ref(producer_job));attempt=dict(number=0)
     declaration=dict(key='implementation_authoring',kind='authoring',size_bytes=1)
     producer_interface=dict(public_capabilities=[declaration])
@@ -313,9 +324,13 @@ def _compiler_source_call(tmp_path,monkeypatch,*,mixed=None,input_slots=False):
     assert all(set(compiler[key])=={'path','size_bytes'} for key in ('job','configuration','native_intent','capability'))
     compiler_path=directory/'compiler.json';_saved(compiler_path,compiler)
     sealed=dict(material=material,compiler=q._ref(root,compiler_path),client_binding=q._ref(root,client))
-    seal=root/'native-evidence'/f'{step:03d}'/'result-identity.json';_saved(seal,dict(materials=[material],compiled_implementations=[sealed]))
+    seal=root/'native-evidence'/f'{step:03d}'/'result-identity.json';_saved(seal,dict(job_ref=c.record_ref(producer_job),
+        raw_ref=_saved(root/'native-evidence'/f'{step:03d}'/'science-output.json',dict(fixture='sealed raw output')),
+        materials=[material],compiled_implementations=[sealed]))
     job=root/'jobs'/f'{requester:03d}.json'
-    _saved(job,dict(step=requester,role='W',worker_view_version=1,direct_materials=[material],selected_inputs=[]))
+    producer_sources={step:dict(owner=originals.node(root,step),job=c.read(producer_job),seal=c.read(seal))}
+    _saved(job,dict(step=requester,role='W',worker_view_version=1,selected_inputs=[],
+        material_refs=material_references.references([material],sources=producer_sources)))
     scope=dict(step=requester,role='W',job_ref=c.record_ref(job))
     body=dict(scope=scope,native_attempt=attempt,max_seconds=10,
         record_dir=str(root/'host-runtime/experiment-control'/f'{requester:03d}'/'records'))
@@ -448,9 +463,11 @@ def test_compiler_source_rejects_equal_length_input_seal_control_changes(tmp_pat
     changed=e.encoded(seal)
     assert len(changed)==value['input_seal'].stat().st_size
     _replace(value['input_seal'],changed)
-    with pytest.raises(e.IntegrityError,match='compiler input'):
+    # A changed sealed job reference is now refused while loading the producer seal.
+    error,match=(ValueError,'exact original job') if change=='job_ref' else (e.IntegrityError,'compiler input')
+    with pytest.raises(error,match=match):
         e._source_projection(value['config'],value['accepted'])
-    with pytest.raises(e.IntegrityError,match='compiler input'):
+    with pytest.raises(error,match=match):
         e.verify_observation(observation,lambda item:Path(item['path']),verify_files=False)
 
 
@@ -481,10 +498,13 @@ def test_preparation_authority_keeps_qualification_refs_and_bound_acceptance_at_
         interface=config['execution_interface'],authority=refs['authority'],request=refs['request'],decision=refs['decision'])
     bound=dict(accepted=q._ref(root,value['directory']/'accepted.json'),prepared=accepted['prepared'])
     row=dict(ref=reservation,binding=binding,bound=bound,released=False,actual={})
-    # Only ledger storage is injected; reservation lookup, signatures and every
-    # authority/native-intent/acceptance comparison use production readers.
-    monkeypatch.setattr(budget,'_events',lambda selected,settings,**options:([],None,({}, {'a'*64:row})))
+    # Ledger storage and the accepted native-attempt chain locator are injected;
+    # reservation lookup, signatures and every authority/native-intent/acceptance
+    # comparison still use production readers over the retained originals.
+    monkeypatch.setattr(budget,'_events',lambda selected,**options:([],None,({}, {'a'*64:row})))
     def forbidden(*args,**options):pytest.fail('Preparation inspection rewrote consumed budget ownership')
+    monkeypatch.setattr(recovery.execution,'record',
+        lambda selected,step,attempt=None:Path(selected)/'native-evidence'/f'{step:03d}')
     monkeypatch.setattr(budget,'_append',forbidden)
     snapshot=dict(call_id=accepted['call_id'],scope=config['scope'],native_attempt=config['native_attempt'],
         interface=config['execution_interface'],prepared=accepted['prepared'],records=config['record_dir'],

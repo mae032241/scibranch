@@ -38,7 +38,8 @@ def test_project_declaration_roundtrip_preserves_frozen_identity(tmp_path):
     frozen = {**project, 'base_identity': dict(object_format='sha256', commit='a' * 64)}
     settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
         native_launcher_argv=['never-launched'], model='model', project=frozen,
-        handoff_protocol=protocol.CURRENT, node_budget_mode='soft', final_a_completion_policy=dict(version=1),
+        handoff_protocol=protocol.CURRENT, research_strategy_version=3, advisory_scope_version=1,
+        node_budget_mode='soft', final_a_completion_policy=dict(version=1),
         max_tokens=1000, max_seconds=120, max_steps=8)
     document = research_config.to_document(tmp_path / 'instance', settings)
     assert document['project'] == project
@@ -53,7 +54,8 @@ def test_project_is_immutable_before_operational_revalidation(tmp_path, monkeypa
         base_identity=dict(object_format='sha1', commit='a' * 40))
     settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
         native_launcher_argv=['never-launched'], model='model',
-        handoff_protocol=protocol.CURRENT, node_budget_mode='soft', final_a_completion_policy=dict(version=1),
+        handoff_protocol=protocol.CURRENT, research_strategy_version=3, advisory_scope_version=1,
+        node_budget_mode='soft', final_a_completion_policy=dict(version=1),
         max_tokens=1000, max_seconds=120, max_steps=8)
     if change != 'add':
         settings['project'] = frozen
@@ -119,44 +121,44 @@ def test_standard_defaults_separate_automatic_recovery_from_output_only(tmp_path
     prepared = research_config.normalize(options)
     policy = prepared['resume_policy']
     assert policy['output_only'] and policy['output_repair']
-    assert policy['automatic_recovery'] == dict(enabled=True, max_continues=2, max_retries=3,
-        initial_backoff_seconds=30, max_backoff_seconds=300, jitter_fraction=.1, max_wait_seconds=1800)
+    assert policy['automatic_recovery'] == dict(enabled=True, max_attempts=8, max_continues=8,
+        max_retries=8, initial_backoff_seconds=5, max_backoff_seconds=300, jitter_fraction=0, max_wait_seconds=1800)
     assert policy['native_home'] == str(home)
     assert prepared['native_options'] == options['native_options']
     assert 'resume_policy' not in options and not home.exists()
     policy['automatic_recovery']['max_retries'] = 0
-    assert research_config.normalize(options)['resume_policy']['automatic_recovery']['max_retries'] == 3
+    assert research_config.normalize(options)['resume_policy']['automatic_recovery']['max_retries'] == 8
 
 
 def test_new_standard_worker_context_windows_default_and_explicit_roundtrip(tmp_path, monkeypatch):
     from scidiscovery.research_loop import checkpoint
     monkeypatch.setattr(backends.shutil, 'which', lambda executable: str(tmp_path / 'codex'))
     prepared = research_config.normalize(normalization_options(tmp_path))
-    assert prepared['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1)
+    assert prepared['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1,
+        context_handoff_version=2)
     path = declaration(tmp_path, '\n[policies]\nworker_context="new_context"\nworker_context_windows=1\n')
     parsed = research_config.load(path)
     assert parsed['worker_fragment_policy'] == dict(context='new_context', max_context_windows=1)
     assert checkpoint.policy(parsed['worker_fragment_policy']) == parsed['worker_fragment_policy']
     explicit=research_config.normalize(normalization_options(tmp_path,
         worker_fragment_policy=dict(context='new_context',max_context_windows=2)))
-    assert explicit['worker_fragment_policy']==dict(context='new_context',max_context_windows=2)
+    assert explicit['worker_fragment_policy']==dict(context='new_context',max_context_windows=2,context_handoff_version=2)
     for invalid in (0, 3, True, '2', None):
         with pytest.raises(ValueError, match='context windows'):
             checkpoint.policy(dict(context='same_session', max_context_windows=invalid))
     assert checkpoint.policy(dict(context='same_session')) == dict(context='same_session')
 
 
-@pytest.mark.parametrize('maximum', [None, 1, 2])
-def test_worker_context_projection_preserves_legacy_absence(tmp_path, maximum):
+@pytest.mark.parametrize('maximum', [1, 2])
+def test_worker_context_projection_roundtrips_window_limit_and_handoff_version(tmp_path, maximum):
     settings = dict(objective='Original task', public_root=str(tmp_path / 'public'),
         native_launcher_argv=['codex'], model='model', handoff_protocol=protocol.CURRENT,
-        node_budget_mode='soft', final_a_completion_policy=dict(version=1),
+        research_strategy_version=3, advisory_scope_version=1, node_budget_mode='soft', final_a_completion_policy=dict(version=1),
         max_tokens=1000, max_seconds=120, max_steps=8,
-        worker_fragment_policy=dict(context='same_session'))
-    if maximum is not None:
-        settings['worker_fragment_policy']['max_context_windows'] = maximum
+        worker_fragment_policy=dict(context='same_session', context_handoff_version=2))
+    settings['worker_fragment_policy']['max_context_windows'] = maximum
     document = research_config.to_document(tmp_path / 'instance', settings)
-    assert ('worker_context_windows' in document['policies']) is (maximum is not None)
+    assert document['policies']['worker_context_windows'] == maximum
     assert research_config.from_document(document, base=tmp_path)['worker_fragment_policy'] == settings['worker_fragment_policy']
 
 
@@ -318,7 +320,6 @@ model = "worker-model"
 workspace = "danger-full-access"
 network = true
 web = "cached"
-subagents = true
 [ui]
 port = 7000
 approval_secret_file = "private/operator.key"
@@ -326,8 +327,9 @@ approval_secret_file = "private/operator.key"
     # Credential references are not files to import, copy, or disclose as science.
     monkeypatch.chdir(tmp_path.parent)
     before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob('*'))
-    assert cli.main(['config-check', '--config', str(config)]) == 0
+    code = cli.main(['config-check', '--config', str(config)])
     checked = output(capsys)
+    assert code == 0, checked
     assert checked['source'] == 'research_config'
     assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob('*')) == before
     assert not (tmp_path / 'instance').exists()

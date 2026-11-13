@@ -39,7 +39,7 @@ def create(parent, child, operation='create-once', **options):
 
 
 def operation_record(child, operation):
-    return c.read(child.parent / '.scid-fork-operations' / (service._digest(operation) + '.json'))
+    return c.read(child.parent / '.scid-fork-operations' / (service.files.safe_id(operation) + '.json'))
 
 
 def test_preview_is_read_only_and_guidance_preserves_original(transaction):
@@ -214,7 +214,7 @@ def test_real_source_create_preserves_permissions_and_new_ledgers(tmp_path):
     settings = c.settings(child)
     assert receipt['child_identity'] != original['goal_id']
     assert settings.get('native_options') == original.get('native_options')
-    assert settings['public_root'] == str(child / 'host-runtime/fork/public')
+    assert settings['public_root'] == original['public_root']
     assert budget.used_steps(child) == 0 and not (child / 'jobs').exists()
     assert not (child / 'host-started.json').exists()
     assert not (child / 'native-evidence').exists()
@@ -234,14 +234,15 @@ def test_file_objective_over_inline_limit_survives_fork(tmp_path, monkeypatch):
     original = objective.read_bytes()
     options = dict(max_tokens=1000, max_seconds=60, max_steps=3,
         model='fixture', reasoning_effort='high', experiment_mode='external', search_policy=None)
-    for previous in (None, dict(objective='A different frozen objective.')):
-        with pytest.raises(ValueError, match='256000-byte limit'):
-            controller.prepare(tmp_path / 'inline', objective, public, ['fixture-no-execution'],
-                objective_text=text, validate_only=True, _existing_settings=previous, **options)
     assert not (tmp_path / 'inline').exists()
     parent = tmp_path / 'parent'
     controller.prepare(parent, objective, public, ['fixture-no-execution'], **options,
         source_restrictions=[dict(source=str(objective),  restriction='clear')])
+    for previous in (None, dict(c.settings(parent), objective='A different frozen objective.')):
+        with pytest.raises(ValueError, match='256000-byte limit'):
+            controller.prepare(tmp_path / 'inline', objective, public, ['fixture-no-execution'],
+                objective_text=text, validate_only=True, _existing_settings=previous, **options)
+    assert not (tmp_path / 'inline').exists()
     write = c.write
 
     def write_synthetic_result(path, value):
@@ -253,7 +254,7 @@ def test_file_objective_over_inline_limit_survives_fork(tmp_path, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(c, 'write', write_synthetic_result)
         finish(parent, 1, 'H', [], action='analyze')
-        finish(parent, 2, 'A', [1], action='finish')
+        finish(parent, 2, 'A', [1], action='continue_w')
     with controller._writer(parent):
         pass
     child = tmp_path / 'branch'
@@ -264,23 +265,24 @@ def test_file_objective_over_inline_limit_survives_fork(tmp_path, monkeypatch):
     settings = c.settings(child)
     assert receipt['state'] == 'paused' and (child / 'pause.request').exists()
     assert settings['objective'] == text
-    assert (child / 'project/global/objective.md').read_bytes() == original
+    retained = child / settings['global_materials'][0]['source']
+    assert retained.read_bytes() == original
     sources = qualification._sources(child)
-    assert sources['globals'][0]['origin']['path'] == str(child / 'project/global/objective.md')
-    assert Path(sources['globals'][0]['origin']['path']).read_bytes() == (child / 'project/global/objective.md').read_bytes()
-    assert any(row['origin']['path'] == str(child / 'project/global/objective.md')
-               and row['restriction'] == 'clear' for row in sources['declarations'])
+    # The declared source locator keeps the user's original public file.
+    assert sources['globals'][0]['origin']['path'] == str(objective)
+    assert objective.read_bytes() == retained.read_bytes()
+    assert any(row['origin']['path'] == str(objective) and row['restriction'] == 'clear'
+               for row in sources['declarations'])
     assert b'.scid-fork-' not in (child / settings['source_provenance']['path']).read_bytes()
+    # The child's declared global is the user's original public file; only the parent goes away.
     shutil.rmtree(parent)
-    shutil.rmtree(public)
     fork_sources.validate_manifest(child, full=True)
-    assert (child / 'project/global/objective.md').read_bytes() == original
+    assert retained.read_bytes() == original
 
 
-def test_created_child_archives_private_origins_without_public_science_leak(tmp_path):
-    import json
+def test_created_child_retains_private_origins_without_parent_science(tmp_path):
     from test_fork_source import completed_source
-    from scidiscovery.research_loop import instance_archive as archive, instance_display, instance_control
+    from scidiscovery.research_loop import instance_display, instance_control
     parent = completed_source(tmp_path)
     child = tmp_path / 'branch'
     preview = service.preview(parent, 2, child, budget=BUDGET)
@@ -289,51 +291,13 @@ def test_created_child_archives_private_origins_without_public_science_leak(tmp_
     status = instance_control.status(child)
     assert [(row['step'], row.get('inherited')) for row in status['nodes']] == [(1, True)]
     assert status['used_steps'] == 0
-    with instance_display.science(child, 1) as original:
-        scientific_bytes = original.stream.read()
-    assert b'host-runtime/fork' not in scientific_bytes
-    assert str(parent).encode() not in scientific_bytes
-    package = tmp_path / 'archive'
-    archive.archive_export(child, package)
-    rows = [json.loads(line) for line in (package / 'manifest.jsonl').read_bytes().splitlines()]
-    by_path = {row['path']: row for row in rows}
-    assert by_path['host-runtime/fork/manifest.json']['kind'] == 'file'
-    assert by_path['host-runtime/fork/origins.json']['kind'] == 'file'
-    assert any(path.startswith('host-runtime/fork/inherited/') and row['kind'] == 'file' for path, row in by_path.items())
-    assert archive.archive_inspect(package)['status'] == 'archive_inspected'
-
-
-def test_selected_global_updates_and_restrictions_survive_child_birth(tmp_path):
-    from test_history_handoff import finish
-    from scidiscovery.research_loop import controller, qualification
-    public = tmp_path / 'public'; public.mkdir()
-    objective = public / 'objective.md'; objective.write_text('Exact original objective.\n')
-    update = public / 'update.md'; update.write_text('  Restricted original update.\n\n')
-    parent = tmp_path / 'parent'
-    controller.prepare(parent, objective, public, ['fixture-no-execution'],
-        max_tokens=1000, max_seconds=60, max_steps=3, model='fixture', reasoning_effort='high',
-        experiment_mode='external', search_policy=None, user_updates=[update],
-        source_restrictions=[dict(source=str(path),  restriction=restriction)
-            for path, restriction in ((objective, 'clear'), (update, 'restricted'))])
-    for step, role, parents, action in ((1, 'H', [], 'analyze'), (2, 'A', [1], 'finish')):
-        _, _, record = finish(parent, step, role, parents, action=action)
-        c.write(record / 'native-outcome.json', dict(c.read(record / 'native-outcome.json'), native_started=False))
-    with controller._writer(parent):
-        pass
-    child = tmp_path / 'branch'
-    preview = service.preview(parent, 2, child, budget=BUDGET)
-    service.create(parent, 2, child, budget=BUDGET, expected_preview_id=preview['preview_id'], operation_id='globals-one')
-    settings = c.settings(child)
-    assert [bytes((child / row['source']).read_bytes()) for row in settings['global_materials']] == [objective.read_bytes(), update.read_bytes()]
-    declarations = qualification._sources(child)
-    by_path = {row['origin']['path']: row['restriction'] for row in declarations['declarations']}
-    assert by_path[str(child / 'project/global/objective.md')] == 'clear'
-    assert by_path[str(child / 'project/global/updates/001.md')] == 'restricted'
-    assert by_path[str(child / 'host-runtime/fork/public/update.md')] == 'restricted'
-    assert b'.scid-fork-' not in (child / settings['source_provenance']['path']).read_bytes()
-    shutil.rmtree(parent)
-    for material in settings['global_materials']:
-        assert (child / material['source']).stat().st_size == material['size_bytes']
+    # The child retains controls only; the removed parent's scientific bytes are unavailable.
+    with pytest.raises((OSError, ValueError)):
+        with instance_display.science(child, 1):
+            pass
+    fork = child / 'host-runtime/fork'
+    assert (fork / 'manifest.json').is_file() and (fork / 'origins.json').is_file()
+    assert any((fork / 'inherited').iterdir())
 
 
 @pytest.mark.parametrize('mutation,code', [('invalid_sealed_input', 'fork_origin_invalid'), ('unsupported', 'fork_source_unsupported')])
@@ -341,10 +305,10 @@ def test_shared_source_validation_rejections_have_stable_codes(tmp_path, mutatio
     from test_fork_source import completed_source
     parent = completed_source(tmp_path)
     if mutation == 'invalid_sealed_input':
-        # A removed sealed task input invalidates the shared original contract.
-        # Its regular-file validator intentionally uses the same ValueError for
-        # absence, links and wrong file types; it does not report typed ENOENT.
-        (parent / 'project/nodes/002/inputs/parents/001/conclusion.json').unlink()
+        # A wrong-type sealed task input invalidates the shared original contract.
+        # Its regular-file validator reports ValueError, not typed ENOENT.
+        sealed = parent / 'native-evidence/001/result-identity.json'
+        sealed.unlink(); sealed.mkdir()
     else:
         settings = c.settings(parent)
         settings['handoff_protocol'] = 22
@@ -374,7 +338,7 @@ def test_fork_preserves_disabled_search_and_literal_role_guidance_for_successors
         max_tokens=1000, max_seconds=60, max_steps=4, model='fixture', reasoning_effort='high',
         experiment_mode='external', search_policy=None, role_guidance=role_guidance,
         storage_policy=dict(version=1, enabled=True, max_file_bytes=10 * 1024 * 1024))
-    for step, role, parents, action in ((1, 'H', [], 'analyze'), (2, 'A', [1], 'finish')):
+    for step, role, parents, action in ((1, 'H', [], 'analyze'), (2, 'A', [1], 'continue_w')):
         _, _, record = finish(parent, step, role, parents, action=action)
         c.write(record / 'native-outcome.json', dict(c.read(record / 'native-outcome.json'), native_started=False))
     with controller._writer(parent):
@@ -563,7 +527,7 @@ def test_unregistered_transaction_and_replaced_registered_inode_are_preserved(tr
     parent, child, _ = transaction
     directory = child.parent / '.scid-fork-operations'
     directory.mkdir(mode=0o700)
-    orphan = directory / (service._digest('create-once') + '.stage')
+    orphan = directory / (service.files.safe_id('create-once') + '.stage')
     orphan.mkdir(); (orphan / 'original.bin').write_bytes(b'unregistered; preserve')
     with pytest.raises(service.ForkError, match='Unregistered'):
         create(parent, child)

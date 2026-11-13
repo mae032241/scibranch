@@ -120,6 +120,12 @@ def test_candidate_slots_do_not_overwrite_each_other_or_compare_other_evaluation
         history.candidate_overview(records)
 
 
+def inventory_for(scene, job):
+    """The stopped node's produced inventory facts; capture() only consumes them."""
+    record = c.host_record(c.workspace(scene, job['step']))
+    return c.CurrentInventory(scene, job, record, 0, [], {}, policy=c.settings(scene, job))
+
+
 def setup_observer(scene, tmp_path, body):
     path = tmp_path / 'adapter.py';path.write_text(body)
     config = history.observer_config(dict(adapter=str(path), config={}))
@@ -141,13 +147,13 @@ print(json.dumps({"current_candidate":None,"coverage":{"status":"complete","note
     source(scene)
     job = c.read(scene / 'jobs/002.json');raw = c.read(c.host_record(c.workspace(scene, 2)) / 'science-output.json')
     materials = c.read(c.host_record(c.workspace(scene, 2)) / 'result-identity.json')['materials']
-    first = history.capture(scene, job, raw, materials)
+    first = history.capture(scene, job, raw, materials, inventory=inventory_for(scene, job))
     observation = c.read(scene / first['path'])
     assert observation['actual_submission']['artifact']['size_bytes'] == (scene / 'artifact.bin').stat().st_size
     assert observation['actual_submission']['artifact']['retention']=='unavailable'
     assert observation['coverage']['status']=='partial'
     (scene / 'fact.json').write_text('{"measured":999}')
-    assert history.capture(scene, job, raw, materials) == first
+    assert history.capture(scene, job, raw, materials, inventory=inventory_for(scene, job)) == first
     assert c.read(scene / first['path']) == observation
 
 
@@ -178,20 +184,20 @@ def test_observer_timeout_and_output_bound_stop_without_model(scene, tmp_path, m
     job = c.build_job(scene, 1, 'H', [])
     c.write(c.host_record(c.workspace(scene, 1)) / 'science-output.json', {'summary':'Unsealed fixture'})
     monkeypatch.setattr(history, 'OBSERVER_SECONDS', .1)
-    receipt = history.capture(scene, job, {}, [])
+    receipt = history.capture(scene, job, {}, [], inventory=inventory_for(scene, job))
     fact = c.read(scene / receipt['path'])
     assert fact['coverage']['status'] == 'unavailable'
-    assert history.capture(scene, job, {}, []) == receipt
+    assert history.capture(scene, job, {}, [], inventory=inventory_for(scene, job)) == receipt
 
 
 def test_observer_tool_upgrade_preserves_the_original_observation(scene, tmp_path):
     adapter = setup_observer(scene, tmp_path, 'print(\'{"candidates":[],"current_candidate":null,"actual_submission":null,"coverage":{"status":"complete","note":"Fixture"}}\')')
     source(scene)
     job = c.read(scene / 'jobs/002.json')
-    original=history.capture(scene, job, {}, [])
+    original=history.capture(scene, job, {}, [], inventory=inventory_for(scene, job))
     retained=(scene/original['path']).read_bytes()
     adapter.write_text('raise Exception("upgraded tool must not rebuild an observation")')
-    assert history.capture(scene, job, {}, [])==original
+    assert history.capture(scene, job, {}, [], inventory=inventory_for(scene, job))==original
     assert (scene/original['path']).read_bytes()==retained
 
 
@@ -217,30 +223,10 @@ def test_cov_adapter_uses_public_facts_and_keeps_unexported_code_unknown(scene):
     assert adapter.observe(request)['candidates'] == []
 
 
-def test_revised_h_reads_old_science_now_and_selects_only_old_code_for_successor(scene):
-    source(scene)
-    finish(scene, 3, 'A', [2], action='revise_h')
-    finish(scene, 4, 'H', [3], action='extract')
-    finish(scene, 5, 'E', [4])
-    job = c.build_job(scene, 6, 'H', [5])
-    work = c.workspace(scene, 6)
-    assert not (work / REUSED).exists()
-    page = c.read(work / job['history']['view']['indexes']['nodes'])
-    old = next(row for row in page['records'] if row['step'] == 2)
-    assert old['implementations'][0] == dict(id='W002-I001', label='candidate.py', label_truncated=False)
-    assert json.loads(''.join(c.read(bound_history_file(scene,work,job['history'],path))['text'] for path in old['conclusion_pages']))['summary'] == 'A contribution'
-    finish(scene, 6, 'H', [5], text='Select the retained scientific implementation.', action='experiment', selection=['W002-I001'])
-    successor = c.build_job(scene, 7, 'W', [6])
-    material=next(row for row in successor['direct_materials'] if row['path']==REUSED)
-    assert originals.material_path(scene,material).read_text() == 'def predict(): return 42\n'
-    assert [row['path'] for row in successor['direct_refs']] == ['inputs/parents/006/conclusion.json']
-    assert not any(Path(row['path']).name=='unused.txt' for row in successor['direct_materials'])
-
-
 def test_current_history_packets_stay_fixed_and_legacy_write_schema_is_rejected(scene):
     source(scene)
     job = c.build_job(scene, 3, 'A', [2])
-    finish(scene, 3, 'A', [2], action='revise_h')
+    finish(scene, 3, 'A', [2])
     work = c.workspace(scene, 3)
     original = {path: path.read_bytes() for path in (scene / 'jobs/003.json', work / 'science-task.json',
         c.host_record(work) / 'result-identity.json')}

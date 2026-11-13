@@ -90,7 +90,7 @@ def test_changed_copied_member_does_not_validate_from_manifest_only(tmp_path):
     path = child / originals.FORK_DIRECTORY / entry['storage_path']
     path.chmod(0o600)
     path.write_text('{}')
-    with pytest.raises(ValueError, match='bytes changed'):
+    with pytest.raises(ValueError, match='Original size changed'):
         fork_sources.validate_manifest(child, full=True)
 
 
@@ -108,7 +108,8 @@ def test_copy_rechecks_source_and_never_changes_parent_bytes(tmp_path):
 
 def test_source_symlink_is_not_followed(tmp_path):
     root = completed_source(tmp_path)
-    source = root / 'project/nodes/002/inputs/parents/001/conclusion.json'
+    # Sealed controls are read by inspection; the sealed science locator is not.
+    source = root / 'native-evidence/001/result-identity.json'
     original = source.read_bytes()
     target = tmp_path / 'foreign.json'
     target.write_bytes(original)
@@ -120,7 +121,7 @@ def test_source_symlink_is_not_followed(tmp_path):
 
 def test_one_source_sequence_shares_one_manifest_snapshot(tmp_path, monkeypatch):
     root = completed_source(tmp_path)
-    for step, role, parents, action in [(3, 'H', [1, 2], 'analyze'), (4, 'A', [3], 'finish')]:
+    for step, role, parents, action in [(3, 'H', [1, 2], 'analyze'), (4, 'A', [3], 'continue_w')]:
         _, _, record = finish(root, step, role, parents, action=action)
         c.write(record / 'native-outcome.json', dict(c.read(record / 'native-outcome.json'), native_started=False))
     child = tmp_path / 'child'
@@ -193,19 +194,19 @@ def test_typed_observer_and_pending_proofs_do_not_parse_scientific_payloads(tmp_
     future = root / 'project/nodes/999/future.json'
     c.write(future, dict(secret='future result'))
     document = 'host-history/observations/002.json'
-    c.write(root / document, dict(candidates=[dict(id='candidate', evidence=[proof])],
+    c.write(root / document, dict(evidence=[dict(originals=[proof])],
         authored_payload=dict(raw=dict(path=future.relative_to(root).as_posix(), ))))
     closure = fork_sources._Closure()
-    closure.snapshot(root)
-    closure.add(source, document)
+    closure.control(source, dict(path=document))
     paths = {row['path'] for row in closure.entries.values()}
     assert proof['snapshot'] in paths
-    assert next(row for row in closure.entries.values() if row['path'] == future.relative_to(root).as_posix())['visibility'] == 'private_snapshot'
+    # Authored payload text never becomes a control reference.
+    assert future.relative_to(root).as_posix() not in paths
     pending = 'native-evidence/002/pending-execution-set.json'
     intent = root / 'native-evidence/002/native-intent.json'
     c.write(root / pending, dict(attempts=[{'native-intent.json': dict(
         path=intent.relative_to(root).as_posix(), )}]))
-    closure.add(source, pending)
+    closure.control(source, dict(path=pending))
     assert intent.relative_to(root).as_posix() in {row['path'] for row in closure.entries.values()}
 
 
@@ -220,7 +221,7 @@ def test_inherited_same_node_completed_call_keeps_its_exact_parent(tmp_path):
     parent = cov.run(config, script, new=True)
     branch = cov.run(config, script, parent=parent['candidate_id'])
     finish(root, 2, 'W', [1])
-    finish(root, 3, 'A', [1, 2], action='finish')
+    finish(root, 3, 'A', [1, 2], action='continue_w')
     for step in (1, 2, 3):
         path = root / f'native-evidence/{step:03d}/native-outcome.json'
         c.write(path, dict(c.read(path), native_started=False))
@@ -303,7 +304,7 @@ def test_portable_local_coverage_recomputes_relations_and_restrictions(portable_
     assert json.loads(capsys.readouterr().out)['status'] == 'known_success'
     script.write_text('raise RuntimeError("later author edit")\n')
     finish(root, 2, 'W', [1], files={'revised.py': 'def predict(): return 43\n'})
-    finish(root, 3, 'A', [2], action='finish')
+    finish(root, 3, 'A', [2], action='continue_w')
     expected_authors = formal_review.authors(root, 2)
     child = tmp_path / 'portable-local'
     _copy_completed(root, 3, child)
@@ -345,7 +346,7 @@ def _completed_portable_compiled_source(portable_native_chain, capsys):
     assert e.main(['--config', str(active), 'reconcile', '--call-id', call]) == 0
     capsys.readouterr()
     finish(root, 6, 'W', [5], files={'revised.py': 'def predict(): return 44\n'})
-    finish(root, 7, 'A', [6], action='finish')
+    finish(root, 7, 'A', [6], action='continue_w')
     expected = formal_review.authors(root, 6)
     assert expected['complete']
     return root, backend, configuration, call, expected
@@ -433,7 +434,7 @@ def test_nested_raw_payload_uses_ancestor_owner_and_preserves_logical_identity(t
     retained = originals.resolve_ref(exact_owner, dict(material, path=path))
     retained.chmod(0o600)
     retained.write_bytes(b'changed ancestor bytes')
-    with pytest.raises(ValueError, match='bytes changed'):
+    with pytest.raises(ValueError, match='Original size changed'):
         inputs.compiled_payload(child, material, source=owner)
 
 
@@ -459,16 +460,16 @@ def test_portable_legacy_local_inputs_use_exact_work_lineage_namespace(tmp_path,
         return dict(path=str(actual),  size_bytes=actual.stat().st_size)
     settings = write('settings.json', dict(goal_id='legacy-local-source', handoff_protocol=c.CURRENT))
     provenance = write('source-provenance/inputs.json', dict(version=1, step=2, edges=[], scope=q.SCOPE))
-    job = dict(step=2, role='W', handoff_protocol=c.CURRENT, global_materials=[], direct_refs=[],
+    job = dict(step=2, role='W', handoff_protocol=c.CURRENT, global_materials=[], direct_refs=[], material_refs=[],
         direct_materials=[], selected_inputs=[], source_provenance=provenance)
-    job_ref = write('jobs/002.json', job)
+    job_ref = write('jobs/002.json', c.job_record(job))
     intent = write('native-evidence/002/native-intent.json', dict(task_ref=dict(path=str(legacy/job_ref['path']))))
     content = e.encoded(e.INPUT_SOURCES_CONTRACT)
     contract = dict(key=e.INPUT_SOURCES_KEY, kind='source_provenance', schema_id=e.INPUT_SOURCES_SCHEMA,
         payload_schema_version=1, media_type='application/json', content=content.decode(),
         size_bytes=len(content))
     interface = dict(public_capabilities=[contract])
-    scope, attempt = dict(job_ref=dict(path=str(legacy/job_ref['path']))), dict(number=0)
+    scope, attempt = dict(step=2, job_ref=dict(path=str(legacy/job_ref['path']))), dict(number=0)
     config = dict(scope=scope, native_attempt=attempt, execution_interface=interface)
     configuration = write('host-runtime/experiment-control/002/interfaces/000.json', config)
     directory = legacy / 'project/nodes/002/experiments/revision'
@@ -483,7 +484,8 @@ def test_portable_legacy_local_inputs_use_exact_work_lineage_namespace(tmp_path,
         local_observation_version=1, prepared=prepared, experiment_directory=str(directory),
         cwd=str(snapshot / 'inputs'), entry='run.py', source_script=authored['path'], script=script,
         snapshot_files=[dict(authored, name='run.py')], input_sources=dict(contract=contract, view=view),
-        config_ref=dict(path=str(legacy/configuration['path'])))
+        config_ref=dict(path=str(legacy/configuration['path'])),
+        config_record={key: value for key, value in config.items() if key != 'execution_interface'})
     identity = dict(goal_id='legacy-local-source', settings_ref=dict(path=str(legacy/settings['path'])))
     local = originals.NodeSource(identity, 2, str(legacy), legacy)
     closure = fork_sources._Closure()
