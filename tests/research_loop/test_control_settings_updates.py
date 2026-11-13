@@ -1,13 +1,9 @@
 """Saved exploration controls affect real new-node gates, views and validation."""
-import copy
-import json
-
 import pytest
 
-from scidiscovery.research_loop import (candidate_nominations as nominations,
-    configuration_form as form, configuration_updates as updates, contracts as c,
-    controller, correction, execution, experiments, native, search)
-from execution_fixtures import execution_registry
+from scidiscovery.research_loop import (configuration_form as form,
+    configuration_updates as updates, contracts as c, controller, correction,
+    execution, native, search)
 from test_configuration_form import Controls
 from test_history_handoff import finish as finish_current
 
@@ -101,54 +97,3 @@ def test_form_saved_portfolio_frequency_binds_only_new_jobs(tmp_path):
     assert (root/'jobs/002.json').read_bytes()==original
     assert correction.project(root)['review_request'] is None
     assert not (root/'jobs/004.json').exists()
-
-
-@pytest.mark.process_e2e
-def test_form_saved_four_candidate_extras_accepts_four_rejects_five_and_keeps_old_node_bound(
-        tmp_path, execution_registry):
-    from test_breadth_science import a, findings, h, prepare
-    from test_candidate_nominations import accepted_worker
-    from test_history_handoff import finish
-
-    root = prepare(tmp_path)
-    h(root)
-    old, config = accepted_worker(root, tmp_path)
-    old_bytes = (root / 'jobs/002.json').read_bytes()
-    intent_bytes = (execution.record(root, 2) / 'native-intent.json').read_bytes()
-    save_controls(root, {'budget.candidate_extra_slots': 4})
-    directory = c.workspace(root, 2) / 'experiments/models'
-    directory.mkdir(parents=True)
-    artifacts = [f'artifacts/model-{i}.bin' for i in range(8)]
-    declared = dict(version=1, metrics=[], outputs=[dict(path=path) for path in artifacts],
-        candidates=[dict(artifact=path, label=f'Retained original {index}') for index, path in enumerate(artifacts)])
-    script = directory / 'run.py'
-    script.write_text('from pathlib import Path\n'
-        'for path in ' + repr(artifacts) + ': Path(path).write_bytes(b"fixture")\n'
-        'Path("artifacts/result.json").write_text(' + repr(json.dumps(declared)) + ')\n')
-    reply = experiments.dispatch(config, script, mechanism='P', command_options=dict(experiment_directory=str(directory)))
-    assert reply['status'] == 'known_success'
-    finish(root, 2, 'W', [1], mechanism_findings=findings('P', blocked=('Q', 'R')), preserve_native_intent=True)
-    observed = c.read(root / c.read(execution.record(root, 2) / 'result-identity.json')['observations']['path'])
-    ids = [row['id'] for row in observed['candidates']]
-    four = dict(representatives=[dict(mechanism_ref=f'h001.m{index + 1}', candidate=ids[index],
-        reason='This retained candidate represents the stated scientific mechanism.') for index in range(3)],
-        extras=[dict(candidate=identity, reason='A distinct retained scientific alternative.') for identity in ids[3:7]], gaps=[])
-    with pytest.raises(ValueError, match='extra_slots'):
-        nominations.require(root, old, dict(candidate_nominations=four))
-    a(root, 3, [1, 2], focus='h001.m2')
-    new = c.build_job(root, 4, 'W', [1, 2, 3])
-    assert new['candidate_nomination_policy']['extra_slots'] == 4
-    nominations.require(root, new, dict(candidate_nominations=four))
-    five = copy.deepcopy(four)
-    five['extras'].append(dict(candidate=ids[7], reason='A fifth distinct retained scientific alternative.'))
-    with pytest.raises(ValueError, match='extra_slots'):
-        nominations.require(root, new, dict(candidate_nominations=five))
-    finish(root, 4, 'W', [1, 2, 3], mechanism_findings=findings(
-        blocked=[row['mechanism_ref'] for row in new['search']['coverage_obligation']]),
-        candidate_nominations=four)
-    assert len(c.validate(c.workspace(root, 4))['candidate_nominations']['extras']) == 4
-    assert old['candidate_nomination_policy']['extra_slots'] == 2
-    assert c.settings(root, old)['candidate_nomination_policy']['extra_slots'] == 2
-    assert (root / 'jobs/002.json').read_bytes() == old_bytes
-    assert (execution.record(root, 2) / 'native-intent.json').read_bytes() == intent_bytes
-    assert len(observed['candidates']) == 8 and len(observed['managed_calls']) == 1

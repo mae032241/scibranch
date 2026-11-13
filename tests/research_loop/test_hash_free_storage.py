@@ -19,9 +19,11 @@ def _forbid_hash(*args, **kwargs):
 
 def test_file_proofs_only_stat_exact_originals(tmp_path, monkeypatch):
     source=tmp_path/'dataset.bin';source.write_bytes(b'large scientific original')
+    observed=source.stat()
     monkeypatch.setattr(hashlib,'sha256',_forbid_hash)
     monkeypatch.setattr(Path,'read_bytes',lambda self:pytest.fail('Proof read scientific bytes'))
-    assert e.proof(source)==dict(path=str(source),size_bytes=25)
+    assert e.proof(source)==dict(path=str(source),size_bytes=25,
+        file_stat=[observed.st_dev,observed.st_ino,observed.st_size,observed.st_mtime_ns])
     assert c.record_ref(source)==dict(path=str(source))
     assert not hasattr(c,'digest') and not hasattr(c,'verified_digests')
     assert not hasattr(shared,'verified')

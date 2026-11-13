@@ -25,7 +25,7 @@ def prepared(tmp_path, *, global_subagents, worker_subagents, reviewer_subagents
             web='disabled', subagents=global_subagents),
         role_profiles=dict(W=dict(subagents=worker_subagents),
             A=dict(subagents=reviewer_subagents)),
-        formal_review_policy=dict(version=1), research_strategy_version=None)
+        formal_review_policy=dict(version=1))
     return root
 
 

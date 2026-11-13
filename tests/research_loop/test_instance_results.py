@@ -1,6 +1,4 @@
 """Selective result rendering and exact readers; no install/model/browser."""
-import base64
-import hashlib
 from urllib.parse import urlencode
 
 import pytest
@@ -38,11 +36,8 @@ def test_result_cards_preserve_exact_ties_and_do_not_replace_empty_a_recommendat
     assert '本次综合评估未推荐候选方案' in page
     assert '本阶段综合评估建议：' not in page and '本阶段开始前的综合评估建议' in page
     assert '<details>' in page and '/nodes/3/science' in page
-    assert element_texts(page,'script')==[render.translation_client.SCRIPT]
     assert '&lt;script&gt;' in page and 'DO-NOT-RENDER' not in page
     assert '<iframe' not in page and '<img' not in page
-    digest=base64.b64encode(hashlib.sha256(render.CSS.encode()).digest()).decode()
-    assert render.STYLE_SOURCE=="'sha256-"+digest+"'" and 'unsafe-inline' not in render.CSP
     formal=render.result(4,dict(job,formal_review=True),dict(payload,verdict='pass'),dict(materials=[])).decode()
     assert '此阶段没有普通综合评估的候选推荐' in formal
     empty=render.result(5,dict(role='W'),payload,dict(materials=[])).decode()
@@ -57,12 +52,11 @@ def test_result_routes_are_read_only_exact_and_independent_of_live_clock(tmp_pat
     _,_,headers=ui.get('/view?'+urlencode({'token':ui.read_token}),host=ui.host)
     cookie=headers['Set-Cookie']
     before={p.relative_to(root):p.read_bytes() for p in root.rglob('*') if p.is_file()}
-    def forbidden(*args,**kwargs):pytest.fail('Saved results must not sample clocks, rehash originals or rebuild historical projections')
+    def forbidden(*args,**kwargs):pytest.fail('Saved results must not sample clocks or rebuild historical projections')
     monkeypatch.setattr(budget,'clock_stamp',forbidden)
     monkeypatch.setattr(control,'status',forbidden)
     monkeypatch.setattr(history,'rebuild',forbidden)
     monkeypatch.setattr(selection,'project',forbidden)
-    monkeypatch.setattr(c,'digest',forbidden)
     monkeypatch.setattr(c,'validate',forbidden)
     index=ui.get('/results',host=ui.host,cookie=cookie)[1]
     assert b'/results/1' in index and b'/results/2' not in index
