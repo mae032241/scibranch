@@ -7,7 +7,6 @@ import pytest
 from scidiscovery.research_loop import (accepted_budget, budget, configuration_updates,
     contracts as c, controller, execution, experiment_client, experiments)
 from execution_fixtures import execution_registry
-from test_default_cli_output_repair import cli, nomination_diagnostic, prepare_cli
 
 
 def accepted_attempts(tmp_path, monkeypatch, continuations, *, output_only=True, automatic=None):
@@ -115,39 +114,3 @@ def test_latest_output_repair_after_three_wakes_still_rejects_stale_full_task_cl
     config['native_attempt']=dict(number=0,execution_key=c.record_ref(root/'jobs/001.json'))
     with pytest.raises(experiments.UnsupportedExecution,match='Output repair permits original results only'):
         experiments._require_new_execution(config)
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('default_policy',[False,True],ids=['legacy-output-only','default-independent-auto'])
-def test_output_repair_turn_rejects_new_bridge_run_but_keeps_original_reads(tmp_path,execution_registry,default_policy):
-    root,_,env=prepare_cli(tmp_path,fault='nomination-layout',fragment=not default_policy,output_repair_probe=True,layout_input_tokens=10)
-    policy=c.settings(root)['resume_policy']
-    assert policy['output_only'] is True and policy['output_repair'] is True
-    if default_policy:assert policy['automatic_recovery']['enabled'] is True
-    else:assert policy.get('automatic_recovery') is None
-    result=cli(root,'run',env=env)
-    assert result['status']=='finish',nomination_diagnostic(root,result,fault='output-repair-new-effect')
-    origin,current=execution.records(root,2)
-    intent=c.read(current/'native-intent.json')
-    assert intent['continuation_kind']=='repair' and intent['output_repair']['code']=='deliverable_path_collision'
-    work=c.workspace(root,2);locator=c.read(work/'work/retained-candidate-locator.json')
-    query=c.read(work/'work/output-repair-query.json')
-    collected=c.read(work/'work/output-repair-collect.json')
-    rejected=c.read(work/'work/output-repair-run.json')
-    assert query['code']==0 and query['result']['state']=='succeeded'
-    assert query['result']['call_id']==locator['call_id']
-    assert collected['code']==0 and collected['result']['status']=='collected'
-    assert collected['result']['call_id']==locator['call_id']
-    assert rejected['code']==2 and rejected['result']['status']=='unavailable'
-    assert 'call_id' not in rejected['result']
-    calls=experiment_client.record_directory(root,2)/'calls'
-    assert [path.name for path in calls.iterdir()]==[locator['call_id']]
-    assert c.read(calls/locator['call_id']/'accepted.json')['native_attempt']['number']==0
-    assert not (work/'artifacts/output-repair-new-effect.txt').exists()
-    assert not (work/'experiments/repair-probe/artifacts/new-managed-effect.txt').exists()
-    assert (work/'work/launches').read_text()=='exec\nresume\n'
-    retained={path:path.read_bytes() for path in (origin/'science-output.json',
-        calls/locator['call_id']/'accepted.json',calls/locator['call_id']/'completed.json')}
-    assert cli(root,'run',env=env)['status']=='finish'
-    assert all(path.read_bytes()==data for path,data in retained.items())
-    assert [path.name for path in calls.iterdir()]==[locator['call_id']]

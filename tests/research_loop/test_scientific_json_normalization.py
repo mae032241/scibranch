@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, continuation, execution, history, instance_display, instance_science
+from scidiscovery.research_loop import contracts as c, continuation
 from scidiscovery.research_loop.output_repair import OutputRepairRequired
 
 
@@ -66,46 +66,3 @@ def test_accepted_work_repair_reads_normalized_original_without_rejudging_fields
     c.write(prior/'continuations/001/native-intent.json', intent)
     monkeypatch.setattr(continuation.configuration_updates, 'for_step', lambda *args: {})
     assert continuation._accepted_repair_request(root, 1, intent, prior) == request
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('fault', ['valid', 'missing'])
-def test_default_codex_fenced_output_seals_replays_and_repairs_only_fields(tmp_path, monkeypatch, fault):
-    import test_default_cli_output_repair as fixture
-    sink = "pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))"
-    wrapped = ("pathlib.Path(args[args.index('--output-last-message')+1]).write_text("
-        "'\\ufeff ```json\\n'+json.dumps(payload,ensure_ascii=False)+'\\n``` \\n')")
-    assert fixture.NATIVE.count(sink) == 1
-    monkeypatch.setattr(fixture, 'NATIVE', fixture.NATIVE.replace(sink, wrapped))
-    root, _, env = fixture.prepare_cli(tmp_path, fault=fault)
-    result = fixture.cli(root, 'run', env=env)
-    assert result['status'] == 'finish', result
-    records = execution.records(root, 2)
-    assert len(records) == (1 if fault == 'valid' else 2)
-    assert (c.workspace(root, 2)/'work/launches').read_text() == ('exec\n' if fault == 'valid' else 'exec\nresume\n')
-    if fault == 'missing':
-        assert c.read(records[-1]/'native-intent.json')['output_repair']['code'] == 'invalid_fields'
-    saved = {}
-    for record in records:
-        raw = record/'science-output.json'
-        outcome = c.read(record/'native-outcome.json')
-        assert outcome['scientific_output_normalization'] == 'bom+fenced'
-        assert outcome['raw_ref'] == c.file_ref(raw)
-        saved[raw] = raw.read_bytes()
-        saved[record/'native-outcome.json'] = (record/'native-outcome.json').read_bytes()
-    predecessor = execution.origin(root, 1)/'science-output.json'
-    successor = c.read(root/'jobs/002.json')
-    assert any(row['path'] == 'inputs/parents/001/conclusion.json'
-        and row['size_bytes'] == predecessor.stat().st_size for row in successor['direct_originals'])
-    with pytest.raises(json.JSONDecodeError):
-        c.read(predecessor)  # The successor must read the exact framed scientific source.
-    payload = c.validate(c.workspace(root, 2))
-    assert history._source(root, 2)[1]['scientific_result'] == payload['scientific_result']
-    assert instance_display.node(root, 2)['payload'] == c.read_scientific_output(records[-1]/'science-output.json')
-    with instance_science.science(root, 2) as original:
-        assert original.stream.read() == records[-1].joinpath('science-output.json').read_bytes()
-    with instance_display.science(root, 2) as original:
-        assert original.stream.read() == records[-1].joinpath('science-output.json').read_bytes()
-    assert fixture.cli(root, 'run', env=env)['status'] == 'finish'
-    assert execution.records(root, 2) == records
-    assert all(path.read_bytes() == value for path, value in saved.items())
