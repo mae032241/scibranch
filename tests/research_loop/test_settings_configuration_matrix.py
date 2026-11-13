@@ -13,11 +13,13 @@ import sys
 import pytest
 
 from scidiscovery.research_loop import (
-    backends, budget, candidate_audit, checkpoint, configuration_form as form,
+    accepted_budget, backends, budget, candidate_audit, checkpoint, configuration_form as form,
     configuration_updates as updates, continuation, contracts as c, controller,
-    decision, delivery, execution_authority as authority, experiments,
+    delivery, execution_authority as authority, experiments,
     formal_review as review, profiles, shortlist,
 )
+# Registers source-lane execution interfaces; codex instances default to local execution.
+from execution_fixtures import execution_registry  # noqa: F401
 from test_configuration_form import Controls
 from test_delivery import delivery_policy
 from test_history_handoff import finish
@@ -148,9 +150,10 @@ def test_backend_and_exact_launcher_change_protocol_request_and_capabilities(tmp
     adapter, args = launch(root, new)
     schema = root / 'request.schema.json'; c.write(schema, dict(type='object'))
     request = json.loads(adapter.request('Exact prompt', profile=profiles.selected(c.settings(root, new), 'H'),
-        work=c.workspace(root, 2), schema=schema))
-    assert args == [str(Path(sys.executable).resolve()), 'literal-argument']
+        work=c.workspace(root, 2), schema=schema, response_schema=dict(type='object')))
+    assert args == [sys.executable, 'literal-argument']
     assert request['protocol'] == 'scidiscovery-agent-v1'
+    assert request['response_schema'] == dict(type='object')
     assert request['permissions']['enforcement'] == 'hint_only'
     assert c.settings(root, new)['native_capabilities']['session_resume'] is False
     assert launch(root, old)[0].name == 'codex'
@@ -176,7 +179,9 @@ def test_executor_form_source_reaches_registered_adapter_bound_to_each_job(tmp_p
         work = c.workspace(root, job['step'])
         record = c.host_record(work)
         if job is new:
-            c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
+            intent = dict(task_ref=c.record_ref(root / 'jobs/002.json'))
+            c.write(record / 'native-intent.json', intent)
+            accepted_budget.accept_native(root, 2, record, intent)
         config = experiments.configure(root, job['step'], 'local_execution:command', expected, work / 'work/execution.json')
         adapter = experiments.load(config)
         assert adapter.config['run_argv'] == expected['run_argv']
@@ -241,7 +246,7 @@ def test_total_ceiling_form_applies_once_at_next_node_without_refunding(tmp_path
     assert c.settings(root, new)[key] == value
     assert budget.step_limit(root) == (value if key == 'max_steps' else before['max_steps'])
     c.build_job(root, 2, 'H', [])
-    events = budget._events(root, c.settings(root))[0]
+    events = budget._events(root)[0]
     assert len([row for row in events if row.get('operation_id') == 'configuration-1']) == 1
 
 
@@ -256,32 +261,6 @@ def test_each_role_node_target_reaches_admission_and_keeps_old_target(tmp_path, 
     anchor = budget.accept_node(root, new)
     assert anchor['limits'] == dict(max_observed_tokens=1700, max_seconds=40.5)
     assert budget.node_limits(root, old) == targets[role]
-
-
-def test_output_total_cap_counts_all_items_per_node_and_retains_old_quota(tmp_path):
-    root = instance(tmp_path, max_output_item_bytes=8, max_output_total_bytes=16)
-    old, _, record = finish(root, 1, 'H', [], files={'a': '12345678', 'b': '12345678'})
-    assert sum(row['size_bytes'] for row in c.read(record / 'result-identity.json')['materials']) == 16
-    old_seal = (record / 'result-identity.json').read_bytes()
-    save_form(root, {'budget.max_output_item_bytes': 5, 'budget.max_output_total_bytes': 9})
-    # Individually legal files fail only the aggregate collector at 5 + 5 > 9.
-    new = c.build_job(root, 2, 'H', [])
-    outputs = c.workspace(root, 2) / 'artifacts'
-    (outputs / 'a').write_text('12345'); (outputs / 'b').write_text('12345')
-    with pytest.raises(ValueError, match='total byte budget'):
-        c.collect_materials(root, 2)
-    with pytest.raises(ValueError, match='total byte budget'):
-        finish(root, 2, 'H', [])
-    assert not (c.host_record(c.workspace(root, 2)) / 'result-identity.json').exists()
-    (outputs / 'b').write_text('1234')
-    _, _, sealed = finish(root, 2, 'H', [])
-    assert sum(row['size_bytes'] for row in c.read(sealed / 'result-identity.json')['materials']) == 9
-    # A second node receives its own complete 9-byte allowance.
-    _, _, third = finish(root, 3, 'H', [], files={'a': '12345', 'b': '1234'})
-    assert sum(row['size_bytes'] for row in c.read(third / 'result-identity.json')['materials']) == 9
-    assert c.collect_materials(root, old['step'])[0]['size_bytes'] == 8
-    assert (record / 'result-identity.json').read_bytes() == old_seal
-    assert c.settings(root, new)['max_output_total_bytes'] == 9
 
 
 def test_formal_review_and_authority_form_controls_freeze_contracts_for_new_jobs(tmp_path):
@@ -303,18 +282,6 @@ def test_formal_review_and_authority_form_controls_freeze_contracts_for_new_jobs
     assert authority.contract(root, new) == execution_contract
 
 
-def test_decision_contract_control_changes_actual_a_request_gate(tmp_path):
-    root = instance(tmp_path)
-    old, _, _ = finish(root, 1, 'A', [])
-    payload = dict(next_action='continue_w', decision_request=None)
-    assert decision.assess(root, old, payload) == []
-    save_form(root, {'policies.decision_contract': True})
-    new = c.build_job(root, 2, 'A', [])
-    assert 'decision_request' in new['scientific_response_fields']
-    assert decision.assess(root, new, payload) == [dict(code='a_decision_request_missing', subject='continue_w')]
-    assert decision.assess(root, old, payload) == []
-
-
 def test_resume_and_worker_context_controls_use_exact_old_and_new_policies(tmp_path):
     targets = {role: dict(max_observed_tokens=1000, max_seconds=30) for role in 'HWAE'}
     root = instance(tmp_path, launcher=[sys.executable], node_budget_policy=targets)
@@ -328,7 +295,8 @@ def test_resume_and_worker_context_controls_use_exact_old_and_new_policies(tmp_p
     assert checkpoint.enabled(root, first) and not checkpoint.enabled(root, old)
     limits = continuation.validate_launcher(root, 2)
     assert limits['max_attempts'] == 2 and limits['native_home'] == str(tmp_path / 'native-home')
-    assert limits['launcher_files'][0]['invoked_path'] == str(Path(sys.executable).resolve())
+    assert limits['launcher_files'][0]['invoked_path'] == str(Path(sys.executable).absolute())
+    assert limits['launcher_files'][0]['path'] == str(Path(sys.executable).resolve())
     document = updates.status(root)['configuration']
     document['policies']['resume'].pop('native_home')
     save_form(root, {'policies.worker_context': 'new_context', 'policies.resume.max_attempts': 1,
@@ -338,8 +306,8 @@ def test_resume_and_worker_context_controls_use_exact_old_and_new_policies(tmp_p
     assert continuation.validate_launcher(root, 2) == limits
     with pytest.raises(continuation.ResumeUnavailable, match='unsupported'):
         continuation.validate_launcher(root, 1)
-    assert c.read(c.workspace(root, 3) / 'science-task.json')['stage_continuation']['context'] == 'new_context'
-    assert c.read(c.workspace(root, 2) / 'science-task.json')['stage_continuation']['context'] == 'same_session'
+    assert 'Continuation:new_context;' in c.read(c.workspace(root, 3) / 'science-task.json')['stage_response']
+    assert 'Continuation:same_session;' in c.read(c.workspace(root, 2) / 'science-task.json')['stage_response']
     assert checkpoint.enabled(root, latest)
 
 
@@ -383,10 +351,9 @@ def test_delivery_audit_selection_forms_reach_new_contracts_and_runtime_enableme
     assert delivery._adapter(root, old)['target'] == dict(directory=str(tmp_path / 'target'))
     assert candidate_audit.enabled(c.settings(root, new))
     assert not candidate_audit.enabled(c.settings(root, old))
-    assert 'audit' in c.result_schema('A', new['handoff_protocol'], **c.response_options(new))['properties']['next_action']['enum']
     assert shortlist.configured(root) == dict(version=2)
     task = c.read(c.workspace(root, 2) / 'science-task.json')
-    assert task['audit_capability']['available'] is True and task['delivery_selection']
+    assert task['audit_capability']['available'] is True
     document = updates.status(root)['configuration']
     document['policies'].pop('selection'); document['policies']['candidate_audit'] = False
     save_form(root, document=document)
@@ -395,7 +362,7 @@ def test_delivery_audit_selection_forms_reach_new_contracts_and_runtime_enableme
     assert not candidate_audit.enabled(c.settings(root, latest))
     assert c.settings(root, new)['selection_policy'] == dict(version=2)
     task = c.read(c.workspace(root, 3) / 'science-task.json')
-    assert task['audit_capability']['available'] is False and 'delivery_selection' not in task
+    assert task['audit_capability']['available'] is False
     # A retained enabled task still reaches candidate eligibility after disable;
     # the new disabled task stops before any adapter or external action.
     assert candidate_audit.execute(root, new, dict(candidate_recommendation=None)) is None

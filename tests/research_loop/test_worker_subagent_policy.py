@@ -8,6 +8,8 @@ import pytest
 
 from scidiscovery.research_loop import backends, continuation, contracts as c, controller
 from scidiscovery.research_loop import native, profiles, research_config
+# Registers source-lane execution interfaces; codex instances default to local execution.
+from execution_fixtures import execution_registry  # noqa: F401
 from test_consultation_continuity import PROFILE, original
 from test_consultation_continuity_process import FAKE_NATIVE, invoke
 

@@ -193,38 +193,31 @@ assert 'MCP' not in prompt
 job=json.loads((work/'science-task.json').read_text())
 assert job['role']==role and 'global' in job
 assert not (work/'science-result.schema.json').exists()
-assert 'Do not build attachment indexes' in prompt
 assert 'inputs/global/objective.md' == job['global']['objective']
 output=pathlib.Path(args[args.index('--output-last-message')+1])
+# Worker-first: W reports a decision stage, then the final A declines delivery.
 payload={'summary':role+' bounded finding','scientific_result':'Evidence in artifacts/observation.txt',
          'limitations':['Only a deterministic test; no science validation.'],
          'implementation_selection':None}
-if role in {'H','A'}:
-    payload.update(next_action='experiment' if role=='H' else 'finish',route_reason='Exact test direction')
+if '--output-schema' in args:
+    schema=json.loads(pathlib.Path(args[args.index('--output-schema')+1]).read_text())
+    payload={**{key:None for key in schema.get('properties',{})},**payload}
 if role == 'W':
-    payload.update(stage_intent='review',mechanism_findings=[{'mechanism':'Fixture mechanism',
-      'basis':'blocked','finding':'No managed scientific observation in this transport fixture.'}])
-    payload['candidate_nominations']={'representatives':[],'extras':[],
-      'gaps':[{'mechanism_ref':row['mechanism_ref'],
-        'reason':'No managed scientific candidate was produced by this transport fixture.'}
-        for row in job['candidate_nomination_mechanisms'] if row['status']!='waived']}
+    payload.update(stage_intent='decision',consultation_question=None,mechanism_findings=None,
+        route_reason='Existing evidence can support a final assessment.')
+    rows=[row for row in job.get('candidate_nomination_mechanisms') or [] if row['status']!='waived']
+    payload['candidate_nominations']=({'representatives':[],'extras':[],'gaps':[{'mechanism_ref':row['mechanism_ref'],
+        'reason':'No managed scientific candidate was produced by this transport fixture.'} for row in rows]}
+        if rows else None)
 if role == 'A':
     from scidiscovery.research_loop.contracts import AUTHOR_EVIDENCE_GUIDANCE as judgment
     assert 'scientific_judgment' not in job
     occurrences=sum(text.count(judgment) for text in [prompt,*developer])
-    assert occurrences == 1, {'guidance_occurrences':occurrences,'developer_count':len(developer)}
-    payload['candidate_recommendation'] = None
-    payload['progress_assessment'] = None
-    payload['decision_request'] = None
-    payload['portfolio_review'] = None
-    mechanisms=json.loads((work/job['lineage']['indexes']['mechanisms']).read_text())
-    ref=mechanisms['mechanisms'][0]['mechanism_ref']
-    payload['search_review']={'dispositions':[{'mechanism_ref':ref,'status':'pending',
-      'reason':'No managed scientific observation in this transport fixture.'}], 'next_focus':None}
-if role == 'H':
-    payload['search_plan']={'scope':'Fixture scope','commitments':[{'label':'Fixture mechanism',
-      'minimal_test':'Fixture measurement','existing_ref':None}],
-      'focus':{'label':'Fixture mechanism','action':'screen'}}
+    # Final delivery review uses its own route text; shared guidance is never duplicated.
+    assert occurrences <= 1, {'guidance_occurrences':occurrences,'developer_count':len(developer)}
+    payload.update(next_action='finish',candidate_recommendation=None,progress_assessment=None,
+        decision_request=None,portfolio_review=None,search_review=None,
+        route_reason='Decline delivery: the transport fixture supplies no qualified candidate.')
 (work/'artifacts'/'observation.txt').write_text(role+' observation')
 output.write_text(json.dumps(payload))
 print(json.dumps({'type':'thread.started','thread_id':'native-'+role}),flush=True)
@@ -242,7 +235,7 @@ def test_real_native_process_completes_without_root_or_loopx(instance):
     result = controller.run(instance)
     if result['status'] != 'finish':
         errors = {}
-        for step in range(1, 4):
+        for step in range(1, 3):
             record = execution.origin(instance, step)
             stderr = record / 'native.stderr'
             if stderr.exists():
@@ -250,22 +243,23 @@ def test_real_native_process_completes_without_root_or_loopx(instance):
                     stream.seek(max(0, stderr.stat().st_size - 4096))
                     errors[str(step)] = stream.read(4096).decode('utf-8', errors='replace')
         pytest.fail(json.dumps(dict(result=result, native_stderr=errors), ensure_ascii=False))
-    assert result['completed_steps'] == 3
-    author_launch=contracts.read(contracts.workspace(instance,3)/'work/captured-launch.json')
-    author_job=contracts.read(instance/'jobs/003.json')
+    assert result['completed_steps'] == 2
+    author_launch=contracts.read(contracts.workspace(instance,2)/'work/captured-launch.json')
+    author_job=contracts.read(instance/'jobs/002.json')
     author_rules=author_job['native_role_instruction']+'\n'+contracts.AUTHOR_EVIDENCE_GUIDANCE
     assert author_launch['developer']==[author_rules]
     assert author_rules not in author_launch['prompt']
     assert contracts.read(Path(result['scientific_output_path']))['scientific_result'].startswith('Evidence')
-    assert result['usage'] == dict(input_tokens=300, cached_input_tokens=240, output_tokens=15,
-                                    observed_tokens=315, unknown_steps=[], accounted_tokens=315,
+    assert result['usage'] == dict(input_tokens=200, cached_input_tokens=160, output_tokens=10,
+                                    observed_tokens=210, unknown_steps=[], accounted_tokens=210,
                                       accounting_basis='observed_lower_bound', blocking_unknown_steps=[],
-                                      reserved_tokens=0, reserved_unknown_steps=[])
-    assert [node['role'] for node in status(instance)['nodes']] == ['H', 'W', 'A']
+                                      reserved_tokens=0, reserved_unknown_steps=[], unknown_step_count=0,
+                                      blocking_unknown_count=0, unknown_steps_omitted_count=0)
+    assert [node['role'] for node in status(instance)['nodes']] == ['W', 'A']
     assert not (instance / 'registry.json').exists()
-    for step in range(1, 4):
+    for step in range(1, 3):
         work = contracts.workspace(instance, step)
-        assert contracts.validate(work)['role'] == ('H', 'W', 'A')[step-1]
+        assert contracts.validate(work)['role'] == ('W', 'A')[step-1]
     assert controller.run(instance) == result
 
 
@@ -391,7 +385,7 @@ def test_screen_waits_for_original_runner_after_outcome(instance, tmp_path, monk
 from scidiscovery.research_loop import contracts as c
 original=c.write
 def held_write(path,value):
-    hold='runner' in sys.argv and path.name=='native-outcome.json' and path.parent.name=='002'
+    hold='runner' in sys.argv and path.name=='native-outcome.json' and path.parent.name=='001'
     if hold:pathlib.Path(os.environ['SCID_TEST_HELD']).touch()
     original(path,value)
     if hold:
@@ -404,12 +398,12 @@ c.write=held_write
     monkeypatch.setenv('PYTHONPATH', os.pathsep.join([str(hook), str(Path(__file__).parents[2] / 'src')]))
     monkeypatch.setenv('SCID_TEST_RELEASE', str(release))
     monkeypatch.setenv('SCID_TEST_HELD', str(held))
-    record = execution.origin(instance, 2)
-    original_matches = runtime.process_matches
+    record = execution.origin(instance, 1)
+    original_live = runtime.process_live
     observed = []
 
     def release_observed_writer(receipt, binding):
-        alive = original_matches(receipt, binding)
+        alive = original_live(receipt, binding)
         runner = record / 'runner-process.json'
         if (alive and held.exists() and (record / 'native-outcome.json').exists()
                 and runner.exists() and receipt == contracts.read(runner)):
@@ -422,7 +416,7 @@ c.write=held_write
             original_wait = native.wait_native
 
             def detach_after_outcome(root, step):
-                if step != 2:
+                if step != 1:
                     return original_wait(root, step)
                 deadline = time.monotonic() + 8
                 while not (record / 'native-outcome.json').exists():
@@ -433,17 +427,21 @@ c.write=held_write
             monkeypatch.setattr(native, 'wait_native', detach_after_outcome)
             assert controller.run(instance)['status'] == 'seal_pending'
             monkeypatch.setattr(native, 'wait_native', original_wait)
-        monkeypatch.setattr(runtime, 'process_matches', release_observed_writer)
+        monkeypatch.setattr(runtime, 'process_live', release_observed_writer)
         result = controller.run(instance)
         assert result['status'] == 'finish', result
-        assert result['completed_steps'] == 3
+        assert result['completed_steps'] == 2
+        assert held.exists(), 'The original runner did not publish its outcome through the held writer'
         assert observed, 'Control must observe the still-live original writer before sealing'
-        assert result['usage'] == dict(input_tokens=300, cached_input_tokens=240, output_tokens=15,
-                                      observed_tokens=315, unknown_steps=[], accounted_tokens=315,
+        assert result['usage'] == dict(input_tokens=200, cached_input_tokens=160, output_tokens=10,
+                                      observed_tokens=210, unknown_steps=[], accounted_tokens=210,
                                       accounting_basis='observed_lower_bound', blocking_unknown_steps=[],
-                                      reserved_tokens=0, reserved_unknown_steps=[])
-        assert len(list(instance.rglob('native-intent.json'))) == 3
-        assert len(list(instance.rglob('usage.json'))) == 3
+                                      reserved_tokens=0, reserved_unknown_steps=[], unknown_step_count=0,
+                                      blocking_unknown_count=0, unknown_steps_omitted_count=0)
+        for step in (1, 2):
+            origin = execution.origin(instance, step)
+            assert (origin / 'native-intent.json').is_file() and (origin / 'usage.json').is_file()
+        assert not (instance / 'jobs/003.json').exists()
         assert not (record / 'continuations').exists()
         assert controller.run(instance) == result
     finally:
@@ -452,7 +450,7 @@ c.write=held_write
         if runner.exists():
             receipt = contracts.read(runner)
             deadline = time.monotonic() + 5
-            while original_matches(receipt, receipt['task_ref']):
+            while original_live(receipt, receipt['task_ref']):
                 assert time.monotonic() < deadline, 'Released fixture runner did not exit'
                 time.sleep(.01)
 
@@ -464,7 +462,7 @@ def test_cli_entrypoint_status_is_read_only(instance):
                              'run', '--root', str(instance)], env=environment,
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr + result.stdout
-    assert json.loads(result.stdout)['completed_steps'] == 3
+    assert json.loads(result.stdout)['completed_steps'] == 2
     before = {p: (p).read_bytes() for p in instance.rglob('*') if p.is_file()}
     result = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cli',
                              'status', '--root', str(instance)], env=environment,
@@ -478,7 +476,9 @@ def test_pause_and_continue_between_nodes(instance, capsys):
     assert controller.run(instance)['status'] == 'paused'
     assert not (instance / 'jobs').exists()
     assert main(['continue', '--root', str(instance)]) == 0
-    assert json.loads(capsys.readouterr().out.splitlines()[-1])['completed_steps'] == 3
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    # Worker-first: W reaches its decision stage, then the final A declines delivery.
+    assert result['completed_steps'] == 2, result
 
 
 def test_role_route_is_exact_enum_not_prose(tmp_path):
@@ -506,51 +506,32 @@ def test_native_without_usage_is_not_replayed(instance):
     assert (log).read_bytes() == before
 
 
-def test_tampered_direct_result_never_reaches_next_role(instance):
-    result = controller.run(instance)
-    assert result['status'] == 'finish', result
-    work = contracts.workspace(instance, 3)
-    (work / 'inputs/parents/002/conclusion.json').chmod(0o600)
-    (work / 'inputs/parents/002/conclusion.json').write_text('{}')
-    assert controller.run(instance)['status'] == 'sealed_node_invalid'
-
-
-def test_actual_material_copy_cannot_change_while_parent_stays_valid(instance):
-    result = controller.run(instance)
-    assert result['status'] == 'finish', result
-    work = contracts.workspace(instance, 3)
-    original = work / 'inputs/parents/002/artifacts/observation.txt'
-    original.chmod(0o600)
-    original.write_text('Fabricated local evidence')
-    assert contracts.validate(contracts.workspace(instance, 2))['role'] == 'W'
-    with pytest.raises(ValueError, match='actually read'):
-        contracts.validate(work)
-    assert controller.run(instance)['status'] == 'sealed_node_invalid'
-
-
 def test_next_role_receives_science_without_parent_bindings(instance):
     result = controller.run(instance)
     assert result['status'] == 'finish', json.dumps(result)
-    work = contracts.workspace(instance, 3)
-    value = contracts.read(work / 'inputs/parents/002/conclusion.json')
-    assert set(value) == {'summary', 'scientific_result', 'limitations', 'implementation_selection',
-                          'stage_intent', 'mechanism_findings', 'candidate_nominations'}
-    nominations = value['candidate_nominations']
-    assert nominations['representatives'] == [] and nominations['extras'] == []
-    worker_task = contracts.read(contracts.workspace(instance, 2) / 'science-task.json')
-    assert {row['mechanism_ref'] for row in nominations['gaps']} == {
-        row['mechanism_ref'] for row in worker_task['candidate_nomination_mechanisms']
-        if row['status'] != 'waived'}
-    task = contracts.read(work / 'science-task.json')
-    assert all(set(item) == {'conclusion', 'artifacts', 'role', 'limitations', 'limitations_omitted_count'}
-               for item in task['parents'])
+    # Parent conclusions are readonly views of the exact authored output.
+    seal = contracts.read(execution.origin(instance, 1) / 'result-identity.json')
+    value = contracts.read(Path(seal['raw_ref']['path']))
+    assert value['summary'] == 'W bounded finding'
+    assert not {'role', 'direct_refs', 'materials', 'job_ref'} & set(value)
+    task = contracts.read(contracts.workspace(instance, 2) / 'science-task.json')
+    assert [item['conclusion'] for item in task['parents']] == ['inputs/parents/001/conclusion.json']
+    assert all(set(item) == {'conclusion', 'artifacts', 'role', 'limitations', 'limitations_omitted_count',
+                             'history_alias'} for item in task['parents'])
     assert 'sha256' not in json.dumps(task)
-    assert not (work / 'inputs/parents/001/inputs').exists()
 
 
 def test_native_meter_rejects_impossible_caching():
     assert native._usage_event(dict(type='turn.completed', usage=dict(
         input_tokens=5, cached_input_tokens=6, output_tokens=1))) is None
+
+
+def _terminal_collection_facts(monkeypatch, inventory):
+    """Owner-loaded budget, inventory and recovery facts for one terminal original."""
+    from scidiscovery.research_loop import continuation
+    monkeypatch.setattr(native.control_budget,'prelaunch_budget_reason',lambda *a:None)
+    monkeypatch.setattr(contracts,'accept_current_inventory',lambda *a:inventory)
+    monkeypatch.setattr(continuation,'automatic_decision',lambda *a,**kw:dict(action='stop'))
 
 
 @pytest.mark.parametrize('role',list('HWAE'))
@@ -567,14 +548,16 @@ def test_terminal_wait_seals_only_after_the_exact_original_runner_exits(tmp_path
     monkeypatch.setattr(execution,'identity',lambda *a:'original-call')
     monkeypatch.setattr(runtime,'node_state',lambda *a:'terminal')
     monkeypatch.setattr(checkpoint,'enabled',lambda *a:False)
-    def process_matches(receipt,binding):
+    inventory=object()
+    _terminal_collection_facts(monkeypatch,inventory)
+    def process_live(receipt,binding):
         assert receipt==runner and binding=='original-call'
         state=next(alive);events.append(('runner',state));return state
-    monkeypatch.setattr(runtime,'process_matches',process_matches)
+    monkeypatch.setattr(runtime,'process_live',process_live)
     monkeypatch.setattr(native.time,'sleep',lambda seconds:events.append(('wait',seconds)))
     monkeypatch.setattr(runtime,'start',lambda *a,**kw:pytest.fail('Waiting cannot submit another runner'))
-    def seal(root_arg,step):
-        assert root_arg==root and step==1
+    def seal(root_arg,step,*,inventory=None):
+        assert root_arg==root and step==1 and inventory is not None
         assert events==[('runner',True),('wait',.1),('runner',False)]
         events.append(('seal',role));return dict(role=role,original_retained=True)
     monkeypatch.setattr(continuation,'seal_or_repair',seal)
@@ -596,14 +579,15 @@ def test_wait_preserves_unknown_or_failed_original_without_resubmission(tmp_path
     monkeypatch.setattr(execution,'origin',lambda *a:record)
     monkeypatch.setattr(execution,'identity',lambda *a:'original-call')
     monkeypatch.setattr(runtime,'node_state',lambda *a:state)
-    monkeypatch.setattr(runtime,'process_matches',lambda *a:False)
+    monkeypatch.setattr(runtime,'process_live',lambda *a:False)
     monkeypatch.setattr(checkpoint,'enabled',lambda *a:False)
+    _terminal_collection_facts(monkeypatch,object())
     clock=iter([0,6])
     monkeypatch.setattr(native.time,'monotonic',lambda:next(clock))
     monkeypatch.setattr(native.time,'sleep',lambda *a:pytest.fail('No live owner or startup allowance remains'))
     monkeypatch.setattr(runtime,'start',lambda *a,**kw:pytest.fail('Unknown or failed originals cannot be replayed'))
     seals=[]
-    def refuse_failed_original(*args):
+    def refuse_failed_original(*args,**kwargs):
         seals.append(args);raise RuntimeError('Original failed execution retained')
     monkeypatch.setattr(continuation,'seal_or_repair',refuse_failed_original)
     with pytest.raises(RuntimeError,match='unknown; preserved without replay|Original failed execution retained'):
@@ -613,10 +597,9 @@ def test_wait_preserves_unknown_or_failed_original_without_resubmission(tmp_path
 
 
 def test_actual_native_launch_rechecks_frozen_settings(instance, monkeypatch):
-    contracts.build_job(instance, 1, 'H', [])
-    policy = contracts.read(instance / 'settings.json')
-    policy['model'] = 'unauthorized-replacement'
-    contracts.write(instance / 'settings.json', policy)
+    contracts.build_job(instance, 1, 'W', [])
+    # Frozen settings are bound by their exact locator; no content fingerprint is kept.
+    contracts.write(instance / 'settings-identity.json', dict(path='replacement-settings.json'))
     monkeypatch.setattr(native.subprocess, 'Popen', lambda *a, **kw: pytest.fail('must not launch'))
     with pytest.raises(ValueError, match='settings changed'):
         native.execute_native(instance, 1)

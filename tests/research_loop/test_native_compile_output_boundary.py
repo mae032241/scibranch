@@ -14,7 +14,7 @@ class BuilderReached(Exception):
 def compiler(tmp_path, monkeypatch):
     root = tmp_path / 'instance'
     job = dict(step=2, role='W', handoff_protocol=protocol.CURRENT,
-        worker_view_version=1, lineage_projection_version=1, direct_materials=[], selected_inputs=[])
+        research_strategy_version=3, advisory_scope_version=1, worker_view_version=1, lineage_projection_version=1, direct_materials=[], selected_inputs=[])
     (root / 'jobs').mkdir(parents=True)
     (root / 'jobs/002.json').write_text(json.dumps(job))
     work = c.workspace(root, 2)

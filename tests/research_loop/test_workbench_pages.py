@@ -25,17 +25,17 @@ def test_overview_answers_state_action_usage_and_rounds_for_manager_and_reader(t
     page = text(ui.get('/', host=ui.host, cookie=cookie)[1])
     assert '<h1>Assess one exact declared implementation.</h1>' in page
     assert '未开始' in page and '已准备，等待你开始' in page
-    head = re.search(r'<div class="head-action">(.*?)</div></section>', page, re.S).group(1)
-    assert head.count('<form') == 1 and 'action="/control/start"' in head
+    # The status head carries no controls; the one start form is the primary action.
+    assert page.count('action="/control/start"') == 1
     assert page.count('<section class="stat') == 4 and '还没有开始研究' in page
     assert '更多操作' in page and '如何理解这些结果' in page
     assert 'href="/configuration#budget-settings"' in page and 'action="/control/budget"' not in page
     assert 'nav class="top-nav"' in page and '研究过程' in page and 'href="/settings"' in page
-    finish(root, 1, 'H', [], action='experiment', summary='Plan <script>x</script>')
-    finish(root, 2, 'A', [1], action='revise_h', summary='Revise')
+    finish(root, 1, 'W', [], summary='Plan <script>x</script>')
+    finish(root, 2, 'A', [1], summary='Continue')
     ui._snapshot(force=True)  # The shared cache otherwise serves the same 2 s window.
     page = text(ui.get('/', host=ui.host, cookie=cookie)[1])
-    assert '第 1 轮 · 修订方向' in page and '&lt;script&gt;x&lt;/script&gt;' in page and '<script>x' not in page
+    assert '&lt;script&gt;x&lt;/script&gt;' in page and '<script>x' not in page
     _, _, headers = ui.get('/view?' + urlencode({'token': ui.read_token}), host=ui.host)
     reader = headers['Set-Cookie']
     before = files(root)
@@ -50,8 +50,8 @@ def test_overview_answers_state_action_usage_and_rounds_for_manager_and_reader(t
 def test_overview_and_live_usage_share_weighted_cache_and_latest_exact_context(tmp_path):
     from scidiscovery.research_loop import contracts as c, ui_saved_status
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='experiment')
-    finish(root, 2, 'A', [1], action='revise_h')
+    finish(root, 1, 'W', [])
+    finish(root, 2, 'A', [1])
     for step, input_tokens, cached, output in [(1, 100, 80, 2), (2, 300, 30, 5)]:
         record = root / 'native-evidence' / f'{step:03d}'
         c.write(record / 'usage.json', dict(input_tokens=input_tokens, cached_input_tokens=cached, output_tokens=output))
@@ -67,7 +67,6 @@ def test_overview_and_live_usage_share_weighted_cache_and_latest_exact_context(t
     fragments = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']
     for markup in (page, fragments['live-token-monitor']):
         assert '27.5%' in markup and '25 / 100' in markup
-        assert '阶段 2 / attempt 0' in markup
         assert '<h2>Token 监控</h2>' in markup
     for markup in (page, fragments['live-usage']):
         assert markup.count('<section class="stat') == 4
@@ -137,23 +136,12 @@ def test_status_matrix_primary_actions_follow_state_without_new_controls(tmp_pat
         return ui._primary(token, manager, snapshot, dict(state=state, display=dict(current=dict(step=4))))
     assert 'action="/control/start"' in primary('ready') and 'action="/control/pause"' in primary('active')
     assert 'action="/control/continue"' in primary('paused')
-    assert primary('pause_requested') is None and primary('error') is None  # No cancellation exists.
+    assert not primary('pause_requested') and not primary('error')  # No cancellation exists.
     assert 'href="/results/4"' in primary('waiting') and 'href="/progress"' in primary('unknown')
     assert 'href="/final-results"' in primary('completed')
     assert all('href="/budget-recovery#budget"' in primary(state) for state in ('budget_exhausted', 'final'))
     assert all('<form' not in (primary(state, False) or '') for state in ('ready', 'active', 'paused', 'final'))
     assert '只读查看' in primary('active', False)
-
-
-def test_tiny_budget_and_waiting_states_list_what_needs_the_user(tmp_path):
-    root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='experiment')
-    finish(root, 2, 'A', [1], summary='Needs a missing measurement')
-    ui, cookie = session(root, key)
-    page = text(ui.get('/', host=ui.host, cookie=cookie)[1])
-    assert '等待条件' in page and 'A 等待：Exact scientific question' in page and '需要你处理' in page
-    attention = re.search(r'<section class="attention".*?</section>', page, re.S).group(0)
-    assert 'action="/control/continue"' in attention and 'href="/results/2"' in attention
 
 
 def test_snapshot_failure_is_specific_and_the_page_still_renders(tmp_path, monkeypatch):
@@ -165,11 +153,12 @@ def test_snapshot_failure_is_specific_and_the_page_still_renders(tmp_path, monke
     monkeypatch.setattr(ui, '_snapshot', broken)
     status, page, _ = ui.get('/', host=ui.host, cookie=cookie)
     page = text(page)
-    assert status == 200 and '状态不可读' in page and '工作台内部错误' in page and '错误编号' in page
+    # Read-only rendering records no diagnostic; it names the failure and the original-record check.
+    assert status == 200 and '状态不可读' in page and '工作台内部错误' in page and '核对保存的原记录' in page
     assert 'is malformed' not in page
     assert str(root) not in page and '更多操作' in page and 'nav class="top-nav"' in page
     live = ui._live_snapshot(ui._browser(cookie), '')
-    assert '工作台内部错误' in live['fragments']['live-hero'] and '错误编号' in live['fragments']['live-hero'] and live['current'] is None
+    assert '工作台内部错误' in live['fragments']['live-hero'] and '核对保存的原记录' in live['fragments']['live-hero'] and live['current'] is None
 
 
 def test_workspace_list_names_the_failure_instead_of_a_generic_note(tmp_path, monkeypatch):
@@ -183,14 +172,16 @@ def test_workspace_list_names_the_failure_instead_of_a_generic_note(tmp_path, mo
     child = host._child(1)
     monkeypatch.setattr(child, '_summary_snapshot', lambda **options: (_ for _ in ()).throw(OSError('busy record')))
     failed = host._loaded_instances()
-    assert '无法读取此实例：工作台内部错误' in failed and '错误编号' in failed and '重试' in failed
+    assert '无法读取此实例：工作台内部错误' in failed and '核对保存的原记录' in failed and '重试' in failed
     assert 'busy record' not in failed
     assert '状态暂不可用' not in failed
 
 
 def test_result_pages_lead_with_the_conclusion_and_keep_the_original(tmp_path):
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='experiment', files={'plan.md': 'plan'})
+    from scidiscovery.research_loop import contracts as c, delivery_review
+    finish(root, 1, 'W', [], files={'plan.md': 'plan'})
+    c.build_job(root, 2, 'A', [1], evidence_return=delivery_review.make('delivery_review', 1, 0))
     finish(root, 2, 'A', [1], action='finish', summary='Final <b>judgment</b>', limitations=['L1', 'L2', 'L3', 'L4'])
     ui, cookie = session(root, key)
     before = files(root)
@@ -206,7 +197,8 @@ def test_result_pages_lead_with_the_conclusion_and_keep_the_original(tmp_path):
     assert 'class="role-line"' in h and 'id="full-text"' not in h
     assert re.findall(r'<script src="([^"]+)"></script>', h) == ['/assets/translation.js']
     listing = text(ui.get('/results', host=ui.host, cookie=cookie)[1])
-    assert listing.count('href="/results/2"') == 1 and listing.index('/results/2') < listing.index('/results/1')
+    records = listing[listing.index('<h2>阶段原文记录</h2>'):]
+    assert listing.count('href="/results/2"') == 1 and records.index('/results/2') < records.index('/results/1')
     assert files(root) == before
     with pytest.raises(ValueError):
         ui.get('/results/3', host=ui.host, cookie=cookie)
@@ -228,7 +220,9 @@ def test_csp_uses_same_origin_static_assets_without_inline_sources(tmp_path):
         assert '<link rel="stylesheet" href="/assets/style.css">' in page
         assert '<style' not in page
         scripts = re.findall(r'<script([^>]*)>(.*?)</script>', page, re.S)
-        assert scripts and all('src="/assets/' in attributes and not inline for attributes, inline in scripts)
+        # Inline JSON data blocks are never executed; every executable script is a same-origin asset.
+        executable = [(attributes, inline) for attributes, inline in scripts if 'type="application/json"' not in attributes]
+        assert executable and all('src="/assets/' in attributes and not inline for attributes, inline in executable)
     for path in ('/assets/style.css', '/assets/translation.js', '/assets/progress.js'):
         status, body, _ = ui.get(path, host=ui.host, cookie=cookie)
         assert status == 200 and body

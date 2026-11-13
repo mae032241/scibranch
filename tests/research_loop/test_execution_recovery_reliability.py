@@ -10,7 +10,7 @@ import pytest
 
 from execution_fixtures import execution_registry, remote_registry
 from test_nonlocal_execution_observation import case
-from test_mutable_run_inputs import fixed_code, fragment, terminal_code
+from test_mutable_run_inputs import fixed_code, fragment, live_fragment, terminal_code
 from scidiscovery.research_loop import contracts as c, controller, execution, experiments as e
 from scidiscovery.research_loop import execution_recovery, execution_resume, runtime
 from scidiscovery.research_loop import candidate_audit, worker_execution_bridge as bridge
@@ -25,25 +25,19 @@ def test_pending_capture_contention_never_publishes_missing_evidence(tmp_path, m
 
 
 def test_sealed_accepted_unknown_remains_a_global_blocker(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import originals,budget
-    root=tmp_path.resolve();seal_path=root/'native-evidence/002/result-identity.json'
-    seal_path.parent.mkdir(parents=True)
-    job_ref=dict(path=str(root/'jobs/002.json'))
-    c.write(seal_path,dict(job_ref=job_ref,pending_executions=dict(path='pending.json'),observations=dict(path='observed.json')))
-    c.write(root/'pending.json',dict(job=dict(path='jobs/002.json'),allocations=[dict(
-        call_id='original',disposition='possibly_prepared',accepted=dict(path='accepted.json'),allocation=dict(path='allocation.json'))]))
-    c.write(root/'allocation.json',dict(call_id='original',binding=dict(scope=dict(job_ref=job_ref))))
-    c.write(root/'observed.json',dict(managed_calls=[dict(call_id='original',status='unknown')]))
-    monkeypatch.setattr(originals,'node',lambda *_:type('Source', (), {'original_root':str(root)})())
-    monkeypatch.setattr(originals,'source_for_ref',lambda source,_:source)
-    monkeypatch.setattr(originals,'resolve_ref',lambda _,ref:root/ref['path'])
-    monkeypatch.setattr(execution_recovery,'prefix',lambda *_:[])
-    monkeypatch.setattr(budget,'historical_step_limit',lambda *_:2)
+    from scidiscovery.research_loop import accepted_budget
+    root=tmp_path.resolve()
+    unknown=dict(source_step=2,call_id='original',status='unknown',origin_identity='branch',recovery_ref=None)
+    class Head(dict):
+        prefix=dict(branch='branch')
+    monkeypatch.setattr(accepted_budget,'read',lambda _:Head(search=dict(current_facts={'search/call/002/original':unknown})))
+    latest=[None]
+    monkeypatch.setattr(execution_recovery,'latest',lambda *_,**__:latest[0])
     assert execution_recovery.pending(root)
     assert execution_recovery.pending(root,unknown_only=True)
     assert not execution_recovery.pending(root,ignore=(2,'original'))
     # Only an appended exact-call terminal fact supersedes the frozen unknown.
-    monkeypatch.setattr(execution_recovery,'validate',lambda *_ ,**__: [dict(version=2,source_step=2,call_id='original',phase='terminal',row=dict(call_id='original',status='known_success'))])
+    latest[0]=dict(version=2,source_step=2,call_id='original',phase='terminal',row=dict(call_id='original',status='known_success'))
     assert not execution_recovery.pending(root)
 
 
@@ -58,7 +52,10 @@ def test_cli_exception_text_is_private(tmp_path,monkeypatch,remote_registry,caps
     assert code in {2,3} and secret not in public.out+public.err
     assert json.loads(public.out)['status'] in {'unknown','unresolved'}
     diagnostics=list((Path(config['record_dir']).parent/'execution-diagnostics').glob('*.json'))
-    assert len(diagnostics)==1 and c.read(diagnostics[0])['note']==secret
+    assert len(diagnostics)==1
+    diagnostic=c.read(diagnostics[0])
+    # Host-private diagnostics keep the full original exception.
+    assert diagnostic['error']==kind.__name__ and diagnostic['note'].endswith(f'{kind.__name__}: {secret}\n')
 
 
 @pytest.mark.parametrize('owner_live,fenced,settles',[(False,False,True),(True,False,False),(False,True,False)])
@@ -146,17 +143,13 @@ def test_tcad_retire_found_binds_original_without_cancel(tmp_path,monkeypatch):
 
 
 def test_owner_run_settles_audit_preflight_before_admission(tmp_path,monkeypatch,remote_registry):
-    from scidiscovery.research_loop import audit_recovery,fork_runtime
+    from scidiscovery.research_loop import fork_runtime
     root,_,_,_=case(tmp_path,monkeypatch)
     calls=[]
-    intent=dict(original='preflight')
-    monkeypatch.setattr(candidate_audit,'facts',lambda *_:iter([(intent,None)]))
-    monkeypatch.setattr(audit_recovery,'facts',lambda *_:iter([]))
-    def settle(actual_root,actual_intent):
+    def settle(actual_root):
         controller.require_writer(actual_root)
-        assert actual_intent is intent
         calls.append('settled')
-    monkeypatch.setattr(candidate_audit,'_settle_preflight',settle)
+    monkeypatch.setattr(candidate_audit,'settle_preflights',settle)
     def stop_after_recovery(_):
         assert calls==['settled']
         raise RuntimeError('next original control phase')
@@ -218,7 +211,7 @@ def recovery_metadata(tmp_path,monkeypatch):
     def managed(*args,**options):
         validations.append(options)
         assert options.get('verify_files') is False
-    monkeypatch.setattr(history,'validate_managed',managed)
+    monkeypatch.setattr(history,'_validate_managed',managed)
     monkeypatch.setattr(execution_resume,'verify_pending_set',lambda *args,**options:dict(disposition='possibly_prepared'))
     def forbidden(*args,**options):pytest.fail('Metadata recovery consumed a code pin, export or new execution')
     for name in ('capture','verify','materialize','cleanup_export'):monkeypatch.setattr(code_versions,name,forbidden)
@@ -429,11 +422,12 @@ def test_recorded_resume_only_cleans_saved_original_terminal_export(terminal_cod
     c.write(root/'execution-authority/calls'/call/'allocation.json',dict(call_id=call,
         binding=dict(native_attempt=row['config']['native_attempt'],
             interface=row['config']['execution_interface'],scope=row['config']['scope'])))
-    monkeypatch.setattr(execution_resume,'verify_pending_set',lambda *args,**options:dict(disposition='possibly_prepared'))
+    allocation=execution_resume.q._ref(root,root/'execution-authority/calls'/call/'allocation.json')
+    monkeypatch.setattr(execution_resume,'verify_pending_set',lambda *args,**options:dict(
+        allocations=[dict(allocation=allocation,disposition='possibly_prepared')]))
     monkeypatch.setattr(authority,'_host_context',lambda config:(root,row['job'],None))
-    monkeypatch.setattr(budget,'historical_step_limit',lambda root:step)
-    monkeypatch.setattr(execution_recovery,'prefix',lambda *args:[])
-    monkeypatch.setattr(execution_recovery,'call_view',lambda *args:{(step,call):dict(phase=phase)})
+    monkeypatch.setattr(execution_recovery,'latest',
+        lambda root_,step_,call_id:dict(phase=phase) if (step_,call_id)==(step,call) else None)
     def forbidden(*args,**options):pytest.fail('Recorded terminal resume changed execution or resource authority')
     monkeypatch.setattr(execution_resume,'_RecoveryAdmission',forbidden)
     for name in ('snapshot','execution_available','execution_accounting','authorization_revision',

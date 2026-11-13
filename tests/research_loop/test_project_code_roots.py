@@ -1,9 +1,18 @@
 import pytest
 
 
+def local_interface():
+    """Frozen Local declaration, including its public code-directory capability."""
+    from scidiscovery.research_loop import experiment_client
+    item = experiment_client.frozen_code_directory_capability()
+    return dict(executor='local_execution:command', public_capabilities=[dict(key=item.key, kind=item.kind,
+        schema_id=item.schema_id, payload_schema_version=item.payload_schema_version, media_type=item.media_type,
+        public_summary=dict(item.public_summary), size_bytes=len(item.content))])
+
+
 @pytest.fixture
 def selection(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import contracts as c, experiment_client, project_layout
+    from scidiscovery.research_loop import experiment_client, project_layout
     root = tmp_path / 'instance'
     work = root / 'project/nodes/001/work'
     base = tmp_path / 'base'
@@ -14,10 +23,9 @@ def selection(tmp_path, monkeypatch):
     project = dict(base_root=str(base), editable=['src', 'tools'])
     job = dict(project=project)
     config = dict(scope=dict(role='W', step=1), execution_interface=dict(executor='local_execution:command'))
-    monkeypatch.setattr(experiment_client, 'root_for_configuration', lambda *args, **kwargs: root)
-    monkeypatch.setattr(c, 'workspace', lambda *args: work)
-    monkeypatch.setattr(c, 'regular', lambda path: path)
-    monkeypatch.setattr(c, 'read', lambda path: job)
+    # The operation owner loads task bindings once; selection consumes those facts.
+    facts = experiment_client.client_bindings_from_facts(root, work, job, material_paths={}, material_sources={})
+    monkeypatch.setattr(experiment_client, 'load_client_facts', lambda value: facts)
 
     def layout(value, workspace):
         assert value is project and workspace == work
@@ -120,7 +128,7 @@ def code_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(project_layout, 'files', lambda *args, **kwargs: pytest.fail('metadata query opened current base'))
     version = dict(version=1, object_format='sha1', commit='b' * 40, tree_path='.',
         selection='directory', entry='src/main.py', logical_root='project')
-    config = dict(scope=dict(role='W', step=2), execution_interface=dict(executor='local_execution:command'))
+    config = dict(scope=dict(role='W', step=2), execution_interface=local_interface())
     accepted = dict(scope=config['scope'], call_id='original', code_version=version,
         base_identity=dict(project['base_identity']), source_script=str(c.workspace(root, 2) / 'project/src/main.py'))
     return root, project, job, config, accepted
@@ -178,9 +186,11 @@ def test_project_compiler_metadata_keeps_full_relative_single_file_entry(code_me
 def test_project_directory_run_rejects_remote_provider_before_preparation(code_metadata, monkeypatch):
     from types import SimpleNamespace
     from scidiscovery.operations.execution import LocalFileDescriptor
-    from scidiscovery.research_loop import code_versions, experiments as e
-    _, project, _, config, _ = code_metadata
+    from scidiscovery.research_loop import code_versions, contracts as c, experiment_client, experiments as e
+    root, project, job, config, _ = code_metadata
     config = dict(config, max_seconds=1, execution_interface=dict(executor='tcad_execution:tcad'))
+    facts = experiment_client.client_bindings_from_facts(root.resolve(), c.workspace(root.resolve(), 2), job,
+        material_paths={}, material_sources={})
     monkeypatch.setattr(e, '_pending_dispatch', lambda *args: None)
     monkeypatch.setattr(e, '_require_new_execution', lambda *args: None)
     monkeypatch.setattr(code_versions, 'capture', lambda *args, **kwargs: pytest.fail('unsupported project run captured code'))
@@ -188,8 +198,8 @@ def test_project_directory_run_rejects_remote_provider_before_preparation(code_m
     adapter = SimpleNamespace(prepare=lambda *args, **kwargs: pytest.fail('unsupported project run called provider prepare'))
     payload = LocalFileDescriptor(name='input', local_path=project['base_root'] + '/src/main.py',
         size_bytes=1, media_type='application/octet-stream')
-    with pytest.raises(e.UnsupportedExecution, match='managed Local runtime'):
-        e._prepare_descriptor(config, payload, adapter, records, [])
+    with pytest.raises(e.UnsupportedExecution, match='does not declare frozen code directory inputs'):
+        e._prepare_descriptor(config, payload, adapter, records, [], client_facts=facts)
 
 
 @pytest.mark.parametrize('wrong_identity', [False, True])
@@ -230,7 +240,7 @@ def test_project_seed_uses_only_uniquely_selected_original_call(code_metadata, m
         scope = dict(step=1, role='W')
         config = dict(scope=scope, record_dir=str(root / 'host-runtime/experiment-control/001/records'))
         version = dict(template['code_version'], commit=commit)
-        accepted = dict(call_id=call, scope=scope, interface=dict(executor='local_execution:command', config_record=config),
+        accepted = dict(call_id=call, scope=scope, interface=dict(local_interface(), config_record=config),
             code_version=version, base_identity=dict(project['base_identity']),
             source_script=str(c.workspace(root, 1) / 'project/src/main.py'))
         path = root / (call + '-accepted.json');c.write(path, accepted)

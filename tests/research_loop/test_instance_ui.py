@@ -627,10 +627,12 @@ def test_paused_temporary_or_incomplete_failure_keeps_paused_status_and_continue
     status = ui._status(snapshot, {})
     assert status['state'] == 'paused' and status['badge'] == '已暂停'
     assert ui_view.native_failure_guidance(node) is None
-    hero = str(ui._dashboard_parts(ui._browser(cookie), snapshot)['live-hero'])
-    assert 'action="/control/continue"' in hero
-    assert '服务错误待处理' not in hero and '接续停止待处理' not in hero
-    assert '自动接续已停止' not in hero and '放弃本次尝试并分支重做' not in hero
+    parts = ui._dashboard_parts(ui._browser(cookie), snapshot)
+    # Controls render in the action area; the hero only states the current status.
+    page = str(parts['live-hero']) + str(parts['live-actions'])
+    assert 'action="/control/continue"' in str(parts['live-actions'])
+    assert '服务错误待处理' not in page and '接续停止待处理' not in page
+    assert '自动接续已停止' not in page and '放弃本次尝试并分支重做' not in page
 
 
 def session(root, key):
@@ -709,20 +711,22 @@ def test_ordinary_instance_status_pages_and_browser_bound_controls(tmp_path):
 
 def test_final_results_follow_exact_sealed_terminal_route(tmp_path):
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='analyze')
+    finish(root, 1, 'W', [])
     ui, cookie = session(root, key)
     assert '最终综合结论尚未返回' in ui.get('/final-results', host=ui.host, cookie=cookie)[1].decode()
-    finish(root, 2, 'A', [1], action='finish')
-    assert ui._final_step() is None  # Ordinary v3 A only requests Final A.
+    finish(root, 2, 'A', [1])
+    assert ui._final_step() is None  # Ordinary v3 A only continues W; Final A is separate.
+    finish(root, 3, 'W', [2], stage_intent='decision')
     from scidiscovery.research_loop import contracts as c,delivery_review
-    c.build_job(root,3,'A',[2],evidence_return=delivery_review.make('delivery_review',2,0))
-    finish(root,3,'A',[2],action='finish')
-    assert ui._final_step() == 3
+    c.build_job(root,4,'A',[3],evidence_return=delivery_review.make('delivery_review',3,0))
+    finish(root,4,'A',[3],action='finish')
+    assert ui._final_step() == 4
     page = ui.get('/final-results', host=ui.host, cookie=cookie)[1].decode()
-    assert '研究发现' in page and '/nodes/3/science' in page
+    assert '研究发现' in page and '/nodes/4/science' in page
     overview = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
     assert '已完成' in overview and 'href="/final-results" class="primary">查看结果</a>' in overview
-    assert '第 1 轮 · A 决定结束探索' in overview
+    # The Final A is a separate pre-delivery assessment, outside exploration rounds.
+    assert '<span class="headline">A 决定结束探索</span>' in overview
 
 
 @pytest.mark.parametrize('active', [False, True])
@@ -806,7 +810,7 @@ def test_dashboard_shows_controller_stop_receipt_without_private_reason(tmp_path
 def test_unsealed_controller_receipt_preserves_unknown_task_in_overview_and_live(tmp_path, reason, explanation):
     from scidiscovery.research_loop import contracts as c, execution
     root, key = prepare(tmp_path, enabled=False)
-    c.build_job(root, 1, 'H', [])
+    c.build_job(root, 1, 'W', [])
     record = execution.origin(root, 1)
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json'), prepared_at=1.0))
     operation_id = 'd' * 32
@@ -817,9 +821,10 @@ def test_unsealed_controller_receipt_preserves_unknown_task_in_overview_and_live
         root / 'host-control/operations' / (operation_id + '.json'))}
     ui, cookie = session(root, key)
     page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
-    overview_hero = re.search(r'<div id="live-hero">(.*?)<div id="live-usage">', page, re.S).group(1)
-    hero = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-hero']
-    for rendered in (overview_hero, hero):
+    fragments = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']
+    hero = fragments['live-hero']
+    # Status stays in the hero; the receipt notice and primary action render in the action area.
+    for rendered in (page, hero + fragments['live-actions']):
         assert '本次控制请求已停止推进' in rendered and 'native_outcome_unsealed' in rendered
         assert '上次任务结果不确定' in rendered and '请核对原任务，勿重复提交' in rendered
         assert 'href="/progress" class="primary">查看原任务进度</a>' in rendered
@@ -887,7 +892,8 @@ def test_closeout_stop_notice_keeps_same_original_guidance_and_hides_raw_reason(
         result=dict(status='closeout_native_unsealed', reason=reason, attempt_step=3)))
     ui, cookie = session(root, key)
     page = ui.get('/', host=ui.host, cookie=cookie)[1].decode()
-    live = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-hero']
+    fragments = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']
+    live = fragments['live-hero'] + fragments['live-actions']
     for shown in (page, live):
         assert 'closeout_native_unsealed' in shown and '请核对同一原任务，勿重复提交' in shown
         assert '原任务步骤：3' in shown
@@ -911,14 +917,15 @@ def test_continue_delegates_to_detached_owner_and_pause_remains_immediate(tmp_pa
 
     monkeypatch.setattr(control, 'start_background', detached)
     control.request_pause(root)
-    continuing = form(ui, cookie, 'continue')
+    # An unstarted paused instance exposes no ordinary continue button; post the exact control.
+    continuing = dict(control_fields(ui, cookie, 'continue'), ack_correction='', authorization_note='')
     assert post(ui, cookie, 'continue', continuing)[0] == 303
     assert owners == [(root, dict(continue_run=True, ack_correction=None, authorization_note=None,
         operation_id=ui._operation_id(ui._browser(cookie), 'continue', continuing)))]
     # The UI does not own a controller thread or clear its pause marker; the
     # detached shared control operation owns the actual transition.
     assert not hasattr(ui, 'control_thread')
-    pause = form(ui, cookie, 'pause')
+    pause = control_fields(ui, cookie, 'pause')
     assert post(ui, cookie, 'pause', pause)[0] == 303
     assert post(ui, cookie, 'pause', pause)[0] == 422
     assert (root / 'pause.request').exists()
@@ -1252,15 +1259,13 @@ def test_settings_index_has_one_entry_for_each_setting(tmp_path):
 @pytest.mark.parametrize('exhaustion', ['tokens', 'time', 'steps'])
 @pytest.mark.parametrize('state,available', [
     ('ordinary', False), ('exhausted', True), ('paused_exhausted', True),
-    ('waiting_exhausted', True), ('active_exhausted', False), ('final', True), ('completed_final', True),
+    ('active_exhausted', False), ('final', True), ('completed_final', True),
 ])
 def test_budget_recovery_has_one_contextual_editor_and_preserves_read_only_boundary(tmp_path, monkeypatch, state, available, exhaustion):
     import copy
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='analyze')
+    finish(root, 1, 'W', [])
     ui, cookie = session(root, key)
-    if state == 'waiting_exhausted':
-        finish(root, 2, 'A', [1], action='wait')
     snapshot = copy.deepcopy(ui._snapshot())
     if 'exhausted' in state:
         if exhaustion == 'tokens':
@@ -2729,11 +2734,10 @@ def test_saved_native_wait_and_stops_never_dispatch_from_get_or_sse(tmp_path, mo
 
 def test_completed_research_has_no_attention_for_optional_budget_extension(tmp_path):
     root, key = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='analyze')
-    finish(root, 2, 'A', [1], action='finish')
+    finish(root, 1, 'W', [])
     from scidiscovery.research_loop import contracts as c,delivery_review
-    c.build_job(root,3,'A',[2],evidence_return=delivery_review.make('delivery_review',2,0))
-    finish(root,3,'A',[2],action='finish')
+    c.build_job(root,2,'A',[1],evidence_return=delivery_review.make('delivery_review',1,0))
+    finish(root,2,'A',[1],action='finish')
     ui, cookie = session(root, key)
     snapshot = ui._snapshot()
     status = ui._status(snapshot, ui._receipt(snapshot))
