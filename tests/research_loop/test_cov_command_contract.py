@@ -14,7 +14,7 @@ from execution_fixtures import execution_registry, remote_registry
 
 
 @pytest.mark.parametrize('options', ['directory', 'arguments'])
-def test_cov_unsupported_options_are_known_not_started_before_prepare(wrapper, monkeypatch, capsys, options):
+def test_cov_unsupported_options_are_caller_errors_before_prepare(wrapper, monkeypatch, capsys, options):
     script = wrapper.script('candidate')
 
     def forbidden(*args, **kwargs):
@@ -26,9 +26,10 @@ def test_cov_unsupported_options_are_known_not_started_before_prepare(wrapper, m
     args += ['--experiment-dir', str(wrapper.root)] if options == 'directory' else ['--', '--seed', '7']
     assert e.main(args) == 2
     result = json.loads(capsys.readouterr().out)
-    assert result['status'] == 'known_not_started' and result['accepted'] is False
-    assert result['error'] == 'caller_error'
-    assert result['note'] == 'Requested command options are unavailable; check exp help for this command'
+    assert result['status'] == 'caller_error' and result['accepted'] is False
+    assert result['error'] == 'invalid_arguments'
+    assert result['note'].startswith('Requested command options are unavailable:')
+    assert 'does not support --experiment-dir or script arguments' in result['note']
     assert 'call_id' not in result and wrapper.accepted() == [] and wrapper.calls() == b''
 
 

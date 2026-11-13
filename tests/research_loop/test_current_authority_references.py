@@ -209,8 +209,8 @@ def test_request_acceptance_retains_operation_context_at_ledger_writer(tmp_path,
     @contextmanager
     def bounded_writer(root_, *, context=None):
         observed.append(context)
-        with original(root_, context=context):
-            yield
+        with original(root_, context=context) as base:
+            yield base
     monkeypatch.setattr(budget, '_ledger_writer', bounded_writer)
     reference = authority.create_request(root, **arguments, operation_context=context)
     assert observed == [context]
