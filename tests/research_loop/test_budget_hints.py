@@ -6,6 +6,7 @@ import pytest
 from scidiscovery.research_loop import accepted_budget, budget, budget_notice, contracts as c, controller, execution, native, protocol
 from test_node_budget import instance, policy, target
 from test_soft_node_budget import start_clock
+from execution_fixtures import execution_registry  # noqa: F401  (autouse local_execution registry)
 
 
 def assert_a_notice_retains_advisory_scope(text):

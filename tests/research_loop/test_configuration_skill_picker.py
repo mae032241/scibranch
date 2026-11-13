@@ -6,6 +6,7 @@ import pytest
 
 from scidiscovery.research_loop import configuration_form as form, research_config, skill_supply
 from test_configuration_form import Controls
+from execution_fixtures import execution_registry  # noqa: F401  (autouse local_execution registry)
 
 
 @pytest.fixture

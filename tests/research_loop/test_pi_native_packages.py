@@ -17,6 +17,7 @@ from test_pi_authorship import compact_pi_facts
 from test_pi_backend_v2 import (FINAL, OPTIONS, PROFILE, adapter, collect_separately,
     configure_installed_pi_fixture, installed_pi_fixture, loopback, options, settings)
 from test_pi_resources import command_inventory, reply
+from execution_fixtures import execution_registry  # noqa: F401  (autouse local_execution registry)
 
 CONFIGURED = dict(OPTIONS, resource_mode='configured', web='live')
 PACKAGES = ['npm:pi-web-access', 'npm:pi-guard-sandbox', 'npm:pi-gauge']

@@ -10,6 +10,7 @@ from packaging.markers import default_environment
 from scidiscovery.plugin_configuration import PluginConfigurationError
 from scidiscovery.research_loop import controller, experiments as e, python_environment as p
 from scidiscovery.research_loop.local_experiments import REGISTRATION, configure
+from execution_fixtures import execution_registry  # noqa: F401  (autouse local_execution registry)
 
 
 def configuration(requirement='packaging>=0', module='json', argv=None):

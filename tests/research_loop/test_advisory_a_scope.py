@@ -7,6 +7,7 @@ from scidiscovery.research_loop import accepted_budget, budget, contracts as c, 
 from scidiscovery.research_loop.output_repair import OutputRepairRequired
 from test_worker_e_consultation import QUESTION, instance, next_job, publish
 from test_adaptive_a_budget import _prepare_publication_instance
+from execution_fixtures import execution_registry  # noqa: F401  (autouse local_execution registry)
 
 
 @pytest.mark.parametrize('action',['revise_h','extract','finish','deliver','audit','formal_review','wait'])

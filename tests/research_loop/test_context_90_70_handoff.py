@@ -7,6 +7,7 @@ from scidiscovery.research_loop import (
     accepted_budget, budget, budget_notice as notice, checkpoint, configuration_form,
     contracts as c, controller, protocol, research_config,
 )
+from execution_fixtures import execution_registry  # noqa: F401  (autouse local_execution registry)
 
 
 def observation(started, used, *, current=True, status='last_reported', coverage='live'):

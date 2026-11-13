@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from scidiscovery.research_loop import contracts as c, controller, delivery, generic_delivery
+from execution_fixtures import execution_registry  # noqa: F401  (autouse local_execution registry)
 
 
 @pytest.mark.parametrize('declaration', [None, 'explicit', 'missing-metric', 'missing-direction', 'missing-evaluation', 'artifact-only', 'missing-output', 'unhashable'])
