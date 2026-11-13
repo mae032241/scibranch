@@ -1,7 +1,6 @@
 """Passive saved restriction facts and exact current scientific input checks.
 
 Synthetic findings establish no scientific qualification or execution permission.
-Run this check_ file explicitly; no model, solver or native backend is invoked.
 """
 import pytest
 

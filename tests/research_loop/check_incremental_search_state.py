@@ -30,7 +30,8 @@ def apply(facts, step, role, payload, **job_fields):
     def lookup(key):
         facts['reads'].append(key)
         return facts['rows'].get(key)
-    delta = accepted.prepare_node(None, job, payload, seal, summary=facts['summary'], lookup=lookup)
+    delta = accepted.prepare_node(None, job, payload, seal, summary=facts['summary'], lookup=lookup,
+        observation=observation)
     facts['rows'].update(delta['rows']);facts['summary'] = delta['summary']
     return delta
 

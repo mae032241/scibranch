@@ -5,7 +5,7 @@ import pytest
 
 from scidiscovery.research_loop import accepted_budget as accepted, budget
 from scidiscovery.research_loop import contracts as c, controller, execution, native
-from check_accepted_budget_head import prepare
+from test_accepted_budget_head import prepare
 from test_automatic_recovery import AUTOMATIC_NATIVE
 import test_default_cli_output_repair as default_cli
 

@@ -8,7 +8,7 @@ import pytest
 from scidiscovery.research_loop import accepted_budget as accepted, budget
 from scidiscovery.research_loop import contracts as c, delivery
 from scidiscovery.research_loop import accepted_search, execution_recovery, managed_wait, originals
-from check_accepted_budget_head import prepare
+from test_accepted_budget_head import prepare
 
 
 def test_audit_intent_tail_is_readable_before_control_files_and_head(tmp_path, monkeypatch):

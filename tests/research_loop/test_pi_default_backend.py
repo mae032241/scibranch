@@ -131,12 +131,22 @@ def test_default_resume_uses_selected_executable_without_auth_or_home_redirectio
         selected.append(executable)
         return '/operator/bin/pi'
     monkeypatch.setattr(shutil, 'which', which)
-    def forbidden(*a, **kw): pytest.fail('Default policy read native auth/config or acquired another owner')
-    for name in ('stat', 'open', 'resolve', 'home'):
-        monkeypatch.setattr(Path, name, forbidden)
-    monkeypatch.setattr(pi_namespace, 'agent_directory', forbidden)
-    monkeypatch.setattr(subprocess, 'Popen', forbidden)
-    value = backend.default_resume_policy()
+    forbidden_calls = []
+    def forbidden(*a, **kw):
+        forbidden_calls.append(a)
+        raise AssertionError('Default policy read native auth/config or acquired another owner')
+    # Path itself stays patched only around the call: pytest's own reporting
+    # needs Path, and a leaked patch turns any failure into INTERNALERROR.
+    with monkeypatch.context() as patched:
+        for name in ('stat', 'open', 'resolve', 'home'):
+            patched.setattr(Path, name, forbidden)
+        patched.setattr(pi_namespace, 'agent_directory', forbidden)
+        patched.setattr(subprocess, 'Popen', forbidden)
+        try:
+            value, error = backend.default_resume_policy(), None
+        except Exception as caught:
+            value, error = None, caught
+    assert error is None and not forbidden_calls, (error, len(forbidden_calls))
     assert selected == ['operator-pi']
     assert value == dict(launcher=['/operator/bin/pi'], policy=dict(max_attempts=2,
         protocol='pi_rpc_v1', usage_scope='turn', output_repair=True, output_only=True,
