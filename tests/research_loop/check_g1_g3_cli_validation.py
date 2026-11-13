@@ -208,6 +208,8 @@ def test_sandbox_startup_dependency(tmp_path):
                   checks={name: "not_run" for name in DEPENDENCY_CHECKS},
                   fixture_code_commit=None, fixture_call_id="native-dependency", fixture_step=1,
                   configured_directories={},
+                  sandbox_layout=dict(native_cwd="disposable_fixture_workspace",
+                      payload_cwd="readonly_export"),
                   socket_directory=dict(status="unresolved", path=None,
                       reason="Configured temporary directories do not resolve the app-server socket directory"),
                   fixture_export_cleanup=dict(status="not_run"),
@@ -313,11 +315,14 @@ def test_sandbox_startup_dependency(tmp_path):
             argv.extend(["--setenv", key, value])
         # No provider, model, server or production Worker protocol is involved.
         # START is flushed before any permission assertion in this inert payload.
-        payload = '''import json,pathlib,sys
+        payload = '''import json,os,pathlib,sys
 print('SCID_SANDBOX_START',flush=True)
 repo,base,work,external=map(pathlib.Path,sys.argv[1:5])
 private_names=json.loads(sys.argv[5])
+export=pathlib.Path(sys.argv[6])
+os.chdir(export)
 here=pathlib.Path.cwd()
+assert here==export
 def done(name): print('SCID_CHECK '+name,flush=True)
 def denied(action):
     try: action()
@@ -353,9 +358,12 @@ done('external_inputs')
 (here/'scratch/temporary').write_text('legitimate scratch\\n')
 done('writable_outputs')
 '''
-        argv.extend(["--chdir", str(export), "--", str(native), "sandbox", "-P", "scid-local-attempt",
-                     "-C", str(export), "--", str(python), "-I", "-c", payload,
-                     str(repository), str(base), str(work), str(external), json.dumps(private_names)])
+        # Resolve :workspace protections in the writable disposable fixture,
+        # where native metadata mountpoints can be created. The inert payload
+        # then enters the exact readonly export; all outer mounts stay intact.
+        argv.extend(["--chdir", str(base), "--", str(native), "sandbox", "-P", "scid-local-attempt",
+                     "-C", str(base), "--", str(python), "-I", "-c", payload,
+                     str(repository), str(base), str(work), str(external), json.dumps(private_names), str(export)])
         report.update(last_phase="sandbox_launch", reached_layer="installed_sandbox_dependency")
         report["startup"].update(native="attempted", backend="not_reached")
         save()
