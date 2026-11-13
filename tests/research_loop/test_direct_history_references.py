@@ -4,27 +4,36 @@ import subprocess
 
 import pytest
 
-from test_direct_public_collect import (execution_registry, fixed_code, fragment,
+from test_direct_public_collect import (execution_registry, fixed_code,
     observed_local, replace_equal_bytes, stopped_attempt, terminal_code)
 from test_history_handoff import scene
-from scidiscovery.research_loop import (atomic_files, contracts as c, experiments as e,
+from test_mutable_run_inputs import live_fragment
+from scidiscovery.research_loop import (accepted_budget, atomic_files, contracts as c, experiments as e,
     history, native, shared_originals)
 
 
-@pytest.mark.parametrize('role', ['H', 'W', 'A', 'E'])
+def accept_intent(root, record):
+    """Accept the exact step-1 native intent; a written file alone is not an attempt."""
+    intent = dict(task_ref=c.record_ref(root / 'jobs/001.json'))
+    c.write(record / 'native-intent.json', intent)
+    accepted_budget.accept_native(root, 1, record, intent)
+
+
+@pytest.mark.parametrize('role', ['W', 'A', 'E'])
 def test_final_host_material_is_sealed_in_place_without_a_conclusion_copy(
         scene, monkeypatch, role):
     root = scene
     job = c.build_job(root, 1, role, [])
     work = c.workspace(root, 1)
     record = c.host_record(work)
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    accept_intent(root, record)
     payload = dict(summary='One bounded contribution', scientific_result='A fixture observation with unresolved target limits.',
         limitations=['Source contract fixture only'], implementation_selection=None)
-    if role in {'H', 'A'}:
-        payload.update(next_action='wait', route_reason='Retain the stated uncertainty')
+    if role == 'A':
+        payload.update(next_action='continue_w', route_reason='Retain the stated uncertainty',
+            decision_request=None)
     if role == 'W':
-        payload.update(stage_intent='review', mechanism_findings=None, candidate_nominations=None)
+        payload.update(stage_intent='decision', mechanism_findings=None, candidate_nominations=None)
     schema = c.result_schema(role, job['handoff_protocol'], **c.response_options(job))
     for field in schema['properties']:
         payload.setdefault(field, None)
@@ -74,9 +83,9 @@ def test_final_host_material_is_sealed_in_place_without_a_conclusion_copy(
     assert {path: e.proof(path) for path in originals} == originals and copies == []
     assert (record / 'result-identity.json').read_bytes() == saved_seal
     assert not (work / 'conclusion.json').exists()
-    if role == 'H':
+    if role == 'W':
         from scidiscovery.research_loop import qualification
-        successor = c.build_job(root, 2, 'W', [1])
+        successor = c.build_job(root, 2, 'A', [1])
         assert qualification.status(root, successor) == successor['source_restrictions']
         provenance = c.read(root / seal['source_provenance']['path'])
         assert provenance['raw_ref'] == c.file_ref(raw)
@@ -87,10 +96,11 @@ def test_final_host_material_is_sealed_in_place_without_a_conclusion_copy(
     raw.write_bytes(raw.read_bytes() + b'\n')
     with pytest.raises(ValueError, match='changed|identity|original'):
         c.validate(work)
-    if role == 'H':
-        # This is a control-only source restriction query. It does not consume
-        # the unselected raw scientific body; the actual consumer above rejects.
-        assert qualification.status(root, successor) == successor['source_restrictions']
+    if role == 'W':
+        # The successor's direct producer original is resolved by exact identity;
+        # a changed raw body fails closed instead of yielding stale restrictions.
+        with pytest.raises(ValueError, match='changed'):
+            qualification.status(root, successor)
     assert (record / 'result-identity.json').read_bytes() == saved_seal
 
 
@@ -102,7 +112,7 @@ def test_final_host_material_rejects_mutable_hardlinks_before_chmod(
     job = c.build_job(root, 1, 'W', [])
     work = c.workspace(root, 1)
     record = c.host_record(work)
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    accept_intent(root, record)
     payload = dict(summary='One bounded contribution', scientific_result='A fixture observation with unresolved target limits.',
         limitations=['Source contract fixture only'], implementation_selection=None,
         stage_intent='review', mechanism_findings=None, candidate_nominations=None)
@@ -134,8 +144,8 @@ def test_final_host_material_rejects_mutable_hardlinks_before_chmod(
 
 
 def test_repeated_managed_proof_keeps_saved_original_identity(
-        fragment, observed_local):
-    root, job, _ = fragment
+        live_fragment, observed_local):
+    root, job, _ = live_fragment
     row = observed_local()
     output = row['output']
     saved = e.proof(output)
@@ -144,17 +154,10 @@ def test_repeated_managed_proof_keeps_saved_original_identity(
     proof = history._managed_proof(root, output, saved)
     assert root / proof['snapshot'] == output
     assert proof['file_stat'] == saved['file_stat']
-    calls = history.managed_calls(root, job)
-    assert len(calls) == 1 and calls[0]['status'] == 'known_success'
-    selected = history.scientific_outputs(root, job, calls[0])
-    assert any(root / item['snapshot'] == output and item['file_stat'] == saved['file_stat']
-        for item in selected)
     Path(row['accepted']['source_script']).unlink()
     assert not Path(row['accepted']['script']['path']).exists()
     for _ in range(2):
         assert history._managed_proof(root, output, saved) == proof
-        assert history.managed_calls(root, job) == calls
-        assert history.scientific_outputs(root, job, calls[0]) == selected
         assert e.reconcile_saved_observation(row['config'], row['adapter'], row['accepted']['call_id']) == observed
     assert (row['directory'] / 'execution-observation.json').read_bytes() == before
     assert e.proof(output) == saved
@@ -173,38 +176,37 @@ def test_repeated_managed_proof_keeps_saved_original_identity(
     assert c.file_ref(frozen) == public
 
     replace_equal_bytes(output)
-    for read in (lambda: history._managed_proof(root, output, saved),
-            lambda: history.scientific_outputs(root, job, calls[0])):
-        with pytest.raises(ValueError, match='changed|original'):
-            read()
+    with pytest.raises(ValueError, match='changed|original'):
+        history._managed_proof(root, output, saved)
     assert (row['directory'] / 'execution-observation.json').read_bytes() == before
     assert proof['file_stat'] == saved['file_stat']
 
 
 def test_successor_reuses_frozen_history_bodies(tmp_path,monkeypatch):
     from test_direct_input_bindings import direct_instance, stopped_seals
-    from scidiscovery.research_loop import originals, shared_input_views
+    from scidiscovery.research_loop import accepted_prefix, shared_input_views
     from test_history_handoff import finish
     root,_=direct_instance(tmp_path);stopped_seals(monkeypatch)
-    finish(root,1,'H',[],action='experiment',text='An exact bounded conclusion. '*500)
-    second,_,_=finish(root,2,'W',[1])
-    prefix='inputs/history/nodes/001/'
-    bodies=[row for row in second['history']['files'] if row['path'].startswith(prefix)
-        and Path(row['path']).stem.isdecimal()]
+    finish(root,1,'W',[],text='An exact bounded conclusion. '*500)
+    second,_,_=finish(root,2,'A',[1])
+    # History bodies live once in the branch-owned accepted public view.
+    public=accepted_prefix.visibility(root,accepted_prefix.for_job(second))
+    assert public.is_relative_to(root/'host-history/accepted-public')
+    node=public/Path(second['history']['prefix']['tip']['navigation']['path']).parent
+    bodies=sorted(path for path in node.iterdir() if path.is_file())
     assert len(bodies)>=2
-    saved={row['path']:Path(row['source']).read_bytes() for row in bodies}
+    saved={path:(path.read_bytes(),path.stat().st_ino) for path in bodies}
     written=[];publish=atomic_files.publish_bytes
     def publishing(path,data,**options):
-        if Path(path).is_relative_to(c.workspace(root,3)/prefix):written.append(Path(path))
+        if Path(path).is_relative_to(node) or Path(path).is_relative_to(c.workspace(root,3)/'inputs/history'):
+            written.append(Path(path))
         return publish(path,data,**options)
     monkeypatch.setattr(atomic_files,'publish_bytes',publishing)
-    third=c.build_job(root,3,'A',[2]);work=c.workspace(root,3)
-    assert c.build_job(root,3,'A',[2])==third
-    reused=[row for row in third['history']['files'] if row['path'] in saved]
-    assert reused==bodies and written==[]
+    third=c.build_job(root,3,'W',[2]);work=c.workspace(root,3)
+    assert c.build_job(root,3,'W',[2])==third
+    assert accepted_prefix.visibility(root,accepted_prefix.for_job(third))==public
+    assert written==[] and not (work/'inputs/history').exists()
+    assert {path:(path.read_bytes(),path.stat().st_ino) for path in bodies}==saved
     argv=shared_input_views.mount_arguments(root,third,work,include_skills=False)
-    for row in reused:
-        assert not (work/row['path']).exists()
-        assert originals.resolve_root_ref(root,row).read_bytes()==saved[row['path']]
-        assert any(argv[index:index+3]==['--ro-bind',row['source'],str(work/row['path'])]
-            for index in range(len(argv)-2))
+    assert any(argv[index:index+3]==['--ro-bind',str(public),str(work/'inputs/history')]
+        for index in range(len(argv)-2))

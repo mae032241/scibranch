@@ -49,20 +49,21 @@ def test_twenty_five_real_calls_keep_large_snapshot_contexts_and_restart_binding
     with pytest.raises(history.ObserverIntegrityError):history._source(root,2)
 
 
-def test_checkpoint_full_material_list_and_large_science_keep_small_brief(fragment):
+def test_checkpoint_large_science_keeps_small_brief_and_excludes_mutable_drafts(fragment):
     root,job,record=fragment
     science(record,scientific_result='Full scientific original: '+('\\\"物理 ' * 30000))
     assert (record/'science-output.json').stat().st_size>64000
     artifacts=c.workspace(root,1)/'artifacts';artifacts.mkdir(exist_ok=True)
     for number in range(140):(artifacts/(f'{number:03d}-'+'m'*170)).write_text(str(number))
-    saved=checkpoint.capture(root,job,record)
-    assert len(saved['materials'])==140 and saved['omitted_materials']==0
-    assert (record/'checkpoint.json').stat().st_size>64000
-    assert checkpoint.validate(root,job,record)==saved
-    view=checkpoint.brief(root,job,record)
+    inventory=c.accept_current_inventory(root,job['step'])
+    saved=checkpoint._capture(root,job,record,inventory=inventory)
+    # Mutable artifact drafts are not retained results, however many exist.
+    assert saved['materials']==[] and saved['omitted_materials']==0
+    assert (record/'checkpoint.json').stat().st_size<(record/'science-output.json').stat().st_size  # Referenced, not copied.
+    assert checkpoint._validate(root,job,record,inventory=inventory)==saved
+    view=checkpoint.brief(checkpoint=saved)
     assert len(checkpoint._bytes(view))<=checkpoint.MAX_BRIEF_BYTES
-    assert len(view['direct_files'])+view['omitted_files']==140
-    assert view['truncated']
+    assert len(view['direct_files'])+view['omitted_files']==0
 
 
 def test_archive_streams_complete_large_file_and_never_relaxes_path_checks(fragment,monkeypatch):
@@ -96,7 +97,7 @@ def test_internal_observer_transport_has_no_compact_request_or_response_cap(tmp_
 
 
 def test_oversized_navigation_row_is_omitted_without_limiting_complete_pages(fragment):
-    root,_,_=fragment;work=c.workspace(root,1);_,paged,files=history.page_writer(work)
+    root,_,_=fragment;work=c.workspace(root,1);_,paged,files=history.page_writer(work,root=root)
     rows=[dict(id='retained-id',label='x'*100000)]
     pages=paged(rows,8,'records','inputs/history/large')
     page=c.read(work/pages[0])
@@ -105,18 +106,23 @@ def test_oversized_navigation_row_is_omitted_without_limiting_complete_pages(fra
     assert all(item['size_bytes']<=history.MAX_PAGE_BYTES for item in files)
 
 
-@pytest.mark.parametrize('quotas',[{},dict(max_output_item_bytes=100000,max_output_total_bytes=200000)])
+@pytest.mark.parametrize('quotas',[{},dict(storage_policy=dict(enabled=True,max_files=1))])
 def test_new_default_has_no_storage_cap_and_explicit_quota_is_still_enforced(tmp_path,quotas):
+    # Byte fields are legacy syntax; the explicit opt-in storage policy limits counts.
     public=tmp_path/'public';public.mkdir();objective=public/'goal';objective.write_text('Exact original storage.')
     root=tmp_path/'instance'
     settings=controller.prepare(root,objective,public,['never-launched'],max_tokens=1000,max_seconds=60,max_steps=5,
         model='no-model',reasoning_effort='high',search_policy=None,**quotas)
-    assert (settings['max_output_item_bytes'],settings['max_output_total_bytes'])==((100000,200000) if quotas else (None,None))
-    c.build_job(root,1,'W',[]);output=c.workspace(root,1)/'artifacts/data';output.parent.mkdir(exist_ok=True)
-    output.write_bytes(b'x'*100001)
+    assert (settings['max_output_item_bytes'],settings['max_output_total_bytes'])==(None,None)
+    assert settings['storage_policy']['enabled']==bool(quotas)
+    files={'data':'x'*100001,'second':'y'}
+    finish(root,1,'W',[],files=files)
+    seal=c.read(execution.origin(root,1)/'result-identity.json')
+    assert sorted(row['size_bytes'] for row in seal['materials'])==[1,100001]
+    # The policy limits the input files of the next node, never the retained originals.
     if quotas:
-        with pytest.raises(ValueError,match='item byte budget'):c.collect_materials(root,1)
-    else:assert c.collect_materials(root,1)[0]['size_bytes']==100001
+        with pytest.raises(ValueError,match='Managed storage limit exceeded: max_files'):c.build_job(root,2,'W',[1])
+    else:assert len(c.build_job(root,2,'W',[1])['direct_materials'])==2
 
 
 def test_full_candidate_accumulation_is_not_a_compact_count_limit(fragment):
@@ -133,7 +139,7 @@ def test_full_candidate_accumulation_is_not_a_compact_count_limit(fragment):
     assert [row['id'] for row in compact['candidate_facts']]==expected[:len(compact['candidate_facts'])]
     assert len(compact['candidate_facts'])+compact['candidate_facts_omitted_count']==4100
     root,_,_=fragment;work=c.workspace(root,1)
-    _,paged,files=history.page_writer(work)
+    _,paged,files=history.page_writer(work,root=root)
     pages=paged(view['candidate_index'],16,'candidates','inputs/history/complete-candidates')
     restored=[];page=pages[0]
     while page:
@@ -148,14 +154,13 @@ def test_complete_implementation_selection_is_not_capped_at_sixteen(tmp_path):
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,['never-launched'],max_tokens=1000,max_seconds=60,max_steps=6,
         model='no-model',reasoning_effort='high',search_policy=None)
-    finish(root,1,'H',[],action='experiment')
-    finish(root,2,'W',[1],files={f'file-{n:03d}':'original' for n in range(17)})
-    finish(root,3,'A',[1,2],selection=[f'W002-I{n:03d}' for n in range(1,18)])
-    seal=c.read(execution.origin(root,3)/'result-identity.json')
+    finish(root,1,'W',[],files={f'file-{n:03d}':'original' for n in range(17)})
+    finish(root,2,'W',[1],selection=[f'W001-I{n:03d}' for n in range(1,18)])
+    seal=c.read(execution.origin(root,2)/'result-identity.json')
     assert len(seal['selected_inputs'])==17
-    job=c.build_job(root,4,'H',[3])
+    job=c.build_job(root,3,'W',[2])
     assert len(job['selected_inputs'])==len(job['direct_materials'])==17
-    c._validate_inputs(root,c.workspace(root,4),job)
+    c._validate_inputs(root,c.workspace(root,3),job)
 
 
 @pytest.mark.process_e2e

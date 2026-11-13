@@ -34,9 +34,9 @@ def inherited_candidates(tmp_path):
     controller.prepare(parent,objective,public,['no-model'],max_tokens=10000,max_seconds=120,
         max_steps=10,model='fixture',reasoning_effort='high',search_policy=None,
         history_observer=dict(adapter=str(observer),config={}))
-    for step,role,parents,action in [(1,'H',[],'experiment'),(2,'W',[1],'wait'),
-            (3,'A',[1,2],'revise_h'),(4,'H',[3],'experiment'),(5,'W',[4],'wait'),
-            (6,'A',[4,5],'finish')]:
+    for step,role,parents,action in [(1,'W',[],'wait'),(2,'W',[1],'wait'),
+            (3,'A',[1,2],'continue_w'),(4,'W',[3],'wait'),(5,'W',[4],'wait'),
+            (6,'A',[4,5],'continue_w')]:
         _,_,record=finish(parent,step,role,parents,action=action,
             files={'evidence.txt':'Retained original candidate bytes.\n'} if step==2 else None)
         c.write(record/'native-outcome.json',dict(c.read(record/'native-outcome.json'),native_started=False))
@@ -48,11 +48,11 @@ def inherited_candidates(tmp_path):
         operation_id='candidate-consumers')
     owner=originals.node(child,2)
     identity=candidate_refs.origin_candidate(owner.origin_identity,'original')
-    shutil.rmtree(parent)
+    # Scientific originals stay direct references into the live parent by design.
     return child,owner,identity
 
 
-def test_catalogue_and_shortlist_keep_cutoff_and_origin_after_parent_removal(inherited_candidates,monkeypatch):
+def test_catalogue_and_shortlist_keep_cutoff_and_origin_for_inherited_parent(inherited_candidates,monkeypatch):
     root,_,identity=inherited_candidates
     sources=history.source_sequence(root,4)
     receipts=[dict(step=job['step'],seal_ref=sha) for job,_,_,sha in sources]
@@ -87,7 +87,7 @@ def test_inherited_delivery_proof_rejects_changed_copied_original(inherited_cand
 
 
 @pytest.mark.process_e2e
-def test_managed_candidate_resolution_uses_retained_inputs_after_parent_removal(tmp_path,execution_registry):
+def test_managed_candidate_resolution_uses_retained_inputs_of_inherited_parent(tmp_path,execution_registry):
     from scidiscovery.research_loop import experiment_client, experiments, generic_results
     from test_breadth_science import a, findings, h, prepare, worker
     root=prepare(tmp_path)
@@ -108,7 +108,7 @@ def test_managed_candidate_resolution_uses_retained_inputs_after_parent_removal(
     record=experiments.Records(config).directory(result['call_id'])
     assert result['status']=='known_success',(result,(record/'stderr.raw').read_text()[-2048:])
     finish(root,2,'W',[1],mechanism_findings=findings('P'),preserve_native_intent=True)
-    a(root,3,[1,2],action='finish')
+    a(root,3,[1,2])
     for step in (1,2,3):
         outcome=root/'native-evidence'/f'{step:03d}'/'native-outcome.json'
         c.write(outcome,dict(c.read(outcome),native_started=False))
@@ -185,7 +185,7 @@ def test_inherited_screen_reuses_only_its_frozen_late_recovery(tmp_path,composed
         dict(mechanism_ref='h001.m1',status='screened',reason='Assess W4 using its frozen recovered observation.')],
         next_focus=dict(mechanism_ref='h001.m1',action='improve')))
     finish(root,6,'W',[1,4,5])
-    finish(root,7,'A',[1,6],action='finish')
+    finish(root,7,'A',[1,6],action='continue_w')
     assert search.project(root,6)['mechanisms']['h001.m1']['status']=='screened'
     assert original_observation.read_bytes()==old_observation
     assert len(experiments.Records(config).calls())==1
@@ -217,7 +217,9 @@ def test_inherited_screen_reuses_only_its_frozen_late_recovery(tmp_path,composed
     ('ordinary:parent',True),('x'*80,True),('x'*81,False),
     ('界'*26+'ab',True),('界'*27,False),
     ('source:'+'a'*64+':run-10000',True),
-    ('source:'+'A'*64+':run-10000',False),
+    # Origin keys are goal identifiers now, not lowercase digests: only the raw part is bounded.
+    ('source:'+'A'*64+':run-10000',True),
+    ('source:'+'A'*64+':'+'x'*81,False),
     ('source:'+'a'*64+':'+'x'*81,False),
 ])
 def test_parent_id_bounds_keep_raw_contract_and_exact_origin_shape(value,valid):
@@ -277,9 +279,9 @@ def test_fork_selected_a_consumes_exact_inherited_catalogue(tmp_path):
         delivery_policy=delivery_policy(descriptor(parent,public)),
         selection_policy=dict(version=2),history_observer=dict(adapter=str(observer),config={}))
     (parent/'runs').mkdir();(parent/'submission').mkdir()
-    finish(parent,1,'H',[],action='experiment')
+    finish(parent,1,'W',[])
     finish(parent,2,'W',[1],files={'evidence.txt':'Exact candidate evidence.\n'})
-    original,_,_=finish(parent,3,'A',[1,2],action='finish',recommendation='original')
+    original,_,_=finish(parent,3,'A',[1,2],action='continue_w',recommendation='original')
     with controller._writer(parent):pass
     child=tmp_path/'child';limits=dict(max_tokens=1000,max_seconds=30,max_steps=1)
     preview=fork_service.preview(parent,3,child,budget=limits)

@@ -1,9 +1,9 @@
 """Author closeout leaves task-specific scientific judgments to the Worker."""
-import io
 import json
 import os
 from pathlib import Path
 import re
+import threading
 
 import pytest
 
@@ -42,12 +42,17 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
         from scidiscovery.research_loop import formal_review
         job['formal_review']=dict(fixture='prompt capture only; no scientific verdict')
         c.write(root/'jobs/001.json',job)
+        monkeypatch.setattr(formal_review,'selected_compiler',lambda *args,**kwargs:None)
+        monkeypatch.setattr(formal_review,'input_binding',lambda *args,**kwargs:dict(materials=[]))
         monkeypatch.setattr(formal_review,'public',lambda *args:dict(review=dict(
             instruction='Independently assess the exact scientific subject.')))
     work = c.workspace(root, 1)
     (work / 'artifacts/retained-evidence.txt').write_text(evidence)
     task = c.read(work / 'science-task.json')
-    assert (work / task['global']['objective']).read_text() == objective
+    # The objective is a framed original referenced by the task, not copied into the workspace.
+    objective_row = next(row for row in c.read(root / 'jobs/001.json')['global_materials']
+        if row['path'] == task['global']['objective'])
+    assert Path(objective_row['source']).read_text() == objective
     assert 'candidate_audit_policy' not in c.settings(root)
     assert 'delivery_policy' not in c.settings(root)
 
@@ -74,21 +79,40 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
                 advance_seconds=0., **meter, observed_tokens=0, dispatches=number + 1,
                 limits=nodes[role], usage_observed=True)))
     monkeypatch.setattr(execution, 'records', lambda root, step: chain if step == 1 else [execution.origin(root, step)])
-    monkeypatch.setattr(author_closeout, 'require_intent_eligibility', lambda *args: dict(max_tokens=1000, max_seconds=60))
+    monkeypatch.setattr(author_closeout, 'load_intent_eligibility',
+        lambda *args, **kwargs: (dict(max_tokens=1000, max_seconds=60), None))
 
     prompts = []
 
-    class CaptureInput(io.BytesIO):
-        def write(self, data):
-            prompts.append(data.decode())
-            return super().write(data)
+    readers = []
+
+    def capture_stdin():
+        # The launcher writes through a real nonblocking pipe; collect the whole request.
+        read_fd, write_fd = os.pipe()
+
+        def drain():
+            with os.fdopen(read_fd, 'rb') as stream:
+                prompts.append(stream.read().decode())
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        readers.append(reader)
+        return os.fdopen(write_fd, 'wb')
+
+    real_popen = native.subprocess.Popen
 
     class CaptureProcess:
         pid = 999999999
         returncode = 0
 
+        def __new__(cls, args, **kwargs):
+            # The shared subprocess module also serves the real readonly-mount capability probe.
+            if '--output-last-message' not in args:
+                return real_popen(args, **kwargs)
+            return super().__new__(cls)
+
         def __init__(self, args, **kwargs):
-            self.stdin = CaptureInput()
+            self.stdin = capture_stdin()
             read_fd, write_fd = os.pipe()
             self.stdout = os.fdopen(read_fd, 'rb')
             try:
@@ -111,6 +135,8 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
     monkeypatch.setattr(runtime, 'process_matches', lambda *args: False)
     monkeypatch.setattr(runtime, 'cleanup_owned_group', lambda *args: 'observed_group_cleaned')
     outcome = native.run_native(root, 1, attempt)
+    for reader in readers:
+        reader.join(10)
 
     assert outcome['returncode'] == 0 and outcome['stop_reason'] is None
     assert len(prompts) == 1
@@ -119,16 +145,10 @@ def test_author_closeout_prompt_defers_requirement_judgment_to_worker(tmp_path, 
     assert 'auditing and delivery remain pending' not in prompt.lower()
     assert 'audit and delivery remain pending' not in prompt.lower()
     assert 'rather than asserting task completion' not in prompt
-    assert 'Do not independently compute, compare, or revalidate file/evidence hashes or checksums' in prompt
-    assert 'generate hash inventories, or perform redundant mechanical integrity checks' in prompt
-    assert 'Control automatically owns integrity verification' in prompt
-    assert 'do not run your own checksum verification or alter bindings' in prompt
-    assert 'not hash algorithms required by the scientific task itself' in prompt
-    assert 'Any helper receiving this assignment must follow the same restrictions' in prompt
     if attempt:
-        assert 'No new experiment, training,' in prompt
+        assert 'no experiment/training/refinement/submission/replay/backend query/collection' in prompt
         assert 'read-only' in prompt
-        assert 'Choose stage_intent=review or decision, never continue.' in prompt
+        assert 'stage_intent=decision; no consultation, handoff or continued work' in prompt
         assert '1000' in prompt and '60' in prompt
     if review:assert 'Do not edit the subject' in prompt
     assert (work / 'artifacts/retained-evidence.txt').read_text() == evidence

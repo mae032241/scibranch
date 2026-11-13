@@ -1,5 +1,6 @@
 """Inherited W nominations resolve against their exact frozen candidate pool."""
 import copy
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,12 @@ from scidiscovery.research_loop import (
 def declaration(candidate):
     return dict(representatives=[dict(mechanism_ref='h001.m1',candidate=candidate,reason='Retained original')],
         extras=[],gaps=[])
+
+
+def unresolved(authored):
+    value=copy.deepcopy(authored)
+    for row in value['representatives']:row['candidate']=None
+    return value
 
 
 def frozen_source(tmp_path,monkeypatch,*,receipt_step=2,raw_step=2,status='known_success',retained=True):
@@ -61,7 +68,8 @@ def test_inherited_nomination_reads_exact_frozen_source_without_child_or_parent_
     before=copy.deepcopy(payload)
     value=candidate_refs.control_payload(job,payload,root=child,source=source)
     assert value['candidate_nominations']['representatives'][0]['candidate']=='local-002-original-call-001'
-    assert payload==before and validated==[source]
+    # The observation owner validates managed originals; this consumer does not repeat it.
+    assert payload==before and validated==[]
     assert not (child/'jobs/002.json').exists()
     assert not (tmp_path/'unavailable-parent').exists()
 
@@ -70,28 +78,31 @@ def test_inherited_nomination_reads_exact_frozen_source_without_child_or_parent_
     dict(call_id='other-call',artifact='artifacts/candidate.json'),
     dict(call_id='original-call',artifact='artifacts/other.json'),
 ])
-def test_inherited_nomination_preserves_unresolved_exact_candidate_choice(tmp_path,monkeypatch,choice):
+def test_inherited_nomination_never_guesses_unresolved_exact_candidate_choice(tmp_path,monkeypatch,choice):
     child,source,job,_,_=frozen_source(tmp_path,monkeypatch)
     authored=declaration(choice)
-    assert candidate_nominations.resolve(child,job,authored,source=source)==authored
+    before=copy.deepcopy(authored)
+    # Unresolvable advice keeps its mechanism and reason but names no candidate.
+    assert candidate_nominations.resolve(child,job,authored,source=source)==unresolved(authored)
+    assert authored==before
 
 
 @pytest.mark.parametrize('status,retained',[('unknown',True),('known_success',False)])
 def test_inherited_nomination_cannot_upgrade_unknown_or_unretained_declaration(tmp_path,monkeypatch,status,retained):
     child,source,job,_,_=frozen_source(tmp_path,monkeypatch,status=status,retained=retained)
     authored=declaration(dict(call_id='original-call',artifact='artifacts/candidate.json'))
-    assert candidate_nominations.resolve(child,job,authored,source=source)==authored
+    assert candidate_nominations.resolve(child,job,authored,source=source)==unresolved(authored)
 
 
 @pytest.mark.parametrize('options,message',[
     (dict(receipt_step=3),'lost its exact producer'),
     (dict(raw_step=3),'binding changed'),
 ])
-def test_inherited_nomination_keeps_original_observation_binding_checks(tmp_path,monkeypatch,options,message):
-    child,source,job,_,_=frozen_source(tmp_path,monkeypatch,**options)
-    authored=declaration(dict(call_id='original-call',artifact='artifacts/candidate.json'))
+def test_inherited_observation_owner_keeps_original_binding_checks(tmp_path,monkeypatch,options,message):
+    _,source,job,_,_=frozen_source(tmp_path,monkeypatch,**options)
+    seal=c.read(originals.source_record(source,'result-identity.json'))
     with pytest.raises(history.ObserverIntegrityError,match=message):
-        candidate_nominations.resolve(child,job,authored,source=source)
+        history.validate_observation_original(source,job,seal,controls_only=True)
 
 
 def test_inherited_nomination_rejects_different_source_task(tmp_path,monkeypatch):
@@ -119,15 +130,15 @@ def test_local_nomination_preserves_sealed_receipt_and_live_call_paths(tmp_path,
     root,_,job,call,_=frozen_source(tmp_path,monkeypatch)
     record=root/'native-evidence/002'
     monkeypatch.setattr(c,'host_record',lambda _work:record)
-    captured=[]
-    def live_calls(owner,task):
-        captured.append((owner,task))
-        return [call]
-    monkeypatch.setattr(history,'managed_calls',live_calls)
+    inventory=None
+    authored=declaration(dict(call_id='original-call',artifact='artifacts/candidate.json'))
     if sealed:
         c.write(record/'result-identity.json',dict(observations=dict(path='host-history/observations/002.json')))
         c.write(root/'host-history/observations/002.json',dict(managed_calls=[call]))
-    authored=declaration(dict(call_id='original-call',artifact='artifacts/candidate.json'))
-    result=candidate_nominations.resolve(root,job,authored)
+    else:
+        # An unsealed node consumes only its owner-accepted inventory; never live records.
+        with pytest.raises(ValueError,match='accepted inventory'):
+            candidate_nominations.resolve(root,job,authored)
+        inventory=SimpleNamespace(managed_calls=[call])
+    result=candidate_nominations.resolve(root,job,authored,inventory=inventory)
     assert result['representatives'][0]['candidate']=='local-002-original-call-001'
-    assert captured==([] if sealed else [(root,job)])

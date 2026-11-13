@@ -108,8 +108,8 @@ def selected_fork(tmp_path, monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(c, 'write', synthetic_outcome)
-        finish(parent, 1, 'H', [], action='analyze')
-        finish(parent, 2, 'A', [1], action='finish')
+        finish(parent, 1, 'W', [])
+        finish(parent, 2, 'A', [1], action='continue_w')
     with controller._writer(parent):
         pass
     child = tmp_path / 'child'

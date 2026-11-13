@@ -975,7 +975,7 @@ def compiler_case(tmp_path, monkeypatch):
     objective = public / 'objective.md'; objective.write_text('Bind one synthetic compiler original.')
     controller.prepare(root, objective, public, ['fixture-never-launch'], max_tokens=1000,
         max_seconds=60, max_steps=4, model='fixture', reasoning_effort='high',
-        search_policy=None, experiment_mode='external', research_strategy_version=None)
+        search_policy=None, experiment_mode='external')
     job = c.build_job(root, 2, 'W', [])
     work = c.workspace(root, 2); job_path = root / 'jobs/002.json'
     intent_path = root / 'native-evidence/002/native-intent.json'

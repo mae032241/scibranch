@@ -202,11 +202,10 @@ def test_inherited_git_observer_uses_copied_controls_and_keeps_science_stat_chec
     from test_direct_public_collect import replace_equal_bytes
     public=tmp_path/'public';public.mkdir();goal=public/'goal.md';goal.write_text('Exact retained Git controls.')
     root=tmp_path/'instance'
-    # This fixed-capture reader fixture deliberately freezes the old catalogue
-    # contract. It tests neither current W declarations nor scheduling defaults.
+    # This fixed-capture reader fixture tests neither W declarations nor scheduling defaults.
     controller.prepare(root,goal,public,['never-launched'],max_tokens=10000,
         max_seconds=120,max_steps=8,model='fixture',reasoning_effort='high',
-        search_policy=None,research_strategy_version=1)
+        search_policy=None)
     job=c.build_job(root,1,'W',[]);record=execution.origin(root,1)
     saved_job=c.read(root/'jobs/001.json')
     assert c.job_record(job)==saved_job
@@ -252,9 +251,10 @@ def test_new_fork_screen_can_seal_using_its_retained_prefix(tmp_path,monkeypatch
     root = prepare(tmp_path)
     h(root, labels=('P',))
     finish(root, 2, 'W', [1], mechanism_findings=findings(blocked=('P',)))
-    a(root, 3, [1, 2], focus='h001.m1')
+    finish(root, 3, 'A', [1, 2], search_choice=dict(dispositions=[],
+        next_focus=dict(mechanism_ref='h001.m1', action='screen')))
     finish(root, 4, 'W', [1, 2, 3], mechanism_findings=findings(blocked=('P',)))
-    a(root, 5, [1, 4], action='finish')
+    finish(root, 5, 'A', [1, 4])
     with controller._writer(root):
         pass
     child = tmp_path / 'child'
@@ -355,7 +355,7 @@ def test_fork_formal_reviewer_can_bind_inherited_compiler_originals(
     c.seal_result(root, 4)
     _, parents, instruction, back = review.return_route(root, reviewer, [2, 3, 4])
     c.build_job(root, 5, 'A', parents, instruction, back)
-    finish(root, 5, 'A', parents, action='finish')
+    finish(root, 5, 'A', parents)
     with controller._writer(root):
         pass
     child = tmp_path / 'review-child'
@@ -473,7 +473,7 @@ def test_new_fork_screen_seals_recovered_original_and_nested_fork_keeps_origin(t
         mechanism_findings=findings('h001.m1',blocked=('h001.m2',)))
     frozen=c.read(originals.resolve_root_ref(root,source_job['history']['breadth_snapshot']))
     assert frozen['table']['mechanisms']['h001.m1']['last_terminal']['recovery_ref']==recovery_ref
-    a(root,5,[1,4],action='finish')
+    a(root,5,[1,4])
     with controller._writer(root):pass
     child=tmp_path/'child';limits=dict(max_tokens=1000,max_seconds=30,max_steps=3)
     preview=fork_service.preview(root,4,child,budget=limits)
@@ -541,7 +541,7 @@ def test_new_fork_screen_seals_recovered_original_and_nested_fork_keeps_origin(t
     with pytest.raises((ValueError,OSError)):
         worker_delivery._validate(child,job,record,inventory=inventory)
     c.write(record/worker_delivery.FACT_NAME,facts)
-    a(child,5,[1,4],action='finish')
+    a(child,5,[1,4])
     with controller._writer(child):pass
     nested=tmp_path/'nested';preview=fork_service.preview(child,5,nested,budget=limits)
     fork_service.create(child,5,nested,budget=limits,expected_preview_id=preview['preview_id'],

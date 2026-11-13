@@ -339,9 +339,8 @@ def test_creator_does_not_recreate_ancestor_retired_before_gate_acquisition(inst
 @pytest.mark.parametrize('first', ['fork', 'delete'])
 def test_fork_creation_and_outer_disposal_are_mutually_fenced(instance, tmp_path, monkeypatch, first):
     source = _prepare_nested(tmp_path / 'source', tmp_path)
-    _finish(monkeypatch, source, 1, 'H', [], action='analyze')
-    c.build_job(source, 2, 'A', [1], c.validate(c.workspace(source, 1))['route_reason'])
-    _finish(monkeypatch, source, 2, 'A', [1], action='finish')
+    _finish(monkeypatch, source, 1, 'W', [])
+    _finish(monkeypatch, source, 2, 'A', [1], action='continue_w')
     with controller._writer(source):
         pass
     child = instance / 'fork-child'
@@ -355,8 +354,8 @@ def test_fork_creation_and_outer_disposal_are_mutually_fenced(instance, tmp_path
     if first == 'fork':
         prepare = fork_service._prepare
 
-        def check_delete(*args):
-            result = prepare(*args)
+        def check_delete(*args, **kwargs):
+            result = prepare(*args, **kwargs)
             before = _retained(instance)
             with pytest.raises(archive.files.ArchiveError):
                 deletion.delete_instance(instance, **request)
@@ -431,11 +430,9 @@ def test_explicit_delete_accepts_quiescent_lifecycle_states(instance, monkeypatc
         c.write(root / 'pause.request', dict(reason='Fixture explicit pause'))
         assert controller.run(root)['status'] == 'paused'
     elif state == 'completed':
-        _finish(monkeypatch, root, 1, 'H', [], action='analyze')
-        hypothesis = c.validate(c.workspace(root, 1))
-        c.build_job(root, 2, 'A', [1], hypothesis['route_reason'])
-        _finish(monkeypatch, root, 2, 'A', [1], action='finish')
-        assert c.validate(c.workspace(root, 2))['next_action'] == 'finish'
+        _finish(monkeypatch, root, 1, 'W', [])
+        _finish(monkeypatch, root, 2, 'A', [1], action='continue_w')
+        assert c.validate(c.workspace(root, 2))['next_action'] == 'continue_w'
         with controller._writer(root):
             pass
         assert fork_sources._parent_state(root) == []
@@ -782,10 +779,9 @@ def test_prepared_retry_rechecks_unknown_work_and_preserves_consumption(instance
 @pytest.mark.parametrize('entry', ['source_lease', 'fork_preview', 'fork_create'])
 def test_prepared_retirement_fences_fork_sources(instance, tmp_path, monkeypatch, entry):
     root = instance
-    _finish(monkeypatch, root, 1, 'H', [], action='analyze',
+    _finish(monkeypatch, root, 1, 'W', [],
         files={'fork-source.bin': 'Retained source bytes cannot admit a new fork after retirement.\n'})
-    c.build_job(root, 2, 'A', [1], c.validate(c.workspace(root, 1))['route_reason'])
-    _finish(monkeypatch, root, 2, 'A', [1], action='finish')
+    _finish(monkeypatch, root, 2, 'A', [1], action='continue_w')
     with controller._writer(root):
         pass
     assert fork_sources._parent_state(root) == []
