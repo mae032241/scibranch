@@ -14,8 +14,8 @@ from . import lineage as cov, receipt as cov_receipt
 
 
 class CovExecution(LocalExecution):
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, *, frozen_interface=None):
+        super().__init__(config, frozen_interface=frozen_interface)
         from scidiscovery.research_loop import replay_check
         replay_check.reserve_seconds(config)
 
@@ -167,7 +167,7 @@ class CovExecution(LocalExecution):
             (stage / 'scratch').mkdir()
             if 'code_version' in accepted:
                 from scidiscovery.research_loop import code_versions
-                root = e._code_version_binding(self.config, accepted)
+                root = e._code_version_binding(self.records.config, accepted)
                 check()
                 preparation = storage.Deadline(deadline_boottime - time.clock_gettime(time.CLOCK_BOOTTIME))
                 try:
@@ -271,7 +271,7 @@ class CovExecution(LocalExecution):
             result=super().completion(directory,accepted,returncode,cleanup,transport_complete,context=context)
             source=[accepted['script']]
             if 'code_version' in accepted:
-                root=e._code_version_binding(self.config,accepted)
+                root=e._code_version_binding(self.records.config,accepted)
                 if e._code_export_entry(root,accepted) is not None:source=[]
             result.update(change_intent=accepted['change_intent'],
                 proofs=[e.proof(directory/name) for name in ('accepted.json','stdout.raw','stderr.raw','terminal.json')]
@@ -285,7 +285,7 @@ class CovExecution(LocalExecution):
         # exp records the source's original path. Preserve that contract and
         # verify exact prepared bytes both before execution and in its receipt.
         if 'code_version' in accepted:
-            e._code_version_binding(self.config,accepted)
+            e._code_version_binding(self.records.config,accepted)
             if (accepted['script']['path']!=accepted['prepared']['local_path']
                     or accepted['script']['size_bytes']!=accepted['prepared']['size_bytes']):
                 raise e.IntegrityError('Original cov execution source changed')
@@ -353,7 +353,8 @@ class CovExecution(LocalExecution):
 
 
 def build(context):
-    return RuntimePluginContribution(execution_adapters={'experiment':CovExecution(json.loads(context.config_bytes))})
+    return RuntimePluginContribution(execution_adapters={'experiment':CovExecution(json.loads(context.config_bytes),
+        frozen_interface=context.frozen_execution_interface)})
 
 
 def validate_context(item, accepted, parent):

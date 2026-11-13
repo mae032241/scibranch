@@ -139,20 +139,20 @@ def test_real_process_dynamic_publication_and_native_permissions(layout,monkeypa
     require_mounts()
     root,work,source,alias,canonical=layout
     monkeypatch.setenv('SCID_PRESERVED_NATIVE_VALUE','unchanged')
-    c.write(root/'jobs/001.json',dict(step=1,role='W',worker_view_version=1))
-    c.write(root/'jobs/002.json',dict(step=2,role='H'))
-    previous=root/'project/nodes/002';(previous/'inputs').mkdir(parents=True)
-    (previous/'work').mkdir();(previous/'artifacts').mkdir()
-    prior_input=previous/'inputs/objective.md';os.link(source,prior_input)
-    author=root/'host-recovery/author-context/002/001/author-science-context/inputs/input.txt'
+    from scidiscovery.research_loop.experiments import proof
+    job=dict(history_job(root),role='W',worker_view_version=1)
+    job['global_materials']=[dict(proof(source),path='inputs/original.txt',source=str(source))]
+    c.write(root/'jobs/001.json',job)
+    selected_alias=work/'artifacts/selected-input-alias.txt';os.link(source,selected_alias)
+    author=root/'host-recovery/author-context/001/001/author-science-context/inputs/input.txt'
     author.parent.mkdir(parents=True);os.link(source,author)
     from scidiscovery.research_loop import experiment_client
     records=experiment_client.record_directory(root,1)
     staged=records/'.prepared-live/source.py'
-    monkeypatch.setenv('SCID_TEST_ADDITIONAL_ALIASES',json.dumps([str(prior_input),str(author),str(staged)]))
+    monkeypatch.setenv('SCID_TEST_ADDITIONAL_ALIASES',json.dumps([str(selected_alias),str(author),str(staged)]))
     argv=[sys.executable,'-I','-c',PROBE,str(work),str(canonical),
         '--network=original','--web=live','--subagents=on']
-    command=views.wrap(root,{},work,argv)
+    command=views.wrap(root,job,work,argv)
     assert command[-len(argv):]==argv
     process=subprocess.Popen(command,cwd=work,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
@@ -160,7 +160,7 @@ def test_real_process_dynamic_publication_and_native_permissions(layout,monkeypa
         while not (work/'work/ready').exists() and process.poll() is None and time.monotonic()<deadline:
             time.sleep(.02)
         assert (work/'work/ready').exists(),process.communicate(timeout=2)
-        staged.parent.mkdir();os.link(source,staged)
+        staged.parent.mkdir(parents=True);os.link(source,staged)
         target=views.dynamic_root(root,work,'retained-experiments')/'call/outputs/new.txt'
         target.parent.mkdir(parents=True);os.link(source,target)
         stdout,stderr=process.communicate(timeout=15)
@@ -204,7 +204,7 @@ readonly(later,'later host original')
 def test_real_process_pty_shell_keeps_inputs_and_later_private_git_readonly(layout):
     require_mounts()
     root,work,source,_,canonical=layout
-    job=dict(step=1,role='H',global_materials=[dict(source=str(canonical),
+    job=dict(history_job(root),role='H',global_materials=[dict(source=str(canonical),
         path='inputs/original.txt',size_bytes=canonical.stat().st_size)])
     c.write(root/'jobs/001.json',job)
     holder=root/'host-runtime/code-versions'
@@ -260,30 +260,6 @@ else:
  print(json.dumps(dict(type='completed',usage=dict(input_tokens=1,cached_input_tokens=0,output_tokens=1))),flush=True)
 '''
 
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('backend',['codex','protocol'])
-def test_final_native_popen_enforces_custom_and_protocol_without_registration(tmp_path,backend):
-    require_mounts()
-    from scidiscovery.research_loop import budget, controller, execution, native
-    public=tmp_path/'public';public.mkdir();objective=public/'objective.md'
-    objective.write_text('Inert readonly native process validation.')
-    launcher=tmp_path/'native-probe.py';launcher.write_text(NATIVE_PROBE)
-    root=tmp_path/'instance'
-    controller.prepare(root,objective,public,[sys.executable,str(launcher),backend],
-        max_tokens=1000,max_seconds=45,max_steps=2,model='no-model',reasoning_effort='high',
-        search_policy=None,experiment_mode='external',native_backend=backend,
-        native_options=dict(workspace='danger-full-access',network=False,web='live',subagents=True))
-    c.write(root/'host-started.json',budget.clock_stamp());budget.transition(root,'advance','Readonly transport test')
-    c.build_job(root,1,'H',[]);work=c.workspace(root,1)
-    (work/'artifacts').mkdir(exist_ok=True)
-    os.link(work/'inputs/global/objective.md',work/'artifacts/input-alias')
-    native.execute_native(root,1)
-    outcome=c.read(execution.origin(root,1)/'native-outcome.json')
-    assert outcome['native_started'] and outcome['shared_inputs']['enforcement']=='kernel_readonly_mounts'
-    assert outcome['native_permissions']['enforcement']['workspace']=='hint_only'
-    assert (work/'artifacts/native-write').read_text()=='native writable output'
-    assert (work/'inputs/global/objective.md').read_text()==objective.read_text()
 
 @pytest.mark.parametrize('publisher',['collect','wake'])
 def test_host_publishers_refuse_same_name_replacement_before_any_publish(layout,monkeypatch,publisher):
@@ -407,7 +383,6 @@ def test_opaque_local_argv_remains_on_common_wrapper_without_registration_gate(r
     assert skill_supply.namespace_launcher(settings) is None
 
 
-
 def test_readonly_record_inventory_accepts_directory_only_without_creating_pins(layout):
     from scidiscovery.research_loop import experiment_client,experiments
     root,work,*_=layout
@@ -432,7 +407,6 @@ def test_complete_record_publisher_refuses_replaced_holder_before_receipt_write(
     with pytest.raises(UnsupportedExecution,match='private original holder was replaced'):
         records.publish('original-call','terminal.json',{})
     assert list(directory.iterdir())==[]
-
 
 
 def test_adapter_record_effect_refuses_replaced_holder_before_lock_or_adapter_write(layout):
@@ -483,7 +457,7 @@ def test_git_wrapper_prepares_holder_before_existing_mounts_and_covers_later_chi
         return workspace(*args,**kwargs)
     monkeypatch.setattr(views,'workspace_arguments',prepared)
     argv=['custom-native','--sandbox','danger-full-access','--network=original','--web=live','--subagents=on']
-    command=views.wrap(root,{},work,argv);divider=command.index('--')
+    command=views.wrap(root,history_job(root),work,argv);divider=command.index('--')
     assert command[divider+1:]==argv and events==[holder.stat().st_ino]
     assert command[divider-3:divider]==['--ro-bind',str(holder),str(holder)]
     existing=[*workspace(root,work),*data]

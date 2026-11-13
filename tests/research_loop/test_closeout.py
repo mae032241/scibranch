@@ -75,51 +75,6 @@ def native_diagnostics(root):
 
 
 @pytest.mark.process_e2e
-def test_actual_fake_h_w_closeout_a_submit_confirm_and_no_replay(tmp_path):
-    root = real_chain(tmp_path,pause_after_worker=True)
-    paused=controller.run(root)
-    assert paused['status']=='paused' and paused['completed_steps']==2,(paused,native_diagnostics(root))
-    assert all((c.host_record(c.workspace(root,step))/'result-identity.json').is_file() for step in (1,2))
-    assert not (root/'jobs/003.json').exists()
-    (root/'pause.request').unlink()
-    result = controller.closeout(root)
-    assert result['status']=='delivery_confirmed',(result,native_diagnostics(root))
-    assert result['last_step']==3 and result['source_cutoff']==2
-    assert result['completed_scientific_nodes']==3 and result['used_steps']==5
-    assert result['goal_completion']=='not_asserted' and 'unmet_goal' not in result
-    assert native.usage(root)['observed_tokens']==30
-    jobs=[c.read(root/'jobs'/f'{step:03d}.json') for step in (1,2,3)]
-    assert [job['role'] for job in jobs]==['H','W','A']
-    assert jobs[2]['purpose']=='closeout' and [row['step'] for row in jobs[2]['history']['nodes']]==[1,2]
-    assert jobs[2]['delivery_sources']['items'][0]['status']=='available'
-    facts=budget.closeout_state(root)
-    assert [row['intent']['action_kind'] for row in facts['actions']]==['submit','confirm']
-    assert not facts['unresolved_operations'] and not budget.execution_blocked(root)
-    original={str(p):p.read_bytes() for p in (root/'native-evidence').rglob('*') if p.is_file()}
-    result=controller.run(root)
-    assert result['status']=='delivery_confirmed',(result,native_diagnostics(root))
-    assert all(Path(path).read_bytes()==data for path,data in original.items())
-    assert len(budget.closeout_state(root)['actions'])==2
-
-
-@pytest.mark.process_e2e
-def test_export_only_existing_model_closeout_never_executes(tmp_path,monkeypatch):
-    root=real_chain(tmp_path,pause_after_worker=True)
-    paused=controller.run(root)
-    assert paused['status']=='paused' and paused['completed_steps']==2,(paused,native_diagnostics(root))
-    assert all((c.host_record(c.workspace(root,step))/'result-identity.json').is_file() for step in (1,2))
-    assert not (root/'jobs/003.json').exists()
-    (root/'pause.request').unlink()
-    result=controller.closeout(root)
-    assert result['status']=='delivery_confirmed',(result,native_diagnostics(root))
-    monkeypatch.setattr(native,'execute_native',lambda *a:pytest.fail('Export must never launch science'))
-    monkeypatch.setattr(delivery,'invoke',lambda *a,**k:pytest.fail('Export must never invoke an external action'))
-    before=len(budget.closeout_state(root)['actions'])
-    assert controller.closeout(root,export_only=True)['status']=='exported_unsubmitted'
-    assert len(budget.closeout_state(root)['actions'])==before
-
-
-@pytest.mark.process_e2e
 def test_audit_only_launch_window_and_malformed_phase_are_unknown(tmp_path):
     root, _, nodes = prepare_fixture(tmp_path)
     refs = delivery.freeze_sources(root, nodes)
@@ -172,6 +127,8 @@ def test_export_only_does_not_seal_retained_success_or_write_status_cache(tmp_pa
     c.write(root/'host-started.json',budget.clock_stamp())
     budget.transition(root,'advance','Retained original')
     c.write(record/'native-intent.json',dict(step=1,task_ref=c.record_ref(root/'jobs/001.json'),budget_slice=budget.accept_node(root,job)))
+    from scidiscovery.research_loop import accepted_budget
+    accepted_budget.accept_native(root, 1, record, c.read(record/'native-intent.json'))
     native.run_native(root,1)  # Native success alone is not a science seal.
     original={str(p):p.read_bytes() for p in record.rglob('*') if p.is_file()}
     monkeypatch.setattr(c,'seal_result',lambda *a:pytest.fail('Pure export never seals'))

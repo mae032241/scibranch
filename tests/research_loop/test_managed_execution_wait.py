@@ -264,26 +264,6 @@ else:
 '''
 
 
-def instance(tmp_path,options,*,fragment=False,resume=True,seconds=120,node_seconds=20):
-    public=tmp_path/'public';public.mkdir();goal=public/'objective.md';goal.write_text('Read an async original and retain scientific limits.')
-    launcher=tmp_path/('codex' if resume else 'launcher.py')
-    launcher.write_text('#!'+sys.executable+'\n'+LAUNCHER);launcher.chmod(0o700)
-    root=tmp_path/'instance'
-    # These tests retain the explicit H catalogue -> W -> A waiting route.
-    # Current W-first strategy coverage lives in the worker-first fixtures.
-    # The host freezes the remote fixture and serves the ordinary Worker bridge.
-    controller.prepare(root,goal,public,[str(launcher)] if resume else [sys.executable,str(launcher)],max_tokens=1000,max_seconds=seconds,max_steps=7,
-        model='no-model',reasoning_effort='high',node_budget_mode='soft',research_strategy_version=None,
-        execution_config=dict(executor='composed_execution:fixture',configuration=options),
-        node_budget_policy={role:dict(max_observed_tokens=200,max_seconds=node_seconds) for role in 'HWAE'},
-        resume_policy=dict(max_attempts=2,protocol='codex_exec_resume',usage_scope='turn') if resume else None,
-        worker_fragment_policy=dict(context='same_session') if fragment else None)
-    c.write(root/'fixture-options.json',options)
-    finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Two mechanisms',commitments=[
-        dict(label=label,minimal_test='Read original backend fact',existing_ref=None) for label in ('P','Q')],focus=dict(index=1,action='screen')))
-    return root
-
-
 def run_cli(root,*,on_wait=None):
     options=c.read(root/'fixture-options.json');stop=threading.Event();errors=[]
     def backend_events():
@@ -552,75 +532,6 @@ def test_output_only_without_explicit_wake_diagnoses_before_waiting_for_terminal
     assert len(e.Records(config).calls())==1 and not (record/'result-identity.json').exists()
 
 
-@pytest.mark.parametrize('outcome,fragment,multicall,query_state,terminal_state',[
-    ('known_success',False,False,'running',None),('known_failed',False,False,'running',None),
-    ('known_success',True,False,'running',None),('known_success',False,True,'running',None),
-    ('known_failed',False,False,'queued','cancelled'),
-])
-def test_one_run_waits_without_llm_then_automatically_wakes_same_session_and_seals(tmp_path,composed_registry,outcome,fragment,multicall,query_state,terminal_state):
-    options=dict(collect=outcome=='known_success',terminal_status=outcome,query_state=query_state,
-        stage_intent='continue' if fragment else 'review',synchronous_first=multicall)
-    if terminal_state:options['terminal_state']=terminal_state
-    root=instance(tmp_path,options,fragment=fragment)
-    observed={};errors=[]
-    def backend_event():
-        try:
-            wait=root/'native-evidence/002/execution-wait.json';deadline=time.monotonic()+15
-            while not wait.exists():
-                assert time.monotonic()<deadline
-                time.sleep(.03)
-            value=c.read(wait);config=c.read(Path(value['calls'][0]['config']['path']))
-            assert value['calls'][0]['observed_state']==query_state
-            call=c.read(Path(value['calls'][0]['accepted']['path']))['call_id']
-            assert not (root/'native-evidence/002/result-identity.json').exists()
-            assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-            # More than one controller poll, with no new native turn/accepted call.
-            time.sleep(1.2)
-            observed.update(before=budget.snapshot(root),steps=budget.used_steps(root),calls=len(e.Records(config).calls()))
-            assert observed['before']['clock_phase']=='waiting'
-            assert observed['before']['waiting_seconds']>.1
-            assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-            if terminal_state=='cancelled':
-                path=e.Records(config).directory(call)/'backend-accepted.json';backend=c.read(path)
-                backend['state']='cancelling';c.write(path,backend)
-                time.sleep(1.2)
-                assert not (root/'native-evidence/002/result-identity.json').exists()
-                assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-            e.load(config).complete(call)
-        except BaseException as error:errors.append(error)
-    thread=threading.Thread(target=backend_event);thread.start()
-    reply=run_cli(root);thread.join(timeout=3)
-    log=Path(os.environ.get('SCID_TEST_LOG_DIR',str(tmp_path/'fixture-logs')));log.mkdir(parents=True,exist_ok=True)
-    c.write(log/('managed-'+outcome+f'-{fragment}-{multicall}.json'),dict(stdout=reply.stdout,stderr=reply.stderr,
-        originals={str(p.relative_to(root)):p.read_text()[-16000:] for p in (root/'native-evidence').rglob('*') if p.is_file() and p.suffix in {'.json','.jsonl','.stderr'}}))
-    assert not thread.is_alive() and not errors,(errors,reply.stdout,reply.stderr,[(str(p),p.read_text()[-3000:]) for p in root.glob("native-evidence/002/*.stderr")])
-    assert reply.returncode==0,(reply.stdout,reply.stderr)
-    result=json.loads(reply.stdout);assert result['status']=='wait',result
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\nresume\n'
-    assert (c.workspace(root,2)/'work/consumed-result').read_text()==outcome
-    chain=execution.records(root,2);assert len(chain)==2
-    intent=c.read(chain[-1]/'native-intent.json')
-    assert intent['continuation_kind']=='execution_wake' and intent['session']['thread_id']=='11111111-2222-4333-8444-555555555555'
-    for proof in intent['execution_wake']['observations']:
-        assert e.proof(proof['path'])==proof
-        observation=c.read(Path(proof['path']))
-        accepted=c.read(Path(observation['accepted']['path']))
-        e.verify_observation(observation,lambda item:Path(item['path']),interface=accepted['interface'])
-        assert any(c.read(Path(item['path'])).get('native_payload')=='retained-native-terminal-only'
-            for item in observation['proofs'])
-    seal=c.read(chain[0]/'result-identity.json');fact=c.read(root/seal['observations']['path'])
-    assert fact['managed_calls'][-1]['status']==outcome and observed['calls']==(2 if multicall else 1)
-    if terminal_state=='cancelled':
-        assert (c.workspace(root,2)/'work/consumed-native-state').read_text()=='cancelled'
-        assert fact['managed_calls'][-1]['execution']['native_state']=='cancelled'
-        assert fact['candidates']==[]
-    assert not (Path(intent['execution_wake']['observations'][0]['path']).parent/'terminal.json').exists()
-    c.validate(c.workspace(root,2));c.validate(c.workspace(root,3))
-    before={p:p.read_bytes() for p in root.rglob('*') if p.is_file() and p.name not in {'host-run.lock','control-ledger.lock'}}
-    assert json.loads(run_cli(root).stdout)['status']=='wait'
-    assert all(p.read_bytes()==value for p,value in before.items())
-
-
 def stop_at_waiting(root):
     process=subprocess.Popen([sys.executable,'-m','scidiscovery.research_loop.cli','run','--root',str(root)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     deadline=time.monotonic()+15;path=None
@@ -656,8 +567,8 @@ def stop_at_waiting(root):
     return config,call
 
 
-def test_wait_restart_pause_and_same_call_terminal_notification_wakes_once(tmp_path,composed_registry):
-    root=instance(tmp_path,dict(collect=False))
+def test_wait_restart_pause_and_same_call_terminal_notification_wakes_once(tmp_path,composed_registry,monkeypatch):
+    root,_=standard_instance(tmp_path,monkeypatch,adaptive_batches=1)
     config,call=stop_at_waiting(root)
     assert budget.snapshot(root)['clock_phase']=='waiting'
     with pytest.raises(RuntimeError,match='no running or unknown original execution'):
@@ -667,29 +578,14 @@ def test_wait_restart_pause_and_same_call_terminal_notification_wakes_once(tmp_p
     reply=run_cli(root);result=json.loads(reply.stdout)
     assert result['status']=='waiting_execution' and result['reason']=='paused_before_execution_wake',result
     assert (e.Records(config).directory(call)/'execution-observation.json').exists()
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-    assert not (execution.origin(root,2)/'result-identity.json').exists()
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert not (execution.origin(root,1)/'result-identity.json').exists()
     (root/'pause.request').unlink()
-    assert json.loads(run_cli(root).stdout)['status']=='wait'
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\nresume\n'
-    assert len(e.Records(config).calls())==1 and len(execution.records(root,2))==2
-    assert json.loads(run_cli(root).stdout)['status']=='wait'
-    c.validate(c.workspace(root,2))
-
-
-def test_uncertain_execution_is_not_running_or_replayed(tmp_path,composed_registry):
-    root=instance(tmp_path,dict(collect=False,query_state='unknown'))
-    reply=run_cli(root)
-    assert reply.returncode==0,(reply.stdout,reply.stderr)
-    record=execution.origin(root,2);assert not (record/'execution-wait.json').exists()
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-    assert c.read(c.workspace(root,2)/'work/executor-handoff.json')['action']=='reconcile_or_stop'
-    config=c.read(record/'experiment-config.json')
-    assert len(e.Records(config).calls())==1 and len(execution.records(root,2))==1
-    seal=c.read(record/'result-identity.json');fact=c.read(root/seal['observations']['path'])
-    assert fact['managed_calls'][0]['status']=='unknown'
-    run_cli(root)
-    assert len(e.Records(config).calls())==1
+    assert json.loads(run_cli(root).stdout)['status']=='finish'
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\nresume\n'
+    assert len(e.Records(config).calls())==1 and len(execution.records(root,1))==2
+    assert json.loads(run_cli(root).stdout)['status']=='finish'
+    c.validate(c.workspace(root,1))
 
 
 def test_waiting_longer_than_time_budget_consumes_nothing_and_pause_stops_without_replay(tmp_path,monkeypatch,composed_registry):
@@ -708,159 +604,24 @@ def test_waiting_longer_than_time_budget_consumes_nothing_and_pause_stops_withou
     assert (root/'settings.json').read_bytes()==settings_bytes
 
 
-def test_missing_session_capability_retains_checkpoint_without_fabricated_wake(tmp_path,composed_registry):
-    root=instance(tmp_path,dict(collect=False),resume=False)
-    result=json.loads(run_cli(root).stdout)
-    assert result['status']=='output_repair_unavailable' and result['reason']=='worker_resume_unsupported',result
-    assert (execution.origin(root,2)/'checkpoint.json').exists()
-    assert not (execution.origin(root,2)/'result-identity.json').exists()
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-
-
-@pytest.mark.parametrize('outcome,terminal_state,retained_guidance',[
-    ('known_success',None,False),('known_failed','failed',False),('known_failed','cancelled',False),
-    ('known_success',None,True),
-])
-def test_executor_handoff_without_wake_polls_past_three_until_same_call_terminal(tmp_path,monkeypatch,composed_registry,outcome,terminal_state,retained_guidance):
-    options=dict(collect=True,follow_handoff=True,terminal_at_query=5,terminal_status=outcome)
-    if terminal_state:options['terminal_state']=terminal_state
-    root=instance(tmp_path,options,resume=False)
-    originals={}
-    if retained_guidance:
-        from scidiscovery.research_loop import managed_wait
-        current_capability=managed_wait.capability
-        old_instruction=('poll_original permits only that call, at handoff.poll_interval_seconds and at most handoff.max_queries queries total for this call in this turn; later replies do not reset that bound.')
-        def old_capability(*args):
-            return dict(current_capability(*args),instruction=old_instruction)
-        source_job=c.read(root/'jobs/001.json');source_result=c.validate(c.workspace(root,1))
-        role,parents,instruction,evidence_return,_,_=controller._route(root,1,'H',source_result,source_job,None,None)
-        with monkeypatch.context() as patch:
-            patch.setattr(managed_wait,'capability',old_capability)
-            frozen=c.build_job(root,2,role,parents,instruction=instruction,evidence_return=evidence_return)
-        paths=(root/'jobs/002.json',c.workspace(root,2)/'science-task.json')
-        originals={path:path.read_bytes() for path in paths}
-        assert c.build_job(root,2,role,parents,instruction=instruction,evidence_return=evidence_return)==frozen
-        assert frozen['managed_execution_wait']['wake_authorized'] is False
-        assert all(path.read_bytes()==raw for path,raw in originals.items())
-    reply=run_cli(root);result=json.loads(reply.stdout)
-    assert reply.returncode==0 and result['status']=='wait',(reply.stdout,reply.stderr)
-    work=c.workspace(root,2);handoff=c.read(work/'work/executor-handoff.json')
-    assert handoff['action']=='poll_original' and handoff['poll_interval_seconds']==1
-    assert 'max_queries' not in handoff
-    prompt=(work/'work/initial-prompt').read_text()
-    assert 'handoff.action' in prompt and 'poll_original' in prompt and 'poll_interval_seconds' in prompt
-    assert 'max_queries' not in prompt
-    instruction=c.read(work/'science-task.json')['managed_execution_wait']['instruction']
-    if retained_guidance:
-        assert instruction==old_instruction
-        assert 'Polling instructions supersede older query-count advice only' in prompt
-        assert 'frozen wake permission, original identity and budget remain binding' in prompt
-        assert all(path.read_bytes()==raw for path,raw in originals.items())
-    else:
-        assert 'max_queries' not in instruction
-    call=(work/'work/original-call').read_text()
-    assert c.read(work/'work/poll-queries.json')==[call]*5
-    assert (work/'work/reconciled-call').read_text()==call
-    assert c.read(work/'work/final-handoff.json')['action']=='consume_terminal'
-    assert (work/'work/consumed-result').read_text()==outcome
-    assert (work/'work/consumed-output-count').read_text()=='1'
-    record=execution.origin(root,2);config=c.read(record/'experiment-config.json')
-    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
-    assert (work/'work/launches').read_text()=='exec\n'
-    assert not (record/'execution-wait.json').exists() and (record/'result-identity.json').exists()
-    observed=c.read(e.Records(config).directory(call)/'execution-observation.json')
-    e.verify_observation(observed,lambda item:Path(item['path']),interface=config['execution_interface'])
-    if terminal_state:assert observed['native_state']==terminal_state
-    seal=c.read(record/'result-identity.json');fact=c.read(root/seal['observations']['path'])
-    assert fact['managed_calls'][0]['status']==outcome
-    assert json.loads(run_cli(root).stdout)['status']=='wait'
-    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
-    assert all(path.read_bytes()==raw for path,raw in originals.items())
-
-
-def test_executor_handoff_without_wake_stops_on_unknown_same_call_after_three_queries(tmp_path,composed_registry):
-    root=instance(tmp_path,dict(collect=False,follow_handoff=True,unknown_at_query=5),resume=False)
-    reply=run_cli(root)
-    assert reply.returncode==0,(reply.stdout,reply.stderr)
-    work=c.workspace(root,2);call=(work/'work/original-call').read_text()
-    assert c.read(work/'work/poll-queries.json')==[call]*5
-    assert (work/'work/reconciled-call').read_text()==call
-    assert c.read(work/'work/final-handoff.json')['action']=='reconcile_or_stop'
-    assert not (work/'work/consumed-result').exists()
-    record=execution.origin(root,2);config=c.read(record/'experiment-config.json')
-    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
-    assert (work/'work/launches').read_text()=='exec\n'
-    assert not (record/'execution-wait.json').exists()
-    seal=c.read(record/'result-identity.json');fact=c.read(root/seal['observations']['path'])
-    assert fact['managed_calls'][0]['status']=='unknown'
-    assert not (e.Records(config).directory(call)/'execution-observation.json').exists()
-
-
-def test_bridge_cached_pending_response_requests_reconciliation_without_rewriting_originals(tmp_path,composed_registry,monkeypatch):
-    from types import SimpleNamespace
-    from scidiscovery.research_loop import worker_execution_bridge as bridge
-    root=instance(tmp_path,dict(collect=False));config,call=stop_at_waiting(root)
-    work=c.workspace(root,2);config_path=work/'work/experiment-config.json'
-    directory=work/bridge.SUBMISSION_DIRECTORY;directory.mkdir(exist_ok=True)
-    private=Path(config['record_dir']).parent
-    claims=private/'test-worker-submissions';claims.mkdir(exist_ok=True)
-    server=SimpleNamespace(work=work,directory=directory,config_path=config_path,configuration=config,
-        client=c.read(config_path),claims=claims,diagnostic=private/'test-bridge-error.json',
-        record=execution.origin(root,2),stop=threading.Event(),environment={},
-        launch=lambda *args:pytest.fail('Query must not launch a process'))
-    request=dict(submission_ref='S001',arguments=['query','--call-id',call])
-    raw=bridge._encoded(request);bridge._handle(server,raw)
-    first=c.read(directory/'response.json')
-    assert first['result']['handoff']['action']=='return_control'
-    originals={path:path.read_bytes() for path in (claims/'S001').iterdir() if path.is_file()}
-    bridge._handle(server,raw)
-    cached=c.read(directory/'response.json')
-    assert cached['result']['status']=='unknown'
-    assert cached['result']['handoff']['action']=='reconcile_or_stop'
-    assert cached['result']['handoff']['call_id']==call
-    assert all(path.read_bytes()==value for path,value in originals.items())
-    assert len(e.Records(config).calls())==len(execution.records(root,2))==1
-    assert bridge._unknown()['result']['handoff']['action']=='reconcile_or_stop'
-    for number,arguments in ((2,1),(3,{'run':'invalid'}),(4,[{'run':'invalid'}])):
-        bridge._handle(server,bridge._encoded(dict(submission_ref=f'S{number:03d}',arguments=arguments)))
-        malformed=c.read(directory/'response.json')
-        assert malformed['code']==2 and malformed['result']['status']=='caller_error'
-    # A malformed ordinary request must not terminate the receiver before a
-    # subsequent legitimate query of the same original call.
-    bridge._handle(server,bridge._encoded(dict(submission_ref='S005',arguments=['query','--call-id',call])))
-    assert c.read(directory/'response.json')['result']['handoff']['action']=='return_control'
-    from scidiscovery.research_loop import managed_wait
-    real_handoff=managed_wait.handoff
-    def large_handoff(body,*args,**kwargs):
-        return dict(action='reconcile_or_stop',instruction='x'*bridge.MAX_BYTES) if body is not None else real_handoff(body,*args,**kwargs)
-    with monkeypatch.context() as patch:
-        patch.setattr(managed_wait,'handoff',large_handoff)
-        bridge._handle(server,raw)
-    oversized=c.read(directory/'response.json')
-    assert oversized['code']==3 and oversized['result']['status']=='integrity_error'
-    assert oversized['result']['handoff']['action']=='reconcile_or_stop'
-    assert len((directory/'response.json').read_bytes())<=bridge.MAX_BYTES
-    assert all(path.read_bytes()==value for path,value in originals.items())
-
-
 def test_persisted_wake_intent_without_process_is_unknown_and_never_relaunched(tmp_path,composed_registry,monkeypatch):
     from scidiscovery.research_loop import runtime
-    root=instance(tmp_path,dict(collect=False));config,call=stop_at_waiting(root);e.load(config).complete(call)
+    root,_=standard_instance(tmp_path,monkeypatch,adaptive_batches=1);config,call=stop_at_waiting(root);e.load(config).complete(call)
     with monkeypatch.context() as patch:
         patch.setattr(runtime,'start',lambda *args,**kwargs:(_ for _ in ()).throw(RuntimeError('Fixture crash after durable wake acceptance')))
         result=controller.run(root)
     assert result['status']=='native_outcome_unsealed',result
-    current=execution.record(root,2);assert c.read(current/'native-intent.json')['continuation_kind']=='execution_wake'
+    current=execution.record(root,1);assert c.read(current/'native-intent.json')['continuation_kind']=='execution_wake'
     before=(current/'native-intent.json').read_bytes()
     result=controller.run(root)
     assert result['status']=='native_outcome_unsealed' and (current/'native-intent.json').read_bytes()==before
-    assert len(execution.records(root,2))==2 and len(e.Records(config).calls())==1
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
+    assert len(execution.records(root,1))==2 and len(e.Records(config).calls())==1
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
 
 
 @pytest.mark.parametrize('fault',['accepted','submission','retained-proof'])
-def test_wait_or_terminal_binding_tamper_cannot_authorize_wake(tmp_path,composed_registry,fault):
-    root=instance(tmp_path,dict(collect=False));config,call=stop_at_waiting(root)
+def test_wait_or_terminal_binding_tamper_cannot_authorize_wake(tmp_path,composed_registry,monkeypatch,fault):
+    root,_=standard_instance(tmp_path,monkeypatch,adaptive_batches=1);config,call=stop_at_waiting(root)
     directory=e.Records(config).directory(call)
     if fault=='retained-proof':
         e.load(config).complete(call);e.record_observation(config,e.load(config),call)
@@ -872,135 +633,9 @@ def test_wait_or_terminal_binding_tamper_cannot_authorize_wake(tmp_path,composed
         else:value['external_run_id']='different-external'
         c.write(path,value)
     reply=run_cli(root)
-    assert (c.workspace(root,2)/'work/launches').read_text()=='exec\n'
-    assert not (execution.origin(root,2)/'continuations/001/native-intent.json').exists()
+    assert (c.workspace(root,1)/'work/launches').read_text()=='exec\n'
+    assert not (execution.origin(root,1)/'continuations/001/native-intent.json').exists()
     assert len(e.Records(config).calls())==1
-
-
-@pytest.mark.parametrize('outcome,collect',[('known_success',True),('known_failed',True),('known_success',False)])
-def test_sealed_unknown_recovery_binds_new_prefix_materials_and_resolves_original_reservation(tmp_path,composed_registry,monkeypatch,outcome,collect):
-    from test_composed_execution_results import case
-    from scidiscovery.research_loop import managed_wait, search
-    root,job,config,cli,call=case(tmp_path,dict(terminal_status=outcome,collect=collect))
-    # Construct the historical pre-fix seal; production never uses this bypass.
-    with monkeypatch.context() as patch:
-        patch.setattr(managed_wait,'before_seal',lambda *args:None)
-        finish(root,2,'W',[1],mechanism_findings=[dict(mechanism=label,basis='blocked',finding='Original backend pending') for label in ('P','Q')])
-    old_record=execution.origin(root,2);seal_bytes=(old_record/'result-identity.json').read_bytes()
-    old_seal=c.read(old_record/'result-identity.json');old_fact=c.read(root/old_seal['observations']['path'])
-    assert old_fact['managed_calls'][0]['status']=='unknown'
-    # This A is prepared before recovery; its old input prefix must remain stable.
-    a=c.build_job(root,3,'A',[1,2]);old_job=(root/'jobs/003.json').read_bytes()
-    finish(root,3,'A',[1,2],action='continue_w',search_choice=dict(dispositions=[],next_focus=dict(mechanism_ref='h001.m1',action='screen')))
-    assert search.project(root,4)['opportunity_unknown']
-    e.load(config).complete(call);assert cli('reconcile','--call-id',call)['status']==outcome
-    with controller._writer(root):
-        competing=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli','execution-recover','--root',str(root),'--step','2'],capture_output=True,text=True)
-        assert competing.returncode==1 and 'running controller' in competing.stdout
-    reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli','execution-recover','--root',str(root),'--step','2'],capture_output=True,text=True)
-    assert reply.returncode==0,(reply.stdout,reply.stderr)
-    assert json.loads(reply.stdout)['status']=='execution_recovered'
-    refs=list((root/'host-history/execution-recoveries/002').glob('*.json'));assert len(refs)==1
-    recovery_bytes=refs[0].read_bytes()
-    # Repeat confirmation consumes the same terminal projection and recovery fact.
-    assert controller.execution_recover(root,2)['status']=='execution_recovered'
-    assert refs[0].read_bytes()==recovery_bytes
-    assert (old_record/'result-identity.json').read_bytes()==seal_bytes and (root/'jobs/003.json').read_bytes()==old_job
-    c.validate(c.workspace(root,2));c.validate(c.workspace(root,3))
-    current=search.project(root,4)
-    assert not current['opportunity_unknown'] and current['opportunity_counts']=={'h001.m1':1}
-    successor=c.build_job(root,4,'W',[1,2,3]);assert len(successor['history']['execution_recoveries'])==1
-    assert not successor['search']['breadth']['prior_unknown']
-    index=c.read(c.workspace(root,4)/successor['history']['view']['indexes']['experiments'])
-    recovered=index['experiments'][0]
-    assert recovered['call_id']==call and recovered['execution_status']==outcome
-    if collect:assert (c.workspace(root,4)/recovered['outputs'][0]['path']).read_bytes()==b'opaque original job package'
-    assert successor['worker_view_version']==1
-    assert not {'native_originals_index','native_originals','original'} & recovered.keys()
-    assert not (c.workspace(root,4)/f'inputs/recovered/002/{call}/originals').exists()
-    # Native control proofs remain reachable through the exact frozen host prefix.
-    recovery_ref=successor['history']['execution_recoveries'][0]
-    assert root/recovery_ref['path']==refs[0] and refs[0].stat().st_size==recovery_ref['size_bytes']
-    recovery=c.read(root/recovery_ref['path']);row=recovery['row']
-    assert recovery['source_step']==2 and recovery['seal_ref']==c.record_ref(old_record/'result-identity.json')
-    assert row['call_id']==call and row['status']==outcome
-    assert row['accepted']==old_fact['managed_calls'][0]['accepted'] and row['scope']==old_fact['managed_calls'][0]['scope']
-    history.validate_managed(root,job,[row])
-    observation=c.read(root/row['observation']['snapshot'])
-    native_originals=[c.read(Path(proof['path'])) for proof in observation['proofs']]
-    assert any(item.get('native_payload')=='retained-native-terminal-only' and item['call_id']==call
-        and item['scope']==row['scope'] and item['status']==outcome for item in native_originals)
-    # A fresh W interprets the appended original; no replacement managed submit.
-    finish(root,4,'W',[1,2,3],mechanism_findings=[dict(mechanism='P',basis='observed',finding='Read the recovered original'),dict(mechanism='Q',basis='blocked',finding='No Q observation')])
-    finish(root,5,'A',[1,4],action='continue_w',search_choice=dict(dispositions=[dict(mechanism_ref='h001.m1',status='screened',reason='Assess the new W interpretation')],next_focus=dict(mechanism_ref='h001.m1',action='improve')))
-    assert search.project(root,6)['mechanisms']['h001.m1']['status']=='screened'
-    next_job=c.build_job(root,6,'W',[1,4,5]);record=execution.record(root,6)
-    node_anchor=budget.accept_node(root,next_job)
-    anchor=dict(budget_slice=node_anchor) if node_anchor is not None else dict(search_slice=search.accept(root,next_job))
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/006.json'),**anchor))
-    next_config=e.configure(root,6,'composed_execution:fixture',dict(synchronous=True),c.workspace(root,6)/'work/config.json')
-    package=c.workspace(root,6)/'work/package';package.write_bytes(b'new scientific input')
-    assert e.dispatch(next_config,package,new=True,mechanism='P')['status']=='known_success'
-    assert len(e.Records(config).calls())==1
-    # Tampering a consumed recovery prefix is rejected, while old jobs remain unchanged.
-    refs[0].chmod(0o600);value=c.read(refs[0]);value['row']['status']='unknown';c.write(refs[0],value)
-    with pytest.raises(ValueError):c.validate(c.workspace(root,4))
-    c.validate(c.workspace(root,2));c.validate(c.workspace(root,3))
-
-
-def legacy_two_calls(tmp_path,monkeypatch):
-    from test_composed_execution_results import case
-    from scidiscovery.research_loop import managed_wait
-    import uuid
-    root,job,config,cli,first=case(tmp_path,dict(collect=False))
-    # Historical parallel originals: construct the two accepted reservations via
-    # the common registry contract, not a modern dispatch retry of unknown work.
-    records=e.Records(config);adapter=e.load(config);package=c.workspace(root,2)/'work/package';proof=e.proof(package)
-    descriptor=e.LocalFileDescriptor(name='0002-'+uuid.uuid4().hex,local_path=str(package),size_bytes=proof['size_bytes'],media_type='application/octet-stream')
-    accepted=records.accept(descriptor,adapter.acceptance_metadata(descriptor,new=True),config['execution_interface'],expected_calls=[first],mechanism='Q')
-    adapter.dispatch_lease(accepted);external,state=adapter.submit(descriptor);records.bind_external(descriptor.name,external,state)
-    with monkeypatch.context() as patch:
-        patch.setattr(managed_wait,'before_seal',lambda *args:None)
-        finish(root,2,'W',[1],mechanism_findings=[dict(mechanism=label,basis='blocked',finding='Original backend pending') for label in ('P','Q')])
-    return root,job,config,cli,first,descriptor.name
-
-
-def test_partial_recovery_keeps_other_original_unknown_and_prepared_w_prefix(tmp_path,composed_registry,monkeypatch):
-    from scidiscovery.research_loop import search
-    root,job,config,cli,first,second=legacy_two_calls(tmp_path,monkeypatch)
-    finish(root,3,'A',[1,2],action='continue_w',search_choice=dict(dispositions=[],next_focus=dict(mechanism_ref='h001.m1',action='screen')))
-    prepared=c.build_job(root,4,'W',[1,2,3]);saved=(root/'jobs/004.json').read_bytes()
-    assert prepared['search']['breadth']['prior_unknown']
-    adapter=e.load(config);adapter.complete(first)
-    assert controller.execution_recover(root,2)['status']=='execution_recovery_pending'
-    assert len(list((root/'host-history/execution-recoveries/002').glob('*.json')))==1
-    from scidiscovery.research_loop import execution_recovery
-    partial=search.fold(root,history.source_sequence(root,4),recovery_refs=execution_recovery.prefix(root,5))
-    assert partial['opportunity_unknown'] and partial['opportunity_counts']=={'h001.m1':1,'h001.m2':1}
-    # Existing W retains its exact unknown prefix even after all originals resolve.
-    adapter.complete(second);assert controller.execution_recover(root,2)['status']=='execution_recovered'
-    assert (root/'jobs/004.json').read_bytes()==saved and search.project(root,4)['opportunity_unknown']
-    assert c.build_job(root,4,'W',[1,2,3])==prepared
-    finish(root,4,'W',[1,2,3],mechanism_findings=[dict(mechanism=label,basis='blocked',finding='This prepared node lacks the new recovery prefix') for label in ('P','Q')])
-    a=c.build_job(root,5,'A',[1,2,4])
-    assert len(a['history']['execution_recoveries'])==2
-    state=search.project(root,5)
-    assert not state['opportunity_unknown'] and state['opportunity_counts']=={'h001.m1':1,'h001.m2':1}
-    before={p:p.read_bytes() for p in (root/'host-history/execution-recoveries/002').glob('*.json')}
-    assert controller.execution_recover(root,2)['status']=='execution_recovered'
-    assert before=={p:p.read_bytes() for p in before}
-    c.validate(c.workspace(root,2));c.validate(c.workspace(root,3));c.validate(c.workspace(root,4))
-
-
-def test_wait_gate_preserves_known_missing_output_repair_diagnosis(tmp_path,composed_registry):
-    from scidiscovery.research_loop import continuation, managed_wait
-    from scidiscovery.research_loop.output_repair import OutputRepairRequired
-    root=instance(tmp_path,dict(collect=False));job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
-    c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,usage=dict(unknown_steps=[]),output_status='missing',raw_ref=None,cleanup='observed_group_cleaned'))
-    managed_wait.before_seal(root,job,record)
-    with pytest.raises(OutputRepairRequired,match='Return the required final scientific JSON'):c.seal_result(root,2)
-    assert not (record/'execution-wait.json').exists()
 
 
 @pytest.mark.parametrize('fault',['noninteger-native-code','unknown-native-usage'])
@@ -1012,6 +647,7 @@ def test_wait_gate_never_converts_uncertain_native_facts_to_free_waiting(tmp_pat
     c.write(record/'native-outcome.json',dict(returncode=False if fault=='noninteger-native-code' else 0,
         stop_reason=None,usage=dict(unknown_steps=[2] if fault=='unknown-native-usage' else []),raw_ref=c.file_ref(raw)))
     monkeypatch.setattr(e,'load',lambda *args,**kwargs:pytest.fail('Uncertain native facts must not enter managed waiting'))
-    managed_wait.before_seal(root,job,record)
+    # Invalid native facts return before the inventory or adapter is consumed.
+    managed_wait.before_seal(root,job,record,inventory=None)
     assert not (record/'execution-wait.json').exists() and not (record/'checkpoint.json').exists()
     assert len(e.Records(config).calls())==1

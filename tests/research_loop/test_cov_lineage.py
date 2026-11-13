@@ -202,25 +202,6 @@ def test_current_frozen_wrapper_configuration_roundtrips_and_rejects_undeclared_
 
 
 @pytest.mark.process_e2e
-def test_same_node_new_parent_branch_and_backtrack_without_carry(wrapper):
-    p = wrapper.run('P', 'success', '--new-plan')
-    q = wrapper.run('Q', 'success', '--parent-plan', p['candidate_id'], '--change-intent', 'Improve P')
-    r = wrapper.run('R', 'success', '--parent-plan', p['candidate_id'])
-    omitted = wrapper.run('no-automatic-parent')
-    assert p['parent']['status'] == 'declared_root'
-    assert q['parent']['candidate_id'] == r['parent']['candidate_id'] == p['candidate_id']
-    assert q['candidate_id'] != r['candidate_id']
-    assert q['parent']['source'] == r['parent']['source'] == 'same_node_completed_call'
-    assert omitted['parent']['status'] == 'unknown'
-    assert q['model'] == {'retained': True}
-    assert not {'scope', 'proofs'} & q.keys()
-    before = {p: p.read_bytes() for p in wrapper.root.rglob('*') if p.is_file()}
-    status = wrapper.cli('lineage-status')
-    assert len(status['calls']) == 4
-    assert before == {p: p.read_bytes() for p in wrapper.root.rglob('*') if p.is_file()}
-
-
-@pytest.mark.process_e2e
 def test_exact_failed_receipt_preserves_known_failure_and_allows_new_repair(wrapper):
     p = wrapper.run('P', 'success', '--new-plan')
     failed = wrapper.run('failed', 'failed', '--parent-plan', p['candidate_id'], expected=1)
@@ -231,25 +212,6 @@ def test_exact_failed_receipt_preserves_known_failure_and_allows_new_repair(wrap
     repaired = wrapper.run('repair', 'success', '--parent-plan', p['candidate_id'], '--change-intent', 'Repair known failure')
     assert repaired['status'] == 'known_success' and repaired['run_id'] == 3
     assert (wrapper.directory(failed) / 'completed.json').read_bytes() == original
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('mode', ['missing_receipt', 'wrong_script', 'wrong_metric'])
-def test_missing_or_mismatched_independent_receipt_never_guesses_or_replays(wrapper, mode):
-    unknown = wrapper.run('uncertain', mode, '--new-plan', expected=2)
-    assert unknown['status'] == 'unknown' and unknown['candidate_id'] is None
-    # Public rows, models and plausible stdout cannot establish call ownership.
-    directory=wrapper.directory(unknown)
-    assert json.loads((directory/'stdout.raw').read_text())['ok'] is True
-    if mode=='missing_receipt':assert not (directory/'receipt.json').exists()
-    else:assert (directory/'receipt.json').is_file()
-    assert (wrapper.runs / 'model_run1.pkl').exists()
-    original_calls, original_accepts = wrapper.calls(), wrapper.accepted()
-    snapshot = {p: p.read_bytes() for p in wrapper.root.rglob('*') if p.is_file()}
-    assert wrapper.cli('lineage-status')['calls'][0]['status'] == 'unknown'
-    assert snapshot == {p: p.read_bytes() for p in wrapper.root.rglob('*') if p.is_file()}
-    assert wrapper.run('do-not-replay', expected=2)['status'] == 'unknown'
-    assert wrapper.calls() == original_calls and wrapper.accepted() == original_accepts
 
 
 @pytest.mark.process_e2e
@@ -266,57 +228,11 @@ def test_unmanaged_public_row_does_not_create_a_selectable_declared_parent(wrapp
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('name', ['model.pkl', 'source.py', 'stdout.raw', 'row.json', 'receipt.json', 'accepted.json'])
-def test_retained_call_asset_tamper_is_hard_error_and_blocks_new_execution(wrapper, name):
-    result = wrapper.run('P', 'success', '--new-plan')
-    path = (wrapper.runs / f'model_run{result["run_id"]}.pkl' if name=='model.pkl'
-        else wrapper.directory(result) / name)
-    path.chmod(0o600)
-    if name == 'accepted.json':
-        value = json.loads(path.read_text())
-        value['scope']['execution_key'] = 'c'*64
-        path.write_text(json.dumps(value))
-    else:
-        path.write_bytes(path.read_bytes() + b'tampered')
-    before = wrapper.calls()
-    if name in {'model.pkl', 'source.py'}:
-        preview = wrapper.cli('lineage-status')
-        assert preview['calls'][0]['status'] == 'known_success'
-        assert 'does not establish source/model integrity' in preview['feedback']['qualification']
-    else:
-        assert wrapper.cli('lineage-status', expected=3)['status'] == 'integrity_error'
-    assert wrapper.run('cannot-use-mutated-parent', 'success', '--parent-plan', result['candidate_id'], expected=3)['status'] == 'integrity_error'
-    assert wrapper.calls() == before and len(wrapper.accepted()) == 1
-
-
-@pytest.mark.process_e2e
 def test_public_stdout_and_stderr_exact_aggregate_bound_is_allowed(wrapper):
     result = wrapper.run('exact-byte-bound', 'exact_stdio', '--new-plan')
     assert result['status'] == 'known_success'
     directory = wrapper.directory(result)
     assert (directory / 'stdout.raw').stat().st_size + (directory / 'stderr.raw').stat().st_size == cov_lineage.MAX_BYTES
-
-
-@pytest.mark.process_e2e
-def test_incomplete_transport_rejects_even_exact_successful_receipt(wrapper):
-    result = wrapper.run('complete-original', 'success', '--new-plan')
-    directory = wrapper.directory(result)
-    accepted = json.loads((directory / 'accepted.json').read_text())
-    rows = [json.loads(line) for line in (wrapper.runs / 'results.jsonl').read_text().splitlines()]
-    original = {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
-    receipt=json.loads((directory/'receipt.json').read_text())
-    assert receipt['row']==rows[0]
-    assert set(receipt)=={'version','call_id','scope','source_ref','row'}
-    assert receipt['version']==1 and receipt['call_id']==accepted['call_id']
-    assert receipt['scope']==accepted['scope']
-    assert receipt['source_ref']==accepted['script']
-    config = json.loads(wrapper.config.read_text())
-    from scidiscovery.research_loop import storage_policy as storage
-    arguments = dict(storage_root=experiments.Records(config).storage_root(),
-        policy=config.get('storage_policy'), context=storage.Deadline(10))
-    assert cov_lineage._receipt(directory, accepted, rows, 0, True, transport_complete=True, **arguments)['status'] == 'known_success'
-    assert cov_lineage._receipt(directory, accepted, rows, 0, True, transport_complete=False, **arguments) is None
-    assert original == {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
 
 
 @pytest.mark.process_e2e

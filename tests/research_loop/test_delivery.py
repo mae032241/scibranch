@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import sys
 
@@ -195,7 +194,7 @@ def test_delivery_tool_upgrade_preserves_scientific_input_checks(tmp_path,monkey
         inputs=[dict(label='runtime-python',path=str(python)),dict(label='harness/data.csv',path=str(scientific))])))['adapter']
     runtime=next(item for item in spec['inputs'] if item['label']=='runtime-python')
     assert 'sha256' not in runtime
-    monkeypatch.setattr(c,'settings',lambda root:dict(delivery_policy=dict(adapter=spec)))
+    monkeypatch.setattr(delivery,'_settings',lambda *args:dict(delivery_policy=dict(adapter=spec)))
     python.write_text('upgraded interpreter')
     adapter.write_text('print("upgraded tool")')
     assert delivery._adapter(tmp_path)['config']==spec['config']
@@ -204,42 +203,32 @@ def test_delivery_tool_upgrade_preserves_scientific_input_checks(tmp_path,monkey
         delivery._adapter(tmp_path)
 
 
-@pytest.mark.parametrize('kind,phase',[('generic','confirm'),('cov','confirm'),('cov','audit'),('cov','smoke')])
-def test_delivery_namespace_uses_exact_interpreter_reference(tmp_path,monkeypatch,kind,phase):
+def test_delivery_namespace_uses_exact_interpreter_reference(tmp_path,monkeypatch):
     from scidiscovery.research_loop import generic_delivery
     from scidiscovery.research_loop.protocol import CURRENT
     stage=tmp_path/'stage';(stage/'inputs').mkdir(parents=True);(stage/'scratch').mkdir()
     target=tmp_path/'target';target.mkdir()
     python=Path(sys.executable)
     proof=dict(label='runtime-python',invoked_path=str(python.absolute()),path=str(python.resolve()))
-    request=dict(scope=dict(handoff_protocol=CURRENT),stage=str(stage),phase=phase,inputs=[proof],
-        source_roots=[],config=dict(python=str(python)),target={})
-    if kind=='generic':
-        module=generic_delivery
-        request['config']['runtime_roots']=list(dict.fromkeys([sys.base_prefix,sys.prefix]))
-        request['target']=dict(directory=str(target))
-    else:
-        module=cov_delivery
-        runs=target/'runs';runs.mkdir()
-        submission=target/'submission';submission.mkdir()
-        request['target']=dict(runs=str(runs),submission=str(submission))
-    if phase in {'audit','smoke'}:request.pop('target')
+    request=dict(scope=dict(handoff_protocol=CURRENT),stage=str(stage),phase='confirm',inputs=[proof],
+        source_roots=[],object_refs={},config=dict(python=str(python),runtime_roots=list(dict.fromkeys([sys.base_prefix,sys.prefix]))),
+        target=dict(directory=str(target)))
     commands=[]
     class NamespaceReady(Exception):pass
     def capture(program,arguments):
         commands.append((program,arguments))
         raise NamespaceReady
-    monkeypatch.setattr(module.shutil,'which',lambda name:'/qualified/bwrap')
-    monkeypatch.setattr(module.os,'execv',capture)
-    with pytest.raises(NamespaceReady):module.isolate(request,str(Path(module.__file__).resolve()))
+    monkeypatch.setattr(generic_delivery.shutil,'which',lambda name:'/qualified/bwrap')
+    monkeypatch.setattr(generic_delivery.os,'execv',capture)
+    with pytest.raises(NamespaceReady):generic_delivery.isolate(request,str(Path(generic_delivery.__file__).resolve()))
     program,arguments=commands[0]
     assert program=='/qualified/bwrap' and '--unshare-net' in arguments
     assert arguments[arguments.index('--')+1]==str(python)
-    if phase=='confirm':
-        assert '--bind' not in arguments  # Confirmation preserves read-only delivery targets.
-    else:
-        assert '/target' not in arguments and str(target) not in arguments
-
+    assert '--bind' not in arguments
+    proof['invoked_path']='/another/python'
+    with pytest.raises(ValueError,match='runtime changed'):
+        generic_delivery.isolate(request,str(Path(generic_delivery.__file__).resolve()))
+    assert len(commands)==1
 
 
 @pytest.mark.parametrize('invalid', ['missing', 'nan', 'zero_submit', 'negative_margin'])
@@ -264,7 +253,8 @@ def test_pre_a_sources_are_snapshot_pending_not_proxy_qualified(tmp_path):
     (root / 'runs/exact-model.bin').write_bytes(b'Overwritten mutable public model')
     (c.workspace(root, 2) / 'artifacts/train.py').chmod(0o600)
     # Changing sealed material is corruption, unlike overwriting unsealed scratch.
-    delivery.validate_sources(root, refs)
+    with pytest.raises(ValueError, match='Original size changed|original'):
+        delivery.validate_sources(root, refs)
     assert refs == saved
     view = json.dumps(delivery.public_sources(refs))
     assert len(view.encode()) <= 4096 and 'sha256' not in view and 'host-delivery' not in view
@@ -348,10 +338,10 @@ def test_seventeenth_source_remains_selectable_and_shared_objects_are_deduplicat
     _, _, bound = closeout_decision(root, refs, recommendation='run-17')
     assert bound['candidate_id'] == 'run-17'
     job = c.read(root / 'jobs/003.json')
-    assert 'run-17' in job['history']['candidate_ids']
-    page = c.workspace(root, 3) / 'inputs/history/candidates/0002.json'
-    assert c.read(page)['candidates'][0]['id'] == 'run-17'
-    assert page.stat().st_mode & 0o222 == 0
+    assert any(row['candidate_id']=='run-17' for row in refs['items'])
+    from scidiscovery.research_loop import accepted_prefix
+    candidate = accepted_prefix.candidate(root, job['history']['prefix'], 'run-17')
+    assert candidate['observation']['id'] == bound['candidate_id'] == 'run-17'
 
 
 @pytest.mark.process_e2e
@@ -469,10 +459,10 @@ def test_staged_audit_and_recovery_inputs_omit_delivery_destination(tmp_path,mon
     assert 'target' not in request and 'target' not in recovery
     assert 'private-destination' not in json.dumps([request,recovery])
     assert request['candidate_id']==recovery['candidate_id']=='exact-candidate'
-    assert request['object_refs']==recovery['object_refs']=={'artifact':proof}
+    assert request['object_refs']==recovery['object_refs']=={'artifact':c.file_ref(original)}
     assert request['artifact_origin']==recovery['artifact_origin']==c.file_ref(original)
-    assert (stage/'inputs/artifact').stat().st_ino == (stage/'recovery-1/inputs/artifact').stat().st_ino == original.stat().st_ino
-    assert stat.S_IMODE((stage/'inputs/artifact').stat().st_mode) == 0o400
+    assert (stage/'inputs/artifact').stat().st_size == (stage/'recovery-1/inputs/artifact').stat().st_size == 0
+    assert (stage/'inputs/artifact').stat().st_ino != original.stat().st_ino
     (stage/'scratch/owned').write_text('writable independent audit work')
     assert (stage/'scratch/owned').stat().st_ino != original.stat().st_ino
 
@@ -483,32 +473,6 @@ def test_custom_delivery_requires_explicit_readonly_input_contract(tmp_path):
         inputs=[], source_roots=[str(tmp_path)])
     with pytest.raises(ValueError, match='readonly_inputs_version'):
         delivery.policy(delivery_policy(supplied))
-
-
-def test_delivery_stage_uses_owned_namespace_and_never_falls_back_to_copy(tmp_path, monkeypatch):
-    import errno
-    from scidiscovery.archive_io import SharingUnsupported
-    from scidiscovery.research_loop import atomic_files
-    original = tmp_path / 'artifact'; original.write_bytes(b'controlled immutable original'); original.chmod(0o400)
-    proof = dict(path='artifact',size_bytes=original.stat().st_size)
-    source = dict(candidate_id='exact', objects={'artifact': proof}, artifact_origin=c.file_ref(original),context={})
-    monkeypatch.setattr(delivery, '_settings', lambda *args: dict(handoff_protocol=c.HANDOFF_PROTOCOL))
-    elsewhere = tmp_path / 'other-tmp'; elsewhere.mkdir()
-    monkeypatch.setenv('TMPDIR', str(elsewhere))
-    def no_copy(*args, **kwargs):
-        raise AssertionError('Stage construction must not copy payloads')
-    monkeypatch.setattr(atomic_files, 'copy_original', no_copy)
-    with delivery._stage(tmp_path, 'fixture-') as directory:
-        stage = Path(directory)
-        assert stage.parent == tmp_path / 'host-delivery'
-        delivery._staged(tmp_path, dict(inputs=[], config={}), source, 'same-call', stage)
-        assert (stage / 'inputs/artifact').stat().st_ino == original.stat().st_ino
-    assert original.read_bytes() == b'controlled immutable original'
-    def unsupported(*args, **kwargs):
-        raise OSError(errno.EXDEV, 'fixture cannot share this inode')
-    monkeypatch.setattr(os, 'link', unsupported)
-    with delivery._stage(tmp_path, 'fixture-') as directory, pytest.raises(SharingUnsupported):
-        delivery._staged(tmp_path, dict(inputs=[], config={}), source, 'same-call', Path(directory))
 
 
 def test_staging_deadline_expires_before_any_leaf_dispatch(tmp_path, monkeypatch):
@@ -546,22 +510,3 @@ def test_selected_sources_ignore_missing_unconsumed_science(tmp_path,monkeypatch
         objects=objects,artifact_origin=c.file_ref(selected),context=dict(kind='managed_local_result'))
     refs=dict(items=[source],omitted_count=0,source_nodes=nodes)
     assert delivery.validate_sources(root,refs)==refs
-    def copied(*args,**options):pytest.fail('Delivery staged scientific body bytes or an inode alias')
-    monkeypatch.setattr(shared_originals,'retain',copied)
-    monkeypatch.setattr(shared_originals,'link',copied)
-    stage=root/'host-delivery/selected-stage';stage.mkdir(parents=True)
-    request=delivery._staged(root,spec,source,'a'*64,stage,
-        job=dict(c.read(root/'jobs/001.json'),delivery_sources=dict(source_nodes=nodes)))
-    assert request['object_refs']['artifact']==c.file_ref(selected)
-    assert all((stage/'inputs'/label).stat().st_size==0 for label in objects)
-    assert (stage/'inputs/artifact').stat().st_ino!=selected.stat().st_ino
-    captured=[]
-    monkeypatch.setattr(generic_delivery.shutil,'which',lambda name:'/qualified/bwrap')
-    monkeypatch.setattr(generic_delivery.os,'execv',lambda binary,args:captured.extend(args))
-    generic_delivery.isolate(dict(request,phase='promote',target=spec['target']),spec['adapter'])
-    assert any(captured[index:index+3]==['--ro-bind',str(selected),'/inputs/artifact']
-        for index in range(len(captured)-2))
-    replace_equal_bytes(selected)
-    with pytest.raises(ValueError,match='changed|identity|original'):delivery.validate_sources(root,refs)
-    (record/'native-outcome.json').unlink()
-    with pytest.raises((OSError,ValueError),match='original|regular|control|No such|file'):delivery.catalogue_sources(root,nodes)

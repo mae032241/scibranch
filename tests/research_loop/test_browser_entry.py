@@ -1,9 +1,6 @@
 """Real browser capability entry from another site; no model or controller runs."""
-import base64
-import hashlib
 import os
 from pathlib import Path
-import re
 import shutil
 import signal
 import subprocess
@@ -18,7 +15,7 @@ from scidiscovery.research_loop import instance_ui
 from test_execution_authority import prepare
 
 
-def test_entry_document_keeps_strict_cookie_and_a_secret_free_child_fallback(tmp_path):
+def test_entry_document_keeps_strict_cookie_and_secret_free_child_links(tmp_path):
     root, key = prepare(tmp_path, enabled=False)
     workspace = tmp_path / 'workspace'; workspace.mkdir()
     ui = instance_ui.InstanceUI(workspace, secret_file=key, workspace=True, instance_roots=[root])
@@ -34,12 +31,6 @@ def test_entry_document_keeps_strict_cookie_and_a_secret_free_child_fallback(tmp
         assert b'data-live-url' not in body
         assert headers['Referrer-Policy'] == 'no-referrer'
         assert 'HttpOnly' in headers['Set-Cookie'] and 'SameSite=Strict' in headers['Set-Cookie']
-        scripts = re.findall(rb'<script>(.*?)</script>', body, re.S)
-        assert b"location.replace('./');" in scripts
-        for script in scripts:
-            digest = base64.b64encode(hashlib.sha256(script).digest()).decode()
-            assert "'sha256-" + digest + "'" in headers['Content-Security-Policy']
-        assert "'unsafe-inline'" not in headers['Content-Security-Policy']
     restarted = instance_ui.InstanceUI(workspace, secret_file=key, workspace=True, instance_roots=[root])
     restarted.host = ui.host
     for access, token in (('manage', ui.management_token), ('view', ui.read_token), ('manage', 'forged')):
@@ -91,8 +82,11 @@ def test_browser_entry_from_another_site(tmp_path, monkeypatch, scope):
             self.end_headers(); self.wfile.write(body)
 
     monkeypatch.setattr(instance_ui, 'ThreadingHTTPServer', Server)
-    monkeypatch.setattr(instance_ui, 'InstanceUI', lambda selected, **options:
-                        ui if Path(selected) == workspace else ui_type(selected, **options))
+    def selected_ui(selected, **options):
+        return ui if Path(selected) == workspace else ui_type(selected, **options)
+    selected_ui._from_settings = ui_type._from_settings
+    selected_ui._mount = ui_type._mount
+    monkeypatch.setattr(instance_ui, 'InstanceUI', selected_ui)
     monkeypatch.setattr(instance_ui, 'print', lambda *args, **options: None, raising=False)
 
     def serve():

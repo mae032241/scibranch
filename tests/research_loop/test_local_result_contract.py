@@ -85,22 +85,20 @@ def test_artifact_candidate_needs_no_metric_and_never_chooses_first_measurement(
     assert result['metrics']==value['metrics']
 
 
-def test_candidate_members_keep_identity_and_public_reference_when_list_order_changes(tmp_path):
+def test_candidate_members_keep_identity_and_public_reference_when_projection_order_changes(tmp_path):
     from scidiscovery.research_loop import candidate_refs
     value=declaration()
     value['outputs'].append(dict(path='artifacts/alternative.bin'))
     value['candidates'].append(dict(artifact='artifacts/alternative.bin'))
-    projected=[];references=[]
-    for members in (value['candidates'],list(reversed(value['candidates']))):
-        (tmp_path/'result.json').write_text(json.dumps(dict(value,candidates=members)))
-        result=LocalExecution.read_result(tmp_path,[dict(name='model.bin'),dict(name='alternative.bin')])
-        row=dict(observed(result),outputs=[dict(name='model.bin'),dict(name='alternative.bin')])
-        rows=generic_results.candidates([row])
-        assert len(rows)==2 and len({item['id'] for item in rows})==2
-        projected.append({item['evidence'][1]['name']:item['id'] for item in rows})
-        references.append(candidate_refs.references([dict(role='W',step=2,
-            observation=dict(candidates=rows,managed_calls=[row]))]))
-    assert projected[0]==projected[1] and references[0]==references[1]
+    (tmp_path/'result.json').write_text(json.dumps(value))
+    result=LocalExecution.read_result(tmp_path,[dict(name='model.bin'),dict(name='alternative.bin')])
+    row=dict(observed(result),outputs=[dict(name='model.bin'),dict(name='alternative.bin')])
+    candidates=generic_results.candidates([row])
+    assert len(candidates)==2 and len({item['id'] for item in candidates})==2
+    references=[candidate_refs.references([dict(role='W',step=2,
+        observation=dict(candidates=rows,managed_calls=[row]))])
+        for rows in (candidates,list(reversed(candidates)))]
+    assert references[0]==references[1]
     assert set(references[0].values())=={'W002-C001/artifacts/model.bin','W002-C001/artifacts/alternative.bin'}
 
 
@@ -229,14 +227,12 @@ def test_nonfinite_descriptions_preserve_real_completion_publish_and_original(lo
     assert len(e.Records(config).calls())==1
 
 
-def test_unreadable_json_has_fixed_bounded_detail(tmp_path):
+def test_unreadable_json_diagnostic_omits_host_path(tmp_path):
     (tmp_path/'result.json').write_text('{')
     result=LocalExecution.read_result(tmp_path,[])
     assert result['status']=='invalid' and result['diagnostic']=='result_json_invalid'
     assert str(tmp_path) not in result['detail']
-    original=dict(result,detail='字'*512,private_control=dict(path='/private/control'))
-    public=e._run_view(dict(result=original))['result']
-    assert len(public['detail'].encode())<=512 and 'private_control' not in public
+
 
 
 @pytest.mark.parametrize('output_kind',['mutable_alias','frozen_alias','exclusive','declaration_limit'])

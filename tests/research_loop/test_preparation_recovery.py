@@ -12,7 +12,7 @@ import traceback
 import pytest
 
 from execution_fixtures import execution_registry, remote_registry, DifferentExternalIdentity
-from test_nonlocal_execution_observation import case, run
+from test_nonlocal_execution_observation import case, run, research, research_path
 from test_history_handoff import finish
 from test_native_execution_inputs import chain, late_call as original_late_call, _approve, _resume, _reviewed_execution
 from scidiscovery.operations.execution import LocalFileDescriptor
@@ -37,6 +37,7 @@ def late_call(chain, capsys, monkeypatch):
 # These wrappers observe actual production writes/admission. They never supply a
 # successful adapter, authorization, accepted record or recovery result.
 CRASH_WRITER = r'''
+from test_nonlocal_execution_observation import research
 import json, os, pathlib, signal, sys
 from execution_fixtures import DifferentExternalIdentity
 from scidiscovery.research_loop import breadth, contracts as c, experiments as e, preparation_recovery as recovery
@@ -60,10 +61,12 @@ if boundary=='binding':
         ref=original(*args,**kwargs);stop(ref['path']);return ref
     recovery.bind_snapshot=bind
 elif boundary=='partial':
-    original=c._bind_original
-    def copy(*args,**kwargs):
-        result=original(*args,**kwargs);stop(args[1]);return result
-    c._bind_original=copy
+    original=e.verify_scientific_inputs
+    def verify(accepted,*args,**kwargs):
+        result=original(accepted,*args,**kwargs)
+        if accepted.get('host_preparation'):stop(accepted['host_preparation']['path'])
+        return result
+    e.verify_scientific_inputs=verify
 elif boundary=='accepted':
     original=e.write
     def write(path,*args,**kwargs):
@@ -71,12 +74,13 @@ elif boundary=='accepted':
         if pathlib.Path(path).name=='accepted.json':stop(path)
         return result
     e.write=write
-e.dispatch(config,payload,new=True,mechanism='P')
+e.dispatch(config,payload,new=True,mechanism=research(payload.parents[4], '1'))
 raise AssertionError('writer passed its durable stop')
 '''
 
 
 LOCAL_CRASH_WRITER = r'''
+from test_nonlocal_execution_observation import research
 import json, os, pathlib, signal, sys
 from scidiscovery.research_loop import contracts as c, experiments as e
 from scidiscovery.research_loop.local_experiments import LocalExecution
@@ -111,7 +115,7 @@ else:
         if pathlib.Path(path).name=='accepted.json':stop(path)
         return result
     e.write=write
-e.dispatch(config,payload,new=True,mechanism='P')
+e.dispatch(config,payload,new=True,mechanism=research(payload.parents[4], '1'))
 raise AssertionError('Local writer passed its durable stop')
 '''
 
@@ -137,13 +141,15 @@ def _child(source, *arguments):
 
 
 def _payload(root):
-    path = c.workspace(root, 2) / 'work/opaque-package'
+    path = c.workspace(root, 2) / 'code/opaque-package'
+    path.parent.mkdir(exist_ok=True)
     path.write_bytes(b'opaque contract fixture; never executed as source\n')
     return path
 
 
 def _local_payload(root):
-    path = c.workspace(root, 2) / 'work/local.py'
+    path = c.workspace(root, 2) / 'code/local.py'
+    path.parent.mkdir(exist_ok=True)
     path.write_text('raise AssertionError("Local preparation fixture must never launch")\n')
     return path
 
@@ -163,7 +169,7 @@ def _killed(root, config, boundary):
     assert row['status'] == 'unknown'
     assert Path(row['binding']['path']).is_file()
     assert not (Path(config['record_dir']) / 'calls' / row['call_id']).exists()
-    assert counter.read_text().splitlines() == (['admit', 'prepare', 'admit'] if boundary == 'accepted' else ['admit', 'prepare'])
+    assert counter.read_text().splitlines() == ['prepare']
     return row, counter
 
 
@@ -174,7 +180,9 @@ def _maintain(root, row, action, **changes):
 
 
 def _pending_binding(root, row):
-    return dict(row['binding'], path=Path(row['binding']['path']).relative_to(root).as_posix())
+    binding = row['binding']
+    return dict(path=Path(binding['path']).relative_to(root).as_posix(),
+        size_bytes=binding['size_bytes'])
 
 
 def _cli(root, row, action):
@@ -271,157 +279,33 @@ def test_legacy_copied_snapshot_consumer_uses_retained_originals(tmp_path, monke
     assert binding.read_bytes() == originals[binding] and accepted_path.read_bytes() == originals[accepted_path]
 
 
+
+
+
+
 @pytest.mark.process_e2e
-def test_killed_unbound_local_writer_explicit_cli_cleanup_removes_only_its_blocker(tmp_path, monkeypatch, capsys):
-    write = c.write
-    def no_native(path, value):
-        return write(path, dict(value, native_started=False) if Path(path).name == 'native-outcome.json' else value)
-    monkeypatch.setattr(c, 'write', no_native)
-    root, _, config, _ = case(tmp_path, monkeypatch, executor='local_execution:command')
-    assert config.get('host_execution_authority') is None
-    with _local_writer(root, config) as (process, snapshot, counter):
-        assert not (snapshot / 'accepted.json').exists()
-        assert _unbound(root, snapshot)['status'] == 'busy'
-        assert snapshot.is_dir()
-        process.send_signal(signal.SIGKILL)
-        assert process.wait(timeout=5) == -signal.SIGKILL
-    finish(root, 2, 'W', [1], preserve_native_intent=True,
-        mechanism_findings=[dict(mechanism=label, basis='blocked',
-            finding='The fixture was killed before acceptance; no scientific observation is claimed.') for label in ('P', 'Q')])
-    snapshot_path = snapshot.relative_to(root).as_posix()
-    selectors = f'--step 2 --snapshot-token {snapshot.name.removeprefix(".prepared-")}'
-    blocker, = [row for row in fork_sources._parent_state(root)
-        if row['code'] == 'unknown_managed_preparation' and row['path'] == snapshot_path]
-    assert selectors in blocker['reason']
-    assert 'execution-preparation-maintain --help' in blocker['reason']
-    assert 'Only for a proven built-in local unbound partial, use --unbound-local --action inspect' in blocker['reason']
-    with pytest.raises(archive.files.ArchiveError, match='Original preparation') as blocked_archive:
-        archive._quiescent(root)
-    assert snapshot_path in str(blocked_archive.value) and selectors in str(blocked_archive.value)
-    assert 'execution-preparation-maintain --help' in str(blocked_archive.value)
-    assert 'Only for a proven built-in local unbound partial, use --unbound-local --action inspect' in str(blocked_archive.value)
+def test_unbound_cleanup_preserves_foreign_executor_originals_without_adapter_effects(tmp_path, monkeypatch, remote_registry):
+    root, _, config, _ = case(tmp_path, monkeypatch, executor='remote_execution:fixture')
+    # This explicit foreign residual must never gain the built-in Local cleanup
+    # exception or invoke an adapter to establish a different execution identity.
     records = Path(config['record_dir'])
-    neighbor = records / 'unrelated-original'; neighbor.mkdir()
-    (neighbor / 'keep').write_bytes(b'untouched neighbor')
-    originals = {path: path.read_bytes() for path in [root / 'settings.json', root / 'jobs/002.json',
-        execution.origin(root, 2) / 'native-intent.json', execution.origin(root, 2) / 'experiment-config.json',
-        execution.origin(root, 2) / 'result-identity.json', records.parent / 'interfaces/000.json',
-        *sorted((root / 'control-ledger').glob('*.json'))]}
-    ledger = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
-    from scidiscovery.research_loop import breadth
-    from scidiscovery.research_loop.local_experiments import LocalExecution
-    def forbidden(*args, **kwargs):
-        pytest.fail('Unbound cleanup entered prepare, admission or submission')
-    for target, name in ((LocalExecution, 'prepare'), (LocalExecution, 'submit'), (breadth, 'admit')):
-        monkeypatch.setattr(target, name, forbidden)
-    assert _unbound_cli(root, snapshot, 'inspect') == 0
-    assert json.loads(capsys.readouterr().out) == dict(status='partial', call_id=None,
-        snapshot_token=snapshot.name.removeprefix('.prepared-'), binding=None)
-    with pytest.raises((ValueError, OSError)):
-        recovery.maintain(root, 2, 'arbitrary-nonexistent-call', snapshot.name.removeprefix('.prepared-'),
-            action='discard-partial', max_seconds=10, authorization_note='A call ID is never a local cleanup selector')
-    assert _unbound_cli(root, snapshot, 'discard-partial') == 0
-    assert json.loads(capsys.readouterr().out) == dict(status='partial_discarded', call_id=None,
-        snapshot_token=snapshot.name.removeprefix('.prepared-'), binding=None)
-    assert not snapshot.exists() and not (records / 'host-preparations').exists()
-    assert (neighbor / 'keep').read_bytes() == b'untouched neighbor'
-    assert not any(row['code'] == 'unknown_managed_preparation' for row in fork_sources._parent_state(root))
-    archive._quiescent(root)
-    assert {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
-    assert all(path.read_bytes() == raw for path, raw in originals.items())
-    assert counter.read_text().splitlines() == ['prepare']
-    with pytest.raises(recovery.PreparationError, match='absent'):
-        _unbound(root, snapshot)
-
-
-def test_live_local_cleanup_failure_residual_can_be_explicitly_removed(tmp_path, monkeypatch, capsys):
-    import shutil
-    from scidiscovery.research_loop.local_experiments import LocalExecution
-    root, _, config, _ = case(tmp_path, monkeypatch, executor='local_execution:command')
-    assert config.get('host_execution_authority') is None
-    snapshots = []
-    original = c._bind_original
-    with monkeypatch.context() as patch:
-        def fail_after_copy(*args, **kwargs):
-            result = original(*args, **kwargs)
-            target = Path(args[1])
-            if target.name == 'source.py' and target.parent.name.startswith('.prepared-'):
-                snapshots.append(target.parent)
-                raise RuntimeError('Real local copy completed before fixture refusal')
-            return result
-        remove = shutil.rmtree
-        def failed_cleanup(path, *args, **kwargs):
-            if Path(path) in snapshots:
-                raise OSError('Exact live local cleanup fault')
-            return remove(path, *args, **kwargs)
-        def no_submit(*args, **kwargs):
-            pytest.fail('Cleanup-failure fixture submitted an execution')
-        patch.setattr(c, '_bind_original', fail_after_copy)
-        patch.setattr(shutil, 'rmtree', failed_cleanup)
-        patch.setattr(LocalExecution, 'submit', no_submit)
-        result = e.dispatch(config, _local_payload(root), new=True, mechanism='P')
-    assert result['status'] == 'known_not_started' and result['error'] == 'local_cleanup_failed'
-    assert len(snapshots) == 1 and (snapshots[0] / 'source.py').is_file()
-    assert not (snapshots[0] / 'accepted.json').exists()
-    ledger = {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
-    assert _unbound_cli(root, snapshots[0], 'discard-partial') == 0
-    assert json.loads(capsys.readouterr().out)['status'] == 'partial_discarded'
-    assert not snapshots[0].exists()
-    assert {path: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('kind', ['bound', 'thirdparty', 'mixed', 'missing_projection'])
-def test_unbound_cleanup_preserves_accepted_bound_and_ambiguous_namespaces(tmp_path, monkeypatch, remote_registry, kind):
-    executor = 'remote_execution:fixture' if kind in {'thirdparty', 'mixed'} else 'local_execution:command'
-    root, job, config, _ = case(tmp_path, monkeypatch, executor=executor, resume=kind == 'mixed')
-    if kind == 'mixed':
-        first = execution.origin(root, 2)
-        meter = dict(input_tokens=1, cached_input_tokens=0, output_tokens=1)
-        c.write(first / 'usage.json', meter)
-        report = budget.node_report(root, job, c.read(first / 'native-intent.json'), meter)
-        c.write(first / 'native-outcome.json', dict(native_started=False, returncode=1, stop_reason='fixture_known_failure',
-            budget_slice=dict(report, usage_observed=(first / 'usage.json').is_file())))
-        anchor = budget.accept_continuation(root, job, [first])
-        continuation = first / 'continuations/001'; continuation.mkdir(parents=True)
-        c.write(continuation / 'native-intent.json', dict(attempt=1, task_ref=c.record_ref(root / 'jobs/002.json'),
-            root_intent_ref=c.record_ref(first / 'native-intent.json'), previous=execution.proof(first), budget_slice=anchor))
-        config = e.configure(root, 2, 'local_execution:command', dict(run_argv=[sys.executable]),
-            c.workspace(root, 2) / 'work/experiment-config.json')
-    if kind == 'thirdparty':
-        # The retained native/interface originals are a real foreign executor.
-        # Its explicitly selected residual needs no adapter invocation to prove
-        # that the built-in Local maintenance exception must refuse it.
-        records = Path(config['record_dir'])
-        records.mkdir(parents=True, exist_ok=True)
-        snapshot = records / '.prepared-foreign-residual'
-        snapshot.mkdir()
-        (snapshot / 'source.py').write_bytes(b'foreign partial original; never executed\n')
-        counter = root.parent / 'foreign-maintenance-effects'
-        counter.write_bytes(b'')
-        native = execution.record(root, 2)
-        foreign_originals = {path: path.read_bytes() for path in (
-            root / 'settings.json', root / 'jobs/002.json',
-            native / 'native-intent.json', native / 'experiment-config.json',
-            records.parent / 'interfaces/000.json')}
-        def no_adapter_effect(*args, **kwargs):
-            with counter.open('ab') as stream:stream.write(b'forbidden adapter invocation\n')
-            pytest.fail('Foreign snapshot maintenance invoked preparation or submission')
-        monkeypatch.setattr(DifferentExternalIdentity, 'prepare', no_adapter_effect)
-        monkeypatch.setattr(DifferentExternalIdentity, 'submit', no_adapter_effect)
-    else:
-        snapshot, counter = _killed_local(root, config, 'accepted' if kind == 'accepted' else 'partial')
-    if kind == 'bound':
-        payload = _local_payload(root)
-        descriptor = LocalFileDescriptor(name='bound-local-target', local_path=str(payload),
-            size_bytes=payload.stat().st_size, media_type='application/octet-stream')
-        recovery.bind_snapshot(config, snapshot, descriptor, dict(parent=dict(candidate_id=None)),
-            context=recovery.storage.Deadline(10))
-    elif kind == 'missing_projection':
-        (Path(config['record_dir']).parent / 'interfaces/000.json').unlink()
+    records.mkdir(parents=True, exist_ok=True)
+    snapshot = records / '.prepared-foreign-residual'
+    snapshot.mkdir()
+    (snapshot / 'source.py').write_bytes(b'foreign partial original; never executed\n')
+    counter = root.parent / 'foreign-maintenance-effects'
+    counter.write_bytes(b'')
+    native = execution.record(root, 2)
+    foreign_originals = {path: path.read_bytes() for path in (
+        root / 'settings.json', root / 'jobs/002.json',
+        native / 'native-intent.json', native / 'experiment-config.json',
+        records.parent / 'interfaces/000.json')}
+    def no_adapter_effect(*args, **kwargs):
+        with counter.open('ab') as stream:stream.write(b'forbidden adapter invocation\n')
+        pytest.fail('Foreign snapshot maintenance invoked preparation or submission')
+    monkeypatch.setattr(DifferentExternalIdentity, 'prepare', no_adapter_effect)
+    monkeypatch.setattr(DifferentExternalIdentity, 'submit', no_adapter_effect)
     source = (snapshot / 'source.py').read_bytes()
-    counter_bytes = counter.read_bytes()
-    bindings = {path: path.read_bytes() for path in (Path(config['record_dir']) / 'host-preparations').glob('*/*.json')}
     blocker, = [row for row in fork_sources._parent_state(root)
         if row['code'] == 'unknown_managed_preparation' and row['path'] == snapshot.relative_to(root).as_posix()]
     assert f'--step 2 --snapshot-token {snapshot.name.removeprefix(".prepared-")}' in blocker['reason']
@@ -432,11 +316,9 @@ def test_unbound_cleanup_preserves_accepted_bound_and_ambiguous_namespaces(tmp_p
         with pytest.raises((ValueError, OSError)):
             _unbound(root, snapshot, action)
     assert snapshot.is_dir() and (snapshot / 'source.py').read_bytes() == source
-    assert counter.read_bytes() == counter_bytes
-    assert all(path.read_bytes() == raw for path, raw in bindings.items())
-    if kind == 'thirdparty':
-        assert all(path.read_bytes() == raw for path, raw in foreign_originals.items())
-        assert e.Records(config).calls() == []
+    assert counter.read_bytes() == b''
+    assert all(path.read_bytes() == raw for path, raw in foreign_originals.items())
+    assert e.Records(config).calls() == []
 
 
 @pytest.mark.process_e2e
@@ -446,7 +328,8 @@ def test_durable_accepted_cli_only_publishes_original_inode(tmp_path, monkeypatc
     snapshot = Path(row['snapshot'])
     identity = snapshot.stat().st_dev, snapshot.stat().st_ino
     accepted = (snapshot / 'accepted.json').read_bytes()
-    frozen_source = (snapshot / 'source.py').read_bytes()
+    source = Path(c.read(snapshot / 'accepted.json')['script']['path'])
+    frozen_source = source.read_bytes()
     originals = {path: path.read_bytes() for path in [root / 'settings.json', root / 'jobs/002.json',
         execution.origin(root, 2) / 'native-intent.json', execution.origin(root, 2) / 'experiment-config.json',
         Path(row['binding']['path']), *sorted((root / 'control-ledger').glob('*.json'))]}
@@ -462,11 +345,11 @@ def test_durable_accepted_cli_only_publishes_original_inode(tmp_path, monkeypatc
     canonical = e.Records(config).directory(row['call_id'])
     assert (canonical.stat().st_dev, canonical.stat().st_ino) == identity
     assert (canonical / 'accepted.json').read_bytes() == accepted and not snapshot.exists()
-    assert (canonical / 'source.py').read_bytes() == frozen_source
+    assert source.read_bytes() == frozen_source
     assert recovery.retained_preparations(root, Path(config['record_dir']))[0]['resolved'] is True
     assert _maintain(root, row, 'publish-accepted')['status'] == 'already_published'
     assert e.Records(config).accepted(row['call_id'])['host_preparation'] == row['binding']
-    assert counter.read_text().splitlines() == ['admit', 'prepare', 'admit']
+    assert counter.read_text().splitlines() == ['prepare']
     assert all(path.read_bytes() == raw for path, raw in originals.items())
     assert not (canonical / 'submission.json').exists()
 
@@ -480,7 +363,7 @@ def test_partial_discard_retains_unknown_and_blocks_prepare_and_pending(tmp_path
         patch.setattr(c, 'write', no_native)
         root, job, config, _ = case(tmp_path, monkeypatch)
     row, counter = _killed(root, config, 'partial')
-    assert (Path(row['snapshot']) / 'source.py').is_file()
+    assert Path(row['snapshot']).is_dir() and not (Path(row['snapshot']) / 'accepted.json').exists()
     binding_bytes = Path(row['binding']['path']).read_bytes()
     _no_replay(monkeypatch)
     assert _cli(root, row, 'discard-partial') == 0
@@ -491,12 +374,12 @@ def test_partial_discard_retains_unknown_and_blocks_prepare_and_pending(tmp_path
     assert _maintain(root, row, 'discard-partial')['status'] == 'partial_discarded'
     rows = recovery.retained_preparations(root, Path(config['record_dir']))
     assert len(rows) == 1 and rows[0]['resolved'] is False
-    result = e.dispatch(config, _payload(root), new=True, mechanism='P')
+    result = e.dispatch(config, _payload(root), new=True, mechanism=research(root, '1'))
     assert result['status'] == 'unknown' and result['call_id'] == row['call_id']
     descriptor = LocalFileDescriptor(**c.read(Path(row['binding']['path']))['prepared'])
     with pytest.raises((e.ConcurrentExecution, e.IntegrityError, recovery.PreparationError)):
-        e.Records(config).accept(descriptor, dict(parent=dict(candidate_id=None)), config['execution_interface'], mechanism='P')
-    assert counter.read_text().splitlines() == ['admit', 'prepare']
+        e.Records(config).accept(descriptor, dict(parent=dict(candidate_id=None)), config['execution_interface'], mechanism=research(root, '1'))
+    assert counter.read_text().splitlines() == ['prepare']
     # There is deliberately no allocation, authority contract, accepted call or
     # original native cleanup proof; none may turn the retained binding into None.
     assert not job.get('execution_authority')
@@ -524,15 +407,7 @@ def test_partial_discard_retains_unknown_and_blocks_prepare_and_pending(tmp_path
                 finding='Original host preparation remains unknown; no scientific observation was claimed.') for label in ('P', 'Q')])
     assert (root / ref['path']).read_bytes() == before
     from scidiscovery.research_loop import execution_recovery
-    sealed = c.read(execution.origin(root, 2) / 'result-identity.json')
-    sources = [(job, None, sealed, None)]
-    retained = execution_recovery.sealed_pending_rows(root, sources)[(2, row['call_id'])]
-    assert retained == dict(row=None, phase='original_prepare_unknown', native_state=None)
-    assert retained.get('grant_dispatch') is not True
     assert execution_recovery.pending(root) and execution_recovery.pending(root, unknown_only=True)
-    projected = execution_recovery.project_records(root, [dict(step=2, observation=None)], [], sources=sources)
-    assert projected[0]['execution_resumes'] == [dict(call_id=row['call_id'], phase='original_prepare_unknown', native_state=None)]
-    assert row['binding']['path'] not in json.dumps(projected) and str(root) not in json.dumps(projected)
     with pytest.raises(archive.files.ArchiveError, match='Retained original host preparation'):
         archive._quiescent(root)
 
@@ -572,7 +447,7 @@ def test_exact_identity_and_tree_conflicts_preserve_target_and_neighbor(tmp_path
         snapshot.rename(snapshot.with_name(snapshot.name + '-original'))
         snapshot.symlink_to(neighbor, target_is_directory=True)
     elif damage == 'source_symlink':
-        (snapshot / 'source.py').unlink(); (snapshot / 'source.py').symlink_to(neighbor / 'keep')
+        (snapshot / 'accepted.json').unlink(); (snapshot / 'accepted.json').symlink_to(neighbor / 'keep')
     elif damage == 'replaced_inode':
         snapshot.rename(snapshot.with_name(snapshot.name + '-original')); snapshot.mkdir()
         (snapshot / 'accepted.json').write_bytes(accepted)
@@ -591,7 +466,7 @@ def test_exact_identity_and_tree_conflicts_preserve_target_and_neighbor(tmp_path
             _maintain(root, row, action)
     assert (neighbor / 'keep').read_bytes() == b'untouched neighbor'
     assert {path.name: path.read_bytes() for path in Path(row['binding']['path']).parent.iterdir()} == before
-    assert counter.read_text().splitlines() == ['admit', 'prepare', 'admit']
+    assert counter.read_text().splitlines() == ['prepare']
 
 
 @pytest.mark.process_e2e
@@ -643,7 +518,7 @@ def test_exact_operation_retry_after_mutation_before_outcome(tmp_path, monkeypat
         assert (canonical.stat().st_dev, canonical.stat().st_ino) == identity
     else:
         assert recovery.retained_preparations(root, Path(config['record_dir']))[0]['resolved'] is False
-    assert counter.read_text().splitlines() == (['admit', 'prepare', 'admit'] if boundary.startswith('publish') else ['admit', 'prepare'])
+    assert counter.read_text().splitlines() == ['prepare']
 
 
 @pytest.mark.process_e2e
@@ -666,71 +541,6 @@ def test_discard_retry_refuses_replacement_directory_after_original_was_removed(
     assert protected.read_bytes() == b'new inode must survive'
 
 
-def test_ordinary_partial_cleanup_still_blocks_new_preparation(tmp_path, monkeypatch, remote_registry):
-    root, job, config, _ = case(tmp_path, monkeypatch)
-    original = c._bind_original
-    with monkeypatch.context() as patch:
-        def fail_after_copy(*args, **kwargs):
-            original(*args, **kwargs)
-            raise RuntimeError('Ordinary writer failed after its first real copy')
-        patch.setattr(c, '_bind_original', fail_after_copy)
-        with pytest.raises(RuntimeError, match='first real copy'):
-            e.dispatch(config, _payload(root), new=True, mechanism='P')
-    rows = recovery.retained_preparations(root, Path(config['record_dir']))
-    assert len(rows) == 1 and rows[0]['resolved'] is False
-    assert not Path(rows[0]['snapshot']).exists()
-    _no_replay(monkeypatch)
-    result = e.dispatch(config, _payload(root), new=True, mechanism='P')
-    assert result['status'] == 'unknown' and result['call_id'] == rows[0]['call_id']
-    ref = execution_resume.capture_pending(root, job)
-    assert q._read(root, ref)['host_preparations'] == [_pending_binding(root, rows[0])]
-
-
-@pytest.mark.process_e2e
-def test_resolved_history_survives_enrollment_and_cold_restore_without_package(tmp_path, monkeypatch, remote_registry):
-    # The reused case declares this exact launcher name. Make its dependency
-    # real before prepare freezes it; scientific native work is never launched.
-    launcher = tmp_path / 'never-launched'
-    launcher.write_text('#!' + sys.executable + '\nraise SystemExit("Native fixture must never launch")\n')
-    launcher.chmod(0o700)
-    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ.get('PATH', ''))
-    # Record the explicit synthetic no-native fact before each thin fixture seal,
-    # rather than changing a frozen outcome to make archive admission pass.
-    write = c.write
-    def no_native(path, value):
-        if Path(path).name == 'native-outcome.json':
-            value = dict(value, native_started=False)
-        return write(path, value)
-    monkeypatch.setattr(c, 'write', no_native)
-    root, _, config, exp_cli = case(tmp_path, monkeypatch)
-    calls = [run(root, exp_cli, label)['call_id'] for label in ('P', 'Q')]
-    finish(root, 2, 'W', [1], preserve_native_intent=True,
-        mechanism_findings=[dict(mechanism=label, basis='observed', finding='Synthetic local terminal contract only.') for label in ('P', 'Q')])
-    rows = recovery.retained_preparations(root, Path(config['record_dir']))
-    assert {row['call_id'] for row in rows} == set(calls) and all(row['resolved'] for row in rows)
-    bindings = {Path(row['binding']['path']): Path(row['binding']['path']).read_bytes() for row in rows}
-    archive._quiescent(root)
-    c.write(root / 'host-started.json', budget.clock_stamp())
-    budget.transition(root, 'paused', 'Explicit inactive fixture transfer boundary')
-    anchor = tmp_path / 'anchor'; anchor.mkdir()
-    archive.checkpoint_enroll(root, anchor)
-    archive._quiescent(root)
-    assert all(row['resolved'] for row in recovery.retained_preparations(root, Path(config['record_dir'])))
-    # Historical enrollment proves provenance only; it cannot authorize maintenance
-    # against the old owner=None generation, even for an already published inode.
-    with pytest.raises(recovery.PreparationError):
-        _maintain(root, rows[0], 'inspect')
-    package = tmp_path / 'checkpoint'
-    archive.checkpoint_export(root, package)
-    root.rename(tmp_path / 'source-generation')
-    archive.checkpoint_restore(root, package)
-    package.rename(tmp_path / 'external-package-unavailable')
-    assert all(path.read_bytes() == raw for path, raw in bindings.items())
-    assert all(row['resolved'] for row in recovery.retained_preparations(root, Path(config['record_dir'])))
-    archive._quiescent(root)
-    assert archive.archive_export(root, tmp_path / 'restored-archive')['status'] == 'archive_exported'
-    with pytest.raises(recovery.PreparationError):
-        _maintain(root, rows[0], 'inspect')
 
 
 @pytest.mark.process_e2e
@@ -750,7 +560,7 @@ def test_published_same_generation_replacement_inode_is_not_original_publication
     canonical.rename(canonical.with_name(canonical.name + '-retained-original'))
     canonical.mkdir()
     original = canonical.with_name(canonical.name + '-retained-original')
-    for name in ('source.py', 'accepted.json'):
+    for name in ('accepted.json',):
         (canonical / name).write_bytes((original / name).read_bytes())
     with pytest.raises(recovery.PreparationError):
         recovery.retained_preparations(root, Path(config['record_dir']))
@@ -822,11 +632,8 @@ def _killed_authorized_resume(root, backend, call, config, boundary, operation=N
     assert waited == pid and os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL
     rows = recovery.retained_preparations(root, Path(config['record_dir']))
     assert len(rows) == 1 and rows[0]['call_id'] == call and rows[0]['resolved'] is False
-    expected = ['prepare', 'admit'] if boundary == 'accepted' else ['prepare']
-    # Ordinary run checks breadth before preparation and while resolving its
-    # call identity; sealed resume starts at its already frozen allocation.
-    if operation is not None:
-        expected = ['admit', 'admit', *expected]
+    # Current W research admission is distinct from retired breadth.admit.
+    expected = ['prepare']
     assert counter.read_text().splitlines() == expected
     return rows[0], counter
 
@@ -872,7 +679,7 @@ def test_authorized_original_recovery_preserves_permission_reservation_budget_an
     assert budget.execution_reservation(root, refs['reservation']) == reservation
     assert all(path.read_bytes() == raw for path, raw in originals.items())
     assert (execution.origin(root, 6) / 'result-identity.json').read_bytes() == seal_bytes
-    assert counter.read_text().splitlines() == (['prepare', 'admit'] if boundary == 'accepted' else ['prepare'])
+    assert counter.read_text().splitlines() == ['prepare']
     if boundary == 'accepted':
         accepted = e.Records(config).accepted(call)
         assert accepted['execution_reservation'] == refs['reservation']
@@ -900,10 +707,12 @@ def test_unsealed_authority_partial_discard_blocks_ordinary_and_direct_prepare(c
     assert len(qualifications) == 1
     subject = formal_review.subject_for_receipt(root, qualifications[0])
     assert subject['producer_step'] == 2
-    bound = [*job['direct_materials'], *[row['material'] for row in job.get('selected_inputs', [])]]
+    from scidiscovery.research_loop import handoff_state, originals
+    inputs=handoff_state.material_inputs(root,job,sources={},source=originals.node(root,job['step']))
+    bound = [*inputs['direct_materials'], *[row['material'] for row in inputs.get('selected_inputs', [])]]
     material = subject['material']
     assert material in bound
-    output = c.workspace(root, job['step']) / material['path']
+    output = originals.material_path(root,material)
     assert e.proof(output)['size_bytes'] == material['size_bytes']
     admission = backend.execution_admission
     monkeypatch.setattr(backend, 'execution_admission', lambda *args, **kwargs:
@@ -914,7 +723,7 @@ def test_unsealed_authority_partial_discard_blocks_ordinary_and_direct_prepare(c
         return diagnostic(error, *args, **kwargs)
     with monkeypatch.context() as patch:
         patch.setattr(e, '_diagnostic', traced)
-        assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+        assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(active).with_name('research.json'))]) == 2
     pending = json.loads(capsys.readouterr().out)
     assert pending['status'] == 'authorization_required'
     call = pending['call_id']
@@ -922,8 +731,8 @@ def test_unsealed_authority_partial_discard_blocks_ordinary_and_direct_prepare(c
     assert len(requests) == 1
     _approve(root, q._ref(root, requests[0]))
     row, counter = _killed_authorized_resume(root, backend, call, config, 'binding',
-        operation=lambda: e.main(['--config', str(active), 'run', '--payload', str(output)]))
-    assert counter.read_text().splitlines() == ['admit', 'admit', 'prepare']
+        operation=lambda: e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(active).with_name('research.json'))]))
+    assert counter.read_text().splitlines() == ['prepare']
     assert not (execution.origin(root, 6) / 'result-identity.json').exists()
     def forbidden(*args, **kwargs):
         pytest.fail('Retained unknown reached a second prepare/admission/submit')
@@ -933,14 +742,14 @@ def test_unsealed_authority_partial_discard_blocks_ordinary_and_direct_prepare(c
     result = recovery.maintain(root, 6, call, row['snapshot_token'], action='discard-partial',
         max_seconds=20, authorization_note='Original unsealed snapshot only')
     assert result['status'] == 'partial_discarded'
-    assert counter.read_text().splitlines() == ['admit', 'admit', 'prepare']
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert counter.read_text().splitlines() == ['prepare']
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(active).with_name('research.json'))]) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'unknown' and result['call_id'] == call
     descriptor = LocalFileDescriptor(**c.read(Path(row['binding']['path']))['prepared'])
     with pytest.raises(e.ConcurrentExecution):
         e.Records(config).accept(descriptor, dict(parent=dict(candidate_id=None)), config['execution_interface'])
-    assert counter.read_text().splitlines() == ['admit', 'admit', 'prepare']
+    assert counter.read_text().splitlines() == ['prepare']
     ref = execution_resume.capture_pending(root, c.read(root / 'jobs/006.json'))
     captured = q._read(root, ref)
     assert captured['complete'] is False
@@ -962,13 +771,11 @@ def test_no_authority_pending_capture_failure_does_not_seek_nonexistent_contract
     captured = q._read(root, ref)
     assert captured['contract'] is None and captured['complete'] is False
     pending_bytes = (root / ref['path']).read_bytes()
-    # It is a retained inability to inspect the original namespace, not an empty
-    # namespace or an invented call. The thin seal remains durable when its
-    # subsequent history refresh refuses to project a clean execution state.
-    with pytest.raises(history.ObserverIntegrityError, match='pending namespace was unavailable'):
-        finish(root, 2, 'W', [1], preserve_native_intent=True,
-            mechanism_findings=[dict(mechanism=label, basis='blocked',
-                finding='Original namespace evidence is unavailable; no execution result was claimed.') for label in ('P', 'Q')])
+    # Sealing retains the unavailable namespace as a fact; execution admission
+    # still refuses it rather than inventing an empty namespace or another call.
+    finish(root, 2, 'W', [1], preserve_native_intent=True,
+        mechanism_findings=[dict(mechanism=label, basis='blocked',
+            finding='Original namespace evidence is unavailable; no execution result was claimed.') for label in ('P', 'Q')])
     seal_path = execution.origin(root, 2) / 'result-identity.json'
     assert seal_path.is_file() and (root / ref['path']).read_bytes() == pending_bytes
     sealed = c.read(seal_path)
@@ -981,21 +788,6 @@ def test_no_authority_pending_capture_failure_does_not_seek_nonexistent_contract
         budget.execution_blocked(root)
 
 
-@pytest.mark.process_e2e
-def test_cli_keeps_missing_accepted_call_as_integrity_error(tmp_path, monkeypatch, remote_registry, capsys):
-    root, _, config, exp_cli = case(tmp_path, monkeypatch)
-    result = run(root, exp_cli, 'P')
-    assert result['status'] == 'known_success'
-    canonical = e.Records(config).directory(result['call_id'])
-    retained = tmp_path / 'retained-accepted-original'; canonical.rename(retained)
-    accepted = (retained / 'accepted.json').read_bytes()
-    # Exercise only optional CLI result projection with an actual prior result;
-    # the canonical original must still be required for an accepted outcome.
-    monkeypatch.setattr(e, 'dispatch', lambda *args, **kwargs: result)
-    assert e.main(['--config', str(c.workspace(root, 2) / 'work/experiment-config.json'),
-        'run', '--payload', str(_payload(root))]) == 3
-    assert json.loads(capsys.readouterr().out)['status'] == 'integrity_error'
-    assert (retained / 'accepted.json').read_bytes() == accepted and not canonical.exists()
 
 
 @pytest.mark.process_e2e

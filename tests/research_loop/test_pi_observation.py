@@ -939,6 +939,45 @@ def test_extension_is_readonly_and_advice_preserves_results_without_native_calls
     assert backend.public_events(dict(type=observation.BOUND, **observer.proof)) == []
 
 
+@pytest.mark.parametrize('fragment,job,required', [
+    (dict(context='same_session', max_context_windows=1), dict(role='W'), True),
+    (None, dict(role='W'), False),
+    (dict(context='same_session', max_context_windows=1), dict(role='W', formal_review=True), False),
+])
+def test_bound_requirement_is_frozen_before_first_observer_staging(tmp_path, monkeypatch, fragment, job, required):
+    backend = adapter(worker_fragment_policy=fragment).for_job(job)
+    home, work = tmp_path / 'home', tmp_path / 'workspace'
+    (work / 'work').mkdir(parents=True)
+    backend.bind_attempt(home, work)
+    args = backend.launch(PROFILE, work, None, None, 'Original contract')
+    meter = backend.meter(home, work)
+    backend.stage_notice(work)
+    source_path = Path(meter.observation.proof['extension'])
+    staged = source_path.read_bytes()
+    binding_line = next(line for line in staged.decode().splitlines() if line.startswith('const binding = '))
+    binding = json.loads(binding_line[len('const binding = '):-1])
+    assert binding['required'] is required
+    assert all(binding[key] == value for key, value in meter.observation.proof.items())
+    assert backend._observer_source['sha256'] == hashlib.sha256(staged).hexdigest()
+    assert backend._observer_source['size_bytes'] == len(staged)
+    projected = []
+    def wrap(args, facts):
+        projected.append(facts)
+        return list(args)
+    monkeypatch.setattr(backend, 'wrap_launch', wrap)
+    facts = dict(launcher='pi', readonly=False, resources=[],
+        resource_policy=backend.permissions(backend.settings)['resource_policy'])
+    _, channel = backend.prepare_launch(args, work, 0, {}, facts, None)
+    assert source_path.read_bytes() == staged
+    assert projected[0]['observation'] == meter.observation.proof
+    assert backend._launch_evidence['observer'] == meter.observation.proof
+    assert backend._launch_evidence['observer_source'] == backend._observer_source
+    with pytest.raises(native_usage.MetadataUnavailable, match='requirement changed'):
+        backend.configure_observation(meter, work, 0, None, channel, required=not required)
+    backend.configure_observation(meter, work, 0, None, channel, required=required)
+    assert meter.observation.required is required
+
+
 def test_private_observer_namespace_exact_ro_exception_and_local_alias_refusal(tmp_path):
     backend, meter, observer = bound(tmp_path)
     backend.stage_notice(meter.workspace)
@@ -990,7 +1029,7 @@ def test_qualified_internal_inventory_start_allows_exactly_one_prompt(tmp_path):
 
 
 @contextmanager
-def native_peer(final, *, compact=False, on_first_request=None):
+def native_peer(final, *, compact=False, on_first_request=None, first_prompt_tokens=900):
     """At most three main responses + four real summary POSTs, loopback only."""
     requests, errors = [], []
     stop = threading.Event()
@@ -1025,7 +1064,7 @@ def native_peer(final, *, compact=False, on_first_request=None):
                 if main and main_count == 1:
                     delta = dict(role='assistant', tool_calls=[dict(index=0, id='native-read', type='function',
                         function=dict(name='read', arguments=json.dumps(dict(path='science-task.json', limit=1))))])
-                    finish, used = 'tool_calls', 900
+                    finish, used = 'tool_calls', first_prompt_tokens
                 else:
                     if main:
                         text = '{broken' if compact and main_count == 2 else final
@@ -1086,13 +1125,16 @@ def test_installed_pi_accepted_w_metadata_notice_and_native_compaction(tmp_path,
         consultation_question='Does the retained native observation leave any unsupported mechanical claim?',
         mechanism_findings=[dict(mechanism='Fixture', basis='observed', finding='Mechanical native boundary.')])
     final = ' \n' + json.dumps(payload, ensure_ascii=False) + '\n\t'
-    with native_peer(final, compact=compact) as (url, requests, errors):
+    # Metered shared usage crosses 90% before the natural second POST. W's
+    # node target is only a recovery/accounting anchor, not this notice trigger.
+    # Even with four summary calls, compaction + repair totals <= 19035 tokens.
+    with native_peer(final, compact=compact, first_prompt_tokens=18000) as (url, requests, errors):
         configure_installed_pi_fixture(agent, url)
         if compact:
             config = c.read(agent / 'settings.json')
             config['compaction'] = dict(enabled=True, reserveTokens=130272, keepRecentTokens=0)
             c.write(agent / 'settings.json', config)
-        value = options(tmp_path, launcher=[launcher], max_tokens=10000, max_seconds=25, max_steps=3,
+        value = options(tmp_path, launcher=[launcher], max_tokens=20000, max_seconds=25, max_steps=3,
             experiment_mode='local', native_options=dict(OPTIONS, workspace='workspace-write'),
             resume_policy=dict(RESUME), worker_fragment_policy=dict(context='same_session', max_context_windows=1),
             node_budget_policy={role: dict(max_observed_tokens=1000, max_seconds=25) for role in 'HWAE'})
@@ -1124,7 +1166,9 @@ def test_installed_pi_accepted_w_metadata_notice_and_native_compaction(tmp_path,
         # Advice reaches the real naturally required second POST, not a prompt
         # injection or forced continuation. Original result text is retained.
         tool_messages = [m for m in main_requests[1]['messages'] if m.get('role') == 'tool']
-        assert len(tool_messages) == 1 and 'Token budget risk.' in tool_messages[0]['content']
+        assert len(tool_messages) == 1 and budget_notice.WORKER_SHARED_TOKEN_NEAR_TEXT in tool_messages[0]['content'], dict(
+            tool_messages=tool_messages,
+            metadata_delivery=c.read(first/'native-outcome.json').get('metering',{}).get('metadata_delivery'))
         for body in requests:
             serialized = json.dumps(body, ensure_ascii=False)
             assert '.pi-observation-' not in serialized and 'pi_observer_bound' not in serialized
@@ -1282,6 +1326,7 @@ def test_installed_pi_metadata_fault_no_replay_preserves_native_original_and_bil
 @pytest.mark.process_e2e
 def test_installed_pi_real_delivery_timeout_waits_without_lock_then_aborts_no_next_post(
         tmp_path, monkeypatch, record_property, execution_registry):
+    diagnostic_log_dir = os.environ.get('SCID_TEST_LOG_DIR')
     launcher, agent = installed_pi_fixture(tmp_path, monkeypatch, record_property)
     root = tmp_path / 'instance'
     release = threading.Event()
@@ -1307,12 +1352,26 @@ def test_installed_pi_real_delivery_timeout_waits_without_lock_then_aborts_no_ne
         value['public_root'].mkdir(); value['objective'].write_text('Finite real metadata timeout fixture.')
         research_config.prepare(**value); c.build_job(root, 1, 'W', [])
         c.write(root / 'host-started.json', budget.clock_stamp()); budget.transition(root, 'advance', 'pi_real_timeout_fixture')
-        try: result = collect_separately(root, timeout=45)
+        result = None
+        collector_stderr = None
+        try:
+            result = collect_separately(root, timeout=45)
+            collector_stderr = result.stderr
+        except subprocess.TimeoutExpired as error:
+            collector_stderr = error.stderr
+            raise
         finally:
             release.set()
             for thread in holders:
                 thread.join(timeout=2); assert not thread.is_alive()
-        assert result.returncode != 0 and len(requests) == 1 and errors == []
+            if diagnostic_log_dir:
+                diagnostics = retain_installed_repair_diagnostics(root,
+                    Path(diagnostic_log_dir) / 'real-delivery-timeout', collector_stderr)
+                assert diagnostics is not None and (diagnostics / 'manifest.json').is_file()
+                record_property('pi_timeout_diagnostics', str(diagnostics))
+        assert result.returncode != 0 and len(requests) == 1 and errors == [], dict(
+            returncode=result.returncode, request_count=len(requests), errors=errors,
+            stderr=result.stderr.decode(errors='replace') if isinstance(result.stderr, bytes) else result.stderr)
         record = execution.origin(root, 1); outcome = c.read(record / 'native-outcome.json')
         assert outcome['cleanup'] == 'observed_group_cleaned'
         assert outcome['metering']['metadata_delivery']['fault']

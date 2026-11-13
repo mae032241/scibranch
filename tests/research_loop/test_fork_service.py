@@ -18,6 +18,8 @@ def transaction(tmp_path, monkeypatch):
                 prefix_entries=[], cut={}, selected_settings={}, blocked_reasons=[])
     monkeypatch.setattr(service.fork_sources, 'inspect_source', lambda *_: plan)
     monkeypatch.setattr(service.fork_sources, 'validate_manifest', lambda *_, **__: {})
+    # This transaction-only fixture has no retained scientific settings.
+    monkeypatch.setattr(service.fork_sources, 'retained_settings', lambda *_: [])
     monkeypatch.setattr(service.fork_sources, 'source_guard', lambda *_: nullcontext())
     def prepare(plan, request, transaction, *, _on_created=None):
         root = transaction / 'child'; root.mkdir()
@@ -553,10 +555,19 @@ def test_unregistered_transaction_and_replaced_registered_inode_are_preserved(tr
     assert service._clean_transaction is clean and not child.exists()
 
 
-def test_real_published_delete_never_recreates_child(tmp_path, monkeypatch):
+@pytest.mark.parametrize('enrolled', [False, True])
+def test_real_published_delete_never_recreates_child(tmp_path, monkeypatch, enrolled):
     from test_fork_source import completed_source
-    from scidiscovery.research_loop import instance_delete
+    from scidiscovery.research_loop import instance_delete, instance_owner as owner
+    from test_instance_delete import _enroll_legacy_owner
+    monkeypatch.setattr(owner, '_gate_directory', lambda: tmp_path / 'private-owner-gates')
     parent = completed_source(tmp_path); child = tmp_path / 'branch'
+    if enrolled:
+        binding = _enroll_legacy_owner(parent, tmp_path)
+        assert c.read(parent / 'settings-identity.json')['cold_owner'] == dict(
+            anchor=binding['anchor'], anchor_id=binding['anchor_id'])
+        original_owner = owner.require_owner(parent)
+    parent_identity = (parent / 'settings-identity.json').read_bytes()
     expected = service.preview(parent, 2, child, budget=BUDGET)['preview_id']
     receipt = service.create(parent, 2, child, budget=BUDGET,
         expected_preview_id=expected, operation_id='published-deleted')
@@ -566,6 +577,122 @@ def test_real_published_delete_never_recreates_child(tmp_path, monkeypatch):
     assert service.create(parent, 2, child, budget=BUDGET,
         expected_preview_id=expected, operation_id='published-deleted') == receipt
     assert not child.exists()
+    assert (parent / 'settings-identity.json').read_bytes() == parent_identity
+    if enrolled:
+        assert owner.require_owner(parent) == original_owner
+
+
+@pytest.mark.parametrize('replacement', ['none', 'directory', 'file', 'partial', 'partial_file'])
+def test_real_fork_delete_retry_uses_original_pair_after_manifest_cleanup(tmp_path, monkeypatch, replacement):
+    from test_fork_source import completed_source
+    from scidiscovery.research_loop import instance_delete as deletion
+    parent = completed_source(tmp_path); child = tmp_path / 'branch'
+    preview = service.preview(parent, 2, child, budget=BUDGET)
+    receipt = service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=preview['preview_id'], operation_id='delete-retry-child')
+    request = dict(instance_id=receipt['child_identity'], settings_ref=c.record_ref(child / 'settings.json'),
+        operation_id='delete-fork-once')
+    path = child.parent / '.scid-delete-operations/delete-fork-once.json'
+    parent_settings = (parent / 'settings.json').read_bytes()
+    def interrupted(root, identity):
+        (root / service.originals.MANIFEST).unlink()
+        if replacement in {'partial', 'partial_file'}:
+            retained = root / c.read(path)['retained_settings'][0]['path']
+            (retained / 'settings-identity.json').unlink()
+        raise OSError('interrupted after manifest removal')
+    with monkeypatch.context() as patch:
+        patch.setattr(deletion, '_remove_tree', interrupted)
+        with pytest.raises(OSError, match='after manifest removal'):
+            deletion.delete_instance(child, **request)
+    record = c.read(path); tombstone = service.Path(record['tombstone'])
+    assert record['phase'] == 'retired' and record['retained_settings']
+    retained = tombstone / record['retained_settings'][0]['path']
+    assert (retained / 'settings.json').is_file()
+    assert not (tombstone / service.originals.MANIFEST).exists()
+    if replacement in {'partial', 'partial_file'}:
+        assert not (retained / 'settings-identity.json').exists()
+    if replacement not in {'none', 'partial'}:
+        original_settings = (retained / 'settings.json').read_bytes()
+        if replacement == 'directory':
+            original = retained.rename(tmp_path / 'original-retained-controls')
+            retained.mkdir()
+            for name in ('settings.json', 'settings-identity.json'):
+                (retained / name).write_bytes((original / name).read_bytes())
+        else:
+            (retained / 'settings.json').rename(tmp_path / 'original-retained-settings.json')
+            (retained / 'settings.json').write_bytes(original_settings)
+        with pytest.raises(deletion.DeleteError) as error:
+            deletion.delete_instance(child, **request)
+        assert error.value.code == 'delete_nested_instance'
+        assert (retained / 'settings.json').read_bytes() == original_settings
+        assert c.read(path) == record
+    else:
+        assert deletion.delete_instance(child, **request)['status'] == 'instance_deleted'
+        assert not tombstone.exists() and not child.exists()
+        assert c.read(path)['root_identity'] == record['root_identity']
+        assert c.read(path)['request'] == record['request']
+    assert (parent / 'settings.json').read_bytes() == parent_settings
+
+
+@pytest.mark.parametrize('intrusion', ['independent_instance', 'owner_marker', 'retirement_marker', 'project_globals'])
+def test_retained_fork_controls_do_not_hide_independent_instance_owners(tmp_path, intrusion):
+    from test_fork_source import completed_source
+    from scidiscovery.research_loop import controller, instance_delete as deletion, instance_owner as owner
+    parent = completed_source(tmp_path); child = tmp_path / 'branch'
+    preview = service.preview(parent, 2, child, budget=BUDGET)
+    receipt = service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=preview['preview_id'], operation_id='nested-owner-child')
+    manifest = service.fork_sources.validate_manifest(child, full=True)
+    entry = next(row for row in manifest['entries'] if row['path'] == 'settings.json')
+    retained = (child / service.originals.FORK_DIRECTORY / entry['storage_path']).parent
+    if intrusion == 'independent_instance':
+        public = tmp_path / 'nested-public'; public.mkdir()
+        objective = public / 'objective.md'; objective.write_text('An independent instance is never fork payload.')
+        inner = retained.parent / 'independent-instance'
+        controller.prepare(inner, objective, public, ['never-launched'], max_tokens=200,
+            max_seconds=30, max_steps=2, model='fixture', reasoning_effort='high',
+            search_policy=None, experiment_mode='external')
+        sentinel = inner / 'settings.json'
+    elif intrusion == 'project_globals':
+        sentinel = retained / 'project/global/independent-original'
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_bytes(b'independent global material')
+    else:
+        sentinel = retained / (owner.BINDING if intrusion == 'owner_marker' else owner.RETIREMENT)
+        sentinel.write_bytes(b'independent retained owner marker')
+    before = sentinel.read_bytes()
+    with pytest.raises(deletion.DeleteError) as error:
+        deletion.delete_instance(child, instance_id=receipt['child_identity'],
+            settings_ref=c.record_ref(child / 'settings.json'), operation_id='reject-nested-owner')
+    assert error.value.code == 'delete_nested_instance'
+    assert sentinel.read_bytes() == before and child.exists()
+    assert not (child / owner.RETIREMENT).exists()
+
+
+@pytest.mark.parametrize('name', ['settings.json', 'settings-identity.json'])
+def test_changed_retained_settings_identity_never_becomes_cleanup_ownership(tmp_path, name):
+    from test_fork_source import completed_source
+    from scidiscovery.research_loop import instance_delete as deletion, instance_owner as owner
+    parent = completed_source(tmp_path); child = tmp_path / 'branch'
+    preview = service.preview(parent, 2, child, budget=BUDGET)
+    receipt = service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=preview['preview_id'], operation_id='changed-control-child')
+    manifest = service.fork_sources.validate_manifest(child, full=True)
+    entry = next(row for row in manifest['entries'] if row['path'] == name)
+    path = child / service.originals.FORK_DIRECTORY / entry['storage_path']
+    before = path.read_bytes()
+    if name == 'settings.json':
+        identity = entry['origin_identity']['goal_id'].encode()
+        changed = before.replace(identity, b'x' * len(identity), 1)
+    else:
+        changed = before.replace(b'settings.json', b'settings.jsox', 1)
+    assert changed != before and len(changed) == len(before)
+    path.chmod(0o600); path.write_bytes(changed); path.chmod(0o400)
+    with pytest.raises(ValueError, match='Fork settings lost their exact'):
+        deletion.delete_instance(child, instance_id=receipt['child_identity'],
+            settings_ref=c.record_ref(child / 'settings.json'), operation_id='reject-changed-control')
+    assert child.exists() and path.read_bytes() == changed
+    assert not (child / owner.RETIREMENT).exists()
 
 
 def test_cleanup_failure_never_revokes_published_receipt(transaction, monkeypatch):
@@ -581,11 +708,18 @@ def test_cleanup_failure_never_revokes_published_receipt(transaction, monkeypatc
     assert not child.exists()
 
 
-def test_initialization_failure_after_settings_reclaims_registered_stage_and_original_links(tmp_path, monkeypatch):
+@pytest.mark.parametrize('enrolled', [False, True])
+def test_initialization_failure_after_settings_reclaims_registered_stage_and_original_links(tmp_path, monkeypatch, enrolled):
     from contextlib import contextmanager
     from test_fork_source import completed_source
-    from scidiscovery.research_loop import storage_policy as storage
+    from test_instance_delete import _enroll_legacy_owner
+    from scidiscovery.research_loop import instance_owner as owner, storage_policy as storage
+    monkeypatch.setattr(owner, '_gate_directory', lambda: tmp_path / 'private-owner-gates')
     parent = completed_source(tmp_path)
+    if enrolled:
+        _enroll_legacy_owner(parent, tmp_path)
+        original_owner = owner.require_owner(parent)
+    parent_identity = (parent / 'settings-identity.json').read_bytes()
     sibling = tmp_path / 'sibling'
     preview = service.preview(parent, 2, sibling, budget=BUDGET)
     service.create(parent, 2, sibling, budget=BUDGET, expected_preview_id=preview['preview_id'], operation_id='sibling')
@@ -620,6 +754,75 @@ def test_initialization_failure_after_settings_reclaims_registered_stage_and_ori
     receipt = service.create(parent, 2, child, budget=BUDGET,
         expected_preview_id=preview['preview_id'], operation_id='failed-initialization')
     assert receipt['state'] == 'paused'
+    assert (parent / 'settings-identity.json').read_bytes() == parent_identity
+    if enrolled:
+        assert owner.require_owner(parent) == original_owner
+
+
+def test_interrupted_fork_cleanup_retries_registered_controls_without_manifest(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from test_fork_source import completed_source
+    from scidiscovery.research_loop import instance_delete as deletion, storage_policy as storage
+    parent = completed_source(tmp_path); child = tmp_path / 'branch'
+    preview = service.preview(parent, 2, child, budget=BUDGET)
+    mutation = storage.mutation
+    @contextmanager
+    def reject_initialized(root, growth, **options):
+        if root is not None and root.name == 'child' and root.parent.name.endswith('.stage'):
+            raise storage.StorageQuotaExceeded('initialization interrupted')
+        with mutation(root, growth, **options):
+            yield
+    def interrupt_cleanup(root, identity):
+        record = operation_record(child, 'interrupted-cleanup')
+        assert record['phase'] == 'staging' and record['retained_settings']
+        stores = [root / 'origins', root / 'child' / service.originals.FORK_DIRECTORY]
+        manifests = [store / 'manifest.json' for store in stores if (store / 'manifest.json').exists()]
+        assert len(manifests) == 1
+        manifests[0].unlink()
+        raise OSError('cleanup interrupted after manifest removal')
+    with monkeypatch.context() as patch:
+        patch.setattr(storage, 'mutation', reject_initialized)
+        patch.setattr(deletion, '_remove_tree', interrupt_cleanup)
+        with pytest.raises(OSError, match='cleanup interrupted after manifest removal'):
+            service.create(parent, 2, child, budget=BUDGET,
+                expected_preview_id=preview['preview_id'], operation_id='interrupted-cleanup')
+    record = operation_record(child, 'interrupted-cleanup')
+    transaction = service.Path(record['transaction_path'])
+    assert record['phase'] == 'staging' and not child.exists()
+    assert all((transaction / row['path'] / 'settings.json').exists() for row in record['retained_settings'])
+    receipt = service.create(parent, 2, child, budget=BUDGET,
+        expected_preview_id=preview['preview_id'], operation_id='interrupted-cleanup')
+    assert receipt['state'] == 'paused' and not transaction.exists()
+    assert operation_record(child, 'interrupted-cleanup')['phase'] == 'published'
+
+
+def test_observer_proof_fields_keep_exact_science_membership_without_copying_payloads(tmp_path, monkeypatch):
+    from test_fork_source import completed_source
+    parent = completed_source(tmp_path)
+    owner = service.originals.node(parent, 1)
+    proof = dict(path='project/nodes/001/artifacts/observer-evidence.txt', size_bytes=29,
+        retention='archived', snapshot='host-history/objects/exact-observer-proof')
+    artifact = dict(path='project/nodes/001/artifacts/submission.bin', size_bytes=31, retention='unavailable')
+    path = 'host-history/observations/001.json'
+    observation = dict(candidates=[dict(id='one', evidence=[proof])],
+        current_candidate=dict(candidate_id='one', evidence=[proof]),
+        actual_submission=dict(candidate_id='one', artifact=artifact, evidence=[proof]),
+        contexts=[dict(proofs=[proof], source=artifact)],
+        authored_payload=dict(candidates=[dict(evidence=[dict(proof, snapshot='private-unbound.json')])]))
+    c.write(parent / path, observation)
+    stat_file = service.fork_sources.files.stat_file
+    def controls_only(actual, **options):
+        assert actual not in {parent / proof['snapshot'], parent / artifact['path']}
+        return stat_file(actual, **options)
+    monkeypatch.setattr(service.fork_sources.files, 'stat_file', controls_only)
+    closure = service.fork_sources._Closure()
+    closure.control(owner, dict(path=path))
+    entries = {row['path']: row for row in closure.entries.values()}
+    assert entries[proof['snapshot']]['visibility'] == 'historical_science'
+    assert entries[artifact['path']]['visibility'] == 'historical_science'
+    assert 'private-unbound.json' not in entries
+    assert len(entries) == 3
+    assert not (parent / proof['snapshot']).exists()
 
 
 def test_prepared_record_follows_completed_tree_and_stage_parent_sync(transaction, monkeypatch):

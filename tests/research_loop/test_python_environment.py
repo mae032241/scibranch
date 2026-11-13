@@ -117,26 +117,22 @@ def test_cov_callback_preserves_script_prefix_and_reuses_checks(monkeypatch):
     assert calls[0][0] == '/declared/python' and '/public/runner.py' not in calls[0]
 
 
-def test_native_runtime_capture_uses_exact_job_selection_once_per_new_attempt(tmp_path, monkeypatch):
+def test_native_runtime_capture_uses_selected_settings_without_reopening_configuration(tmp_path, monkeypatch):
     from scidiscovery.research_loop import configuration_updates, native_execution
-    job = dict(configuration_revision=dict(revision=7, path='host-control/configuration/revisions/000007.json'))
-    selections = []
     captures = []
-    def for_job(root, selected_job):
-        assert root == tmp_path and selected_job is job
-        return selections[-1]
-    monkeypatch.setattr(configuration_updates, 'for_job', for_job)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Runtime consumer reopened the selected configuration')
+    monkeypatch.setattr(configuration_updates, 'for_job', forbidden)
     monkeypatch.setattr(p, 'runtime_roots', lambda interpreter: captures.append(interpreter) or ['/runtime/root'])
     for python in ('/scientific-one/bin/python', '/scientific-two/bin/python3.12'):
-        selections.append(dict(execution_config=dict(executor='local_execution:command',
-            configuration=dict(run_argv=[python, '-I']))))
-        assert native_execution._experiment_python(tmp_path, job, sys.executable) == dict(
+        settings=dict(execution_config=dict(executor='local_execution:command',configuration=dict(run_argv=[python, '-I'])))
+        assert native_execution._experiment_python(settings, sys.executable) == dict(
             run_argv=[python, '-I'], runtime_roots=['/runtime/root'])
     assert captures == ['/scientific-one/bin/python', '/scientific-two/bin/python3.12']
     for executor, argv in (('local_execution:command', [sys.executable]),
             ('local_execution:command', ['/bin/sh']), ('cov_execution:experiment', ['/scientific/bin/python'])):
-        selections.append(dict(execution_config=dict(executor=executor, configuration=dict(run_argv=argv))))
-        assert native_execution._experiment_python(tmp_path, job, sys.executable) is None
+        settings=dict(execution_config=dict(executor=executor, configuration=dict(run_argv=argv)))
+        assert native_execution._experiment_python(settings, sys.executable) is None
     assert len(captures) == 2
 
 

@@ -451,6 +451,26 @@ class _Closure:
         for row in [*value.get('managed_calls', []), *value.get('evidence', []), *value.get('unknown', [])]:
             if isinstance(row, dict):
                 self.call(source, row)
+        if path.startswith('host-history/observations/'):
+            # These fields are published by the observer owner after sealing
+            # their exact proofs. They remain scientific references, including
+            # archived snapshots; arbitrary authored JSON is never traversed.
+            for candidate in value.get('candidates', []):
+                for proof in candidate.get('evidence', []):
+                    self.science_ref(source, proof)
+            for name in ('current_candidate', 'actual_submission'):
+                item = value.get(name)
+                if item is not None:
+                    for proof in item.get('evidence', []):
+                        self.science_ref(source, proof)
+                    if name == 'actual_submission' and isinstance(item.get('artifact'), dict):
+                        self.science_ref(source, item['artifact'])
+            for context in value.get('contexts', []):
+                for proof in context.get('proofs', []):
+                    self.science_ref(source, proof)
+                for proof in context.values():
+                    if isinstance(proof, dict) and {'path', 'size_bytes', 'retention'} <= set(proof):
+                        self.science_ref(source, proof)
         for attempt in value.get('attempts', []):
             if path.endswith('/pending-execution-set.json'):
                 for proof in attempt.values():follow(proof)
@@ -1068,6 +1088,10 @@ def copy_source(plan, target_store):
 
 def validate_manifest(child_root, *, full=False):
     manifest = o._manifest(child_root)
+    return _validate_manifest(Path(child_root) / o.FORK_DIRECTORY, manifest, full=full)
+
+
+def _validate_manifest(store, manifest, *, full=False):
     if manifest is None or manifest.get('version') != 2 or manifest.get('kind') != 'scientific_fork':
         raise ValueError('Fork manifest identity changed')
     if len(manifest['entries']) > MAX_ENTRIES or sum(row['size_bytes'] for row in manifest['entries']
@@ -1081,12 +1105,50 @@ def validate_manifest(child_root, *, full=False):
             raise ValueError('Fork manifest repeats an original identity')
         seen.add(key)
         if full and entry['visibility'] not in {'scientific_input', 'historical_science'}:
-            source = o._source(child_root, manifest, entry['origin_identity'], manifest['source']['step'], snapshot=snapshot)
+            source = o._snapshot_source(store, snapshot, entry['origin_identity'], manifest['source']['step'])
             o.resolve_ref(source, entry)
-    store = Path(child_root) / o.FORK_DIRECTORY
     if _json(store / 'origins.json') != manifest['origins'] or _json(store / 'bootstrap.json') != manifest['bootstrap']:
         raise ValueError('Fork private bindings changed')
     return manifest
+
+
+def retained_settings(store):
+    """Own the exact copied settings-pair reads needed by destructive cleanup."""
+    from . import contracts as c
+    store = Path(store)
+    manifest = _validate_manifest(store, _json(store / 'manifest.json'))
+    snapshot = o._snapshot(manifest)
+    result = []
+    for key, origin in manifest['origins'].items():
+        identity = origin['identity']
+        if key != o.identity_key(identity):
+            raise ValueError('Fork settings lost their exact original owner')
+        source = o._snapshot_source(store, snapshot, identity, manifest['source']['step'])
+        if not any(source._index.get((key, name)) for name in ('settings.json', 'settings-identity.json')):
+            continue  # A scientific-reference-only origin owns no copied pair.
+        pair = {}
+        for name in ('settings.json', 'settings-identity.json'):
+            entries = source._index.get((key, name), ())
+            if len(entries) != 1 or entries[0].get('visibility') != 'host_proof':
+                raise ValueError('Fork settings lack their exact retained control binding')
+            if entries[0]['size_bytes'] > 32 * 1024 * 1024:
+                raise ValueError('Original control JSON exceeds its finite parse bound')
+            pair[name] = o.resolve_ref(source, entries[0])
+        if pair['settings.json'].parent != pair['settings-identity.json'].parent:
+            raise ValueError('Fork settings controls have different retained owners')
+        if str(Path(origin['original_root']) / 'settings.json') != identity['settings_ref']['path']:
+            raise ValueError('Fork settings lost their exact original settings reference')
+        try:
+            # The ordinary settings owner validates the same frozen locator,
+            # including its supported inert cold_owner extension. A copied
+            # marker neither enrolls this child nor reopens the parent's anchor.
+            settings = c.settings(pair['settings.json'].parent)
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            raise ValueError('Fork settings lost their exact original settings reference') from error
+        if not isinstance(settings, dict) or settings.get('goal_id') != identity['goal_id']:
+            raise ValueError('Fork settings lost their exact instance identity')
+        result.append(pair)
+    return result
 
 
 def selected_task(child_root, *, full=False, material_sources=None):

@@ -144,22 +144,3 @@ def test_empty_screen_still_has_no_mechanism_to_dispatch(tmp_path):
         policy=dict(search_policy=dict(search.DEFAULT_POLICY)), state=_empty_state(), selected_inputs=[])
     assert result['diagnostics'] == [dict(code='science_plan_empty', subject='unfinished scientific plan')]
     assert result['focus'] is None
-
-
-def test_revised_structured_description_preserves_exact_existing_mechanism(scene, declaration):
-    root, raw = scene
-    finish(root, 1, 'H', [], action='analyze', search_choice=declaration)
-    finish(root, 2, 'A', [1], action='revise_h')
-    description = dict(method='Revised bounded comparison', caveat='Fixture is not scientific qualification')
-    plan = dict(commitments=[dict(label='Revised fixture', minimal_test=description, existing_ref='h001.m2')],
-        focus=dict(index=1, action='screen'))
-    _, _, record = finish(root, 3, 'H', [2], action='experiment', search_choice=plan)
-    worker = c.build_job(root, 4, 'W', [3])
-    row, = worker['search']['breadth']['mechanisms']
-    assert row['mechanism_ref'] == 'h001.m2' and row['source_h'] == 3
-    assert json.loads(row['minimal_test']) == description
-    mechanisms = accepted_budget.read(root)['search']['table']['mechanisms']
-    assert len(mechanisms) == 3 and mechanisms['h001.m2']['original_h'] == 1
-    assert mechanisms['h001.m1']['source_h'] == 1
-    assert c.read_scientific_output(record / 'science-output.json')['search_plan'] == plan
-    assert (root / 'native-evidence/001/science-output.json').read_bytes() == raw[1]

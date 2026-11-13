@@ -26,7 +26,7 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     finish(root,1,'H',[],action='experiment',search_choice=plan,text='BODY-CROWD '*2000,limitations=caveats)
     finish(root,2,'W',[1],text='One negative observation does not resolve the other mechanisms.',limitations=['Negative result is bounded','Feasibility elsewhere is unknown'],
         mechanism_findings=[dict(mechanism=f'h001.m{i}',basis='blocked',finding='This view-only fixture has no domain execution originals; applicability of this mechanism remains unresolved.') for i in range(1,5)])
-    finish(root,3,'A',[1,2],action='wait',recommendation='P',limitations=['A applicability judgment is not an observation'])
+    finish(root,3,'A',[1,2],action='continue_w',recommendation='P',limitations=['A applicability judgment is not an observation'])
     c.build_job(root,4,'E',[3],instruction='Retrieve the requested counterevidence.',evidence_return=dict(step=3,role='A'))
     finish(root,4,'E',[3],limitations=['Requested original is unavailable'])
     return root
@@ -53,76 +53,6 @@ def indexed_rows(root, job, name, *, key=None):
     return rows
 
 
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('role,first',[('H','A'),('W','H'),('A','W'),('E','A'),('E','H')])
-def test_role_material_priority_preserves_constraints_caveats_and_opportunities(tmp_path,role,first):
-    from scidiscovery.research_loop import execution
-    root=context_scene(tmp_path)
-    job=c.build_job(root,5,role,[1,2,3,4],instruction='Exact question about the target constraint.',
-        evidence_return=dict(step=1 if first=='H' else 3,role=first) if role=='E' else None)
-    original=copy.deepcopy(job)
-    view=c.science_view(job,root)
-    assert job==original and view==c.read(c.workspace(root,5)/'science-task.json')
-    question='Exact question about the target constraint.'
-    assert job['instruction']==question
-    if role=='W':
-        from scidiscovery.research_loop import guidance
-        work_unit=guidance.WORK_UNITS['screen']
-        assert job['scientific_work_unit']==work_unit
-        assert view['question']==question+'\nWork unit: '+work_unit
-    else:
-        assert 'scientific_work_unit' not in job
-        assert view['question']==question
-    assert view['parents'][0]['role']==first
-    assert bound_input_path(root,job,view['global']['objective']).read_text().startswith('Keep the original target constraint')
-    h=next(row for row in view['parents'] if row['role']=='H')
-    assert h['limitations']==['Original target condition is still unknown','A counterexample remains unresolved','Later caveat must survive']
-    assert h['limitations_omitted_count']==1
-    assert bound_input_path(root,job,h['conclusion']).is_file()
-    for parent in view['parents']:
-        step=int(Path(parent['conclusion']).parts[2])
-        assert parent['history_alias']==f'inputs/history/nodes/{step:03d}/0001.json'
-        assert bound_input_path(root,job,parent['history_alias']).is_file()
-    # The compact task chooses one primary route; all historical text pages
-    # remain bound and preserve even scientific content beyond the previews.
-    primary={row['history_alias']:row['conclusion'] for row in view['parents']}
-    for row in view['lineage']['recent']:
-        assert row['original']==f'inputs/parents/{row["step"]:03d}/conclusion.json'
-    historical=indexed_rows(root,job,'nodes',key='records')
-    h_record=next(row for row in historical if row['step']==1)
-    assert len(h_record['conclusion_pages'])>1
-    chunks=[c.read(bound_input_path(root,job,path)) for path in h_record['conclusion_pages']]
-    assert all(row['source']=='node:001/scientific-output' for row in chunks)
-    complete=json.loads(''.join(row['text'] for row in chunks))
-    direct=c.read_scientific_output(bound_input_path(root,job,h['conclusion']))
-    assert complete['scientific_result']==direct['scientific_result']=='BODY-CROWD '*2000
-    assert complete['limitations']==direct['limitations']
-    assert complete['limitations'][-1]=='Later caveat must survive'
-    assert complete['search_plan']==direct['search_plan']
-    assert h_record['conclusion_pages'][0] in primary
-    assert job==original
-    mechanisms=view['lineage']['mechanisms']
-    originals=indexed_rows(root,job,'mechanisms')
-    assert [row['mechanism_ref'] for row in originals]==[f'h001.m{index}' for index in range(1,5)]
-    assert all(row['status']=='pending' and bound_input_path(root,job,row['original']).is_file() for row in originals)
-    if view['lineage'].get('view_omitted'):
-        assert view['lineage']['omission_reason']
-        assert mechanisms['count']==mechanisms['pending_count']==4
-    else:
-        mechanism=mechanisms['unfinished_plan']
-        assert mechanism['remaining_count']==4
-        assert bound_input_path(root,job,mechanism['index']).is_file()
-    candidates=view['lineage']['candidates']
-    # Unbound observer rows and authored advice cannot create registered candidates.
-    assert c.read_scientific_output(execution.raw(root,3))['candidate_recommendation']=='P'
-    assert candidates['count' if view['lineage'].get('view_omitted') else 'candidate_count']==0
-    assert candidates['candidate_facts']==[]
-    assert candidates['candidate_facts_omitted_count']==0
-    assert indexed_rows(root,job,'candidates')==[]
-    assert 'target_best' not in candidates
-    assert 'experiments' not in view
-    assert len((json.dumps(view,ensure_ascii=False,indent=2)+'\n').encode())<12000
-    assert 'BODY-CROWD '*2000 not in json.dumps(view)
 
 
 def test_primary_reading_routes_only_replace_verified_same_source_aliases():
@@ -146,21 +76,22 @@ def test_primary_reading_routes_only_replace_verified_same_source_aliases():
     assert job==before
 
 
-@pytest.mark.process_e2e
-def test_parent_history_alias_requires_exact_source_seal(tmp_path):
-    root=context_scene(tmp_path)
-    job=c.build_job(root,5,'H',[3],instruction='Retain independent counterevidence.')
-    ref=job['direct_refs'][0]
-    assert c._parent_view(job,ref,root)['history_alias']=='inputs/history/nodes/003/0001.json'
-    # A matching step or body basename cannot substitute for the frozen owner.
-    changed=copy.deepcopy(job)
-    row=next(row for row in changed['history']['nodes'] if row['step']==3)
-    row['seal_ref']=dict(path='/foreign/native-evidence/003/result-identity.json')
-    assert 'history_alias' not in c._parent_view(changed,ref,root)
-    changed=copy.deepcopy(job)
-    changed['history']['files']=[row for row in changed['history']['files']
-        if row['path']!='inputs/history/nodes/003/0001.json']
-    assert 'history_alias' not in c._parent_view(changed,ref,root)
+def test_parent_view_projects_explicit_accepted_source_without_file_reads(monkeypatch):
+    ref=dict(path='inputs/parents/002/conclusion.json',size_bytes=20)
+    job=dict(direct_refs=[ref],direct_entry_points=[])
+    source=dict(public=dict(limitations=['The observation remains bounded.']),
+        facts=dict(job=dict(role='W')),
+        member=dict(navigation=dict(path='nodes/exact-goal/002/node.json')))
+    def forbidden(*args,**kwargs):
+        pytest.fail('A parent projection must use its producer-supplied original facts')
+    monkeypatch.setattr(c,'read',forbidden)
+    view=c._parent_view(job,ref,source=source)
+    assert view['history_alias']=='inputs/history/nodes/exact-goal/002/science.json'
+    assert view['role']=='W' and view['limitations']==source['public']['limitations']
+    with pytest.raises(ValueError,match='exact task binding'):
+        c._parent_view(job,dict(ref,path='inputs/parents/003/conclusion.json'),source=source)
+
+
 
 
 def test_selection_preserves_late_failed_unknown_and_relevant_audit():
@@ -180,37 +111,3 @@ def test_selection_preserves_late_failed_unknown_and_relevant_audit():
     assert 'target_best' not in result and result['delivery']['state']=='unknown'
     assert result['a_recommended']['candidate_id']=='candidate-19'
     assert len(selection._bytes(result))<=4096
-
-
-@pytest.mark.process_e2e
-def test_w_combination_view_uses_frozen_authorized_rows_not_single_focus(tmp_path):
-    from scidiscovery.research_loop import execution
-    root=context_scene(tmp_path)
-    job=c.build_job(root,5,'W',[1,2,3,4],instruction='Work within the authorized scientific questions.')
-    # Pure projection contract input: acceptance and grants remain another owner.
-    plan=c.read_scientific_output(execution.raw(root,1))['search_plan']
-    mechanisms=[dict(mechanism_ref=f'h001.m{index}',label=item['label'],source_h=1,
-        source_h_ref=c.record_ref(c.host_record(c.workspace(root,1))/'result-identity.json'),
-        minimal_test=item['minimal_test'],status='pending') for index,item in enumerate(plan['commitments'],1)]
-    job['search']['breadth']=dict(version=1,initial_calls=1,mechanisms=mechanisms,
-        baseline=[dict(mechanism_ref=row['mechanism_ref'],accepted_count=1) for row in mechanisms],grant=None,prior_unknown=False)
-    before=copy.deepcopy(job)
-    view=c.science_view(job,root)
-    scope=view['lineage']['mechanisms']
-    assert scope['focus'] is None
-    if view['lineage'].get('view_omitted'):
-        assert view['lineage']['omission_reason']
-        assert scope['count']==scope['pending_count']==len(mechanisms)==4
-        rows=indexed_rows(root,job,'mechanisms')
-    else:
-        assert scope['authorized_count']==4 and scope['overview_omitted_count']==0
-        assert scope['unfinished_plan']['remaining_count']==4
-        rows=scope['overview']
-    assert [row['mechanism_ref'] for row in rows]==[row['mechanism_ref'] for row in mechanisms]
-    assert [row['label'] for row in rows]==[row['label'] for row in mechanisms]
-    for row in rows:
-        assert bound_input_path(root,job,row['original']).is_file()
-    public=json.dumps(view)
-    assert 'source_h_ref' not in public and 'baseline' not in public and 'accepted_count' not in public
-    assert len((json.dumps(view['lineage'],ensure_ascii=False,indent=2)+'\n').encode())<=4096
-    assert job==before

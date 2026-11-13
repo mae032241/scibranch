@@ -650,6 +650,12 @@ usable after private-home deletion and in framework historical-task forks,
 including nested forks. This does not authorize live resume without its originals.
 Existing frozen false capabilities and old unsupported receipts remain unsupported.
 
+Current same-session repair/resume meters the new append from the current EOF;
+it does not acquire a verified whole-history digest. The SDK session identity
+remains stable, but these resumed receipts have unsupported complete authorship
+and cannot qualify an exact subject requiring complete author proof. Normal
+finite resume and its retained consumption do not depend on that qualification.
+
 Ordinary W/A/Final A does not require complete authorship or strict independence
 proof. Current supported historical-task forks do not promise migration or
 resumption of older paused or not-yet-dispatched forks.
@@ -677,6 +683,10 @@ configured 因扩展参与者与调用覆盖不完整，冻结完整原生作者
 同一 actor 变成独立审查者。留存校验消费这些证明，不重新打开 live native session；私有
 home 删除后及框架历史任务 fork（含嵌套 fork）中仍可使用，但不授权缺失原件时的 live
 resume。既有冻结 false 能力与旧 unsupported 回执仍不受支持。
+
+当前同 session 补填／续接仅从当前 EOF 增量计量，不取得经过核验的完整历史 digest。
+SDK session 身份仍稳定，但这类续接回执的完整作者证明为 unsupported，不能赋予要求完整
+作者证明的准确 subject 正式资格；正常有限续接及其已耗预算保留不依赖该资格。
 
 普通 W/A/Final A 不以完整作者或严格独立性证明为硬门槛。当前受支持历史任务 fork 不承诺
 旧暂停或尚未首派工 fork 的迁移续跑。

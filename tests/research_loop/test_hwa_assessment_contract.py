@@ -76,11 +76,14 @@ def test_retained_repair_binds_its_actual_w_author_instead_of_intervening_a(tmp_
     monkeypatch.setattr(search,'_current_combination',lambda *args:None)
     monkeypatch.setattr(history,'_source',source)
     monkeypatch.setattr(history,'source_control_ref',lambda *args:dict(path='jobs/002.json'))
-    monkeypatch.setattr(originals,'node',lambda *args:object())
+    monkeypatch.setattr(originals,'node',lambda *args,**kwargs:object())
     monkeypatch.setattr(originals,'source_record',lambda *args:tmp_path/'original-w-seal')
     monkeypatch.setattr(handoff_state,'selected_materials',lambda *args,**kwargs:selected)
     monkeypatch.setattr(search,'_repair_choice',repair)
-    monkeypatch.setattr(search,'_breadth',lambda *args:None)
+    def bounded_breadth(root,state,limits,focus,*,restricted):
+        assert restricted is False
+        return None
+    monkeypatch.setattr(search,'_breadth',bounded_breadth)
     monkeypatch.setattr(c,'record_ref',lambda path:dict(path=str(path)))
     bound=search.bind(tmp_path,4,'W',state=state)
     assert reads==[2] and choices==[(chooser,'Q',selected)]

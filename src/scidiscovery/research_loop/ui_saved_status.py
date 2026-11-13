@@ -16,21 +16,21 @@ def _read(path, default=None):
     return c.read(path) if path.exists() else default
 
 
-def _saved_read(path, memo):
+def _saved_read(path, memo, default=None):
     """UI-only immutable record memo; never used by control admission."""
     if memo is None:
-        return _read(path)
+        return _read(path, default)
     with memo_lock(memo):
-        return _memo_read(path, memo)
+        return _memo_read(path, memo, default)
 
 
-def _memo_read(path, memo):
+def _memo_read(path, memo, default=None):
     key = str(path)
     try:
         info = path.stat()
     except FileNotFoundError:
         memo.pop(key, None)
-        return None
+        return default
     identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     saved = memo.get(key)
     if saved is not None and saved[0] == identity:
@@ -111,7 +111,9 @@ def final_return(root, events=None):
 
 
 def _native_outcome(record, memo=None):
-    outcome = _saved_read(record / 'native-outcome.json', memo) or {}
+    outcome = _saved_read(record / 'native-outcome.json', memo, {})
+    if not isinstance(outcome, dict):
+        raise ValueError('Saved native outcome original must be an object')
     if (outcome.get('stop_reason') == 'native_failure_event'
             and type(outcome.get('returncode')) is int and outcome['returncode'] == 0
             and outcome.get('terminal_observed') is True and outcome.get('native_started') is True

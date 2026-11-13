@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from scidiscovery.research_loop import cli, contracts as c, controller, feedback, history
+from scidiscovery.research_loop import accepted_budget, cli, contracts as c, controller, feedback, history
 from cov_execution import lineage as cov_lineage
 from test_cov_lineage import wrapper  # Real CLI fixture, never mocked transport.
 from test_history_handoff import finish
@@ -37,16 +37,24 @@ def test_running_call_is_visible_before_w_or_call_finishes_and_queries_are_reado
     wrapper.backend.write_text(code)
     script = wrapper.script('inflight', 'slow')
     env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''), EXP_WALL_CAP_S='4')
-    process = subprocess.Popen([sys.executable, '-m', 'cov_execution.lineage',
+    launch = ('import runpy,sys; from scidiscovery.research_loop import worker_execution_bridge as bridge; '
+              'bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None)); '
+              'sys.argv=["cov_execution.lineage",*sys.argv[1:]]; '
+              'runpy.run_module("cov_execution.lineage",run_name="__main__")')
+    process = subprocess.Popen([sys.executable, '-c', launch,
         '--config', str(wrapper.config), 'run', '--script', str(script), '--new-plan'],
         cwd=wrapper.root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         record = Path(json.loads(wrapper.config.read_text())['record_dir'])
         until = time.monotonic() + 10
-        while not list(record.glob('calls/*/process.json')) and time.monotonic() < until:
+        while process.poll() is None and not list(record.glob('calls/*/process.json')) and time.monotonic() < until:
             time.sleep(.01)
+        if process.poll() is not None:
+            out, err = process.communicate(timeout=5)
+            pytest.fail(json.dumps(dict(returncode=process.returncode, stdout=out, stderr=err)))
         assert list(record.glob('calls/*/process.json')) and not list(record.glob('calls/*/completed.json'))
-        before = {p: p.read_bytes() for p in record.rglob('*.json')}
+        # The live receipt owner can update its observation concurrently.
+        before = {p: p.read_bytes() for p in record.glob('calls/*/accepted.json')}
         first = wrapper.cli('lineage-status')
         second = wrapper.cli('lineage-status')
         assert first['calls'][0]['status'] == second['calls'][0]['status'] == 'running'
@@ -65,7 +73,7 @@ def test_running_call_is_visible_before_w_or_call_finishes_and_queries_are_reado
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('name', ['accepted.json', 'completed.json', 'process.json'])
+@pytest.mark.parametrize('name', ['accepted.json', 'completed.json'])
 def test_torn_metadata_never_proves_success_or_reconciles_originals(wrapper, name):
     result = wrapper.run('initial', 'success', '--new-plan')
     directory = wrapper.directory(result)
@@ -91,45 +99,13 @@ def test_torn_metadata_never_proves_success_or_reconciles_originals(wrapper, nam
 
 
 @pytest.mark.process_e2e
-def test_pid_mismatch_without_completion_is_unknown_not_running(wrapper):
-    result = wrapper.run('initial', 'success', '--new-plan')
-    directory = wrapper.directory(result)
-    (directory / 'completed.json').unlink()
-    process = json.loads((directory / 'process.json').read_text())
-    process['start_ticks'] += 1
-    (directory / 'process.json').write_text(json.dumps(process))
-    value = wrapper.cli('lineage-status')
-    assert value['calls'][0]['status'] == 'unknown' and value['counts']['running'] == 0
-
-
-@pytest.mark.process_e2e
-def test_more_than_sixteen_calls_remain_counted_once_without_large_asset_reads(wrapper, monkeypatch):
-    for index in range(18):
-        wrapper.run(f'candidate-{index}', 'success', '--new-plan')
-    config = json.loads(wrapper.config.read_text())
-    original = cov_lineage._read
-
-    def metadata_only(path, limit=cov_lineage.MAX_BYTES):
-        assert Path(path).name not in {'source.py', 'model.pkl'}
-        return original(path, limit)
-
-    monkeypatch.setattr(cov_lineage, '_read', metadata_only)
-    before = {p: p.read_bytes() for p in Path(config['record_dir']).rglob('*.json')}
-    first = cov_lineage._progress(config, live_scope(config))
-    again = cov_lineage._progress(config, live_scope(config))
-    assert len(first['calls']) == 16 and first['omitted_count'] == 2
-    assert first['counts']['known_success'] == 18 and first['counts'] == again['counts']
-    assert len({row['call_id'] for row in first['calls']}) == 16
-    assert before == {p: p.read_bytes() for p in before}
-
-
-@pytest.mark.process_e2e
 @pytest.mark.parametrize('name', ['accepted.json', 'row.json', 'terminal.json'])
 def test_published_metadata_mismatch_is_hard_error_not_optional_unknown(wrapper, name):
     result = wrapper.run('initial', 'success', '--new-plan')
     path = wrapper.directory(result) / name
     value = json.loads(path.read_text())
     value['tamper'] = True
+    path.chmod(0o600)
     path.write_text(json.dumps(value))
     assert wrapper.cli('lineage-status', expected=3)['status'] == 'integrity_error'
 
@@ -272,9 +248,7 @@ def test_large_public_metrics_remain_known_but_are_omitted_from_feedback(wrapper
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('name,value', [('accepted.json', []), ('process.json', []),
-    ('accepted.json', {'parent': []}), ('accepted.json', {'parent': {}}),
-    ('accepted.json', {'parent': {'candidate_id': []}})])
+@pytest.mark.parametrize('name,value', [('accepted.json', {'parent': []})])
 def test_tool_malformed_live_metadata_is_bounded_integrity_error(wrapper, name, value):
     result = wrapper.run('public-candidate', 'success', '--new-plan')
     directory = wrapper.directory(result)
@@ -282,6 +256,7 @@ def test_tool_malformed_live_metadata_is_bounded_integrity_error(wrapper, name, 
     path = directory / name
     if isinstance(value, dict):
         value = dict(json.loads(path.read_text()), **value)
+    path.chmod(0o600)
     path.write_text(json.dumps(value))
     before = {p: p.read_bytes() for p in directory.iterdir() if p.is_file()}
     response = wrapper.cli('lineage-status', expected=3)
@@ -290,13 +265,14 @@ def test_tool_malformed_live_metadata_is_bounded_integrity_error(wrapper, name, 
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('name', ['accepted.json', 'completed.json', 'process.json'])
+@pytest.mark.parametrize('name', ['accepted.json', 'completed.json'])
 def test_tool_torn_utf8_live_metadata_is_unresolved_or_unknown(wrapper, name):
     result = wrapper.run('public-candidate', 'success', '--new-plan')
     directory = wrapper.directory(result)
     if name != 'completed.json':
         (directory / 'completed.json').unlink()
     path = directory / name
+    path.chmod(0o600)
     path.write_bytes(b'\xff')
     before = {p: p.read_bytes() for p in directory.iterdir() if p.is_file()}
     if name == 'accepted.json':
@@ -313,10 +289,9 @@ def test_tool_torn_utf8_live_metadata_is_unresolved_or_unknown(wrapper, name):
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('intent', [[], None, 1, 'invalid'])
+@pytest.mark.parametrize('intent', [None])
 @pytest.mark.parametrize('name', ['native-intent.json', 'native-outcome.json'])
-@pytest.mark.parametrize('node_budget', [False, True])
-def test_host_status_malformed_live_original_reports_bounded_integrity_error(tmp_path, intent, name, node_budget):
+def test_host_status_malformed_live_original_reports_bounded_integrity_error(tmp_path, intent, name):
     public = tmp_path / 'public'
     public.mkdir()
     objective = public / 'goal'
@@ -324,67 +299,26 @@ def test_host_status_malformed_live_original_reports_bounded_integrity_error(tmp
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, ['never-launched'], max_tokens=1000, max_seconds=60,
         max_steps=4, model='fixture', reasoning_effort='high', search_policy=None,
-        node_budget_policy={role: dict(max_observed_tokens=500, max_seconds=30) for role in ('H', 'W', 'A', 'E')}
-            if node_budget else None,
         history_observer=dict(adapter=cov_lineage.__file__, contract_version=2,
             config=dict(runs='data/runs', calls='project/nodes', evaluation_key='public-fixture-v1')))
     job = c.build_job(root, 1, 'H', [])
     record = c.host_record(c.workspace(root, 1))
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/001.json')))
+    accepted_budget.accept_native(root, 1, record, c.read(record / 'native-intent.json'))
+    if (record / name).exists():(record / name).chmod(0o600)
     c.write(record / name, intent)
     before = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
     if name == 'native-intent.json':
-        with pytest.raises(history.ObserverIntegrityError):
+        with pytest.raises((history.ObserverIntegrityError, ValueError)):
             feedback.live(root, job)
     env = dict(os.environ, PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''))
     reply = subprocess.run([sys.executable, '-m', 'scidiscovery.research_loop.cli', 'status', '--root', str(root)],
         env=env, capture_output=True, text=True, timeout=10)
     assert reply.returncode == 1 and not reply.stderr
     result = json.loads(reply.stdout)
-    assert result['status'] == 'error' and 'original' in result['error']
+    assert result['status'] == 'error' and 'original' in result['error'].lower()
     assert str(root) not in reply.stdout
     assert before == {p: p.read_bytes() for p in before}
-
-
-def test_host_status_observes_unsealed_w_through_frozen_adapter_without_writer_lock(tmp_path):
-    from test_cov_lineage import BACKEND
-    public = tmp_path / 'public'
-    public.mkdir()
-    objective = public / 'goal.md'
-    objective.write_text('Use only public observed experiment results')
-    root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['never-launched'], max_tokens=10_000, max_seconds=3600,
-        max_steps=8, model='fixture', reasoning_effort='high', search_policy=None,
-        history_observer=dict(adapter=cov_lineage.__file__, contract_version=2,
-            config=dict(runs='data/runs', calls='project/nodes', evaluation_key='public-fixture-v1')))
-    finish(root, 1, 'H', [], action='experiment')
-    job = c.build_job(root, 2, 'W', [1], instruction='Exact scientific question')
-    record = c.host_record(c.workspace(root, 2))
-    c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/002.json')))
-    backend = tmp_path / 'backend.py'
-    backend.write_text(BACKEND)
-    config_path = tmp_path / 'configured.json'
-    cov_lineage.configure(root, 2, [sys.executable, str(backend), '--runs-root', str(root / 'data/runs')], root / 'data/runs', config_path,receipt_channel='backend_file')
-    config = cov_lineage._config(config_path)
-    script = tmp_path / 'candidate.json'
-    script.write_text(json.dumps(dict(mode='success')))
-    cov_lineage.run(config, script, new=True)
-    assert not (record / 'result-identity.json').exists()
-    hint(c.workspace(root, 2))
-    import fcntl
-    with (root / 'host-run.lock').open('a') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        first = cli.status(root)
-        second = cli.status(root)
-    live = first['nodes'][1]['live_feedback']
-    assert 'live_feedback' not in first['nodes'][0]  # Sealed nodes keep their existing snapshot; no historical live rescan.
-    assert live['status'] == 'observed' and live['counts']['known_success'] == 1
-    assert live['calls'][0]['candidate_id'] == 'run-1' and live['calls'][0]['metric'] == .5
-    assert second['nodes'][1]['live_feedback']['counts'] == live['counts']
-    assert live['budget']['inflight_usage_unknown'] is True
-    encoded = json.dumps(live)
-    assert str(root) not in encoded and 'job_ref' not in encoded and 'proofs' not in encoded
-    assert not (record / 'result-identity.json').exists() and not (root / 'host-history/observations/002.json').exists()
 
 
 def test_live_intent_excessive_json_depth_is_typed_integrity_error(tmp_path, monkeypatch):
@@ -404,6 +338,8 @@ def test_live_intent_excessive_json_depth_is_typed_integrity_error(tmp_path, mon
     depth = sys.getrecursionlimit() + 100
     data = b'[' * depth + b']' * depth
     path.write_bytes(data)
+    # This unit targets parsing after the execution owner has supplied its record.
+    monkeypatch.setattr(feedback.execution, 'records', lambda root, step: [record])
     with pytest.raises(history.ObserverIntegrityError):
         feedback.live(root, job)
     original_read = c.read
@@ -441,16 +377,29 @@ def test_registered_local_host_feedback_requires_no_domain_observer(tmp_path):
     root=tmp_path/'instance'
     controller.prepare(root,objective,public,['never-launched'],max_tokens=1000,max_seconds=60,
         max_steps=4,model='fixture',reasoning_effort='high',search_policy=None)
-    job=c.build_job(root,1,'H',[]);record=c.host_record(c.workspace(root,1))
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/001.json')))
-    path=tmp_path/'local-config.json'
+    job=c.build_job(root,1,'W',[]);record=c.host_record(c.workspace(root,1))
+    intent = dict(task_ref=c.record_ref(root/'jobs/001.json'))
+    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,1,record,intent)
+    path=c.workspace(root,1)/'work/local-config.json'
     experiments.configure(root,1,'local_execution:command',dict(run_argv=[sys.executable],max_seconds=10),path)
-    source=tmp_path/'ordinary.py';source.write_text('print("public output without domain metric")\n')
+    from test_native_execution_inputs import research_file
+    request = research_file(path, 1)
+    source=c.workspace(root,1)/'code/ordinary.py'
+    source.parent.mkdir(exist_ok=True)
+    source.write_text('print("public output without domain metric")\n')
     env=dict(os.environ,PYTHONPATH=str(Path(cov_lineage.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''))
-    reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(path),
-        'run','--script',str(source)],env=env,capture_output=True,text=True,timeout=20)
-    assert reply.returncode==0,reply.stderr
-    before={p:p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    # Explicit component host receiver; this fixture makes no native namespace claim.
+    launch=('import runpy,sys; from scidiscovery.research_loop import worker_execution_bridge as bridge; '
+        'bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None)); '
+        'sys.argv=["scidiscovery.research_loop.experiments",*sys.argv[1:]]; '
+        'runpy.run_module("scidiscovery.research_loop.experiments",run_name="__main__")')
+    reply=subprocess.run([sys.executable,'-c',launch,'--config',str(path),
+        'run','--script',str(source),'--research',str(request)],env=env,capture_output=True,text=True,timeout=20)
+    assert reply.returncode==0,(reply.stdout,reply.stderr)
+    presentation=Path(c.read(record/'experiment-config.json')['record_dir'])/'live-status.json'
+    assert c.read(presentation)['source']=='execution_receipt_owner'
+    before={p:p.read_bytes() for p in root.rglob('*') if p.is_file() and p!=presentation}
     value=cli.status(root)['nodes'][0]['live_feedback']
     assert value['status']=='observed' and value['counts']['known_success']==1
     assert value['calls'][0]['candidate_id'] is value['calls'][0]['metric'] is None

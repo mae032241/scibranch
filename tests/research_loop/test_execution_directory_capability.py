@@ -11,6 +11,7 @@ import pytest
 
 from execution_fixtures import DifferentExternalIdentity, execution_registry
 from test_history_handoff import finish
+from test_native_execution_inputs import research_file
 from scidiscovery.operations.execution import ExecutionInterfaceRegistration
 from scidiscovery.operations.runtime_plugins import RuntimePluginContribution, RuntimePluginFactory
 from scidiscovery.research_loop import (accepted_budget, budget, code_versions, contracts as c, controller,
@@ -97,6 +98,7 @@ def _case(tmp_path,*,project=False,directory_inputs=True):
     accepted_budget.accept_native(root,2,record,c.read(record/'native-intent.json'))
     work=c.workspace(root,2);config_path=work/'work/experiment-config.json'
     config=e.configure(root,2,'directory_fixture:command',dict(directory_inputs=directory_inputs),config_path)
+    research_file(config_path, 2)
     code=work/('project/src' if project else 'code');code.mkdir(parents=True,exist_ok=True)
     (code/'main.py').write_bytes(b'from helper import VALUE\nprint(VALUE)\n')
     (code/'helper.py').write_bytes(b'VALUE = "captured sibling"\n')
@@ -141,7 +143,7 @@ def test_declared_provider_receives_frozen_directory_and_query_survives_export_r
         assert Path(payload.local_path).with_name('helper.py').read_bytes()==helper
 
     directory_registry['before_prepare']=edit_draft
-    result=e.dispatch(config,code/'main.py',new=True,mechanism='h001.m1')
+    result=e.dispatch(config,code/'main.py',new=True,mechanism=c.read(config_path.with_name('research.json')))
     assert result['status']=='known_success'
     call=result['call_id'];accepted=e.Records(config).accepted(call);version=accepted['code_version']
     assert set(version)=={'version','object_format','commit','tree_path','selection','entry','logical_root'}
@@ -181,20 +183,20 @@ def test_declared_provider_receives_frozen_directory_and_query_survives_export_r
 @pytest.mark.process_e2e
 def test_undeclared_provider_keeps_file_selection_and_cannot_admit_project_directory(tmp_path,directory_registry):
     ordinary=tmp_path/'ordinary';ordinary.mkdir()
-    root,job,work,code,config,_=_case(ordinary,directory_inputs=False)
+    root,job,work,code,config,config_path=_case(ordinary,directory_inputs=False)
     selection=experiment_client.code_selection(config,code/'main.py')
     assert selection['selection']=='file' and selection['code_root']==code
-    result=e.dispatch(config,code/'main.py',new=True,mechanism='h001.m1')
+    result=e.dispatch(config,code/'main.py',new=True,mechanism=c.read(config_path.with_name('research.json')))
     assert result['status']=='known_success'
     accepted=e.Records(config).accepted(result['call_id'])
     assert accepted['code_version']['selection']=='file'
     assert not Path(accepted['prepared']['local_path']).with_name('helper.py').exists()
     code_versions.cleanup_export(root,step=2,call_id=result['call_id'])
     project=tmp_path/'project';project.mkdir()
-    _,_,_,project_code,project_config,_=_case(project,project=True,directory_inputs=False)
+    _,_,_,project_code,project_config,project_config_path=_case(project,project=True,directory_inputs=False)
     prepared=len(directory_registry['prepared'])
     with pytest.raises(e.UnsupportedExecution,match='does not declare frozen code directory inputs'):
-        e.dispatch(project_config,project_code/'main.py',new=True,mechanism='h001.m1')
+        e.dispatch(project_config,project_code/'main.py',new=True,mechanism=c.read(project_config_path.with_name('research.json')))
     assert len(directory_registry['prepared'])==prepared
     assert e.Records(project_config).calls()==[]
 

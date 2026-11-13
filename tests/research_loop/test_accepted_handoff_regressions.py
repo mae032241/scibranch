@@ -62,20 +62,6 @@ def test_output_request_passes_the_same_inventory_to_review_choice(scene, monkey
     assert inventory.selected_inputs is selected and inventory.output_error is None
 
 
-def test_assessment_uses_frozen_none_context_without_reinterpreting_old_h(scene, monkeypatch):
-    finish(scene,1,'H',[],action='experiment')
-    c.build_job(scene,2,'W',[1],instruction='Exact scientific question')
-    finish(scene,2,'W',[1])
-    generate=c._decision_context
-    def only_new_context(job,*,sources):
-        assert job['step']==3,'An accepted W/H context was regenerated'
-        return generate(job,sources=sources)
-    monkeypatch.setattr(c,'_decision_context',only_new_context)
-    job=c.build_job(scene,3,'A',[1,2])
-    handoff=job['assessment_handoff']
-    assert handoff['current_w']=='inputs/parents/002/conclusion.json'
-    assert handoff['current_h']=='inputs/parents/001/conclusion.json'
-    assert 'previous_a' not in handoff
 
 
 def test_fork_worker_overview_uses_current_source_h_goal_not_child_goal(tmp_path):

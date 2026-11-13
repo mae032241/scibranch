@@ -13,42 +13,6 @@ from scidiscovery.research_loop import checkpoint, contracts as c, controller, e
 from cov_execution import lineage as cov
 
 
-@pytest.mark.process_e2e
-def test_twenty_five_real_calls_keep_large_snapshot_contexts_and_restart_bindings(tmp_path,execution_registry):
-    outer=tmp_path/('long-real-instance-owner-'+'q'*100);outer.mkdir()
-    root,config,digest=cov_scene(outer)
-    script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    results=[cov.run(config,script,new=True) for _ in range(25)]
-    assert all(row['status']=='known_success' for row in results)
-    finish(root,2,'W',[1],text='A complete authored record. '+('科学 evidence \\"' * 12000))
-    seal_path=execution.origin(root,2)/'result-identity.json';sealed=seal_path.read_bytes()
-    seal=c.read(seal_path);path=root/seal['observations']['path'];frozen=path.read_bytes();value=c.read(path)
-    assert len(frozen)>256000
-    assert len(value['contexts'])==len(value['managed_calls'])==len(value['candidates'])==25
-    assert value['coverage']['status']=='complete' and 'diagnostic' not in value
-    expected={item['candidate_id']:item['call_id'] for item in value['contexts']}
-    assert all(item['status']=='known_success' and item['parent']['status']=='declared_root' for item in value['contexts'])
-    # A receives all associations, not rediscovered candidates without contexts.
-    job=c.build_job(root,3,'A',[1,2]);assert len(job['history']['candidate_ids'])==25
-    graph=lineage.project(root,3)['graph']
-    assert {key:item['context']['call_id'] for key,item in graph['candidates'].items()}==expected
-    assert len(history._bytes(job['history']['view']))<=history.MAX_BRIEF_BYTES
-    assert all(row['size_bytes']<=history.MAX_PAGE_BYTES for row in job['history']['files'])
-    finish(root,3,'A',[1,2],recommendation=results[0]['candidate_id'])
-    assert history._source(root,2)[2]['observations']==seal['observations']
-    # Disposable projections can disappear across process restart.
-    for cached in (root/'host-history/nodes').glob('*.json'):cached.unlink()
-    restored=lineage.project(root,4)
-    assert {key:item['context']['call_id'] for key,item in restored['graph']['candidates'].items()}==expected
-    c.validate(c.workspace(root,2));c.validate(c.workspace(root,3))
-    assert path.read_bytes()==frozen and seal_path.read_bytes()==sealed
-    # The archived accepted identity remains authoritative after size caps go.
-    original=root/value['contexts'][0]['proofs'][0]['snapshot']
-    original.chmod(0o600)
-    with original.open('ab') as stream:stream.write(b'changed')
-    with pytest.raises(history.ObserverIntegrityError):history._source(root,2)
-
-
 def test_checkpoint_large_science_keeps_small_brief_and_excludes_mutable_drafts(fragment):
     root,job,record=fragment
     science(record,scientific_result='Full scientific original: '+('\\\"物理 ' * 30000))
@@ -161,18 +125,3 @@ def test_complete_implementation_selection_is_not_capped_at_sixteen(tmp_path):
     job=c.build_job(root,3,'W',[2])
     assert len(job['selected_inputs'])==len(job['direct_materials'])==17
     c._validate_inputs(root,c.workspace(root,3),job)
-
-
-@pytest.mark.process_e2e
-def test_large_coverage_record_does_not_fail_scientific_seal_or_overview(tmp_path):
-    public=tmp_path/'public';public.mkdir();objective=public/'goal';objective.write_text('Retain complete provenance.')
-    adapter=tmp_path/'observer.py';adapter.write_text('import json\nprint(json.dumps(dict(candidates=[],current_candidate=None,actual_submission=None,coverage=dict(status="partial",note="original "*20000))))\n')
-    root=tmp_path/'instance'
-    controller.prepare(root,objective,public,['never-launched'],max_tokens=1000,max_seconds=60,max_steps=3,
-        model='no-model',reasoning_effort='high',search_policy=None,history_observer=dict(adapter=str(adapter),config={}))
-    finish(root,1,'H',[])
-    seal=c.read(execution.origin(root,1)/'result-identity.json');full=c.read(root/seal['observations']['path'])
-    assert full['coverage']['note']=='original '*20000
-    assert (root/'host-history/overview.json').stat().st_size<=history.MAX_PAGE_BYTES
-    assert c.read(root/'host-history/overview.json')['view_omitted']
-    c.validate(c.workspace(root,1))

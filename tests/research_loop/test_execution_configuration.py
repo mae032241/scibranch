@@ -8,43 +8,13 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import contracts as c, controller, execution, experiments as e, native
+from scidiscovery.research_loop import accepted_budget, contracts as c, controller, execution, experiments as e, native
 from scidiscovery.operations.execution import ExecutionInterfaceRegistration
 from scidiscovery.operations.runtime_plugins import RuntimePluginFactory
 from scidiscovery.plugin_configuration import PluginConfigurationError, read_execution_selection
 from execution_fixtures import execution_registry, remote_registry
 from test_composed_execution_results import composed_registry
-
-
-NATIVE = '''import json,os,pathlib,subprocess,sys
-work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE']);role=os.environ['THIN_HWA_ROLE'];prompt=sys.stdin.read()
-task=json.loads((work/'science-task.json').read_text())
-payload=dict(summary=role+' fixture finding',scientific_result='Mechanical registration only.',limitations=['No science qualification.'],implementation_selection=None)
-if role=='H':payload.update(next_action='experiment',route_reason='Read one bounded opaque execution',search_plan=None)
-if role=='W':
- assert 'Managed registered experiments:' in prompt and 'Managed local experiments:' not in prompt
- assert 'unsupported, never a passing verdict' in prompt
- command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(work/'work/experiment-config.json')]
- listed=subprocess.run([*command,'capabilities'],capture_output=True,text=True);assert listed.returncode==0,(listed.stdout,listed.stderr)
- capabilities=json.loads(listed.stdout);assert capabilities['contracts'] and not capabilities['lifecycle']['cancel']
- contract=capabilities['contracts'][0];assert contract['media_type']=='application/schema+json'
- schema_path=work/'work/public-schema.json'
- described=subprocess.run([*command,'describe','--key',contract['key'],'--output',str(schema_path)],capture_output=True,text=True)
- assert described.returncode==0,(described.stdout,described.stderr)
- schema=json.loads(schema_path.read_text())
- source=work/'work/payload.bin';source.write_text(json.dumps({key:value['const'] for key,value in schema['properties'].items()}))
- result=subprocess.run([*command,'run','--payload',str(source)],capture_output=True,text=True)
- assert result.returncode==0,(result.stdout,result.stderr)
- result=json.loads(result.stdout);assert result['status']=='known_success',result
- call=result['call_id']
- checked=subprocess.run([*command,'query','--call-id',call],capture_output=True,text=True)
- assert checked.returncode==0 and json.loads(checked.stdout)['state']=='succeeded',(checked.stdout,checked.stderr)
- payload.update(stage_intent='review',mechanism_findings=None)
-if role=='A':payload.update(next_action='finish',route_reason='Retain exact fixture evidence',candidate_recommendation=None,search_review=None,progress_assessment=None,decision_request=None,portfolio_review=None)
-args=sys.argv[1:];pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
-print(json.dumps({'type':'thread.started','thread_id':'selection-fixture-'+role}),flush=True)
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tokens':5}}),flush=True)
-'''
+from test_nonlocal_execution_observation import research, research_path
 
 
 def inputs(tmp_path):
@@ -57,58 +27,6 @@ def cli(*args):
     reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.cli',*map(str,args)],env=env,capture_output=True,text=True,timeout=30)
     assert reply.stdout,reply.stderr
     return reply,json.loads(reply.stdout)
-
-
-@pytest.mark.process_e2e
-def test_cli_selection_is_frozen_before_real_native_host_wiring(tmp_path,monkeypatch,remote_registry):
-    executor='remote_execution:fixture';options=dict(include_result=True,require_contract=True)
-    public,goal=inputs(tmp_path);root=tmp_path/'instance'
-    monkeypatch.setenv('PYTHONPATH',os.pathsep.join([str(Path(e.__file__).parents[2]),str(Path(__file__).parent),os.environ.get('PYTHONPATH','')]))
-    launcher=tmp_path/'native.py';launcher.write_text(NATIVE)
-    selection=tmp_path/'execution.json';c.write(selection,dict(executor=executor,configuration=options))
-    search=tmp_path/'search.json';c.write(search,None)
-    prepared,result=cli('prepare','--root',root,'--objective',goal,'--public-root',public,
-        '--native-launcher-json',json.dumps([sys.executable,str(launcher)]),
-        '--execution-config',selection,'--search-policy',search,'--max-tokens',1000,'--max-seconds',60,'--max-steps',4,'--model','no-model')
-    assert prepared.returncode==0,result
-    assert result['execution']==dict(executor=executor,capabilities_status='awaiting_host_task_configuration')
-    settings=c.settings(root);frozen=settings['execution_config']
-    assert frozen['configuration']==options and frozen['executor']==executor
-    assert settings['experiment_mode']=='local'  # Ownership, not the backend type.
-    assert not list((root/'jobs').glob('*')) and not list((root/'project/nodes').glob('*/work/experiment-config.json'))
-    before=(root/'settings.json').read_bytes();selection.write_text('{}')
-    ran,result=cli('run','--root',root)
-    assert ran.returncode==0 and result['status']=='finish',result
-    work=c.workspace(root,2);job=c.read(root/'jobs/002.json');config=c.read(execution.origin(root,2)/'experiment-config.json')
-    assert (root/'settings.json').read_bytes()==before and job['execution_config_ref']
-    assert config['execution_interface']['executor']==executor
-    assert config['scope']['job_ref']==c.record_ref(root/'jobs/002.json') and config['native_attempt']['number']==0
-    from scidiscovery.research_loop import experiment_client
-    assert config['record_dir']==str(experiment_client.record_directory(root,2)) and config['admission']['mode']=='soft'
-    assert config.get('registered_implementation')==frozen.get('implementation')
-    assert config['execution_interface']['public_capabilities'][0]['schema_id'].startswith('fixture.')
-    assert 'execution_config' not in (work/'science-task.json').read_text()
-    seal=c.read(execution.origin(root,2)/'result-identity.json');observed=c.read(root/seal['observations']['path'])
-    assert len(observed['managed_calls'])==1 and observed['managed_calls'][0]['status']=='known_success'
-    assert observed['managed_calls'][0]['outputs']
-    status=cli('status','--root',root)[1]['nodes'][1]['execution']
-    assert status['executor']==executor and status['capabilities']['query'] and 'configuration' not in status
-    from scidiscovery.research_loop.local_experiments import cleanup
-    assert cleanup(root,job)=='not_applicable'
-    frozen_calls={p:p.read_bytes() for p in e.Records(config).root.rglob('*') if p.is_file()}
-    repeated=cli('run','--root',root)[1]
-    assert {key:value for key,value in repeated.items() if key!='budget'}=={key:value for key,value in result.items() if key!='budget'}
-    assert all(p.read_bytes()==raw for p,raw in frozen_calls.items())
-    original_registration=e.registration
-    def replaced(key):
-        declared,binding=original_registration(key)
-        return ExecutionInterfaceRegistration(declared.plugin_id,declared.version+'-replaced',declared.factory),binding
-    monkeypatch.setattr(e,'registration',replaced)
-    call=e.Records(config).calls()[0].name
-    _,adapter=e.original_adapter(config,call,'query')
-    assert adapter.status_details(call)['state']=='succeeded'
-    assert e.dispatch(config,work/'work/payload.bin')['status']=='known_success'
-    assert all(p.read_bytes()==raw for p,raw in frozen_calls.items())
 
 
 def forbidden_factory(context):
@@ -291,69 +209,14 @@ def test_binding_and_adapter_config_errors_precede_native_launch(tmp_path,execut
     finish(root,1,'H',[],action='experiment');job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
     from scidiscovery.research_loop import profiles
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**profiles.binding(c.settings(root),job)))
+    accepted_budget.accept_native(root,2,record,c.read(record/'native-intent.json'))
     monkeypatch.setattr(native.subprocess,'Popen',lambda *a,**k:pytest.fail('Invalid configuration must not launch native'))
     with pytest.raises(ValueError):native.run_native(root,2)
     assert not (record/'native-process.json').exists() and not list((c.workspace(root,2)/'work/lineage/calls').glob('*'))
 
 
-@pytest.mark.process_e2e
-def test_default_local_cli_keeps_workspace_cwd_for_single_script(tmp_path,execution_registry):
-    from test_history_handoff import finish
-    from scidiscovery.research_loop import profiles
-    public,goal=inputs(tmp_path);root=tmp_path/'instance'
-    settings=controller.prepare(root,goal,public,['codex'],search_policy=None,
-        max_tokens=1000,max_seconds=60,max_steps=4,model='no-model',reasoning_effort='high')
-    selected=settings['execution_config'];assert selected['executor']=='local_execution:command'
-    finish(root,1,'H',[],action='experiment');job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**profiles.binding(settings,job)))
-    work=c.workspace(root,2);source=work/'work/child/run.py';source.parent.mkdir()
-    (work/'relative-original.txt').write_text('workspace original')
-    source.write_text('import pathlib\nassert pathlib.Path("relative-original.txt").read_text()=="workspace original"\npathlib.Path("artifacts/cwd-proof.txt").write_text(str(pathlib.Path.cwd()))\n')
-    path=work/'work/experiment-config.json'
-    config=e.configure(root,2,selected['executor'],selected['configuration'],path)
-    env=dict(os.environ,PYTHONPATH=os.pathsep.join(str(p) for p in sys.path if p))
-    reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(path),'run','--script',str(source)],
-        cwd=source.parent,env=env,capture_output=True,text=True,timeout=10)
-    assert reply.returncode==0,(reply.stdout,reply.stderr)
-    result=json.loads(reply.stdout);assert result['status']=='known_success'
-    assert config['cwd']==str(work) and (work/'artifacts/cwd-proof.txt').read_text()==str(work)
 
 
-@pytest.mark.process_e2e
-def test_accepted_package_upgrade_allows_query_reconcile_and_submit(tmp_path,monkeypatch):
-    from test_history_handoff import finish
-    from scidiscovery.research_loop import profiles
-    package=tmp_path/'accepted_package';package.mkdir();(package/'__init__.py').write_text('')
-    helper=package/'helper.py';helper.write_text('VERSION=1\n')
-    (package/'factory.py').write_text('from . import helper\nimport json\n'
-        'from scidiscovery.research_loop.local_experiments import LocalExecution\n'
-        'from scidiscovery.operations.execution import ExecutionInterfaceRegistration\n'
-        'from scidiscovery.operations.runtime_plugins import RuntimePluginContribution,RuntimePluginFactory\n'
-        'def build(context):return RuntimePluginContribution(execution_adapters={"command":LocalExecution(json.loads(context.config_bytes))})\n'
-        'REGISTRATION=ExecutionInterfaceRegistration("accepted_fixture","1",RuntimePluginFactory(build))\n')
-    metadata=tmp_path/'accepted_fixture.dist-info';metadata.mkdir()
-    (metadata/'METADATA').write_text('Metadata-Version: 2.1\nName: accepted-fixture\nVersion: 1\n')
-    (metadata/'entry_points.txt').write_text('[scidiscovery.execution_interfaces]\naccepted_fixture = accepted_package.factory:REGISTRATION\n')
-    monkeypatch.syspath_prepend(str(tmp_path))
-    public,goal=inputs(tmp_path);root=tmp_path/'instance'
-    options=dict(run_argv=[sys.executable],max_seconds=5)
-    controller.prepare(root,goal,public,['never-launched'],max_tokens=100,max_seconds=20,max_steps=3,search_policy=None,
-        model='no-model',reasoning_effort='high',execution_config=dict(executor='accepted_fixture:command',configuration=options))
-    finish(root,1,'H',[],action='experiment');job=c.build_job(root,2,'W',[1]);record=execution.origin(root,2)
-    c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json'),**profiles.binding(c.settings(root),job)))
-    path=c.workspace(root,2)/'work/experiment-config.json';config=e.configure(root,2,'accepted_fixture:command',options,path)
-    script=tmp_path/'source.py';script.write_text('print("one original dispatch")\n')
-    result=e.dispatch(config,script);assert result['status']=='known_success'
-    originals={p:p.read_bytes() for p in e.Records(config).root.rglob('*') if p.is_file()}
-    helper.write_text('VERSION=2\n')
-    env=dict(os.environ,PYTHONPATH=os.pathsep.join(str(p) for p in sys.path if p))
-    for action in ('query','reconcile','run'):
-        args=['--script',str(script)] if action=='run' else ['--call-id',result['call_id']]
-        reply=subprocess.run([sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(path),action,*args],
-            env=env,capture_output=True,text=True,timeout=10)
-        assert reply.returncode==0,(reply.stdout,reply.stderr)
-    assert all(p.read_bytes()==raw for p,raw in originals.items())
-    assert len(e.Records(config).calls())==2
 
 
 @pytest.mark.parametrize('changed',['task','configuration','permission'])

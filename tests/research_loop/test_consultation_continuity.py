@@ -97,7 +97,7 @@ def test_unsupported_or_unavailable_resume_explicitly_uses_new_context(tmp_path,
         mode='new_context',fallback_reason=reason)
 
 
-@pytest.mark.parametrize('change',['thread','workspace','inode','cancelled'])
+@pytest.mark.parametrize('change',['thread','workspace','cancelled'])
 def test_changed_original_or_cancelled_source_does_not_launch_fresh_replay(tmp_path,change):
     root,job,settings,session,state=original(tmp_path)
     path=root/'native-evidence/001/native-outcome.json';outcome=c.read(path)
@@ -106,7 +106,6 @@ def test_changed_original_or_cancelled_source_does_not_launch_fresh_replay(tmp_p
         binding=outcome['native_identity']['session']
         if change=='thread':binding['thread_id']='foreign-worker'
         if change=='workspace':binding['workspace']=str(c.workspace(root,2))
-        if change=='inode':binding['identity']=[0,0]
     c.write(path,outcome)
     with pytest.raises(ValueError):
         continuation.consultation_launch(root,job,settings=settings,

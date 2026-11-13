@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from types import SimpleNamespace
+
 import pytest
 
 from execution_fixtures import execution_registry
@@ -95,28 +97,30 @@ def test_non_screen_without_typed_refusal_does_not_capture_facts(tmp_path,monkey
     job=dict(role='W',search=search)
     monkeypatch.setattr(worker_delivery,'_caller_correction',lambda *args:None)
     monkeypatch.setattr(worker_delivery,'validate',lambda *args,**kwargs:pytest.fail('Unneeded fact validation'))
-    assert worker_delivery.capture(tmp_path,job,tmp_path) is None
-    assert worker_delivery.assessment(tmp_path,job,dict(stage_intent='decision'),tmp_path)['status']=='not_applicable'
+    inventory=SimpleNamespace(caller_correction=None,file_correction=None)
+    assert worker_delivery._capture(tmp_path,job,tmp_path,inventory=inventory) is None
+    assert worker_delivery.assessment(tmp_path,job,dict(stage_intent='decision'),tmp_path,inventory=inventory)['status']=='not_applicable'
     assert not (tmp_path/worker_delivery.FACT_NAME).exists()
 
 
-def test_non_screen_assessment_reuses_its_verified_refusal_for_lazy_capture(tmp_path,monkeypatch):
+def test_non_screen_assessment_consumes_supplied_refusal_without_recapture(tmp_path,monkeypatch):
     job=dict(role='W')
     correction=dict(mechanism_ref='unaccepted run request',diagnostic='Check required options.')
-    scanned=[];captured=[]
-    def refusal(*args):
-        scanned.append(args)
-        return correction
-    def capture(root,job,record,*,correction=None):
-        captured.append(correction)
-        c.write(record/worker_delivery.FACT_NAME,{})
-    monkeypatch.setattr(worker_delivery,'_caller_correction',refusal)
-    monkeypatch.setattr(worker_delivery,'capture',capture)
-    monkeypatch.setattr(worker_delivery,'validate',lambda *args,**kwargs:dict(
-        evidence=[],unknown=[],prior_unknown=False,capacity=False))
-    result=worker_delivery.assessment(tmp_path,job,{},tmp_path)
+    inventory=SimpleNamespace(caller_correction=correction,file_correction=None)
+    def unexpected(*args,**kwargs):
+        pytest.fail('The delivery consumer must not reacquire or publish facts')
+    monkeypatch.setattr(worker_delivery,'_caller_correction',unexpected)
+    monkeypatch.setattr(worker_delivery,'_capture',unexpected)
+    c.write(tmp_path/worker_delivery.FACT_NAME,{})
+    validated=[]
+    def validate(*args,**kwargs):
+        assert kwargs['inventory'] is inventory
+        validated.append(True)
+        return dict(evidence=[],unknown=[],prior_unknown=False,capacity=False)
+    monkeypatch.setattr(worker_delivery,'validate',validate)
+    result=worker_delivery.assessment(tmp_path,job,{},tmp_path,inventory=inventory)
     assert result['status']=='incomplete' and result['caller_correction']==correction
-    assert len(scanned)==1 and captured==[correction]
+    assert validated==[True]
 
 
 def test_real_transport_failure_gets_local_reconciliation_hint(tmp_path,capsys):
@@ -128,10 +132,13 @@ def test_real_transport_failure_gets_local_reconciliation_hint(tmp_path,capsys):
     assert result['handoff']['reason']=='original_configuration_unavailable'
 
 
+@pytest.mark.process_e2e
 def test_host_verified_terminal_hint_survives_actual_client_and_cli_stdout(chain,monkeypatch,capsys):
     root,backend,output,path,config,_=_reviewed_execution(chain,capsys)
-    assert e.main(['--config',str(path),'run','--payload',str(output)])==2
-    call=json.loads(capsys.readouterr().out)['call_id']
+    assert e.main(['--config',str(path),'run','--payload',str(output),'--research',str(Path(path).with_name('research.json'))])==2
+    response=json.loads(capsys.readouterr().out)
+    assert 'call_id' in response, response
+    call=response['call_id']
     backend.state='succeeded'
     assert e.main(['--config',str(path),'collect','--call-id',call])==0
     capsys.readouterr()

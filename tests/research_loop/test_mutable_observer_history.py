@@ -80,19 +80,21 @@ def test_changed_metadata_gets_new_original_and_keeps_old_bytes(scene,tmp_path,m
 
 
 def test_capture_rejects_corrupt_original_before_reusing_unchanged_metadata(scene,tmp_path,monkeypatch):
-    from scidiscovery.research_loop import execution,shared_originals
+    from scidiscovery.research_loop import accepted_budget,execution,shared_originals
     metadata_observer(scene,tmp_path)
     (scene/'fact.json').write_bytes(b'first')
     finish(scene,1,'H',[])
     proof=metadata_proof(scene,1)
     job=c.build_job(scene,2,'W',[1])
     c.write(execution.raw(scene,2),dict(summary='Unsealed component observation'))
+    inventory=c.CurrentInventory(scene,job,execution.origin(scene,2),0,[],{},
+        policy=c.settings(scene),head=accepted_budget.read(scene))
     retained=scene/proof['snapshot'];retained.chmod(0o600);retained.write_bytes(b'other')
     def no_copy(*args,**kwargs):
         raise AssertionError('A damaged retained original must not be replaced by a fresh copy')
     monkeypatch.setattr(shared_originals,'retain',no_copy)
     with pytest.raises(history.ObserverIntegrityError,match='Archived observer original changed'):
-        history.capture(scene,job,{},[])
+        history.capture(scene,job,{},[],inventory=inventory)
     assert not (scene/'host-history/observations/002.json').exists()
 
 
@@ -129,7 +131,7 @@ print(json.dumps(dict(candidates=[],current_candidate=None,
 
 def test_capture_reuses_managed_output_control_binding_across_promotions(tmp_path,monkeypatch):
     import sys
-    from scidiscovery.research_loop import controller,execution,experiments,shared_originals
+    from scidiscovery.research_loop import accepted_budget,controller,execution,experiments,shared_originals
     from cov_execution import delivery as provider,observer
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Check retained output custody without executing science.')
@@ -151,8 +153,9 @@ def test_capture_reuses_managed_output_control_binding_across_promotions(tmp_pat
     # It replaces discovery only: no executor, qualification or scientific
     # verdict is supplied, and no scientific execution is requested.
     assert history._managed_config(job,scene) is not None
-    monkeypatch.setattr(history,'managed_calls',lambda root,current:[dict(
-        call_id='retained-component',scope=dict(step=current['step']),outputs=[output])])
+    inventory=c.CurrentInventory(scene,job,execution.origin(scene,2),0,
+        [dict(call_id='retained-component',scope=dict(step=job['step']),outputs=[output])],{},
+        policy=c.settings(scene),head=accepted_budget.read(scene))
     monkeypatch.setattr(history,'read_adapter',lambda config,request:observer.observe(dict(request,
         config=dict(runs='runs',evaluation_key='component-only'))))
     runs=scene/'runs';runs.mkdir();submission=scene/'submission';submission.mkdir()
@@ -166,7 +169,7 @@ def test_capture_reuses_managed_output_control_binding_across_promotions(tmp_pat
         artifact_ref={key:saved[key] for key in ('path','size_bytes')},
         artifact_origin={key:saved[key] for key in ('path','size_bytes')},target=dict(runs=str(runs)))
     provider._promote(request,runs,submission,original,dict(run_id=1))
-    receipt=history.capture(scene,job,{},[])
+    receipt=history.capture(scene,job,{},[],inventory=inventory)
     fact=c.read(scene/receipt['path']);actual=fact['actual_submission']
     artifact=actual['artifact'];metadata=actual['evidence'][0]
     assert artifact['retention']=='archived'
@@ -177,7 +180,7 @@ def test_capture_reuses_managed_output_control_binding_across_promotions(tmp_pat
     provider._promote(dict(request,operation_id='fixture-next'),runs,submission,original,dict(run_id=1))
     for proof in (artifact,metadata):history._validate_proof(scene,proof)
     assert (scene/metadata['snapshot']).read_bytes()==original_metadata
-    assert history.capture(scene,job,{},[])==receipt
+    assert history.capture(scene,job,{},[],inventory=inventory)==receipt
     assert c.read(scene/receipt['path'])==fact
     assert copied==[runs/'submitted.json']
     original.chmod(0o600);original.write_bytes(b'tampered managed original')

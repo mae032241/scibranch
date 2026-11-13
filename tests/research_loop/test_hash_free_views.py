@@ -1,5 +1,6 @@
 """Display snapshots do not re-hash or reorder recovered scientific sources."""
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,7 @@ from scidiscovery.research_loop import instance_ui, ui_errors
 
 def test_history_page_keeps_original_projection_when_missing_source_recovers(tmp_path, monkeypatch):
     page=instance_ui.InstanceUI.__new__(instance_ui.InstanceUI)
-    page.root=tmp_path;page.view_memo={};page.history_pages={}
+    page.root=tmp_path;page.view_memo={};page.history_pages={};page.cache_lock=threading.RLock()
     page._sealed_steps=lambda:[1,2]
     page._navigation=lambda:''
     page._page=lambda title,body,**kwargs:body

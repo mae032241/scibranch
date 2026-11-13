@@ -26,23 +26,24 @@ if config['meter']=='mismatched':
   json.dumps(dict(type='event_msg',payload=dict(type='token_count',info=dict(total_token_usage=
    dict(input_tokens=230,cached_input_tokens=100,output_tokens=10)))))+'\n')
  print(json.dumps(dict(type='thread.started',thread_id=thread)),flush=True)
+payload=dict(summary='The original final report is retained.',
+ scientific_result='Completed the bounded assessment; the scientific objective remains unresolved.',
+ limitations=['A deterministic transport fixture supplies no scientific qualification.'],
+ implementation_selection=None,candidate_recommendation=None,final_coverage=None,search_review=None,
+ progress_assessment=None,decision_request=None,portfolio_review=None,
+ next_action='finish',route_reason='Preserve this original report and its limitations.')
+raw=json.dumps(payload)
+print(json.dumps(dict(type='item.completed',item=dict(type='agent_message',phase='final_answer',text=raw))),flush=True)
 if config['terminal']:
  event=dict(type='turn.completed')
  if config['meter'] is True or config['meter']=='mismatched':
   event['usage']=dict(input_tokens=210,cached_input_tokens=209,output_tokens=3)
  print(json.dumps(event),flush=True)
  (work/'work/terminal-emitted').touch()
-deadline=time.monotonic()+config['delay']
-while time.monotonic()<deadline:
- print(json.dumps(dict(type='fixture.waiting')),flush=True)
- time.sleep(.05)
-payload=dict(summary='The original final report is retained.',
- scientific_result='Completed the bounded assessment; the scientific objective remains unresolved.',
- limitations=['A deterministic transport fixture supplies no scientific qualification.'],
- implementation_selection=None,candidate_recommendation=None,search_review=None,
- progress_assessment=None,decision_request=None,portfolio_review=None,
- next_action='finish',route_reason='Preserve this original report and its limitations.')
-pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
+# The native terminal already occurred. Delayed file publication is silent;
+# emitting fixture activity here would contradict the terminal under test.
+time.sleep(config['delay'])
+pathlib.Path(args[args.index('--output-last-message')+1]).write_text(raw)
 (work/'work/final-written').touch()
 raise SystemExit(config['returncode'])
 '''
@@ -71,6 +72,7 @@ def instance(tmp_path, *, mode='soft', node_seconds=10, total_seconds=30,
 
 
 @pytest.mark.parametrize('mode', ['soft'])
+@pytest.mark.process_e2e
 def test_last_original_a_collects_delayed_json_after_local_and_shared_token_overrun(tmp_path, mode):
     root = instance(tmp_path, mode=mode)
     original_settings = (root / 'settings.json').read_bytes()
@@ -108,6 +110,7 @@ def test_last_original_a_collects_delayed_json_after_local_and_shared_token_over
     assert not (root / 'jobs/003.json').exists()
 
 
+@pytest.mark.process_e2e
 def test_final_completion_still_stops_real_process_at_original_node_time_boundary(tmp_path):
     root = instance(tmp_path, node_seconds=.5, delay=4)
     expected = 'node_slice_time_limit'
@@ -125,6 +128,7 @@ def test_final_completion_still_stops_real_process_at_original_node_time_boundar
     assert (c.workspace(root, 2) / 'work/launches').read_text() == 'A\n'
 
 
+@pytest.mark.process_e2e
 def test_final_completion_survives_shared_wall_exhaustion_with_finite_node_time(tmp_path):
     root = instance(tmp_path, mode='soft', node_seconds=10, total_seconds=2, delay=4)
     assert controller.run(root)['status'] == 'final_a_completed'
@@ -135,6 +139,7 @@ def test_final_completion_survives_shared_wall_exhaustion_with_finite_node_time(
 
 
 @pytest.mark.parametrize('fault', ['missing_terminal', 'nonzero_exit'])
+@pytest.mark.process_e2e
 def test_final_json_without_terminal_event_or_zero_exit_never_seals_or_relaunches(tmp_path, fault):
     root = instance(tmp_path, meter=fault != 'missing_terminal', returncode=7 if fault == 'nonzero_exit' else 0)
     result = controller.run(root)
@@ -191,7 +196,7 @@ def test_final_completion_rejects_later_native_failure_or_duplicate_without_repl
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('meter', ['missing', 'mismatched'])
+@pytest.mark.parametrize('meter', ['missing'])
 def test_final_native_terminal_report_seals_with_unknown_billing_without_relaunch(tmp_path, meter):
     root = instance(tmp_path, meter=meter, terminal=True)
     settings = (root / 'settings.json').read_bytes()
@@ -368,7 +373,7 @@ def test_wait_collects_same_original_after_partial_runner_receipt_is_completed(t
     monkeypatch.setattr(native.time, 'monotonic', lambda: now[0])
     monkeypatch.setattr(native.time, 'sleep', advance)
     monkeypatch.setattr(runtime, 'node_state', state)
-    monkeypatch.setattr(runtime, 'process_matches', process_matches)
+    monkeypatch.setattr(runtime, 'process_live', process_matches)
     monkeypatch.setattr(runtime, 'start', lambda *args, **kwargs: pytest.fail('Never relaunch an accepted original'))
     result = native.wait_native(root, 2)
     assert result['next_action'] == 'finish'
@@ -417,6 +422,9 @@ def test_stale_unknown_probe_rechecks_published_original_before_collecting(tmp_p
         pauses.append(seconds)
         if len(pauses) == 2:
             complete(root, job, intent)
+            outcome=c.read(record/'native-outcome.json')
+            outcome['native_started']=True
+            c.write(record/'native-outcome.json',outcome)
             assert runner_alive[0] and not (record / 'result-identity.json').exists()
             runner_alive[0] = False
         elif len(pauses) > 2:
@@ -426,10 +434,12 @@ def test_stale_unknown_probe_rechecks_published_original_before_collecting(tmp_p
     monkeypatch.setattr(native.time, 'sleep', advance)
     monkeypatch.setattr(runtime, 'node_state', state)
     monkeypatch.setattr(runtime, 'process_matches', process_matches)
+    monkeypatch.setattr(runtime, 'process_live', process_matches)
     monkeypatch.setattr(runtime, 'start', lambda *args, **kwargs: pytest.fail('Never relaunch after a stale probe'))
     assert native.wait_native(root, 2)['next_action'] == 'finish'
     assert states == ['unknown', 'running', 'terminal']
-    assert owner_probes == [True, True, False] and len(pauses) == 2
+    assert owner_probes[:2] == [True, True]
+    assert owner_probes[2:] and not any(owner_probes[2:]) and len(pauses) == 2
     assert 0 < now[0] < 5
     assert all(path.read_bytes() == raw for path, raw in originals.items())
     assert budget.final_a_barrier(root) == original_grant

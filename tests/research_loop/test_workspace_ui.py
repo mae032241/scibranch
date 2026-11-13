@@ -164,7 +164,7 @@ def test_workspace_structured_form_preview_create_and_open_exact_instance(tmp_pa
         assert b'action="/control/create"' not in invalid
         fields = dict(retained, **{'cfg.budget.max_tokens': '1234'})
         status, page, _ = request(connection, 'POST', '/control/configure', cookie=cookie, fields=fields, origin=origin)
-        assert status == 200 and b'Research a new task directly from the form.' in page
+        assert status == 200 and b'Research a new task directly from the form.' in page, page.decode(errors='replace')
         assert b'form-model' in page and '确认创建研究'.encode() in page
         assert not (workspace / 'new-instance').exists()
         status, _, headers = request(connection, 'POST', '/control/create', cookie=cookie,

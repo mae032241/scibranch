@@ -477,23 +477,32 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
             _put(result['document'], field.path, typed(raw, field.kind, field.label, path=field.path))
     # An explicit extra tree preserves empty groups and arbitrary imported keys.
     extras = tree('@extra', 'table')
-    def merge(target, extra, prefix=''):
+    def remember_owned(value, keys, owned):
+        if isinstance(value, dict) and value:
+            for key, item in value.items():
+                remember_owned(item, [*keys, key], owned)
+        else:
+            owned.append([keys, copy.deepcopy(value)])
+    def merge(target, extra, prefix='', *, owned=None, keys=()):
         for key, value in extra.items():
             if key in target and isinstance(target[key], dict) and isinstance(value, dict):
-                merge(target[key], value, prefix+key+'.')
+                merge(target[key], value, prefix+key+'.', owned=owned, keys=(*keys, key))
             elif key in target:
                 errors.append(f'{prefix}{key}：高级设置与表单字段重复，请只保留一处')
             else:
                 target[key] = value
+                if owned is not None:
+                    remember_owned(value, [*keys, key], owned)
     merge(result['document'], extras)
     # Settings outside the form are edited as TOML and merged losslessly.
     advanced = _single(fields, 'advanced_toml')
     result['advanced_text'] = advanced
     result['advanced_fixed'] = _fixed_values(_single(fields, 'advanced_fixed', '[]'))
+    result['advanced_owned'] = []
     advanced_valid = True
     if advanced.strip():
         try:
-            merge(result['document'], tomllib.loads(advanced))
+            merge(result['document'], tomllib.loads(advanced), owned=result['advanced_owned'])
         except tomllib.TOMLDecodeError as error:
             advanced_valid = False
             errors.append('高级设置（TOML）格式错误：'+str(error))
@@ -507,6 +516,7 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
         else:
             if keys[-1] not in target:
                 target[keys[-1]] = copy.deepcopy(value)
+                remember_owned(value, keys, result['advanced_owned'])
     mode = _single(fields, 'cfg.policies.supervision.mode')
     supervision_paths = [field.path for field in form_fields if field.path.startswith('policies.supervision.')]
     observed = {path: _single(fields, 'cfg.'+path) for path in [*supervision_paths, 'policies.supervision.mode']}
@@ -585,6 +595,7 @@ def parse(fields, *, base, _fixed_skill_sets=None, refresh_backend=False):
         # Regenerate the text so the previous provider's options leave it.
         del result['advanced_text']
         result.pop('advanced_fixed', None)
+        result.pop('advanced_owned', None)
         if not refresh_backend:
             errors.append('后端已切换；原生设置按原后端保留。请检查当前后端的设置后再次提交。')
     elif native_drafts:
@@ -732,6 +743,20 @@ def render(draft, *, edit=False, catalogs=None):
     """Render a guided form; hidden steps retain successful, typed controls."""
     document = draft['document']
     current_backend = _get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND
+    control_document = copy.deepcopy(document)
+    def omit_owned(target, keys, original):
+        if len(keys) == 1:
+            if keys[0] in target and target[keys[0]] == original:
+                del target[keys[0]]
+        elif isinstance(target.get(keys[0]), dict):
+            omit_owned(target[keys[0]], keys[1:], original)
+            if not target[keys[0]]:
+                del target[keys[0]]
+    # Retained TOML owns these values. Do not promote them into successful
+    # typed controls after an error or preview; later picker edits still show.
+    if 'advanced_text' in draft:
+        for keys, original in draft.get('advanced_owned', []):
+            omit_owned(control_document, keys, original)
     form_fields=_fields(current_backend)
     catalogs = load_catalogs(draft) if catalogs is None else catalogs
     short_hints = {
@@ -811,7 +836,7 @@ def render(draft, *, edit=False, catalogs=None):
         return ''.join(rows)
 
     def control(field, *, advanced=False, matrix=False):
-        value = _get(document, field.path)
+        value = _get(control_document, field.path)
         for path, pending in draft.get('group_drafts', {}).items():
             if field.path.startswith(path+'.'):
                 value = _get(pending, field.path[len(path)+1:], value)
@@ -1005,7 +1030,7 @@ def render(draft, *, edit=False, catalogs=None):
         rows.append('<tr><th scope="row">'+role+' · '+ROLE_NAMES[role]+'<p class="note">'+ROLE_HELP[role]+'</p><p class="note">'+escape(inheritance)+'</p></th>'+''.join('<td>'+control(by_path[path], matrix=True)+'</td>' for path in paths)+'</tr>')
     rows.append('</tbody></table></div><p class="note" id="role-settings-help">角色显式值优先，其次沿用命名研究者，再沿用全局模型、推理力度与服务档位。Final A 使用 A 的配置。</p></details>')
     rows.append(skill_picker())
-    current_supervision = _get(document, 'policies.supervision')
+    current_supervision = _get(control_document, 'policies.supervision')
     current_mode = current_supervision.get('mode') if isinstance(current_supervision, dict) else None
     if isinstance(current_mode, str) and current_mode:
         _delete(extras, SUPERVISION_MODE_FIELD.path)
@@ -1069,12 +1094,12 @@ def render(draft, *, edit=False, catalogs=None):
         for name, value in catalogs.items()}, ensure_ascii=False).replace('<', '\\u003c')
     rows.append('<script type="application/json" id="model-catalog">'+catalog_json+'</script>')
     rows.append('<script src="/assets/configuration.js"></script>')
-    baseline = {path: (str(value).lower() if type(value) is bool else str(value)) if (value := _get(document, path)) is not None and not isinstance(value, (dict, list)) else '' for path in [*(field.path for field in form_fields if field.path.startswith('policies.supervision.')), 'policies.supervision.mode']}
-    if not isinstance(_get(document, SUPERVISION_MODE_FIELD.path), str):
+    baseline = {path: (str(value).lower() if type(value) is bool else str(value)) if (value := _get(control_document, path)) is not None and not isinstance(value, (dict, list)) else '' for path in [*(field.path for field in form_fields if field.path.startswith('policies.supervision.')), 'policies.supervision.mode']}
+    if not isinstance(_get(control_document, SUPERVISION_MODE_FIELD.path), str):
         baseline[SUPERVISION_MODE_FIELD.path] = ''
     metadata='<input type="hidden" name="supervision_baseline" value="'+escape(json.dumps(baseline, ensure_ascii=False),quote=True)+'">'
     metadata+='<input type="hidden" name="rendered_backend" value="'+escape(
-        str(_get(document,'agent.backend',backends.DEFAULT_BACKEND) or backends.DEFAULT_BACKEND),quote=True)+'">'
+        str(current_backend),quote=True)+'">'
     saved_native=draft.get('native_drafts',{})
     if saved_native:
         metadata+='<input type="hidden" name="native_drafts" value="'+escape(

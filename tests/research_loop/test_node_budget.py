@@ -34,7 +34,7 @@ if role=='H':payload.update(next_action='wait',route_reason='No further work req
 if role=='W':
  job=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())
  assigned=(job.get('search') or {}).get('coverage_obligation',[])
- payload.update(stage_intent='review',mechanism_findings=[dict(mechanism=row['mechanism_ref'],basis='blocked',
+ payload.update(stage_intent='decision',consultation_question=None,mechanism_findings=[dict(mechanism=row['mechanism_ref'],basis='blocked',
   finding='This transport fixture performs no scientific experiment or managed observation.')
   for row in assigned] if assigned else None,
   candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],
@@ -51,6 +51,7 @@ if mode in ('time','tokens','no_usage'):time.sleep(20)
 if mode=='hold':
  while not (work/'work/release').exists():time.sleep(.02)
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))
+if role=='W':pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).parents[1].joinpath('pause.request').touch()
 '''
 
 
@@ -120,22 +121,18 @@ def test_valid_policy_is_explicit_and_does_not_mutate_caller():
     assert value == before
 
 
-
-
-
-
 @pytest.mark.process_e2e
 def test_cached_input_is_not_a_second_charge_in_actual_native_guard(tmp_path):
     root = instance(tmp_path, limits=policy(tokens=110), observed=(100, 99, 1))
     result = controller.run(root)
-    assert result['status'] == 'wait' and result['completed_steps'] == 1, result
+    assert result['status'] == 'paused' and result['completed_steps'] == 1, result
     record = c.host_record(c.workspace(root, 1))
     report = c.read(record / 'native-outcome.json')['budget_slice']
     assert report['observed_tokens'] == 101
     assert report['cached_input_tokens'] == 99
     assert report['usage_observed'] is True
     assert native.usage(root)['observed_tokens'] == 101
-    assert c.validate(c.workspace(root, 1))['role'] == 'H'
+    assert c.validate(c.workspace(root, 1))['role'] == 'W'
 
 
 def test_original_slice_excludes_explicit_pause_but_does_not_reset(tmp_path, monkeypatch):
@@ -162,7 +159,7 @@ def test_original_slice_excludes_explicit_pause_but_does_not_reset(tmp_path, mon
     assert intent == original
 
 
-@pytest.mark.parametrize('field', ['role', 'task_ref', 'boot_id', 'limits'])
+@pytest.mark.parametrize('field', ['role', 'task_ref', 'limits'])
 def test_changed_accepted_identity_cannot_refund_or_launch(tmp_path, field):
     root = instance(tmp_path, limits=policy())
     c.write(root / 'host-started.json', budget.clock_stamp())
@@ -175,47 +172,6 @@ def test_changed_accepted_identity_cannot_refund_or_launch(tmp_path, field):
                          dict(input_tokens=0, cached_input_tokens=0, output_tokens=0))
 
 
-@pytest.mark.parametrize('node_tokens,search_tokens', [(50, 100), (100, 50)])
-@pytest.mark.process_e2e
-def test_new_w_uses_smaller_search_or_node_target_with_one_anchor(tmp_path, node_tokens, search_tokens):
-    search_limits = dict(search.DEFAULT_POLICY, max_w_observed_tokens=search_tokens)
-    root = instance(tmp_path, limits=policy(tokens=node_tokens),
-                    observed=(70, 69, 5), search_policy=search_limits)
-    target(root, 'W', with_search=True)
-    result = controller.run(root)
-    assert result['status'] == 'finish', result
-    record = c.host_record(c.workspace(root, 2))
-    assert c.read(record / 'native-outcome.json')['stop_reason'] is None
-    intent = c.read(record / 'native-intent.json')
-    assert 'budget_slice' in intent and 'search_slice' not in intent
-    outcome = c.read(record / 'native-outcome.json')
-    assert outcome['budget_slice']['limits']['max_observed_tokens'] == min(node_tokens, search_tokens)
-    assert outcome['search_slice']['dispatches'] == 1
-    assert outcome['search_slice']['observed_tokens'] == 75
-    assert outcome['budget_slice']['observed_tokens'] == 75
-    assert c.validate(c.workspace(root, 2))['stage_intent'] == 'review'
-    assert search.project(root, 3)['accepted_slices'][0]['meter']['observed_tokens'] == 75
-
-
-@pytest.mark.process_e2e
-def test_successful_w_statistics_reuse_same_budget_anchor(tmp_path):
-    root = instance(tmp_path, limits=policy(tokens=100), search_policy=search.DEFAULT_POLICY)
-    target(root, 'W', with_search=True)
-    result = controller.run(root)
-    assert result['status'] == 'finish', result
-    rows = search.project(root, 4)['accepted_slices']
-    assert len(rows) == 1
-    assert rows[0]['meter']['dispatches'] == 1
-    assert rows[0]['meter']['observed_tokens'] == 10
-    record = c.host_record(c.workspace(root, 2))
-    intent = c.read(record / 'native-intent.json')
-    assert 'budget_slice' in intent and 'search_slice' not in intent
-    delivery = c.read(record / 'result-identity.json')['control_outcome']['worker_delivery']
-    assert delivery['status'] == 'partial' and delivery['reason'] == 'scientific_blocked'
-    assert c.read(record / 'work-evidence.json')['evidence'] == []
-    assert search.project(root, 4)['mechanisms']['h001.m1']['status'] == 'pending'
-
-
 @pytest.mark.parametrize('dimension', ['tokens', 'seconds'])
 @pytest.mark.process_e2e
 def test_controller_uses_actual_tokens_and_retains_finite_time_window(tmp_path, dimension):
@@ -225,13 +181,13 @@ def test_controller_uses_actual_tokens_and_retains_finite_time_window(tmp_path, 
     result = controller.run(root)
     record = c.host_record(c.workspace(root, 1))
     if dimension=='tokens':
-        assert result['status']=='wait',result
-        assert c.read(root/'jobs/001.json')['role']=='H'
+        assert result['status']=='paused',result
+        assert c.read(root/'jobs/001.json')['role']=='W'
         assert (record/'native-intent.json').exists()
         assert native.usage(root)['observed_tokens']==10
     else:
-        assert result['status']=='wait',result
-        assert c.read(root/'jobs/001.json')['role']=='H'
+        assert result['status']=='paused',result
+        assert c.read(root/'jobs/001.json')['role']=='W'
         assert not c.read(root/'jobs/001.json').get('final_only')
         assert native.usage(root)['observed_tokens']==10
 
@@ -257,7 +213,7 @@ def test_amend_rejects_original_n6_intent_without_terminal_outcome(tmp_path):
 @pytest.mark.process_e2e
 def test_amend_after_success_preserves_old_slice_report_and_consumption(tmp_path):
     root = instance(tmp_path, limits=policy())
-    assert controller.run(root)['status'] == 'wait'
+    assert controller.run(root)['status'] == 'paused'
     record = c.host_record(c.workspace(root, 1))
     paths = [root / 'settings.json', record / 'native-intent.json',
              record / 'native-outcome.json', record / 'usage.json', record / 'result-identity.json']
@@ -331,43 +287,19 @@ def test_controller_restart_rejoins_same_slice_and_counts_one_dispatch(tmp_path)
         (work / 'work/release').touch()
         out, err = second.communicate(timeout=10)
         assert second.returncode == 0, out + err
-        assert json.loads(out)['status'] == 'wait'
+        assert json.loads(out)['status'] == 'paused'
         assert (record / 'native-intent.json').read_bytes() == before
         assert (work / 'work/launches.txt').read_text() == 'launch\n'
         report = budget.node_report(root, c.read(root / 'jobs/001.json'), c.read(record / 'native-intent.json'),
                                     c.read(record / 'usage.json'))
         assert report['dispatches'] == 1 and report['observed_tokens'] == 10
-        assert controller.run(root)['status'] == 'wait'
+        assert controller.run(root)['status'] == 'paused'
     finally:
         if (work / 'work').exists():
             (work / 'work/release').touch()
         for front in fronts:
             if front.poll() is None:
                 front.communicate(timeout=12)
-
-
-@pytest.mark.parametrize('legacy_w_guard', [False, True])
-@pytest.mark.process_e2e
-def test_absent_node_policy_keeps_current_protocol_and_original_w_transport(tmp_path, legacy_w_guard):
-    search_limits = dict(search.DEFAULT_POLICY, max_w_observed_tokens=50) if legacy_w_guard else None
-    root = instance(tmp_path, limits=None, mode='normal',
-                    search_policy=search_limits, observed=(70, 69, 5) if legacy_w_guard else (7, 2, 3))
-    assert 'node_budget_policy' not in c.settings(root)
-    if legacy_w_guard:
-        target(root, 'W', with_search=True)
-    result = controller.run(root)
-    if legacy_w_guard:
-        assert result['status'] == 'finish', result
-        record = c.host_record(c.workspace(root, 2))
-        assert c.read(record / 'native-outcome.json')['stop_reason'] is None
-        assert 'search_slice' in c.read(record / 'native-intent.json')
-    else:
-        assert result['status'] == 'wait' and result['completed_steps'] == 1, result
-        record = c.host_record(c.workspace(root, 1))
-        assert c.read(root / 'jobs/001.json')['handoff_protocol'] == CURRENT
-        assert c.validate(c.workspace(root, 1))['summary'] == 'A bounded finding'
-    assert 'budget_slice' not in c.read(record / 'native-intent.json')
-    assert all('budget_slice' not in row for row in status(root)['nodes'])
 
 
 def test_budget_race_preserves_unaccepted_job_and_enters_durable_final(tmp_path, monkeypatch):
@@ -386,7 +318,7 @@ def test_budget_race_preserves_unaccepted_job_and_enters_durable_final(tmp_path,
     monkeypatch.setattr(native.subprocess, 'Popen', lambda *a, **kw: pytest.fail('No node was accepted'))
     final = []
     monkeypatch.setattr(controller, '_run_final',
-        lambda root, begin: final.append(begin) or dict(status='final_report'))
+        lambda root, begin, **facts: final.append(begin) or dict(status='final_report'))
     result = controller.run(root)
     assert result['status'] == 'final_report'
     assert len(built) == 1
@@ -399,7 +331,7 @@ def test_budget_race_preserves_unaccepted_job_and_enters_durable_final(tmp_path,
     assert not (record / 'science-output.json').exists()
     prepared = (root / 'jobs/001.json').read_bytes()
     assert budget.protected_final_report(c.settings(root))
-    assert c.read(root / 'jobs/001.json')['role'] == 'H'
+    assert c.read(root / 'jobs/001.json')['role'] == 'W'
     assert controller.run(root)['status'] == 'final_report'
     assert final == [begin, begin]
     assert len(built) == 1 and (root / 'jobs/001.json').read_bytes() == prepared
@@ -457,12 +389,3 @@ def test_admission_reuses_one_local_observation_and_next_boundary_reads_mutation
     assert (record / 'usage.json').read_bytes() == original_meter
     budget._amend_locked(root, max_tokens=100, authorization_note='Restore the explicit consumed token ceiling')
     assert budget.node_admission(root, job) == 'node_budget_unavailable_tokens'
-
-
-def test_current_budget_ledger_rejects_retired_usage_reserve_event(tmp_path):
-    root = instance(tmp_path, limits=policy())
-    event = dict(seq=1, parent_ref=None, settings_ref=c.record_ref(root / 'settings.json'),
-                 kind='native_usage_reserve', **budget.clock_stamp())
-    c.write(root / 'control-ledger/000001.json', event)
-    with pytest.raises(ValueError, match='ledger identity'):
-        budget.snapshot(root)

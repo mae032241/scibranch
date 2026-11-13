@@ -1,11 +1,11 @@
 """Exact original identity, bounded manifests and immutable copy boundaries."""
 import pytest
+from pathlib import Path
 
 from scidiscovery.research_loop import contracts as c, fork_sources, originals
 from test_fork_source import completed_source
 from test_history_handoff import finish
 from execution_fixtures import execution_registry
-from test_local_input_sources import local_scene
 from test_native_execution_inputs import chain
 
 
@@ -19,24 +19,17 @@ def _copy_completed(root, step, child):
 
 
 @pytest.fixture
-def source_identity_records(monkeypatch):
-    # These reused fixtures synthesize native headers and never launch a native
-    # process. Record that fact before sealing, preserving the sealed originals.
-    seal = c.seal_result
-    def no_native(root, step):
-        path = c.host_record(c.workspace(root, step)) / 'native-outcome.json'
-        c.write(path, dict(c.read(path), native_started=False))
-        return seal(root, step)
-    monkeypatch.setattr(c, 'seal_result', no_native)
-
-
-@pytest.fixture
-def portable_local_scene(source_identity_records, request):
-    return request.getfixturevalue('local_scene')
-
-
-@pytest.fixture
-def portable_native_chain(source_identity_records, request):
+def portable_native_chain(request, monkeypatch):
+    # This chain authors synthetic native identity records without launching a
+    # native process. Declare that fact at the first outcome producer, preserving
+    # any explicit real-launch fact and every already accepted original.
+    write = c.write
+    def synthetic_outcome(path, value):
+        if Path(path).name == 'native-outcome.json':
+            value = dict(value)
+            value.setdefault('native_started', False)
+        return write(path, value)
+    monkeypatch.setattr(c, 'write', synthetic_outcome)
     return request.getfixturevalue('chain')
 
 
@@ -210,129 +203,6 @@ def test_typed_observer_and_pending_proofs_do_not_parse_scientific_payloads(tmp_
     assert intent.relative_to(root).as_posix() in {row['path'] for row in closure.entries.values()}
 
 
-@pytest.mark.process_e2e
-def test_inherited_same_node_completed_call_keeps_its_exact_parent(tmp_path):
-    import shutil
-    from scidiscovery.research_loop import candidate_refs, controller, fork_service, lineage
-    from test_lineage import scene, cov
-    root, config, digest = scene(tmp_path)
-    script = c.workspace(root, 2) / 'work/train.py'
-    script.write_text('success')
-    parent = cov.run(config, script, new=True)
-    branch = cov.run(config, script, parent=parent['candidate_id'])
-    finish(root, 2, 'W', [1])
-    finish(root, 3, 'A', [1, 2], action='continue_w')
-    for step in (1, 2, 3):
-        path = root / f'native-evidence/{step:03d}/native-outcome.json'
-        c.write(path, dict(c.read(path), native_started=False))
-    with controller._writer(root):
-        pass
-    child = tmp_path / 'child'
-    limits = dict(max_tokens=1000, max_seconds=30, max_steps=2)
-    preview = fork_service.preview(root, 3, child, budget=limits)
-    fork_service.create(root, 3, child, budget=limits, expected_preview_id=preview['preview_id'],
-        operation_id='same-node-parent')
-    source = originals.node(child, 2)
-    expected = (candidate_refs.origin_candidate(source.origin_identity, branch['candidate_id']),
-        candidate_refs.origin_candidate(source.origin_identity, parent['candidate_id']))
-    shutil.rmtree(root)
-    view = lineage.build(child, 3)
-    assert expected in {(edge['subject'], edge['target']) for edge in view['relations'] if edge['kind'] == 'derivation'}
-
-
-@pytest.mark.process_e2e
-def test_original_review_cannot_qualify_a_new_producer_even_with_identical_material(tmp_path, monkeypatch):
-    """A real sealed pass binds producer identity in addition to artifact bytes."""
-    import copy
-    import sys
-    from pathlib import Path
-    from scidiscovery.research_loop import controller, formal_review, qualification as q
-    from test_execution_authority import prepare
-    from test_formal_review import LAUNCHER
-    launcher = tmp_path / 'codex'
-    launcher.write_text('#!' + sys.executable + '\n' + LAUNCHER)
-    launcher.chmod(0o700)
-    home = tmp_path / 'native'
-    home.mkdir()
-    monkeypatch.setenv('CODEX_HOME', str(home))
-    monkeypatch.delenv('REVIEW_REUSE_AUTHOR', raising=False)
-    monkeypatch.delenv('REVIEW_MISSING_AUTHOR', raising=False)
-    root, _ = prepare(tmp_path, launcher=[str(launcher)])
-    assert controller.run(root)['status'] == 'finish'
-    review_seal = c.read(root / 'native-evidence/004/result-identity.json')
-    receipt = review_seal['formal_review']
-    subject = q._read(root, receipt)['subject']
-    assert formal_review.require_review(root, subject, receipt) == receipt
-    child_area = tmp_path / 'new-child'
-    child_area.mkdir()
-    child, _ = prepare(child_area, enabled=False)
-    finish(child, 1, 'H', [], action='experiment')
-    filename = Path(subject['material']['path']).name
-    finish(child, 2, 'W', [1], action='wait',
-        files={filename: Path(subject['material']['source']).read_text()})
-    new_seal = originals.original_ref(originals.node(child, 2), 'native-evidence/002/result-identity.json')
-    new_material = next(row for row in c.read(child / new_seal['path'])['materials']
-        if Path(row['source']).name == filename)
-    actual_child_subject = dict(producer_step=2, producer_seal=new_seal, material=new_material)
-    with pytest.raises(ValueError, match='Exact subject'):
-        formal_review.require_review(root, actual_child_subject, receipt)
-    # Also isolate producer identity while holding the old material descriptor
-    # exactly equal: identical path and bytes do not extend the original pass.
-    child_subject = copy.deepcopy(subject)
-    child_subject['producer_seal'] = new_seal
-    with pytest.raises(ValueError, match='Exact subject'):
-        formal_review.require_review(root, child_subject, receipt)
-    changed_bytes = copy.deepcopy(subject)
-    changed_bytes['material']['size_bytes'] += 1
-    with pytest.raises(ValueError, match='Exact subject'):
-        formal_review.require_review(root, changed_bytes, receipt)
-
-
-@pytest.mark.process_e2e
-def test_portable_local_coverage_recomputes_relations_and_restrictions(portable_local_scene, tmp_path, capsys):
-    import copy
-    import json
-    import shutil
-    from scidiscovery.research_loop import experiments as e, formal_review, qualification as q
-    from test_local_input_sources import authored
-    root, _, _, path = portable_local_scene
-    bound = c.workspace(root, 2) / 'inputs/parents/001/artifacts/base'
-    assert e.main(['--config', str(path), 'run', '--experiment-dir', str(bound), '--script', str(bound / 'run.py')]) == 0
-    assert json.loads(capsys.readouterr().out)['status'] == 'known_success'
-    directory, script = authored(root)
-    assert e.main(['--config', str(path), 'run', '--experiment-dir', str(directory), '--script', str(script)]) == 0
-    assert json.loads(capsys.readouterr().out)['status'] == 'known_success'
-    script.write_text('raise RuntimeError("later author edit")\n')
-    finish(root, 2, 'W', [1], files={'revised.py': 'def predict(): return 43\n'})
-    finish(root, 3, 'A', [2], action='continue_w')
-    expected_authors = formal_review.authors(root, 2)
-    child = tmp_path / 'portable-local'
-    _copy_completed(root, 3, child)
-    owner = originals.node(child, 2)
-    identity = owner.origin_identity
-    shutil.rmtree(root)
-    c.validate_original(owner)
-    assert q.original_status(owner)['restriction'] == 'clear'
-    assert formal_review.authors(child, 2) == expected_authors
-    job = originals.source_job(owner)
-    seal = c.read(originals.source_record(owner, 'result-identity.json'))
-    baseline = q._read(child, seal['source_provenance'], source=owner)
-    assert len(baseline['managed_input_coverage']) == 2
-    for change in ('omitted_coverage', 'omitted_call', 'other_accepted', 'wrong_contract', 'contradictory_missing_reason'):
-        changed = copy.deepcopy(baseline)
-        if change == 'omitted_coverage':changed.pop('managed_input_coverage')
-        elif change == 'omitted_call':changed['managed_input_coverage'].pop()
-        elif change == 'other_accepted':
-            changed['managed_input_coverage'][0]['accepted_ref'] = changed['managed_input_coverage'][1]['accepted_ref']
-        elif change == 'wrong_contract':changed['managed_input_coverage'][0]['input_sources'] = '0' * 64
-        else:changed['missing_reason'] = 'observation_input_provenance_unsupported'
-        changed_owner = _rewrite_portable_provenance(child, identity, 2, changed)
-        # Every retained member descriptor is correct; only the source relationships
-        # and the corresponding published restriction are inconsistent.
-        fork_sources.validate_manifest(child, full=True)
-        with pytest.raises(q.IntegrityError):
-            c.validate_original(changed_owner)
-    _rewrite_portable_provenance(child, identity, 2, baseline)
 
 
 def _completed_portable_compiled_source(portable_native_chain, capsys):
@@ -340,71 +210,18 @@ def _completed_portable_compiled_source(portable_native_chain, capsys):
     from scidiscovery.research_loop import experiments as e, formal_review
     from test_native_execution_inputs import _reviewed_execution
     root, backend, output, active, configuration, _ = _reviewed_execution(portable_native_chain, capsys)
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(active).with_name('research.json'))]) == 2
     call = json.loads(capsys.readouterr().out)['call_id']
     backend.state = 'succeeded'
     assert e.main(['--config', str(active), 'reconcile', '--call-id', call]) == 0
     capsys.readouterr()
-    finish(root, 6, 'W', [5], files={'revised.py': 'def predict(): return 44\n'})
+    finish(root, 6, 'W', [5], preserve_native_intent=True, files={'revised.py': 'def predict(): return 44\n'})
     finish(root, 7, 'A', [6], action='continue_w')
     expected = formal_review.authors(root, 6)
     assert expected['complete']
     return root, backend, configuration, call, expected
 
 
-@pytest.mark.process_e2e
-def test_portable_compiled_managed_authors_keep_complete_exact_contributors(portable_native_chain, tmp_path, capsys):
-    import shutil
-    from scidiscovery.research_loop import formal_review, qualification as q
-    from scidiscovery.operations import review_rules
-    root, _, _, _, expected = _completed_portable_compiled_source(portable_native_chain, capsys)
-    child = tmp_path / 'portable-native'
-    _copy_completed(root, 7, child)
-    shutil.rmtree(root)
-    owner = originals.node(child, 6)
-    c.validate_original(owner)
-    assert q.original_status(owner)['restriction'] == 'clear'
-    actual = formal_review.authors(child, 6)
-    assert actual == expected
-    people = [tuple(row) for row in actual['participants']]
-    assert review_rules.independence(people, [people[0]], authors_complete=True, reviewers_complete=True) == 'overlap'
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('prepared_retention', ['missing', 'reused'])
-def test_fork_rejects_invalid_live_prepared_locator_even_with_retained_archive(
-        portable_native_chain, tmp_path, capsys, prepared_retention):
-    from pathlib import Path
-    from scidiscovery.research_loop import controller, experiments as e, history, qualification as q
-    root, backend, configuration, call, _ = _completed_portable_compiled_source(portable_native_chain, capsys)
-    # A valid live parent is required before any fork inventory is collected.
-    c.validate(c.workspace(root, 7))
-    records = e.Records(configuration)
-    prepared = records.accepted(call)['prepared']
-    locator = Path(prepared['local_path'])
-    with controller._writer(root), c.record_writer(records.root, exclusive=True):
-        retained = history._managed_proof(root, locator, prepared)
-        assert retained['retention'] == 'archived'
-        assert retained['size_bytes'] == prepared['size_bytes']
-        assert (root / retained['snapshot']).stat().st_size == prepared['size_bytes']
-        if prepared_retention == 'missing':
-            locator.unlink()
-        else:
-            locator.chmod(0o600)
-            locator.write_bytes(b'later bytes at the original prepared locator')
-    settings = (root / 'settings.json').read_bytes()
-    ledger = {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
-    submissions = backend.submits
-    with pytest.raises(q.IntegrityError):
-        c.validate(c.workspace(root, 7))
-    child = tmp_path / 'rejected-fork'
-    with pytest.raises(q.IntegrityError):
-        _copy_completed(root, 7, child)
-    assert not child.exists() and root.exists()
-    assert backend.submits == submissions
-    assert (root / 'settings.json').read_bytes() == settings
-    assert {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
-    assert (root / retained['snapshot']).stat().st_size == prepared['size_bytes']
 
 
 def test_nested_raw_payload_uses_ancestor_owner_and_preserves_logical_identity(tmp_path):

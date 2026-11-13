@@ -45,49 +45,29 @@ Cov 独立插件使用同一目标和 `--installation-cohort cov`。日志属于
 
 默认日志目录为仓库内 `.trial/lifecycle-validation-<UTC时间>-<随机后缀>`；`--output .trial/<新目录>` 可指定仓库内的新目录，相对路径以仓库根目录为基准，既有目录拒绝覆盖。每批保留 `runner.log` 和 `guard/` 原始证据，聚合 `summary.json` 记录命令、退出码、原始 guard 结果及未运行批次。只有退出码为 0、guard 报告 passed 且清理完成才通过；Ctrl-C/TERM 会转交现有 guard 并等待收尾。这是五项专项回归，不是功能全量、真实模型 Worker、solver 或 SSH 验收。
 
-## r6 交接缺陷的显式回归集
+## 历史原件与当前交接回归
 
-`research_loop/fixtures/r6_handoff_examples.json` 从 Cov r6 的公开科学输出提取五份交接样例，
-并记录八节点拓扑、六个受管调用及交接时间。模型、数据集、原生会话、认证和宿主路径不进入
-测试集。原调用的科学结论与资格不随样例复制；测试使用新建的机械夹具原件，原始 r6 不变。
+`research_loop/fixtures/r6_handoff_examples.json` 保留从公开科学输出提取的交接样例与拓扑。
+它是功能夹具，不复制科学资格、模型会话、认证或宿主路径。旧的 r6 costs、delivery、
+file_bindings 检查依赖已退役的 H 来源字段、普通 A 调度和整链回放，已移除；不要以旧矩阵
+恢复兼容入口，也不要改写原始夹具字节来适配当前路由。
 
-`check_r6_handoff_costs.py` 检查已封存历史前缀的读取次数和原件查找比较次数；
-`check_r6_handoff_delivery.py` 检查首次 W 的阻断声明是否可发现，以及字段补正、实际缺工作、
-明确阻断、旧 H 证据和未知调用的分类。`check_` 入口须显式选择，不进入默认测试发现。
-`check_r6_handoff_incremental.py` 对照 2、8、16 节点前缀，检查冷恢复、下一节点封存及挂载准备
-不重查旧原件，当前输入变化仍拒绝，并覆盖保存路线与同一历史截面的新对账。
-`check_handoff_passive_provenance.py` 检查冷启动后的受限、未知来源传播，禁止重跑旧执行、
-来源门槛或解析无关的旧科学正文，同时保留当前所选文件的精确来源及损坏拒绝。
-`check_r6_handoff_file_bindings.py` 用各节点不同内容的同名小文件，核对八节点、六调用的精确
-原件关系，以及追加节点、选择旧成果、只读挂载、冷恢复和 fork 后的来源映射。
-`check_r6_handoff_acceptance.py` 保存同一八节点六调用流程的 build/seal 秒数，供修复前后比较。
-这些断言用于修复验收；没有 xfail 将缺陷隐藏成通过。
-
-性能断言使用结构计数：已有源集合的 fold 不再读源，project 每个源最多读取一次；
-已封存历史的投影不重新匹配原件；当前独立原件核验的查找工作须有界于候选清单与查找请求
-数量之和。删除派生搜索游标后，冷重建仍只折叠保存事实，不能重跑科学门槛或原件查验。
-文件关系的完整比对属于测试预言，不加回生产交接。r6 实测秒数和修复前坏计数只作
-来源记录，不作为机器相关的性能门槛。路径、大小、文件 stat 和歧义拒绝仍有正反例。
-
-使用原有串行监督入口，输出目录须为新的仓库本地目录：
+当前历史检查验证接受的前缀、原件关系及读取所有权：已有事实不重做科学验收，当前输入
+变化仍拒绝，冷恢复保留原调用和已用预算。独立原件核验的工作量须有界于所选清单和请求，
+不以历史实测秒数作为机器相关门槛。按缺陷显式选择现有检查，例如：
 
 ```sh
-python scripts/run_tests.py --lane source --output .trial/r6-handoff-source \
-  tests/research_loop/check_r6_handoff_costs.py \
+python scripts/run_tests.py --lane source --output .trial/handoff-source \
   tests/research_loop/check_r6_handoff_incremental.py \
-  tests/research_loop/check_handoff_passive_provenance.py
-python scripts/run_tests.py --lane process --output .trial/r6-handoff-process \
-  tests/research_loop/check_r6_handoff_costs.py \
-  tests/research_loop/check_r6_handoff_delivery.py
-python scripts/run_tests.py --lane process --output .trial/r6-handoff-bindings \
-  tests/research_loop/check_r6_handoff_file_bindings.py \
-  tests/research_loop/check_r6_handoff_acceptance.py
+  tests/research_loop/test_handoff_passive_provenance.py
+python scripts/run_tests.py --lane process --output .trial/original-execution-process \
+  tests/research_loop/test_nonlocal_execution_observation.py::test_remote_unknown_is_preserved_without_replay_or_worker_qualification \
+  tests/research_loop/test_native_transport_stall.py
 ```
 
-进程用例复用当前 Local 测试环境，需要已支持的 Codex 可执行文件、bwrap 和 Linux namespace。
-它只做能力检查并运行小型机械命令，不调用模型，不复制用户认证或原生 HOME；临时原生目录
-属于夹具。缺少依赖导致的 skip 是未运行，不能算通过或成功复现。测试初始化异常也须单列，
-只有到达目标行为断言的失败才是有效的缺陷基线。修复时应逐条使失败断言转绿，并保持对照通过。
+纯传输夹具须声明其实际后端与能力。合成输出只能验证协议，不能证明标准 Codex 支持
+元数据 hook、真实权限隔离或科学资格。实际 namespace、原生程序及 socket 目录的启动失败
+保留精确 stderr；未到达行为断言就是未验证，不用 skip、xfail、裸宿主回退或权限降级冒充通过。
 
 ## 资源与支持边界
 

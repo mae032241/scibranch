@@ -23,12 +23,7 @@ from execution_fixtures import execution_registry
 
 
 def accepted_scene(tmp_path, monkeypatch, *, interrupt_support=True):
-    root, record = _scene(tmp_path, monkeypatch, 'blocked')
-    intent = c.read(record / 'native-intent.json')
-    if interrupt_support:
-        intent['operator_interrupt_version'] = native.OPERATOR_INTERRUPT_VERSION
-    (record / 'native-intent.json').unlink()
-    accepted_budget.accept_native(root, 1, record, intent)
+    root, record = _scene(tmp_path, monkeypatch, 'blocked', interrupt_support=interrupt_support)
     target = dict(step=1, expected_attempt=0,
         native_intent_ref=dict(path=str(record / 'native-intent.json')))
     return root, record, target

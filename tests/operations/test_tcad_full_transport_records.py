@@ -95,7 +95,7 @@ def test_small_descriptors_and_logs_keep_identity_and_path_guards(tmp_path):
     with pytest.raises(RuntimeError, match='differs from its descriptor'):
         adapter._collected_outputs(dict(outputs=[record]))
     outside = tmp_path / 'outside'; outside.write_bytes(b'original')
-    with pytest.raises(RuntimeError, match='outside its result root'):
+    with pytest.raises(RuntimeError, match='outside its declared result root'):
         adapter._collected_outputs(dict(outputs=[dict(record, local_path=str(outside))]))
     raw=b'diagnostic END';log=preserve_log(root,'stderr',raw)
     again=preserve_log(root,'stderr',raw)

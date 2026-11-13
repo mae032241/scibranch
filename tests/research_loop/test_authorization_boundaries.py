@@ -41,118 +41,30 @@ def _forbid_results(monkeypatch):
 
 
 @pytest.mark.process_e2e
-def test_audit_permission_and_consumption_ignore_broken_results(tmp_path, monkeypatch):
+@pytest.mark.parametrize('damage', ['task', 'missing_original'])
+def test_native_consumption_keeps_accepted_count_without_reopening_originals(tmp_path, monkeypatch, damage):
+    from scidiscovery.research_loop import accepted_budget
     root = audit_fixture(tmp_path)
-    _, _, intent = _accepted_audit(root)
-    directory = candidate_audit._directory(root, 3)
-    for path in (execution.origin(root, 3)/'science-output.json',
-                 execution.origin(root, 3)/'usage.json',
-                 directory/'outcome.json', directory/'dispatch.json', directory/'binding.json'):
-        if path.exists():path.chmod(0o600)
-        path.write_text('Broken result original; never an authorization input')
-    with monkeypatch.context() as pure:
-        _forbid_results(pure)
-        candidate_audit.validate_intent(root, intent)
-        assert list(candidate_audit.intents(root)) == [intent]
-        assert budget.used_steps(root) == 4
-    changed = dict(intent, decision=dict(intent['decision'], job_ref=dict(path='/fixture/jobs/002.json')))
-    changed['operation_id'] = changed['action_id'] = candidate_audit._operation(root, changed['decision'], 'run-1')
-    with pytest.raises(ValueError, match='declared requester'):
-        candidate_audit._validate_request(root, changed)
-
-
-@pytest.mark.process_e2e
-def test_audit_new_acceptance_requires_valid_scientific_result(tmp_path, monkeypatch):
-    root = audit_fixture(tmp_path)
-    job, payload = request(root)
-    raw = execution.raw(root, 3)
-    raw.chmod(0o600)
-    raw.write_bytes(raw.read_bytes()+b'\n')
-    def no_effect(*args, **kwargs):
-        pytest.fail('Invalid scientific decision reached adapter preparation/effects')
-    monkeypatch.setattr(delivery, 'freeze_sources', no_effect)
-    monkeypatch.setattr(delivery, '_call', no_effect)
-    with pytest.raises(ValueError):
-        candidate_audit.execute(root, job, payload)
-    assert not (candidate_audit._directory(root, 3)/'intent.json').exists()
-
-
-@pytest.mark.process_e2e
-def test_accepted_audit_still_rejects_changed_result_before_effect(tmp_path, monkeypatch):
-    root = audit_fixture(tmp_path)
-    job, payload, intent = _accepted_audit(root)
-    raw = execution.raw(root, 3)
-    raw.chmod(0o600)
-    raw.write_bytes(raw.read_bytes()+b'\n')
-    candidate_audit.validate_intent(root, intent)
-    assert budget.used_steps(root) == 4
-    with controller._writer(root):
-        assert candidate_audit.execute(root, job, payload) == 'candidate_audit_unknown'
-    def no_effect(*args, **kwargs):
-        pytest.fail('Changed scientific result reached adapter effects')
-    monkeypatch.setattr(delivery, '_call', no_effect)
-    bound = dict(intent, binding=dict(decision=intent['decision'], operation_id=intent['operation_id']))
-    with pytest.raises(ValueError, match='scientific decision changed'):
-        delivery.invoke(root, bound, 20, audit_only=True)
-    with pytest.raises(ValueError, match='scientific author changed'):
-        candidate_audit.require_eligibility(root, intent)
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('damage', ['task', 'attempt', 'step', 'root', 'previous', 'gap', 'missing_original'])
-def test_native_consumption_reads_accepted_intents_not_results(tmp_path, monkeypatch, damage):
-    root = audit_fixture(tmp_path)
-    record = execution.origin(root, 2)
-    later = record/'continuations/001'
-    later.mkdir(parents=True)
-    intent = dict(step=2, attempt=1, task_ref=c.record_ref(root/'jobs/002.json'),
-                  root_intent_ref=c.record_ref(record/'native-intent.json'),
-                  previous={'native-intent.json': c.record_ref(record/'native-intent.json'),
-                            'native-outcome.json': '0'*64, 'usage.json': '0'*64})
-    c.write(later/'native-intent.json', intent)
+    job = c.build_job(root, 3, 'W', [2])
+    record = execution.origin(root, 3)
+    intent = dict(step=3, task_ref=c.record_ref(root/'jobs/003.json'))
+    c.write(record/'native-intent.json', intent)
+    accepted_budget.accept_native(root, 3, record, intent)
     for name in ('native-outcome.json', 'usage.json'):
-        (record/name).write_text('Broken result')
-        (later/name).write_text('Broken result')
+        c.write(record/name, 'Broken scientific result; never a budget input')
     with monkeypatch.context() as pure:
         _forbid_results(pure)
         assert budget.used_steps(root) == 3
     if damage == 'task':
-        c.write(later/'native-intent.json', dict(intent, task_ref=dict(path='/fixture/jobs/002.json')))
-    elif damage == 'attempt':
-        c.write(later/'native-intent.json', dict(intent, attempt=True))
-    elif damage == 'step':
-        c.write(later/'native-intent.json', dict(intent, step=True))
-    elif damage == 'root':
-        c.write(later/'native-intent.json', dict(intent, root_intent_ref='0'*64))
-    elif damage == 'previous':
-        c.write(later/'native-intent.json', dict(intent, previous={'native-intent.json': '0'*64}))
-    elif damage == 'gap':
-        later.rename(record/'continuations/002')
-        later.mkdir()
-        c.write(record/'continuations/002/native-intent.json', dict(intent, attempt=2))
+        c.write(record/'native-intent.json', dict(intent, task_ref=dict(path='/fixture/jobs/002.json')))
     else:
         (record/'native-intent.json').unlink()
-    with pytest.raises(ValueError, match='continuation identity'):
-        budget.used_steps(root)
-
-
-@pytest.mark.process_e2e
-def test_audit_retry_consumption_ignores_results_but_rejects_bad_intent(tmp_path, monkeypatch):
-    root = audit_fixture(tmp_path)
-    operation = 'e'*64
-    path = root/'host-delivery/audit-recovery'/operation/'intent.json'
-    intent = dict(settings_ref=c.record_ref(root/'settings.json'), operation_id=operation,
-                  attempt=1, reason='audit_source_missing', max_seconds=20, advance_seconds=0)
-    c.write(path, intent)
-    path.with_name('outcome.json').write_text('Broken result')
-    path.with_name('process.json').write_text('Broken result')
     with monkeypatch.context() as pure:
         _forbid_results(pure)
-        assert list(audit_recovery.intents(root)) == [intent]
         assert budget.used_steps(root) == 3
-    c.write(path, dict(intent, attempt=True))
-    with pytest.raises(ValueError, match='recovery identity changed'):
-        budget.used_steps(root)
+    if damage == 'task':
+        with pytest.raises(ValueError, match='native intent identity changed'):
+            list(execution.accepted_intents(root, 3))
 
 
 def _final_permit(tmp_path):
@@ -174,7 +86,7 @@ def test_final_permissions_never_read_execution_results(tmp_path, monkeypatch):
 
 
 @pytest.mark.process_e2e
-def test_final_cursor_permission_is_separate_from_sealed_source_eligibility(tmp_path, monkeypatch):
+def test_final_cursor_binds_accepted_sources_without_revalidating_old_science(tmp_path, monkeypatch):
     root = audit_fixture(tmp_path)
     refs = [dict(step=step, seal_ref=c.record_ref(execution.origin(root, step)/'result-identity.json')) for step in (1, 2)]
     cursor = dict(role='A', parents=[1, 2], instruction='Review existing evidence', evidence_return=None,
@@ -186,8 +98,24 @@ def test_final_cursor_permission_is_separate_from_sealed_source_eligibility(tmp_
         _forbid_results(pure)
         assert budget.closeout_state(root)['begin'] == begin
     events, _ = budget._events(root)
-    with pytest.raises(ValueError):
-        budget.require_cursor_eligibility(root, cursor, 3, events)
+    budget.require_cursor_eligibility(root, cursor, 3, events)
+    changed = dict(cursor, source_refs=[refs[0], dict(refs[1], seal_ref=dict(path='/foreign/seal.json'))])
+    with pytest.raises(ValueError, match='accepted normal science'):
+        budget.require_cursor_eligibility(root, changed, 3, events)
+
+
+@pytest.mark.parametrize('recovery,phase', [
+    ('unsupported', 'audit'), ({}, 'audit'), ('control_retry', 'confirm'), ('none', None),
+])
+def test_delivery_action_recovery_rejects_unknown_classification_or_non_audit_context(recovery, phase):
+    artifact = dict(path='/fixture/artifact.bin', size_bytes=8)
+    intent = dict(operation_id='operation', binding=dict(candidate_id='candidate', source=dict(objects=dict(artifact=artifact))))
+    result = dict(status='unknown', operation_id='operation', candidate_id='candidate', artifact_ref=artifact,
+        note='Original outcome remains uncertain', cleanup_confirmed=True, recovery=recovery)
+    if phase is not None:
+        result['failure_phase'] = phase
+    with pytest.raises(ValueError, match='exact accepted candidate and artifact'):
+        budget._validate_action_result(intent, result)
 
 
 @pytest.mark.process_e2e

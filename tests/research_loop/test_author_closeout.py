@@ -5,28 +5,7 @@ import pytest
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop import author_closeout,budget,contracts as c,native
 from scidiscovery.research_loop.experiment_client import record_directory
-from test_cov_delivery_lineage import managed_scene
 from test_operator_usage_reserve import unknown_original
-
-
-@pytest.mark.process_e2e
-def test_terminal_facts_use_retained_transport_without_an_adapter(tmp_path,execution_registry,monkeypatch):
-    root,_,first,*_=managed_scene(tmp_path)
-    from scidiscovery.research_loop import experiments
-    monkeypatch.setattr(experiments,'load',lambda *a,**kw:pytest.fail('No backend or adapter loading for author closeout'))
-    calls=record_directory(root,2)/'calls'
-    before={p:p.read_bytes() for p in calls.rglob('*') if p.is_file()}
-    assert before and len(list(calls.glob('*/accepted.json')))==2
-    facts=author_closeout.terminal_facts(root,2)
-    assert len(facts['calls'])==2
-    assert facts['calls'][0]['candidate_id']==first['candidate_id']
-    assert all(row['status']=='known_success' for row in facts['calls'])
-    assert all('val_score' not in row and 'audit_pass' not in row for row in facts['calls'])
-    assert before=={p:p.read_bytes() for p in calls.rglob('*') if p.is_file()}
-    accepted=next(calls.glob('*/accepted.json'));accepted.chmod(0o600)
-    c.write(accepted,dict(c.read(accepted),call_id='another-call'))
-    with pytest.raises(ValueError,match='another frozen execution interface'):
-        author_closeout.terminal_facts(root,2)
 
 
 def test_author_start_requires_positive_actual_shared_balance(unknown_original):

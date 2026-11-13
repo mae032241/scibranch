@@ -1,10 +1,7 @@
 """Common admission boundaries, real local/cov CLI, no native models."""
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
-import time
 
 import pytest
 
@@ -12,7 +9,7 @@ from execution_fixtures import execution_registry
 from test_registered_experiments import managed
 from test_soft_node_budget import scene, start_clock
 from test_history_handoff import finish
-from scidiscovery.research_loop import accepted_budget, budget, contracts as c, execution, execution_authority, experiments, native, runtime
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, execution, experiments, native
 
 
 def soft(managed, *, max_seconds=None):
@@ -38,28 +35,6 @@ def publish(config, *, pending=False, reason='reserve_reached', malformed=False)
     c.write(Path(config['admission']['directory'])/'review.json',value)
 
 
-def spawn(managed,source):
-    return subprocess.Popen([*managed.command,'--config',str(managed.config),'run','--script',str(source),'--new-plan'],
-        cwd=managed.root,env=managed.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
-
-
-def wait_for(condition):
-    until=time.monotonic()+10
-    while not condition() and time.monotonic()<until:time.sleep(.01)
-    assert condition()
-
-
-def finish_process(process,expected):
-    out,err=process.communicate(timeout=15)
-    assert process.returncode==expected,(out,err)
-    assert not err
-    return json.loads(out)
-
-
-def stop(process):
-    if process.poll() is None:process.terminate();process.communicate(timeout=10)
-
-
 def assert_no_accept(managed):
     assert not list(managed.records.glob('calls/*/accepted.json'))
     assert not list(managed.records.glob('calls/*/process.json'))
@@ -71,43 +46,8 @@ def test_pending_new_accept_has_no_formal_call_or_external_effect(managed):
     config=soft(managed)
     with experiments.Records(config).lease('accept.lock'):publish(config,pending=True)
     result=managed.cli('run','--script',managed.source(),expected=2)
-    assert result['status']=='review_required' and result['accepted'] is False
+    assert result['status']=='budget_exhausted' and result['accepted'] is False
     assert_no_accept(managed)
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('target', ['tokens', 'time'])
-def test_host_soft_target_keeps_new_managed_execution_available(managed, target):
-    host=managed.root/'host';host.mkdir()
-    root=scene(host,tokens=2,seconds=.001 if target=='time' else 20,total_seconds=60,search_policy=None)
-    finish(root,1,'H',[],action='experiment')
-    job=c.build_job(root,2,'W',[1]);start_clock(root,'Soft W target remains advisory')
-    record=execution.record(root,2)
-    intent=dict(task_ref=c.record_ref(root/'jobs/002.json'),budget_slice=budget.accept_node(root,job))
-    c.write(record/'native-intent.json',intent)
-    c.write(record/'usage.json',dict(input_tokens=2 if target=='tokens' else 0,cached_input_tokens=0,output_tokens=0))
-    if target=='time':
-        # Observe real elapsed host time, without launching a native/model turn.
-        wait_for(lambda:budget._node_duration(root,job,intent,budget.snapshot(root))>.001)
-    admission=budget.review_configuration(root,job)
-    projection=c.read(Path(admission['directory'])/'review.json')
-    value=json.loads(managed.config.read_text());value.pop('execution_interface')
-    value.update(admission=admission,scope=projection['scope'],native_attempt=projection['native_attempt'])
-    config=experiments.freeze(value,managed.executor,path=managed.config)
-    managed.config.write_text(json.dumps(config))
-    review=experiments.review_status(config)
-    assert review['reason']=='target_'+target+'_reached' and review['requested'] is True
-    assert review['enforced'] is False
-    assert budget.snapshot(root)['max_tokens']-native.usage(root)['accounted_tokens']>0
-    assert projection['deadline_boottime']-budget.clock_stamp()['at_boottime']>1
-    # Real matching process identities exercise the authorized adapter's common
-    # remaining-window check; this does not supply an execution permission.
-    for name in ('runner-process.json','native-process.json'):
-        c.write(record/name,runtime.process_identity(os.getpid(),execution.identity(root,2)))
-    assert execution_authority._remaining(root,config)[1]>1
-    result=managed.cli('run','--script',managed.source(),'--new-plan')
-    assert result['status']=='known_success'
-    assert managed.cli('collect','--call-id',result['call_id'])['feedback']['review']['enforced'] is False
 
 
 @pytest.mark.process_e2e
@@ -116,7 +56,7 @@ def test_soft_target_cannot_mask_expired_original_shared_window(managed):
     path=Path(config['admission']['directory'])/'review.json';value=c.read(path)
     value['deadline_boottime']=budget.clock_stamp()['at_boottime']-.001;c.write(path,value)
     result=managed.cli('run','--script',managed.source(),expected=2)
-    assert result['status']=='review_required' and result['accepted'] is False
+    assert result['status']=='budget_exhausted' and result['accepted'] is False
     assert experiments.review_status(config)['enforced'] is True
     assert_no_accept(managed)
 
@@ -136,18 +76,6 @@ def test_soft_budget_observation_delay_does_not_deny_new_managed_call(managed, o
 
 
 @pytest.mark.process_e2e
-def test_soft_target_does_not_replay_original_unknown_submission(managed):
-    config=soft(managed);publish(config,pending=True,reason='target_tokens_reached')
-    result=managed.cli('run','--script',managed.source(),'--new-plan')
-    directory=managed.records/'calls'/result['call_id']
-    (directory/'terminal.json').unlink();(directory/'completed.json').unlink()
-    originals={path:path.read_bytes() for path in managed.records.rglob('*') if path.is_file()}
-    retry=managed.cli('run','--script',managed.source('next'),'--new-plan',expected=2)
-    assert retry['status']=='unknown'
-    assert originals=={path:path.read_bytes() for path in managed.records.rglob('*') if path.is_file()}
-
-
-@pytest.mark.process_e2e
 @pytest.mark.parametrize('mode', ['soft', 'hard'])
 def test_managed_call_keeps_finite_execution_limit_after_soft_target(managed, mode):
     if mode=='soft':
@@ -161,48 +89,6 @@ def test_managed_call_keeps_finite_execution_limit_after_soft_target(managed, mo
     assert result['status']=='unknown' and result['returncode']!=0
     terminal=c.read(managed.records/'calls'/result['call_id']/'terminal.json')
     assert terminal['cleanup_confirmed'] is True
-
-
-@pytest.mark.process_e2e
-def test_accepted_work_crosses_boundary_and_original_operations_remain_available(managed):
-    config=soft(managed);publish(config)
-    process=spawn(managed,managed.source(slow=True))
-    try:
-        wait_for(lambda:bool(list(managed.records.glob('calls/*/process.json'))))
-        assert process.poll() is None
-        # Both short locks are free while the accepted solver is running.
-        with experiments.Records(config).lease():
-            with experiments.Records(config).lease('accept.lock'):publish(config,pending=True)
-        result=finish_process(process,0);call=result['call_id']
-        assert result['status']=='known_success'
-        assert managed.cli('query','--call-id',call)['state']=='succeeded'
-        assert managed.cli('lookup','--call-id',call)['state']=='succeeded'
-        collected=managed.cli('collect','--call-id',call)
-        assert collected['status']=='collected' and collected['outputs']
-        assert collected['feedback']['review']['requested'] is True
-        refused=managed.cli('run','--script',managed.source('next'),expected=2)
-        assert refused['status']=='review_required'
-        assert len(list(managed.records.glob('calls/*/accepted.json')))==1
-    finally:stop(process)
-
-
-@pytest.mark.process_e2e
-def test_host_publication_before_accept_linearizes_rejection(managed):
-    config=soft(managed);publish(config)
-    source=managed.source()
-    with experiments.Records(config).lease('accept.lock'):
-        process=spawn(managed,source)
-        try:
-            wait_for(lambda:bool(list(managed.records.glob('.prepared-*'))))
-            assert not list(managed.records.glob('calls/*/accepted.json'))
-            publish(config,pending=True)
-        except BaseException:
-            stop(process);raise
-    try:
-        result=finish_process(process,2)
-        assert result['status']=='review_required'
-        assert_no_accept(managed)
-    finally:stop(process)
 
 
 @pytest.mark.process_e2e

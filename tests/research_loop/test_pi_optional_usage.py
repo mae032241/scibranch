@@ -52,7 +52,10 @@ def test_missing_assistant_and_compaction_billing_keeps_context_and_known_lower_
     terminal = backend.finish_observation(meter, required=True)
     assert not observer.fault and native_usage.metadata_stop(terminal, required=True, terminal=True) is None
     assert terminal['tokens'] == lower_bound and terminal['coverage'] == 'unknown'
-    assert terminal['session_binding'] is None  # No complete billing/resume proof invented.
+    binding = terminal['session_binding']
+    assert binding['thread_id'] == 'exact-session' and binding['path'] == str(meter.path)
+    assert binding['workspace'] == str(meter.workspace)
+    assert 'sha256' not in binding  # Missing billing does not invent a full session digest.
 
 
 def test_later_known_usage_never_fills_or_rebills_prior_unknown_billing(tmp_path):

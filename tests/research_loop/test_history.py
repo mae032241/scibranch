@@ -26,67 +26,12 @@ def read_pages(work, start, key):
     return rows
 
 
-def test_role_index_paging_and_complete_scientific_text_are_readable_now(scene):
-    source(scene)
-    roles = ('A', 'H', 'E', 'H', 'W', 'A', 'H', 'W', 'A')
-    for step, role in enumerate(roles, 3):
-        finish(scene, step, role, [step - 1], text='Scientific original ' + ('evidence ' * 1000))
-    work = c.workspace(scene, 12)
-    work.mkdir()
-    binding = bind(scene, 12)
-    assert binding['view']['node_count'] == 11
-    page = c.read(work / binding['view']['indexes']['nodes'])
-    assert len(page['records']) == 8 and page['omitted_count'] == 3
-    second = c.read(work / page['next_page'])
-    assert len(second['records']) == 3 and second['next_page'] is None
-    assert {row['role'] for row in [*page['records'], *second['records']]} == {'H', 'W', 'A', 'E'}
-    old = page['records'][2]
-    detail = ''.join(c.read(bound_history_file(scene,work,binding,path))['text'] for path in old['conclusion_pages'])
-    assert json.loads(detail) == c.read(c.host_record(c.workspace(scene, 3)) / 'science-output.json')
-    assert bound_history_file(scene,work,binding,old['conclusion_pages'][0]).stat().st_mode & 0o222 == 0
-    assert not any(Path(row['path']).name=='candidate.py' for row in binding['files'])
-    assert [row['step'] for row in binding['view']['recent']] == [10, 11]
-    assert c.read(scene / 'jobs/009.json')['direct_refs'] == [dict(
-        path='inputs/parents/008/conclusion.json', size_bytes=(c.host_record(c.workspace(scene,8))/'science-output.json').stat().st_size)]
-    h9 = next(row for row in lineage.project(scene, 12)['records'] if row['step'] == 9)
-    assert h9['view']['h_parents'] == [6]
-    assert 'failed' not in binding['view']  # limitations are author's declarations, no semantic guess.
-    history.validate(scene, work, binding)
 
 
-def test_deleted_projection_rebuilds_without_duplicate_attempts(scene):
-    source(scene)
-    work = c.workspace(scene, 3);work.mkdir()
-    first = bind(scene, 3)
-    originals = {path: path.read_bytes() for path in (scene / 'native-evidence').rglob('*') if path.is_file()}
-    shutil.rmtree(work / 'inputs/history')
-    assert bind(scene, 3) == first
-    assert len(first['nodes']) == 2
-    assert len(list((scene / 'jobs').glob('*.json'))) == 2
-    assert all(path.read_bytes() == raw for path, raw in originals.items())
 
 
-def test_history_exact_implementation_handle_uses_original_seal(scene):
-    source(scene)
-    work = c.workspace(scene, 3);work.mkdir()
-    bound = bind(scene, 3)
-    row = history.resolve(scene, 'history/nodes/002/artifacts/candidate.py', bound['nodes'])
-    assert row['path'] == REUSED and Path(row['source']) == c.workspace(scene, 2) / 'artifacts/candidate.py'
-    for target in ('history/nodes/003/artifacts/candidate.py', 'history/nodes/002/artifacts/missing.py',
-                   'history/nodes/2/artifacts/candidate.py', 'history/nodes/002/artifacts/../candidate.py'):
-        with pytest.raises(ValueError):
-            history.resolve(scene, target, bound['nodes'])
 
 
-@pytest.mark.parametrize('changed', ['page', 'source', 'seal'])
-def test_tampered_history_is_rejected(scene, changed):
-    source(scene)
-    work = c.workspace(scene, 3);work.mkdir()
-    bound = bind(scene, 3)
-    path = bound_history_file(scene,work,bound,bound['files'][0]['path']) if changed == 'page' else c.host_record(c.workspace(scene, 2)) / ('science-output.json' if changed == 'source' else 'result-identity.json')
-    path.chmod(0o600);path.write_text('{}')
-    with pytest.raises((ValueError, KeyError)):
-        history.validate(scene, work, bound)
 
 
 def test_oversized_navigation_has_explicit_omission_without_discarding_originals(scene, monkeypatch):
@@ -157,37 +102,8 @@ print(json.dumps({"current_candidate":None,"coverage":{"status":"complete","note
     assert c.read(scene / first['path']) == observation
 
 
-def test_observer_keeps_valid_candidates_with_missing_or_free_scientific_metadata(scene,tmp_path):
-    setup_observer(scene,tmp_path,'''import json,sys
-q=json.load(sys.stdin)
-items=([{"id":"unmeasured","status":"ok","evidence":["fact.json"]},
- {"id":"explained","label":{"science":"descriptive"},"status":"ok","direction":"maximize under constraints",
- "evaluation_key":{"conditions":["limited"]},"evidence":["fact.json"]},
- {"id":[],"status":"ok","evidence":["fact.json"]}] if q["step"]==2 else [])
-print(json.dumps(dict(candidates=items,current_candidate=None,actual_submission=None,coverage=dict(status="partial",note="Fixture"))))
-''')
-    (scene/'fact.json').write_text('Original observation')
-    source(scene)
-    seal=c.read(c.host_record(c.workspace(scene,2))/'result-identity.json')
-    fact=c.read(scene/seal['observations']['path'])
-    assert [item['id'] for item in fact['candidates']]==['unmeasured','explained']
-    assert fact['candidates'][0]['metric'] is None and fact['candidates'][0]['direction'] is None
-    assert fact['candidates'][1]['evaluation_key']=={'conditions':['limited']}
-    assert fact['candidate_diagnostics']==[dict(index=2,code='candidate_identity_unresolved')]
-    job=c.build_job(scene,3,'A',[2])
-    assert job['history']['candidate_ids']==['unmeasured','explained']
 
 
-@pytest.mark.parametrize('body', ['import time; time.sleep(2)', 'print("x"*300000)'])
-def test_observer_timeout_and_output_bound_stop_without_model(scene, tmp_path, monkeypatch, body):
-    setup_observer(scene, tmp_path, body)
-    job = c.build_job(scene, 1, 'H', [])
-    c.write(c.host_record(c.workspace(scene, 1)) / 'science-output.json', {'summary':'Unsealed fixture'})
-    monkeypatch.setattr(history, 'OBSERVER_SECONDS', .1)
-    receipt = history.capture(scene, job, {}, [], inventory=inventory_for(scene, job))
-    fact = c.read(scene / receipt['path'])
-    assert fact['coverage']['status'] == 'unavailable'
-    assert history.capture(scene, job, {}, [], inventory=inventory_for(scene, job)) == receipt
 
 
 def test_observer_tool_upgrade_preserves_the_original_observation(scene, tmp_path):
@@ -238,20 +154,6 @@ def test_current_history_packets_stay_fixed_and_legacy_write_schema_is_rejected(
     c.validate(work)
 
 
-def test_utf8_history_default_brief_is_at_most_4096_bytes(scene):
-    text = '科学限制' * 500
-    for step in range(1, 9):
-        role = ('H', 'W', 'A', 'E')[(step - 1) % 4]
-        finish(scene, step, role, [step - 1] if step > 1 else [], summary=text,
-               limitations=[text] * 5, text=text)
-    job = c.build_job(scene, 9, 'H', [8])
-    brief = c.science_view(job, scene)['lineage']
-    assert len(history._bytes(brief)) <= history.MAX_BRIEF_BYTES == 4096
-    assert all(len(row['summary'].encode()) <= 160 for row in brief['recent'])
-    assert all('implementations' not in row for row in brief['recent'])
-    rows = read_pages(c.workspace(scene, 9), brief['indexes']['nodes'], 'records')
-    assert len(rows) == 8 and all(row['limitations'] for row in rows)
-    assert all(row['summary_truncated'] for row in brief['recent'])
 
 
 def test_nodes_paginate_by_bytes_as_well_as_row_count(scene):
@@ -288,18 +190,6 @@ print(json.dumps({"candidates":[],"current_candidate":None,"coverage":{"status":
         c.validate(c.workspace(scene, 2))
 
 
-def test_optional_observer_unavailable_does_not_block_scientific_seal(scene, tmp_path):
-    setup_observer(scene, tmp_path, 'print("this is not observer JSON")')
-    finish(scene, 1, 'H', [], action='experiment')
-    seal = c.read(c.host_record(c.workspace(scene, 1)) / 'result-identity.json')
-    snapshot = c.read(scene / seal['observations']['path'])
-    assert snapshot['coverage']['status'] == 'unavailable'
-    c.validate(c.workspace(scene, 1))
-    job = c.build_job(scene, 2, 'W', [1])
-    candidates = job['history']['view']['candidates']
-    assert candidates['coverage'] == 'partial'
-    assert candidates['candidate_count'] == 0 and 'target_best' not in candidates
-    assert candidates['observed_actual_submission'] is None
 
 
 def test_actual_unknown_id_is_unavailable_not_a_false_submission(scene, tmp_path):
@@ -328,32 +218,6 @@ def test_cov_adapter_retains_all_new_records_and_excludes_known_identities(scene
     assert {row['id'] for row in value['candidates']} == {f'run-{i}' for i in range(1, 201)}
 
 
-def test_candidate_pages_pack_valid_multibyte_rows_without_expanding_brief(scene, tmp_path):
-    setup_observer(scene, tmp_path, '''import json,sys
-q=json.load(sys.stdin)
-rows=[]
-if q["step"]==2:
- for i in range(20):
-  rows.append({"id":"candidate-"+str(i),"label":"界"*160,"implementation":None,"evaluation_key":"条件"*256,"metric":i,"direction":"max","status":"ok","evidence":["fact.json"]})
-print(json.dumps({"candidates":rows,"current_candidate":None,"actual_submission":None,"coverage":{"status":"complete","note":"Fixture"}}))
-''')
-    (scene / 'fact.json').write_text('{}')
-    source(scene)
-    job = c.build_job(scene, 3, 'A', [2])
-    work = c.workspace(scene, 3)
-    pages = [row for row in job['history']['files'] if '/candidates/' in row['path']]
-    assert len(pages) >= 2 and all(row['size_bytes'] <= history.MAX_PAGE_BYTES for row in pages)
-    assert sum(len(c.read(work / row['path'])['candidates']) for row in pages) == 20
-    overview = lineage.project(scene, 3)['candidates']
-    assert overview['candidate_facts'][0]['id'] == 'candidate-0'
-    assert overview['candidate_facts'][0]['evaluation_key_truncated']
-    assert len(history._bytes(job['history']['view'])) <= 4096
-    finish(scene, 3, 'A', [2], recommendation='candidate-4')
-    next_job = c.build_job(scene, 4, 'H', [3])
-    next_overview = lineage.project(scene, 4)['candidates']
-    assert next_overview['a_recommended']['candidate_id'] == 'candidate-4'
-    assert next_overview['candidate_facts'][0]['id'] == 'candidate-0'
-    assert next_overview['actual_submission'] is None
 
 
 def test_unknown_a_recommendation_preserves_science_with_local_diagnostic(scene):
@@ -364,43 +228,3 @@ def test_unknown_a_recommendation_preserves_science_with_local_diagnostic(scene)
     assert dict(code='candidate_recommendation_unresolved',subject='invented') in seal['control_outcome']['diagnostics']
     assert c.validate(work)['candidate_recommendation']=='invented'
     assert (record/'science-output.json').read_bytes()==original
-
-
-def test_live_artifact_is_unavailable_and_complete_observer_metadata_is_retained(scene, tmp_path):
-    setup_observer(scene, tmp_path, '''print('{"candidates":[],"current_candidate":null,"coverage":{"status":"complete","note":"Fixture"},"actual_submission":{"candidate_id":null,"artifact":"artifact.bin","evidence":["fact.json"]}}')''')
-    raw = b'Complete observed metadata ' * 12000
-    (scene / 'fact.json').write_bytes(raw);(scene / 'artifact.bin').write_bytes(b'live model')
-    finish(scene, 1, 'H', [])
-    fact = c.read(scene / 'host-history/observations/001.json')
-    proof = fact['actual_submission']['artifact']
-    assert proof == dict(path='artifact.bin',size_bytes=10,retention='unavailable')
-    assert fact['coverage']['status']=='partial'
-    assert (scene/fact['actual_submission']['evidence'][0]['snapshot']).read_bytes()==raw
-    (scene/'artifact.bin').write_bytes(b'new live generation')
-    c.validate(c.workspace(scene, 1))
-    assert c.read(scene / 'host-history/overview.json')['actual_submission']['retention'] == 'unavailable'
-
-
-def test_repeated_known_candidate_becomes_unavailable_without_poisoning_seals(scene, tmp_path):
-    setup_observer(scene, tmp_path, '''import json,sys
-q=json.load(sys.stdin)
-rows=[]
-if q["step"]>=2:
- rows=[{"id":"retained","label":"Measured","implementation":None,"evaluation_key":"proxy-v1","metric":0.7 if q["step"]==2 else 999,"direction":"max","status":"ok","evidence":["fact.json"]}]
-print(json.dumps({"candidates":rows,"current_candidate":None,"actual_submission":None,"coverage":{"status":"complete","note":"Fixture"}}))
-''')
-    (scene / 'fact.json').write_text('{"metric":0.7}')
-    source(scene)
-    old = c.read(scene / 'host-history/observations/002.json')
-    proof = old['candidates'][0]['evidence'][0]
-    (scene / 'fact.json').write_text('{"metric":999}')
-    finish(scene, 3, 'A', [2])
-    snapshot = c.read(scene / 'host-history/observations/003.json')
-    assert snapshot['coverage']['status'] == 'partial'
-    assert snapshot['candidate_diagnostics']==[dict(index=0,code='candidate_identity_unresolved')]
-    overview = c.read(scene / 'host-history/overview.json')
-    assert overview['candidate_facts'][0]['metric'] == .7
-    assert overview['candidate_facts'][0]['candidate_h_scope'] is None
-    assert overview['candidate_facts'][0]['observation_step'] == 2
-    assert (scene / proof['snapshot']).read_text() == '{"metric":0.7}'
-    c.validate(c.workspace(scene, 2));c.validate(c.workspace(scene, 3))

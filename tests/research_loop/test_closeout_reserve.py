@@ -21,10 +21,10 @@ def test_final_audit_request_preserves_original_without_audit_or_followup_author
     assert grant['step']==3 and grant['basis']=='final_state'
     assert grant['anchor']['shared_limits']==dict(max_tokens=100000,max_seconds=600)
     job=c.read(root/'jobs/003.json')
-    assert job['role']=='A' and job['final_only'] and [row['step'] for row in job['history']['nodes']]==[1,2]
+    assert job['role']=='A' and job['final_only']
     prepared=(root/'jobs/003.json').read_bytes()
     record=c.host_record(c.workspace(root,3))
-    assert c.read(record/'science-result.schema.json')['properties']['next_action']['enum']==['deliver']
+    assert 'audit' not in c.read(record/'science-result.schema.json')['properties']['next_action']['enum']
     science=record/'science-output.json'
     original=science.read_bytes()
     assert c.read(science)['next_action']=='audit' and c.read(science)['candidate_recommendation']=='run-1'

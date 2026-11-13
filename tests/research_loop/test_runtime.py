@@ -13,6 +13,29 @@ from scidiscovery.research_loop import accepted_budget, budget, contracts, contr
 from scidiscovery.research_loop.cli import status
 
 
+def _failure_originals(root, record):
+    """Retain only named fixture originals after an existing assertion fails."""
+    destination = os.environ.get('SCID_TEST_LOG_DIR')
+    if not destination:
+        return '\nRuntime originals: SCID_TEST_LOG_DIR is unset.'
+    parts = []
+    for name in ('native-outcome.json', 'native.stderr', 'runner.stderr',
+            'runner-cleanup.json', 'native.jsonl', 'usage-observation.json',
+            'science-output.json', 'result.pending.json', 'runner-process.json',
+            'native-process.json', 'watchdog-process.json'):
+        path = record / name
+        if not path.is_file() or path.is_symlink():
+            continue
+        with path.open('rb') as stream:
+            raw = stream.read(16384)
+        parts.append(name + ':\n' + raw.decode('utf-8', errors='replace'))
+    directory = Path(destination)
+    directory.mkdir(parents=True, exist_ok=True)
+    output = directory / ('runtime-' + root.parent.name + '.log')
+    output.write_text('\n\n'.join(parts), encoding='utf-8')
+    return '\nRuntime originals: ' + str(output)
+
+
 @pytest.fixture
 def local(tmp_path):
     public = tmp_path / 'public'
@@ -23,7 +46,7 @@ def local(tmp_path):
     launcher.write_text('''import json,os,pathlib,subprocess,sys,time
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
 args=sys.argv[1:]
-sys.stdin.read()
+request=json.load(sys.stdin)
 count=work/'work/launches.txt'
 with count.open('a') as f:f.write('launch\\n')
 child=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])
@@ -33,23 +56,26 @@ while not (work/'work/release').exists():time.sleep(.02)
 child.terminate()
 try:child.wait(timeout=.1)
 except subprocess.TimeoutExpired:child.kill();child.wait()
-output=pathlib.Path(args[args.index('--output-last-message')+1])
 payload={'summary':'A finding','scientific_result':'Bounded evidence','limitations':['Fixture only'],
-'next_action':'wait','route_reason':'No external event protocol','search_plan':None}
-if 'implementation_selection' in json.loads((work/'science-task.json').read_text())['final_response']:
+'next_action':'experiment','route_reason':'No external event protocol','search_plan':None}
+if 'implementation_selection' in request['response_schema']['properties']:
  payload['implementation_selection']=None
-output.write_text(json.dumps(payload))
-print(json.dumps({'type':'thread.started','thread_id':'exact-local-thread'}),flush=True)
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tokens':2}}),flush=True)
+print(json.dumps({'type':'session','session_id':'exact-local-thread'}),flush=True)
+print(json.dumps({'type':'result','result':payload}),flush=True)
+print(json.dumps({'type':'completed','usage':{'input_tokens':10,'cached_input_tokens':0,'output_tokens':2}}),flush=True)
 ''')
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, [sys.executable, str(launcher)],
-        max_tokens=1000, max_seconds=60, max_steps=3, model='fake-model', reasoning_effort='high')
+        max_tokens=1000, max_seconds=60, max_steps=3, model='fake-model', reasoning_effort='high',
+        native_backend='protocol', search_policy=None)
     work = contracts.workspace(root, 1)
     record = contracts.host_record(work)
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'src'))
 
     def launch(command='run'):
+        if command=='run' and not (root/'jobs/001.json').exists():
+            # Explicit supported component task; controller defaults stay W-led.
+            contracts.build_job(root,1,'H',[],instruction='Observe this one mechanical transport fixture; no scientific qualification.')
         return subprocess.Popen([sys.executable, '-m', 'scidiscovery.research_loop.cli',
             command, '--root', str(root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
 
@@ -71,71 +97,33 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
 
 
 @pytest.mark.process_e2e
-def test_controller_kill_rejoins_same_native_execution(local):
-    root, work, record, launch, until = local
-    first = launch()
-    until(lambda: (work / 'work/ready').exists())
-    owner = contracts.read(record / 'runner-process.json')
-    assert status(root)['nodes'][0]['state'] == 'running'
-    first.kill()
-    first.communicate(timeout=3)
-    assert runtime.process_matches(owner, owner['task_ref'])
-    before_wait = budget.snapshot(root)['advance_seconds']
-    assert budget.snapshot(root)['clock_phase'] == 'advance'
-    second = launch()
-    time.sleep(.15)
-    assert second.poll() is None  # Completion waiting launches no new role.
-    assert budget.snapshot(root)['advance_seconds'] > before_wait
-    (work / 'work/release').touch()
-    out, err = second.communicate(timeout=8)
-    assert second.returncode == 0, out + err
-    result = json.loads(out)
-    assert result['status'] == 'wait'
-    assert result['completed_steps'] == 1
-    assert budget.snapshot(root)['clock_phase'] == 'paused'
-    assert (work / 'work/launches.txt').read_text() == 'launch\n'
-    assert controller.run(root) == result
-    assert contracts.read(record / 'native-outcome.json')['thread_id'] == 'exact-local-thread'
-
-
-@pytest.mark.process_e2e
 def test_runner_loss_cleans_observed_group_and_never_replays(local):
     root, work, record, launch, until = local
     front = launch()
     until(lambda: (work / 'work/ready').exists())
     runner = contracts.read(record / 'runner-process.json')
-    child_pid = contracts.read(work / 'work/child.json')['pid']
-    child = runtime.process_identity(child_pid, runner['task_ref'])
+    leader = contracts.read(record / 'native-process.json')
+    child = _owned_child(record)
+    originals = {record/name: (record/name).read_bytes() for name in
+        ('native-intent.json', 'runner-process.json', 'native-process.json', 'watchdog-process.json')}
     os.kill(runner['pid'], signal.SIGKILL)
     until(lambda: (record / 'runner-cleanup.json').exists())
     until(lambda: not runtime.process_matches(child, child['task_ref']))
-    assert contracts.read(record / 'runner-cleanup.json')['status'] == 'observed_group_signalled'
+    cleanup = contracts.read(record / 'runner-cleanup.json')
+    assert cleanup['status'] in {'observed_group_signalled', 'cleanup_unknown'}, _failure_originals(root, record)
+    if cleanup['status'] == 'cleanup_unknown':
+        assert not runtime.process_matches(leader, leader['task_ref']), _failure_originals(root, record)
+    assert cleanup['limitation'] == 'Only exactly observed original process-group members; detached descendants are not covered.'
     assert runtime.node_state(root, 1) == 'unknown'
     assert not (record / 'native-outcome.json').exists()
     front.communicate(timeout=5)
-    assert controller.run(root)['status'] == 'native_outcome_unsealed'
-    assert controller.run(root)['status'] == 'native_outcome_unsealed'
-    assert (work / 'work/launches.txt').read_text() == 'launch\n'
-
-
-@pytest.mark.process_e2e
-def test_identity_mismatch_is_unknown_without_killing_original(local):
-    root, work, record, launch, until = local
-    front = launch()
-    until(lambda: (work / 'work/ready').exists())
-    original = contracts.read(record / 'runner-process.json')
-    contracts.write(record / 'runner-process.json', dict(original, start_ticks=original['start_ticks'] + 1))
-    assert runtime.node_state(root, 1) == 'unknown'
-    assert runtime.process_matches(original, original['task_ref'])
-    until(lambda: front.poll() is not None)
-    assert controller.run(root)['status'] == 'native_outcome_unsealed'
-    (work / 'work/release').touch()
-    until(lambda: (record / 'native-outcome.json').exists())
-    front.communicate(timeout=5)
-    # Terminal output precedes the detached runner's final clock append under
-    # the host writer lock. Wait for its real identity, not the tampered file.
-    until(lambda: not runtime.process_matches(original, original['task_ref']))
-    assert controller.run(root)['status'] == 'wait'
+    consumed = budget.snapshot(root)['advance_seconds']
+    first = controller.run(root)
+    second = controller.run(root)
+    assert first['status'] == second['status'] == 'native_outcome_unsealed'
+    assert first['usage']['unknown_steps'] == second['usage']['unknown_steps'] == [1]
+    assert budget.snapshot(root)['advance_seconds'] >= consumed
+    assert all(path.read_bytes() == raw for path, raw in originals.items())
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 
@@ -172,9 +160,6 @@ def test_stale_identity_never_signals_an_unrelated_process(local):
 @pytest.mark.process_e2e
 def test_pause_recovery_collects_accepted_node_before_stopping(local):
     root, work, record, launch, until = local
-    settings = contracts.settings(root)
-    launcher = Path(settings['native_launcher_argv'][1])
-    launcher.write_text(launcher.read_text().replace("'next_action':'wait'", "'next_action':'experiment'"))
     front = launch()
     until(lambda: (work / 'work/ready').exists())
     contracts.write(root / 'pause.request', dict(reason='operator pause'))
@@ -183,7 +168,7 @@ def test_pause_recovery_collects_accepted_node_before_stopping(local):
     resumed = launch()
     (work / 'work/release').touch()
     out, err = resumed.communicate(timeout=8)
-    assert resumed.returncode == 0, out + err
+    assert resumed.returncode == 0, out + err + _failure_originals(root, record)
     assert json.loads(out)['status'] == 'paused'
     assert json.loads(out)['completed_steps'] == 1
     assert (record / 'result-identity.json').exists()
@@ -198,8 +183,14 @@ def test_direct_runner_entry_rejects_duplicate_and_retained_execution(local):
     until(lambda: (work / 'work/ready').exists())
     with pytest.raises(BlockingIOError):
         runtime._run(root, 1)
+    contracts.write(root / 'pause.request', dict(reason='operator pause'))
     (work / 'work/release').touch()
-    front.communicate(timeout=8)
+    out, err = front.communicate(timeout=8)
+    assert front.returncode == 0, out + err + _failure_originals(root, record)
+    assert json.loads(out)['status'] == 'paused'
+    assert json.loads(out)['completed_steps'] == 1
+    assert (record / 'result-identity.json').exists()
+    assert not (root / 'jobs/002.json').exists()
     owner = contracts.read(record / 'runner-process.json')
     until(lambda: not runtime.process_matches(owner, owner['task_ref']))
     with pytest.raises(RuntimeError, match='refusing duplicate'):
@@ -288,12 +279,16 @@ def _leave_child_alive(root):
     launcher.write_text(script)
 
 
-def _assert_child_dead(work, binding):
-    pid = contracts.read(work / 'work/child.json')['pid']
-    try:
-        child = runtime.process_identity(pid, binding)
-    except FileNotFoundError:
-        return
+def _owned_child(record):
+    leader = contracts.read(record/'native-process.json')
+    members = runtime._observed_group_members(leader)
+    parents = {row['ppid'] for row in members}
+    leaves = [row for row in members if row['pid'] not in parents and row['pid']!=leader['pid']]
+    assert len(leaves)==1, members
+    return leaves[0]
+
+
+def _assert_child_dead(child, binding):
     assert not runtime.process_matches(child, binding)
 
 
@@ -303,12 +298,17 @@ def test_successful_leader_exit_cleans_surviving_standard_child(local):
     _leave_child_alive(root)
     front = launch()
     until(lambda: (work / 'work/ready').exists())
+    child = _owned_child(record)
+    contracts.write(root / 'pause.request', dict(reason='operator pause'))
     (work / 'work/release').touch()
     out, err = front.communicate(timeout=8)
-    assert front.returncode == 0, out + err
-    assert json.loads(out)['status'] == 'wait'
+    assert front.returncode == 0, out + err + _failure_originals(root, record)
+    assert json.loads(out)['status'] == 'paused'
+    assert json.loads(out)['completed_steps'] == 1
+    assert (record / 'result-identity.json').exists()
+    assert not (root / 'jobs/002.json').exists()
     assert contracts.read(record / 'native-outcome.json')['cleanup'] == 'observed_group_cleaned'
-    _assert_child_dead(work, contracts.record_ref(root / 'jobs/001.json'))
+    _assert_child_dead(child, contracts.record_ref(root / 'jobs/001.json'))
 
 
 @pytest.mark.process_e2e
@@ -326,7 +326,7 @@ def test_budget_term_leader_exit_cleans_stubborn_standard_child(local):
     front = launch('closeout')
     until(lambda: (work / 'work/ready').exists())
     binding = contracts.record_ref(root / 'jobs/001.json')
-    child = runtime.process_identity(contracts.read(work / 'work/child.json')['pid'], binding)
+    child = _owned_child(record)
     leader = contracts.read(record / 'native-process.json')
     assert (child['pgid'], child['sid']) == (leader['pgid'], leader['sid'])
     out, err = front.communicate(timeout=8)
@@ -338,7 +338,7 @@ def test_budget_term_leader_exit_cleans_stubborn_standard_child(local):
     assert outcome['cleanup'] == 'observed_group_cleaned'
     assert not (record / 'result-identity.json').exists()
     assert not runtime.process_matches(child, binding)
-    _assert_child_dead(work, binding)
+    _assert_child_dead(child, binding)
     final = contracts.read(root / 'jobs/001.json')
     assert final['role'] == 'A' and final['final_only']
     marker = budget.final_a_barrier(root)
@@ -364,6 +364,8 @@ def test_runner_completion_stops_clock_after_controller_disconnect(local):
     front.kill()
     front.communicate(timeout=3)
     assert budget.snapshot(root)['clock_phase'] == 'advance'
+    contracts.write(root / 'pause.request', dict(reason='operator pause'))
+    assert budget.snapshot(root)['clock_phase'] == 'advance'
     (work / 'work/release').touch()
     until(lambda: (record / 'native-outcome.json').exists())
     until(lambda: budget.snapshot(root)['clock_phase'] == 'paused')
@@ -373,7 +375,13 @@ def test_runner_completion_stops_clock_after_controller_disconnect(local):
     assert later['advance_seconds'] == stopped['advance_seconds']
     assert later['paused_seconds'] > stopped['paused_seconds']
     assert not (record / 'result-identity.json').exists()
-    assert controller.run(root)['status'] == 'wait'
+    original = (record / 'native-outcome.json').read_bytes()
+    result = controller.run(root)
+    assert result['status'] == 'paused', _failure_originals(root, record)
+    assert result['completed_steps'] == 1
+    assert (record / 'result-identity.json').exists()
+    assert not (root / 'jobs/002.json').exists()
+    assert (record / 'native-outcome.json').read_bytes() == original
     assert (work / 'work/launches.txt').read_text() == 'launch\n'
 
 

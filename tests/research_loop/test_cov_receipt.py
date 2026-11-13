@@ -70,15 +70,15 @@ def test_confirmed_runner_output_takes_actual_record_object_and_keeps_candidate_
     assert '9001' in (directory/'stdout.raw').read_text()
     assert cov_lineage._completed(directory)['run_id']==1
     if not failed:
-        records = experiments.Records(config)
         public_model = runs / 'model_run1.pkl'
-        frozen_model = directory / 'model.pkl'
-        assert public_model.stat().st_ino != frozen_model.stat().st_ino
+        frozen_model = Path(result['model']['path'])
+        assert frozen_model == public_model
+        assert frozen_model.stat().st_mode & 0o777 == 0o400
         observation = json.loads((directory / 'execution-observation.json').read_text())
         observed = next(item for item in observation['proofs'] if item['source']['path'] == str(frozen_model))
         retained = Path(observed['path'])
         assert retained.stat().st_ino == frozen_model.stat().st_ino
-        public_model.write_bytes(b'public producer may later replace its own output')
+        assert retained == frozen_model
         assert frozen_model.read_bytes() == b'original fixture artifact'
 
     before={p:p.read_bytes() for p in directory.iterdir() if p.is_file()}
@@ -160,42 +160,6 @@ def test_receipt_publication_and_read_keep_the_same_envelope_bound(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_local_managed_finish_failure_retains_stopped_terminal(local):
-    from scidiscovery.research_loop import runtime, worker_execution_bridge as bridge
-    root,script,config,_=local
-    script.write_text('print("finite original execution")\nraise SystemExit(7)\n')
-    launches=[];finished=[]
-    def launch(configuration,accepted,command,cwd):
-        launches.append(accepted['call_id'])
-        def finish(returncode,cleanup,transport_complete):
-            directory=experiments.Records(config).directory(accepted['call_id'])
-            terminal=json.loads((directory/'terminal.json').read_bytes())
-            finished.append((returncode,cleanup,transport_complete,terminal))
-            raise OSError('injected finish publication failure')
-        return command,cwd,finish
-    token=bridge._LOCAL_LAUNCH.set(launch)
-    try:
-        with pytest.raises(OSError,match='finish publication failure'):
-            experiments.dispatch(config,script,command_options=dict(experiment_directory=str(root),arguments=[]))
-    finally:bridge._LOCAL_LAUNCH.reset(token)
-    assert len(launches)==len(finished)==1
-    call_id=launches[0];directory=experiments.Records(config).directory(call_id)
-    returncode,cleanup,transport_complete,terminal=finished[0]
-    assert returncode==7 and cleanup is transport_complete is True
-    assert terminal['returncode']==7 and terminal['cleanup_confirmed'] is terminal['transport_complete'] is True
-    identity=json.loads((directory/'process.json').read_bytes())
-    assert not runtime.process_matches(identity,identity['task_ref'])
-    assert (directory/'stdout.raw').read_text()=='finite original execution\n'
-    assert not (directory/'completed.json').exists()
-    accepted=experiments.Records(config).accepted(call_id)
-    adapter=experiments.load(config)
-    assert adapter.lookup_submission(experiments.LocalFileDescriptor.model_validate(accepted['prepared']))==(call_id,'unknown')
-    assert adapter.result(call_id)['status']=='unknown'
-    assert [path.name for path in experiments.Records(config).calls()]==[call_id]
-    assert len(launches)==1
-
-
-@pytest.mark.process_e2e
 def test_host_receipt_child_imports_writable_inputs_without_bytecode(tmp_path,execution_registry,monkeypatch):
     inputs=tmp_path/'inputs';inputs.mkdir()
     cli=inputs/'exp_cli.py';cli.write_text(CLI)
@@ -214,8 +178,14 @@ def test_host_receipt_child_imports_writable_inputs_without_bytecode(tmp_path,ex
             job_ref=dict(path=str(tmp_path/'jobs/002.json')),execution_key=dict(path=str(tmp_path/'jobs/002.json')),mechanism_ref='h001.m1'),parents=[],evaluation_key='fixture',
         engineering_check_reserve_seconds=0)
     config=experiments.freeze(value,'cov_execution:experiment',path=tmp_path/'config.json')
-    result=experiments.dispatch(config,source,new=True)
-    assert result['status']=='known_success'
+    # Synthetic trusted host receiver; interpreter flags are checked in the child.
+    from scidiscovery.research_loop import worker_execution_bridge as bridge
+    token=bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None))
+    try:
+        result=experiments.dispatch(config,source,new=True)
+    finally:
+        bridge._LOCAL_LAUNCH.reset(token)
+    assert result['status']=='known_success', result
     observed=json.loads(flags.read_text())
     assert observed==dict(isolated=True,dont_write_bytecode=True,dependency='inert engineering input')
     after={path.relative_to(inputs):path.read_bytes() for path in inputs.rglob('*') if path.is_file()}
@@ -224,20 +194,23 @@ def test_host_receipt_child_imports_writable_inputs_without_bytecode(tmp_path,ex
     assert experiments.load(config).command(accepted)[1:3]==['-B','-I']
 
 
-
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('name',['receipt.json','source.py','row.json'])
+@pytest.mark.parametrize('name',['receipt.json','source.py','row.json','model'])
 def test_known_cov_original_tamper_is_integrity_error_without_reexecution(wrapper,name):
     source=wrapper.script('original')
     result=wrapper.cli('run','--script',source,'--new-plan')
     directory=wrapper.directory(result)
-    (directory/name).chmod((directory/name).stat().st_mode|0o200)
-    (directory/name).write_bytes((directory/name).read_bytes()+b' ')
-    before={p:p.read_bytes() for p in directory.iterdir() if p.is_file()}
     adapter=experiments.load(json.loads(wrapper.config.read_text()),path=wrapper.config)
+    host_result=adapter.result(result['call_id'])
+    original=Path(host_result['model']['path']) if name=='model' else directory/name
+    original.chmod(original.stat().st_mode|0o200)
+    original.write_bytes(original.read_bytes()+b' ')
+    corrupted=original.read_bytes()
+    before={p:p.read_bytes() for p in directory.iterdir() if p.is_file()}
     with pytest.raises(experiments.IntegrityError):adapter.result(result['call_id'])
     with pytest.raises(experiments.IntegrityError):adapter.collect_original(result['call_id'])
     assert before=={p:p.read_bytes() for p in directory.iterdir() if p.is_file()}
+    assert original.read_bytes()==corrupted
 
 
 @pytest.mark.process_e2e

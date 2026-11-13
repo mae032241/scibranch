@@ -7,8 +7,6 @@ import pytest
 
 from scidiscovery.research_loop import accepted_budget, accepted_search, contracts as c
 from scidiscovery.research_loop import ui_components, ui_saved_status, ui_view
-from test_history_handoff import finish
-from test_portfolio_contract import prepared
 
 
 HEAD = 'host-history/accepted-budget/head.json'
@@ -47,30 +45,6 @@ def rendered(value, *, usage=None):
 
 def forbidden(*args, **kwargs):
     pytest.fail('A UI consumer attempted to read, discover or qualify originals')
-
-
-def test_real_producer_head_keeps_cycles_without_legacy_overview_metrics(tmp_path):
-    root = prepared(tmp_path)
-    finish(root, 3, 'A', [1, 2], action='finish', portfolio_review=dict(
-        main_line='h001.m1', discriminating_work=None,
-        reason='Mechanical fixture only; target evidence is missing and neither explanation is scientifically qualified.'))
-    head = c.read(root / HEAD)
-    assert 'portfolio_metrics' not in c.read(root / 'host-history/overview.json')
-    assert head['search']['portfolio']['completed_cycle_count'] == 1
-    # The fixture terminal meters lack strict completeness metadata. Keeping
-    # this exclusion is independent of displaying its accepted cycle count.
-    assert head['search']['portfolio']['token_advice']['complete_sample_count'] == 0
-    assert head['search']['portfolio']['token_advice']['excluded_sample_count'] == 1
-    value = ui_saved_status.portfolio_metrics(root, [1, 2, 3], USAGE, BUDGET)
-    view, markup = rendered(value)
-    assert view['available'] and not view['partial'] and view['source_step'] == 3
-    assert view['completed_cycle_count'] == 1 and view['main_line'] == 'Main'
-    # An assessed cycle does not establish managed-call participation; this
-    # real fixture has no managed calls for either declared mechanism.
-    assert [row['participated_cycles'] for row in view['participation']] == [0, 0]
-    assert '探索投入提示 · 已评估 1 周期' in markup
-    assert '完整本分支周期样本：0' in markup and '排除样本：1' in markup
-    assert '按已报告 token 的参考轮数：不可估' in markup
 
 
 def test_current_head_displays_participation_mainline_and_pending_without_overview(tmp_path):

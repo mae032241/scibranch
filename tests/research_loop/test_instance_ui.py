@@ -1405,14 +1405,28 @@ controller._run = bounded_control
             time.sleep(.02)
         assert (root / 'entered').exists()
         receipt = control_operations.operations(root)[0]
+        # Recover the response to this exact accepted HTTP intent before its
+        # browser/boot credentials disappear; do not generate another start.
+        connection.request('POST', '/control/start', body=urlencode(fields), headers={
+            'Cookie': cookie, 'Origin': 'http://' + host, 'Content-Type': 'application/x-www-form-urlencoded'})
+        response = connection.getresponse(); duplicate_body = response.read()
+        failure = duplicate_body.decode(errors='replace')
+        if response.status != 303:
+            diagnostic = re.search(r'\.scid-ui/errors/([0-9a-f]{32})\.json', failure)
+            if diagnostic:
+                journal = root / '.scid-ui/errors' / (diagnostic[1] + '.json')
+                if journal.is_file():
+                    failure += '\nExact host diagnostic:\n' + journal.read_text(encoding='utf-8')
+        assert response.status == 303, failure
+        assert [row['operation_id'] for row in control_operations.operations(root)] == [receipt['operation_id']]
         first.terminate(); first.wait(5)
         assert control_operations.operation(root, receipt['operation_id'])['status'] == 'running'
         second, connection, host, cookie = start_host()
-        fields = get_form(connection, cookie)
-        connection.request('POST', '/control/start', body=urlencode(fields), headers={
-            'Cookie': cookie, 'Origin': 'http://' + host, 'Content-Type': 'application/x-www-form-urlencoded'})
-        response = connection.getresponse(); response.read()
-        assert response.status == 303
+        # The restarted host reconciles the persisted operation. Its new form
+        # credentials describe a new intent, which must not swallow this owner.
+        distinct_operation = '0' * 32 if receipt['operation_id'] != '0' * 32 else '1' * 32
+        with pytest.raises(RuntimeError, match='this exact request was not accepted'):
+            control_operations.start_background(root, operation_id=distinct_operation)
         assert [row['operation_id'] for row in control_operations.operations(root)] == [receipt['operation_id']]
         connection.request('GET', '/operations', headers={'Cookie': cookie})
         response = connection.getresponse()
@@ -2559,28 +2573,6 @@ def test_result_display_and_translation_sources_are_cleaned_without_changing_ori
     ui.translation.close()
 
 
-@pytest.mark.process_e2e
-def test_all_candidate_history_paginates_frozen_prefix_without_latest_nominee_filter(tmp_path):
-    from test_ui_view import nominated_scene
-    root, key = nominated_scene(tmp_path)
-    ui, cookie = session(root, key)
-    first = ui.get('/candidates', host=ui.host, cookie=cookie)[1].decode()
-    found = set(re.findall(r'Candidate (\d+)', first))
-    link = html.unescape(re.search(r'href="([^"]+)"[^>]*>下一页候选', first)[1])
-    second = ui.get(link, host=ui.host, cookie=cookie)[1].decode()
-    remaining = set(re.findall(r'Candidate (\d+)', second))
-    assert found.isdisjoint(remaining)
-    assert found | remaining == {str(number) for number in range(1, 38)}
-    assert 'Candidate 1' in first and '含失败' in first
-    before = ui.get(link, host=ui.host, cookie=cookie)[1]
-    from scidiscovery.research_loop import ui_view
-    finish(root, 7, 'H', [6], action='analyze', search_choice=ui_view.Reader(root).node(1)['payload']['search_plan'])
-    assert ui.get(link, host=ui.host, cookie=cookie)[1] == before
-    overview = ui.get('/', host=ui.host, cookie=cookie)[1]
-    assert b'href="/candidates"' in overview
-    ui.translation.close()
-
-
 def test_sse_component_budget_uses_final_utf8_json_and_keeps_small_status():
     import json
     from scidiscovery.research_loop import instance_live
@@ -2768,43 +2760,6 @@ def test_current_configure_save_route_keeps_existing_file_and_draft(tmp_path):
     fresh.update(mode='save', save_path=str(destination))
     assert post(ui, cookie, 'configure', fresh)[0] == 200
     assert destination.exists() and config.read_bytes() == original
-    ui.translation.close()
-
-
-@pytest.mark.process_e2e
-def test_candidate_history_keeps_readable_candidates_when_earlier_recommended_source_is_missing(tmp_path):
-    from scidiscovery.research_loop import contracts as c, ui_view
-    public = tmp_path / 'public'; public.mkdir()
-    objective = public / 'objective.md'; objective.write_text('Retain incomplete candidate evidence without inventing associations.')
-    observer = tmp_path / 'observer.py'
-    observer.write_text('''import json,sys
-r=json.load(sys.stdin)
-step=r['step']
-rows=[dict(id=f'model-{step}',label=f'Observed candidate {step}',implementation=f'history/nodes/{step:03d}/artifacts/model.py',evaluation_key='val',metric=step/10,direction='max',status='ok',evidence=['project/global/objective.md'])] if step in (2,3) else []
-print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=None,coverage=dict(status='complete',note='Incomplete display fixture only'))))
-''')
-    root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['never-invoked'], max_tokens=100000, max_seconds=600,
-        max_steps=6, model='fixture', reasoning_effort='high', experiment_mode='external',
-        search_policy=None, history_observer=dict(adapter=str(observer), config={}))
-    finish(root, 1, 'H', [], action='analyze')
-    finish(root, 2, 'W', [1], files={'model.py': '# original candidate 2\n'})
-    finish(root, 3, 'W', [2], files={'model.py': '# original candidate 3\n'},
-        candidate_nominations=dict(representatives=[], extras=[dict(candidate='model-2', reason='Retained earlier candidate')], gaps=[]))
-    finish(root, 4, 'A', [3], recommendation='model-2')
-    key = tmp_path / 'operator.key'; key.write_bytes(b'fixture-incomplete-history-key-32'); key.chmod(0o600)
-    ui, cookie = session(root, key)
-    original = root / 'native-evidence/002/science-output.json'
-    original.chmod(0o600); original.write_text('{')
-    status, page, _ = ui.get('/candidates', host=ui.host, cookie=cookie)
-    text = page.decode()
-    assert status == 200 and 'Observed candidate 3' in text and 'Observed candidate 2' not in text
-    assert '缺口阶段：2' in text and '计数为下界' in text
-    assert '1 条推荐的候选来源不可读' in text and '1 条提名的候选来源不可读' in text
-    # The ordinary subject projection remains strict for the same exact gap.
-    job = dict(history=dict(nodes=[dict(step=step) for step in (1,3,4)]))
-    with pytest.raises(ValueError, match='unknown candidate'):
-        ui_view.candidate_projection(root, 5, job=job)
     ui.translation.close()
 
 

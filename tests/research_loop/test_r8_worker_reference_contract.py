@@ -33,11 +33,6 @@ def test_actual_worker_request_explains_optional_observed_calls_and_keeps_three_
 def test_one_exact_comparative_call_supports_multiple_authored_observations(comparison):
     scene=comparison
     scene.job.update(research_strategy_version=3,advisory_scope_version=1)
-    # Retain the fixture's exact H producer identities in the current binding shape.
-    for row in scene.job['search']['breadth']['mechanisms']:
-        row.update(source_step=row['source_h'],source_ref=row['source_h_ref'],source_role='H')
-    for row in scene.job['search']['coverage_obligation']:
-        row.update(source_step=row['source_h'],source_ref=row['source_h_ref'],source_role='H')
     call=scene.terminal('0001-comparison')
     source=scene.job['search']['breadth']['mechanisms'][-1]
     call['mechanism_binding'].update({key:source[key] for key in ('source_step','source_ref','source_role')})
@@ -54,9 +49,9 @@ def test_one_exact_comparative_call_supports_multiple_authored_observations(comp
     assert {row['call_id'] for row in scene.science['mechanism_findings']}=={'0001-comparison'}
     without_reference=copy.deepcopy(scene.science)
     for row in without_reference['mechanism_findings']:row.pop('call_id')
-    partial=worker_delivery.require_delivery(scene.root,scene.job,without_reference,scene.record,inventory=scene.inventory)
-    assert partial['status']=='partial' and partial['reason']=='worker_review'
-    assert set(partial['missing'])==set(REFS[:-1])
+    with pytest.raises(OutputRepairRequired) as missing:
+        worker_delivery.require_delivery(scene.root,scene.job,without_reference,scene.record,inventory=scene.inventory)
+    assert missing.value.code=='worker_delivery_reference'
     binding=copy.deepcopy(call['mechanism_binding'])
     for reference in [None,'0000-not-retained']:
         unresolved=copy.deepcopy(without_reference)

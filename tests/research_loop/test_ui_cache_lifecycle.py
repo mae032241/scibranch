@@ -187,7 +187,8 @@ def test_later_a_missing_choice_source_never_revives_earlier_recommendation(tmp_
     assert (str(tmp_path), 3) not in memo.summaries
     if failure != 'missing':
         # Existing non-summary display callers keep tolerant raw references.
-        assert ui_view.resolve_candidate(tmp_path, nodes[3]['job'], 'W002-I001') == 'W002-I001'
+        assert ui_view.resolve_candidate(tmp_path, nodes[3]['job'], 'W002-I001',
+            facts=dict(error=ValueError('Unreadable source'))) == 'W002-I001'
     monkeypatch.setattr(ui_view.display, 'node', original_node)
     versions[2] = 9
     observations[2]['candidates'][0]['id'] = 'restored-candidate'
@@ -352,8 +353,8 @@ def test_saved_budget_uses_control_clock_intervals(tmp_path, monkeypatch, basis,
             budget._snapshot(tmp_path, settings, events, sample_stamp=now)
     else:
         authority = budget._snapshot(tmp_path, settings, events, sample_stamp=now)
-        # `expected` is the measured advance+waiting span; waiting is not consumed.
-        consumed = 5. if basis == 'active' else expected
+        # Omitted active_waiting_policy retains historical waiting charges.
+        consumed = expected
         assert value['time_status'] == 'recorded' and value['consumed_seconds'] == consumed
         assert value['advance_seconds'] == 5.
         assert value['waiting_seconds'] == (expected - 5. if now['boot_id'] == 'new' else 5.)

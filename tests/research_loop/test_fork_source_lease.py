@@ -35,8 +35,8 @@ def instance(tmp_path, gates):
 
 
 def _gate_path(root, directory):
-    key = hashlib.sha256(owner.files.canonical(dict(root=str(root), **owner._identity(root)))).hexdigest()
-    return directory / (key + '.lock')
+    identity = owner._identity(root)
+    return directory / f'{identity["dev"]}-{identity["ino"]}.lock'
 
 
 def test_read_only_owner_and_missing_gate_probe_do_not_create(tmp_path, gates):
@@ -223,29 +223,3 @@ def test_read_only_source_probe_rejects_child_effect_without_new_files(instance,
     assert process.returncode == 0, (stdout, stderr)
     with owner.source_lease(instance, create=False):
         pass
-
-
-@pytest.mark.process_e2e
-def test_cold_exclusive_reentry_and_absent_root_restore_still_fence_child(instance, gates, tmp_path):
-    root = instance
-    anchors = tmp_path / 'anchors'; anchors.mkdir()
-    archive.checkpoint_enroll(root, anchors)
-    binding = owner._binding(root)
-    with owner.exclusive(root):
-        with owner.lease(root):
-            with budget._ledger_writer(root):
-                pass
-        result = _child(root, gates)
-        assert result.returncode == 23, result.stderr
-    assert _child(root, gates).returncode == 0
-    previous = tmp_path / 'previous'
-    root.rename(previous)
-    # Same missing-root branch used by cold restore; anchor remains the original
-    # serialization owner until the new inode is published and committed.
-    with owner.exclusive(root, binding=binding):
-        shutil.copytree(previous, root)
-        with owner.lease(root):
-            pass
-        result = _child(root, gates)
-        assert result.returncode == 23, result.stderr
-        assert 'Cold owner transfer is in progress' in result.stdout

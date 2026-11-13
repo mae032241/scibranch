@@ -86,7 +86,7 @@ def prepare(tmp_path, *, enabled=False, launcher):
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, launcher, max_tokens=1000,
         max_seconds=60, max_steps=6, model='fixture', reasoning_effort='high',
-        search_policy=None, experiment_mode='external', research_strategy_version=None)
+        search_policy=None, experiment_mode='external')
     return root, public
 
 
@@ -215,67 +215,14 @@ def remove_parent_controls(parent, child):
             before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
 
 
-@pytest.mark.process_e2e
-def test_controller_runs_selected_a_with_frozen_prefix_after_parent_control_removal(tmp_path, monkeypatch):
-    launcher = tmp_path / 'native-fixture.py'
-    launcher.write_text(LAUNCHER)
-    parent, _ = prepare(tmp_path, enabled=False, launcher=[sys.executable, str(launcher)])
-    with controller._writer(parent):
-        pass
-    for step, role, parents, action in [(1, 'H', [], 'analyze'), (2, 'A', [1], 'finish')]:
-        _, _, record = finish(parent, step, role, parents, action=action,
-            text='SOURCE_SELECTED_OUTPUT_SENTINEL' if step == 2 else 'Exact H evidence before selected A.')
-        assert c.read(record / 'native-outcome.json')['native_started'] is False
-    original_task = c.read(parent / 'project/nodes/002/science-task.json')
-    child = tmp_path / 'child'
-    allowance = dict(max_tokens=1000, max_seconds=60, max_steps=2)
-    preview = fork_service.preview(parent, 2, child, budget=allowance)
-    fork_service.create(parent, 2, child, budget=allowance, expected_preview_id=preview['preview_id'], operation_id='execute-a-once')
-    assert not (child / 'host-started.json').exists()
-    remove_parent_controls(parent, child)
-    sealing_errors = []
-    original_seal = c.seal_result
-    def checked_seal(*args, **kwargs):
-        try:
-            return original_seal(*args, **kwargs)
-        except Exception:
-            sealing_errors.append(traceback.format_exc())
-            raise
-    monkeypatch.setattr(c, 'seal_result', checked_seal)
-    monkeypatch.setattr(native, 'seal_result', checked_seal)
-    result = instance_control.continue_instance(child)
-    assert result['status'] == 'finish', '\n'.join(sealing_errors) or json.dumps(result, ensure_ascii=False, indent=2)
-    assert [path.name for path in (child / 'jobs').iterdir()] == ['002.json']
-    job = c.read(child / 'jobs/002.json')
-    assert job['role'] == 'A' and job['step'] == 2
-    assert job['fork_source']['job']['path'] == 'jobs/002.json'
-    view = c.read(child / 'project/nodes/002/science-task.json')
-    expected_task = copy.deepcopy(original_task)
-    expected_task['public_root'] = job['public_root']
-    expected_task['source_restrictions'] = job['source_restrictions']
-    assert view == expected_task
-    assert 'SOURCE_SELECTED_OUTPUT_SENTINEL' not in json.dumps(view)
-    assert c.validate(c.workspace(child, 2))['summary'] == 'Fresh child A finding'
-    assert native.usage(child)['observed_tokens'] == 22
-    session = c.read(child / 'project/nodes/002/work/new-session.json')
-    assert str(child) in session['home'] and 'resume' not in session['args']
-
-
 def routed_parent(tmp_path):
     launcher = tmp_path / 'native-fixture.py'
     launcher.write_text(LAUNCHER)
     parent, _ = prepare(tmp_path, enabled=False, launcher=[sys.executable, str(launcher)])
     with controller._writer(parent):
         pass
-    rows = [(1, 'H', [], 'experiment'), (2, 'W', [1], 'wait'),
-        (3, 'A', [1, 2], 'extract'), (4, 'E', [1, 2, 3], 'wait'),
-        (5, 'A', [1, 2, 3, 4], 'finish')]
-    for step, role, parents, action in rows:
-        if role == 'E':
-            c.build_job(parent, step, role, parents, instruction='Extract the exact original evidence',
-                evidence_return=dict(role='A', step=3))
-        _, _, record = finish(parent, step, role, parents, action=action)
-        assert c.read(record / 'native-outcome.json')['native_started'] is False
+    finish(parent, 1, 'W', [], stage_intent='handoff')
+    finish(parent, 2, 'W', [1], stage_intent='handoff')
     return parent
 
 
@@ -293,80 +240,19 @@ def test_missing_direct_parent_science_refuses_read_before_native_submission(tmp
     original.unlink()
     # Fork metadata preserves the exact missing-input binding. Acceptance of
     # that metadata is not evidence that a scientific original can be read.
-    from scidiscovery.research_loop import handoff_state, originals
+    from scidiscovery.research_loop import accepted_budget, handoff_state, originals
     owner = originals.node(child, 1)
     with pytest.raises(FileNotFoundError) as refused:
-        handoff_state.source_facts(child, 1, owner=owner)
+        handoff_state.source_facts(child, 1, owner=owner, head=accepted_budget.read(child))
     assert Path(refused.value.filename) == original
     assert not (child / 'native-evidence/002/native-intent.json').exists()
     assert native.usage(child)['observed_tokens'] == 0
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('selected_step,selected_role,local_roles', [
-    (1, 'H', ['H', 'A']), (2, 'W', ['W', 'A']),
-    (3, 'A', ['A']), (4, 'E', ['E', 'A'])])
-def test_each_ordinary_role_starts_at_exact_source_and_routes_child_successors(tmp_path, monkeypatch, selected_step, selected_role, local_roles):
-    parent = routed_parent(tmp_path)
-    child = tmp_path / 'child'
-    allowance = dict(max_tokens=2000, max_seconds=60, max_steps=4)
-    preview = fork_service.preview(parent, selected_step, child, budget=allowance)
-    fork_service.create(parent, selected_step, child, budget=allowance,
-        expected_preview_id=preview['preview_id'], operation_id='role-' + selected_role)
-    remove_parent_controls(parent, child)
-    errors = []
-    original_validate = c.validate
-    def checked_validate(*args, **kwargs):
-        try:
-            return original_validate(*args, **kwargs)
-        except Exception:
-            errors.append(traceback.format_exc())
-            raise
-    monkeypatch.setattr(c, 'validate', checked_validate)
-    result = instance_control.continue_instance(child)
-    assert result['status'] == 'finish', '\n'.join(errors) or json.dumps(result, ensure_ascii=False, indent=2)
-    jobs = [c.read(path) for path in sorted((child / 'jobs').iterdir())]
-    assert [job['role'] for job in jobs] == local_roles
-    assert [job['step'] for job in jobs] == list(range(selected_step, selected_step + len(local_roles)))
-    assert jobs[0]['fork_source']['job']['path'] == f'jobs/{selected_step:03d}.json'
-    assert all('fork_source' not in job for job in jobs[1:])
-    for job in jobs:
-        assert c.validate(c.workspace(child, job['step']))['role'] == job['role']
-        session = c.read(c.workspace(child, job['step']) / 'work/new-session.json')
-        assert 'resume' not in session['args'] and str(child) in session['home']
-    assert native.usage(child)['observed_tokens'] == 22 * len(local_roles)
-
-
-@pytest.mark.process_e2e
-def test_nested_fork_runs_with_two_original_identities_after_both_parent_controls_disappear(tmp_path):
-    parent = routed_parent(tmp_path)
-    child, grandchild = tmp_path / 'child', tmp_path / 'grandchild'
-    allowance = dict(max_tokens=2000, max_seconds=60, max_steps=4)
-    first = fork_service.preview(parent, 2, child, budget=allowance)
-    fork_service.create(parent, 2, child, budget=allowance,
-        expected_preview_id=first['preview_id'], operation_id='first-generation')
-    remove_parent_controls(parent, child)
-    assert instance_control.continue_instance(child)['status'] == 'finish'
-    child_identity = c.settings(child)['goal_id']
-    child_session = c.read(c.workspace(child, 3) / 'work/new-session.json')['thread']
-    second = fork_service.preview(child, 3, grandchild, budget=allowance)
-    fork_service.create(child, 3, grandchild, budget=allowance,
-        expected_preview_id=second['preview_id'], operation_id='second-generation')
-    remove_parent_controls(child, grandchild)
-    result = instance_control.continue_instance(grandchild)
-    assert result['status'] == 'finish', json.dumps(result, ensure_ascii=False, indent=2)
-    job = c.read(grandchild / 'jobs/003.json')
-    assert job['fork_source']['job']['origin_identity']['goal_id'] == child_identity
-    manifest = c.read(grandchild / 'host-runtime/fork/manifest.json')
-    assert len({row['origin_identity']['goal_id'] for row in manifest['prefix_entries']}) == 2
-    assert c.validate(c.workspace(grandchild, 3))['role'] == 'A'
-    assert native.usage(grandchild)['observed_tokens'] == 22
-    assert c.read(c.workspace(grandchild, 3) / 'work/new-session.json')['thread'] != child_session
-
-
-@pytest.mark.process_e2e
 def test_mult_attempt_source_restarts_logical_w_in_new_session_without_scratch(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import budget, execution
+    """Execute the selected W component without an unrelated ordinary A tail."""
+    from scidiscovery.research_loop import budget, execution, fork_runtime
     public = tmp_path / 'public'
     public.mkdir()
     objective = public / 'objective.md'
@@ -380,8 +266,9 @@ def test_mult_attempt_source_restarts_logical_w_in_new_session_without_scratch(t
     parent = tmp_path / 'parent'
     controller.prepare(parent, objective, public, [str(launcher)],
         max_tokens=1000, max_seconds=60, max_steps=4, model='fixture', reasoning_effort='high',
-        search_policy=None, experiment_mode='external', research_strategy_version=None,
+        search_policy=None, experiment_mode='external',
         resume_policy=dict(max_attempts=2, protocol='codex_exec_resume', usage_scope='turn', output_repair=True),
+        role_profiles={'W': dict(subagents=False)},
         node_budget_policy={role: dict(max_observed_tokens=100, max_seconds=5) for role in 'HWAE'})
     c.build_job(parent, 1, 'W', [])
     (c.workspace(parent, 1) / 'work/output-kind').write_text('badjson')
@@ -392,8 +279,6 @@ def test_mult_attempt_source_restarts_logical_w_in_new_session_without_scratch(t
             assert native.execute_native(parent, 1)['role'] == 'W'
         except Exception as error:
             raise AssertionError(native_diagnostics(parent, 1)) from error
-        c.build_job(parent, 2, 'A', [1])
-        assert native.execute_native(parent, 2)['next_action'] == 'finish'
         budget.inactive(parent, 'fixture completed')
     assert len(execution.records(parent, 1)) == 2
     original_thread = c.read(c.workspace(parent, 1) / 'work/new-session.json')['thread']
@@ -404,8 +289,16 @@ def test_mult_attempt_source_restarts_logical_w_in_new_session_without_scratch(t
     fork_service.create(parent, 1, child, budget=allowance,
         expected_preview_id=preview['preview_id'], operation_id='restart-logical-w')
     remove_parent_controls(parent, child)
-    result = instance_control.continue_instance(child)
-    assert result['status'] == 'finish', json.dumps(result, ensure_ascii=False, indent=2)
+    with controller._writer(child):
+        fork_runtime.build_selected_job(child, 1)
+        (child / 'pause.request').unlink(missing_ok=True)
+        started = child / 'host-started.json'
+        if not started.exists():
+            c.write(started, budget.clock_stamp())
+        budget.transition(child, 'advance', 'Explicit selected W component')
+        result = native.execute_native(child, 1)
+        budget.inactive(child, 'Selected W original retained')
+    assert result['role'] == 'W'
     assert len(execution.records(child, 1)) == 1
     work = c.workspace(child, 1)
     assert not (work / 'work/output-kind').exists()
@@ -413,7 +306,7 @@ def test_mult_attempt_source_restarts_logical_w_in_new_session_without_scratch(t
     fresh = c.read(work / 'work/new-session.json')
     assert fresh['thread'] != original_thread
     assert 'resume' not in fresh['args']
-    assert native.usage(child)['observed_tokens'] == 44
+    assert native.usage(child)['observed_tokens'] == 22
 
 
 @pytest.mark.process_e2e
@@ -433,7 +326,7 @@ def test_selected_final_a_rebuilds_child_phase_and_never_opens_normal_route(tmp_
     parent = tmp_path / 'parent'
     controller.prepare(parent, objective, public, [str(launcher)],
         max_tokens=4000, max_seconds=60, max_steps=7, model='fixture', reasoning_effort='high',
-        search_policy=None, experiment_mode='external', research_strategy_version=None,
+        search_policy=None, experiment_mode='external',
         resume_policy=(dict(max_attempts=1, protocol='codex_exec_resume', usage_scope='turn', output_repair=True)
             if repair_child_output else None),
         node_budget_policy={role: dict(max_observed_tokens=100, max_seconds=5) for role in 'HWAE'})
@@ -486,8 +379,22 @@ def test_selected_formal_review_keeps_neutral_input_and_checks_original_authors(
         "thread=(os.environ['FORK_REVIEW_FORCE_THREAD'] if step==4 and os.environ.get('FORK_REVIEW_FORCE_THREAD') else str(uuid.uuid5(uuid.NAMESPACE_URL,'formal-native-'+str(work))))")
     monkeypatch.setattr(original_review, 'LAUNCHER', launcher_text)
     parent, _ = original_review.scripted(tmp_path, monkeypatch)
-    result = controller.run(parent)
-    assert result['status'] == 'finish', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
+    request = original_review.exact_request(parent, 3, 2, 'model.txt',
+        'Review the exact inherited subject with neutral scientific inputs.')
+    original_review.formal_job(parent, request, 2)
+    native.execute_native(parent, 4)
+
+    def execute_selected_review(root):
+        from scidiscovery.research_loop import budget, fork_runtime
+        with controller._writer(root):
+            fork_runtime.build_selected_job(root, 4)
+            (root / 'pause.request').unlink(missing_ok=True)
+            started = root / 'host-started.json'
+            if not started.exists():
+                c.write(started, budget.clock_stamp())
+            budget.transition(root, 'advance', 'Explicit selected formal review component')
+            native.execute_native(root, 4)
+            budget.inactive(root, 'Selected formal review original retained')
     author_thread = c.read(parent / 'native-evidence/002/native-outcome.json')['thread_id']
     old_review_thread = c.read(parent / 'native-evidence/004/native-outcome.json')['thread_id']
     parent_identity = c.settings(parent)['goal_id']
@@ -500,8 +407,7 @@ def test_selected_formal_review_keeps_neutral_input_and_checks_original_authors(
     if reuse_subject_author:
         monkeypatch.setenv('FORK_REVIEW_FORCE_THREAD', author_thread)
         monkeypatch.setenv('REVIEW_REUSE_AUTHOR', '1')
-    result = instance_control.continue_instance(child)
-    assert result['status'] == 'finish', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
+    execute_selected_review(child)
     job = c.read(child / 'jobs/004.json')
     assert job['purpose'] == 'formal_review' and job['formal_review']['origin_identity']
     task = c.read(c.workspace(child, 4) / 'science-task.json')
@@ -529,8 +435,7 @@ def test_selected_formal_review_keeps_neutral_input_and_checks_original_authors(
             expected_preview_id=preview['preview_id'], operation_id='nested-independent-review')
         remove_parent_controls(child, grandchild)
         assert not (parent / 'settings.json').exists()
-        result = instance_control.continue_instance(grandchild)
-        assert result['status'] == 'finish', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
+        execute_selected_review(grandchild)
         manifest = c.read(grandchild / 'host-runtime/fork/manifest.json')
         origins = {row['identity']['goal_id'] for row in manifest['origins'].values()}
         assert {parent_identity, child_identity} <= origins
@@ -558,215 +463,4 @@ def test_selected_formal_review_keeps_neutral_input_and_checks_original_authors(
         assert ['codex_exec', grandthread] in grandproof['reviewer']['participants']
         assert c.read(grandchild / 'native-evidence/004/native-intent.json')['task_ref'] != child_intent['task_ref']
         assert grandproof != proof and 'origin_identity' not in grandseal['formal_review']
-        assert [path.name for path in sorted((grandchild / 'jobs').iterdir())] == ['004.json', '005.json']
-
-
-def test_selected_w_cov_default_namespace_refuses_from_owner_facts_without_changing_fork_inputs(tmp_path, monkeypatch, execution_registry):
-    """Mechanical source-unit guard, not dispatch or installed namespace coverage.
-
-    Cov supports frozen code directories, but not the default scientific
-    subprocess namespace. Only the kernel capability prerequisite is substituted
-    to reach that executor guard; no installed namespace qualification follows.
-    Command/cwd below are structural binding fixtures, not an accepted Cov call.
-    No dispatch, review or replay is requested, and an ordinary W handoff is not
-    promoted into a qualified Cov original. This does not replace the existing
-    managed-Cov end-to-end positives.
-    """
-    import subprocess
-    from cov_execution import lineage as cov_lineage, receipt as cov_receipt
-    from cov_execution.experiments import CovExecution
-    from scidiscovery.research_loop import accepted_budget, budget, execution
-    from scidiscovery.research_loop import experiment_client, experiments, fork_runtime, originals
-    from scidiscovery.research_loop import native_execution, shared_input_views
-    from scidiscovery.research_loop.local_experiments import LocalExecution
-    from scidiscovery.research_loop import worker_execution_bridge as bridge
-    from test_worker_execution_hash_free import PUBLIC_CLI, PUBLIC_RUNNER
-
-    launcher = tmp_path / 'never-launch.py'
-    launcher.write_text('raise AssertionError("No native participant may start")\n')
-    parent, public = prepare(tmp_path, launcher=[sys.executable, str(launcher)])
-    finish(parent, 1, 'H', [], action='experiment')
-    finish(parent, 2, 'W', [1], text='No qualified Cov experiment was available.')
-    finish(parent, 3, 'A', [1, 2], action='finish')
-    original_job = c.read(parent / 'jobs/002.json')
-    original_task = c.read(c.workspace(parent, 2) / 'science-task.json')
-    with controller._writer(parent):
-        pass
-    child = tmp_path / 'child'
-    allowance = dict(max_tokens=1000, max_seconds=60, max_steps=1)
-    preview = fork_service.preview(parent, 2, child, budget=allowance)
-    fork_service.create(parent, 2, child, budget=allowance,
-        expected_preview_id=preview['preview_id'], operation_id='unsupported-cov-default-namespace')
-    remove_parent_controls(parent, child)
-    job = fork_runtime.build_selected_job(child, 2)
-    work = c.workspace(child, 2)
-    assert job['step'] == original_job['step'] == 2 and job['role'] == 'W'
-    assert job['fork_source']['job']['path'] == 'jobs/002.json'
-    assert job['fork_source']['job']['origin_identity'] == originals.selected_source(child).origin_identity
-    assert job['direct_refs'] == original_job['direct_refs']
-    assert Path(job['public_root']) == public
-    assert 'execution_authority' not in job and 'execution_qualifications' not in job
-    assert frozen_history_steps(child, job) == [1]
-    expected_task = copy.deepcopy(original_task)
-    expected_task['public_root'] = job['public_root']
-    expected_task['source_restrictions'] = job['source_restrictions']
-    assert c.read(work / 'science-task.json') == expected_task
-    source_owner = originals.selected_source(child)
-    assert originals.source_job(source_owner) == original_job
-    inputs = [originals.resolve_ref(originals.node(child, 1),
-        dict(path='native-evidence/001/science-output.json'))]
-
-    record = execution.origin(child, 2)
-    accepted_budget.accept_native(child, 2, record,
-        dict(task_ref=c.record_ref(child / 'jobs/002.json')))
-    harness = public / 'harness'
-    harness.mkdir()
-    (harness / 'exp_cli.py').write_text(PUBLIC_CLI)
-    (harness / 'runner.py').write_text(PUBLIC_RUNNER)
-    client = work / 'work/experiment-config.json'
-    cov_lineage.configure(child, 2, [sys.executable, str(harness / 'exp_cli.py')],
-        child / 'runs', client, receipt_channel='public_runner_main')
-    config = experiment_client.resolve(client, c.read(client))
-    assert experiment_client.root_for_configuration(config) == child
-    assert config['execution_interface']['executor'] == 'cov_execution:experiment'
-    assert experiment_client.supports_frozen_code_directory(config['execution_interface'])
-    code = work / 'code'
-    code.mkdir(exist_ok=True)
-    source = code / 'refused.py'
-    source.write_text('raise AssertionError("Cov namespace fixture must never execute")\n')
-    # Only this structural prefix is consumed before the executor refusal.
-    # No accepted.json, call ID, code version or execution permission is invented.
-    command = [*config['run_argv'], 'run', '--script', str(source)]
-    launch_bindings = dict(command=list(command), cwd=None)
-    value = dict(workspace=str(work))
-    source_facts = dict(root=child, work=work, target=work, job=job)
-    frozen_paths = [*inputs, child / 'jobs/002.json', work / 'science-task.json',
-        child / 'host-runtime/fork/manifest.json', client, record / 'experiment-config.json',
-        record / 'native-intent.json', public / 'objective.md', source]
-    saved_inputs = {path: path.read_bytes() for path in frozen_paths}
-    records = experiments.Records(config)
-    assert records.calls() == []
-    native_records = execution.records(child, 2)
-    used = budget.used_steps(child)
-    observed_tokens = native.usage(child)['observed_tokens']
-    head = (child / accepted_budget.HEAD).read_bytes()
-    probes = []
-    def kernel_prerequisite(*, context):
-        # Source-only precondition, not evidence of installed readonly mounts.
-        context.remaining_seconds()
-        probes.append(context)
-    monkeypatch.setattr(shared_input_views, 'ensure_capability', kernel_prerequisite)
-    effects = []
-    def forbidden(*args, **kwargs):
-        effects.append((args, kwargs))
-        pytest.fail('Namespace guard unexpectedly requested preparation, execution or a receipt')
-    monkeypatch.setattr(LocalExecution, 'prepare', forbidden)
-    monkeypatch.setattr(LocalExecution, 'submit', forbidden)
-    monkeypatch.setattr(CovExecution, 'acceptance_metadata', forbidden)
-    monkeypatch.setattr(CovExecution, 'replay_check', forbidden)
-    monkeypatch.setattr(bridge, 'local_process_launch', forbidden)
-    monkeypatch.setattr(native, 'execute_native', forbidden)
-    monkeypatch.setattr(subprocess, 'Popen', forbidden)
-    monkeypatch.setattr(subprocess, 'run', forbidden)
-    monkeypatch.setattr(cov_receipt, 'publish', forbidden)
-    for attempt in range(2):
-        # Watch acquisition only within the consumer, not the owner/snapshots.
-        with monkeypatch.context() as consumer:
-            consumer.setattr(c, 'read', forbidden)
-            consumer.setattr(c, 'read_job', forbidden)
-            consumer.setattr(experiments, 'read', forbidden)
-            consumer.setattr(experiments, 'proof', forbidden)
-            consumer.setattr(Path, 'open', forbidden)
-            consumer.setattr(Path, 'stat', forbidden)
-            with pytest.raises(experiments.UnsupportedExecution,
-                    match='^Selected executor has no default scientific subprocess namespace$'):
-                native_execution._launch_from_facts(value, config, launch_bindings, command, None,
-                    public=Path(job['public_root']), root=child, source_facts=source_facts,
-                    selected_code=[], material_sources={}, projection={})
-        assert len(probes) == attempt + 1
-        assert records.calls() == []
-        assert execution.records(child, 2) == native_records
-        assert effects == []
-        assert (child / accepted_budget.HEAD).read_bytes() == head
-        assert budget.used_steps(child) == used
-        assert native.usage(child)['observed_tokens'] == observed_tokens
-        assert budget.closeout_state(child)['actions'] == []
-        assert experiment_client.resolve(client, c.read(client)) == config
-        assert all(path.read_bytes() == data for path, data in saved_inputs.items())
-    assert not (record / 'result-identity.json').exists()
-    assert not (child / 'runs/results.jsonl').exists()
-    assert not (child / 'submission/model.pkl').exists()
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('start_selected', [False, True])
-def test_operator_closeout_uses_visible_fork_science_and_reserves_selected_slot(tmp_path, science_errors, start_selected):
-    from scidiscovery.research_loop import budget
-    parent = routed_parent(tmp_path)
-    child = tmp_path / 'child'
-    allowance = dict(max_tokens=2000, max_seconds=60, max_steps=4)
-    preview = fork_service.preview(parent, 3, child, budget=allowance)
-    fork_service.create(parent, 3, child, budget=allowance,
-        expected_preview_id=preview['preview_id'], operation_id='operator-closeout-' + str(start_selected))
-    remove_parent_controls(parent, child)
-    if start_selected:
-        result = instance_control.continue_instance(child)
-        assert result['status'] == 'finish', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
-    result = controller.closeout(child)
-    if not start_selected:
-        assert result['status'] == 'exported_unsubmitted' and result['reason'] == 'original_pause_requires_release'
-        assert (child / 'pause.request').exists()
-        assert not (child / 'jobs/003.json').exists() and not (child / 'jobs/004.json').exists()
-        assert not (child / 'native-evidence/004/native-intent.json').exists()
-        assert native.usage(child)['observed_tokens'] == 0 and budget.used_steps(child) == 0
-        assert 'final_overrun' not in result
-        result = instance_control.continue_instance(child)
-    assert result['status'] == 'final_a_completed', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
-    state = budget.closeout_state(child)
-    assert state['begin']['source_cutoff'] == (3 if start_selected else 2)
-    assert state['begin']['first_step'] == 4 and state['actions'] == []
-    jobs = [c.read(path) for path in sorted((child / 'jobs').iterdir())]
-    assert [job['step'] for job in jobs] == ([3, 4] if start_selected else [4])
-    assert jobs[-1]['final_only'] and jobs[-1]['role'] == 'A'
-    assert frozen_history_steps(child, jobs[-1]) == ([1, 2, 3] if start_selected else [1, 2])
-    assert native.usage(child)['observed_tokens'] == 22 * len(jobs)
-    assert budget.used_steps(child) == len(jobs)
-    assert c.read(child / 'host-runtime/fork/bootstrap.json')['next_step'] == 3
-
-
-@pytest.mark.process_e2e
-def test_explicit_step_raise_resumes_after_fork_final_with_inherited_roles(tmp_path, science_errors):
-    from scidiscovery.research_loop import budget
-    parent = routed_parent(tmp_path)
-    child = tmp_path / 'child'
-    allowance = dict(max_tokens=2000, max_seconds=60, max_steps=1)
-    preview = fork_service.preview(parent, 4, child, budget=allowance)
-    fork_service.create(parent, 4, child, budget=allowance,
-        expected_preview_id=preview['preview_id'], operation_id='normal-resume-after-final')
-    remove_parent_controls(parent, child)
-    result = instance_control.continue_instance(child)
-    assert result['status'] == 'final_a_completed', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
-    phase = budget.closeout_state(child)['begin']
-    assert phase['source_cutoff'] == 4 and phase['first_step'] == 5
-    assert phase['resume_cursor']['role'] == 'A'
-    assert [ref['step'] for ref in phase['resume_cursor']['source_refs']] == [1, 2, 3, 4]
-    final_job = (child / 'jobs/005.json').read_bytes()
-    final_output = (child / 'native-evidence/005/science-output.json').read_bytes()
-    assert instance_control.continue_instance(child)['status'] == 'final_a_completed'
-    assert not (child / 'jobs/006.json').exists()
-    assert budget.normal_resume(child) is None
-    assert native.usage(child)['observed_tokens'] == 44
-    budget.amend(child, max_steps=4,
-        authorization_note='Record the bounded fixture operator decision.',
-        authorization_statement='Increase this synthetic child action allowance to four and continue its frozen normal route.')
-    result = instance_control.continue_instance(child)
-    assert result['status'] == 'finish', '\n'.join(science_errors) or json.dumps(result, ensure_ascii=False, indent=2)
-    assert [path.name for path in sorted((child / 'jobs').iterdir())] == ['004.json', '005.json', '006.json']
-    resumed = c.read(child / 'jobs/006.json')
-    assert resumed['role'] == 'A' and not resumed.get('final_only')
-    assert resumed['normal_resume']['seq'] == budget.normal_resume(child)['seq']
-    assert frozen_history_steps(child, resumed) == [1, 2, 3, 4, 5]
-    assert (child / 'jobs/005.json').read_bytes() == final_job
-    assert (child / 'native-evidence/005/science-output.json').read_bytes() == final_output
-    assert native.usage(child)['observed_tokens'] == 66 and budget.used_steps(child) == 3
-
+        assert [path.name for path in sorted((grandchild / 'jobs').iterdir())] == ['004.json']

@@ -7,9 +7,9 @@ import pytest
 from execution_fixtures import DifferentExternalIdentity, execution_registry, remote_registry
 from test_context_selection import bound_input_path
 from test_history_handoff import finish
-from test_nonlocal_execution_observation import case
+from test_nonlocal_execution_observation import case, observe_calls, research_path
 from test_worker_input_repair import _receiver
-from scidiscovery.research_loop import contracts as c, execution, experiment_client, experiments as e
+from scidiscovery.research_loop import accepted_prefix, contracts as c, execution, experiment_client, experiments as e
 from scidiscovery.research_loop import local_experiments, worker_execution_bridge as bridge
 
 
@@ -34,7 +34,7 @@ def _local_case(tmp_path, monkeypatch):
     return root, job, config, _receiver(root, config, monkeypatch, launch=launch), launched
 
 
-def _run_candidates(root, server, *, count, unknown_metric=False, mechanism='h001.m1'):
+def _run_candidates(root, server, *, count, unknown_metric=False, mechanism='1'):
     source = c.workspace(root, 2) / 'code/candidates/run.py'
     source.parent.mkdir(parents=True)
     source.write_text('import json,pathlib,sys\n'
@@ -49,7 +49,7 @@ def _run_candidates(root, server, *, count, unknown_metric=False, mechanism='h00
         ' candidates.append(dict(label=f"retained-{number:02d}",artifact="artifacts/"+name,metric=metric))\n'
         '(output/"result.json").write_text(json.dumps(dict(version=1,metrics=metrics,outputs=outputs,candidates=candidates)))\n')
     reply = bridge.client(server.directory, ['run', '--experiment-dir', 'experiments/candidates',
-        '--script', 'code/candidates/run.py', '--new-plan', '--mechanism', mechanism])
+        '--script', 'code/candidates/run.py', '--new-plan', '--research', research_path(root,mechanism)])
     assert reply['code'] == 0 and reply['result']['status'] == 'known_success', _reply_debug(server, reply)
     return reply['result']['call_id']
 
@@ -63,10 +63,9 @@ def _reply_debug(server, reply):
     return dict(reply=reply, host_diagnostic=diagnostic)
 
 
-def _seal_worker(root, *, observed=('h001.m1',)):
-    finish(root, 2, 'W', [1], preserve_native_intent=True,
-        mechanism_findings=[dict(mechanism=label, basis='observed' if label in observed else 'blocked',
-            finding='Inert contract fixture; missing scientific qualification remains explicit.') for label in ('h001.m1', 'h001.m2')])
+def _seal_worker(root):
+    # The fixture reports transport facts only, with no inferred scientific finding.
+    finish(root, 2, 'W', [1], preserve_native_intent=True)
     record = execution.record(root, 2)
     seal = c.read(record / 'result-identity.json')
     return c.read(root / seal['observations']['path'])
@@ -78,7 +77,7 @@ def _snapshot(root, job, facts, config):
         execution.record(root, 2) / 'native-intent.json',
         execution.record(root, 2) / 'result-identity.json',
         execution.record(root, 2) / 'experiment-config.json',
-        root / 'host-history/observations/002.json'}
+        root / c.read(execution.record(root, 2) / 'result-identity.json')['observations']['path']}
     paths.update(bound_input_path(root, job, row['path']) for row in experiment_client._input_rows(job))
     for call in facts['managed_calls']:
         directory = e.Records(config).directory(call['call_id'])
@@ -90,36 +89,21 @@ def _snapshot(root, job, facts, config):
     return {path: path.read_bytes() for path in paths}
 
 
-def _pages(root, job, name):
-    path = job['history']['view']['indexes'].get(name)
-    pages = []
-    seen = set()
-    while path:
-        assert path not in seen, 'Frozen continuation must not cycle'
-        seen.add(path)
-        original = next(row for row in job['history']['files'] if row['path'] == path)
-        material = bound_input_path(root, job, path)
-        assert material.stat().st_size == original['size_bytes']
-        value = c.read(material)
-        pages.append((path, value))
-        path = value['next_page']
-    rows = [row for _, value in pages for row in value[name]]
-    remaining = len(rows)
-    for _, value in pages:
-        remaining -= len(value[name])
-        assert value['omitted_count'] == remaining
-    return pages, rows
+def _candidates(root, job):
+    """Follow the current frozen node navigation to each exact retained entity."""
+    prefix = job['history']['prefix']
+    navigation = accepted_prefix.navigation(root, prefix, 2)
+    entries = [row for row in navigation['entities'] if row['kind'] == 'candidate']
+    rows = []
+    for entry in entries:
+        path = accepted_prefix.visibility(root, prefix) / entry['page'].removeprefix('inputs/history/')
+        assert path.is_file()
+        rows.append(accepted_prefix.candidate(root, prefix, entry['reference']))
+    return entries, rows
 
 
-def _candidate_count(view):
-    candidates = view['lineage']['candidates']
-    return candidates.get('candidate_count', candidates.get('count'))
-
-
-def test_registered_candidates_cross_real_frozen_pages_without_losing_late_original(tmp_path, monkeypatch, execution_registry):
+def test_registered_candidates_keep_late_original_in_frozen_navigation(tmp_path, monkeypatch, execution_registry):
     root, _, config, server, launched = _local_case(tmp_path, monkeypatch)
-    # Production candidate pages hold 16 rows; one additional tiny artifact
-    # crosses that real boundary without changing packing or byte limits.
     call_id = _run_candidates(root, server, count=17)
     facts = _seal_worker(root)
     assert launched == [call_id]
@@ -128,22 +112,12 @@ def test_registered_candidates_cross_real_frozen_pages_without_losing_late_origi
     job = c.build_job(root, 3, 'A', [1, 2])
     original_job = copy.deepcopy(job)
     before = _snapshot(root, job, facts, config)
-    view = c.science_view(job, root)
-    pages, rows = _pages(root, job, 'candidates')
-    assert len(pages) == 2
-    assert [len(page['candidates']) for _, page in pages] == [16, 1]
-    assert pages[0][1]['next_page'] == pages[1][0]
-    assert pages[1][1]['next_page'] is None
-    expected = [job['history']['candidate_references'][row['id']] for row in facts['candidates']]
-    assert [row['id'] for row in rows] == expected
-    assert len(set(expected)) == 17
-    assert [row['label'] for row in rows] == [f'retained-{number:02d}' for number in range(17)]
-    assert [row['metric'] for row in rows] == list(range(17))
-    assert all(row['status'] == 'ok' and row['observation_step'] == 2 for row in rows)
-    assert _candidate_count(view) == 17
-    preview = view['lineage']['candidates']
-    assert len(preview['candidate_facts']) + preview['candidate_facts_omitted_count'] == 17
-    assert expected[-1] not in {row['id'] for row in preview['candidate_facts']}
+    entries, rows = _candidates(root, job)
+    assert len(entries) == len(rows) == 17
+    assert len({row['reference'] for row in entries}) == 17
+    assert [row['observation']['id'] for row in rows] == [row['id'] for row in facts['candidates']]
+    assert [row['observation']['label'] for row in rows] == [f'retained-{number:02d}' for number in range(17)]
+    assert [row['observation']['metric'] for row in rows] == list(range(17))
     for number in range(17):
         logical = f'inputs/parents/002/artifacts/experiments/{call_id}/artifacts/candidate-{number:02d}.txt'
         output = next(row for row in facts['managed_calls'][0]['outputs'] if row['name'] == f'candidate-{number:02d}.txt')
@@ -162,44 +136,29 @@ def test_registered_unknown_measurement_and_failed_unknown_execution_keep_distin
     failed_source.parent.mkdir(parents=True)
     failed_source.write_text('raise SystemExit(7)\n')
     reply = bridge.client(server.directory, ['run', '--experiment-dir', 'experiments/failure',
-        '--script', 'code/failure/run.py', '--new-plan', '--mechanism', 'h001.m2'])
+        '--script', 'code/failure/run.py', '--new-plan', '--research', research_path(root, '2')])
     assert reply['code'] == 1 and reply['result']['status'] == 'known_failed', _reply_debug(server, reply)
     failed = reply['result']['call_id']
-    facts = _seal_worker(root, observed=('h001.m1', 'h001.m2'))
+    facts = _seal_worker(root)
     assert launched == [success, failed]
     assert [row['status'] for row in facts['managed_calls']] == ['known_success', 'known_failed']
+    assert facts['managed_calls'][1]['execution']['returncode'] == 7
     assert len(facts['candidates']) == 2
     assert facts['candidate_diagnostics'] == [dict(call_id=success, code='declared_candidate_metric_unknown')]
     job = c.build_job(root, 3, 'A', [1, 2])
-    original_job = copy.deepcopy(job)
     before = _snapshot(root, job, facts, config)
-    view = c.science_view(job, root)
-    _, candidates = _pages(root, job, 'candidates')
-    _, calls = _pages(root, job, 'experiments')
-    assert [row['id'] for row in candidates] == [job['history']['candidate_references'][row['id']] for row in facts['candidates']]
-    assert [row['call_id'] for row in calls] == [success, failed]
-    assert [row['execution_status'] for row in calls] == ['known_success', 'known_failed']
-    assert calls[1]['returncode'] == 7
-    # Candidate status describes retained registration. An unresolved declared
-    # measurement stays null; a failed execution creates no candidate.
+    _, rows = _candidates(root, job)
+    candidates = [row['observation'] for row in rows]
     assert [row['status'] for row in candidates] == ['ok', 'ok']
     assert candidates[0]['metric'] == 0
     assert all(candidates[1][key] is None for key in ('metric', 'evaluation_key', 'direction'))
-    assert _candidate_count(view) == 2
-    preview = view['lineage']['candidates']
-    assert len(preview['candidate_facts']) + preview['candidate_facts_omitted_count'] == 2
-    for field in ('failed_candidate_count', 'unknown_candidate_count'):
-        if field in preview:
-            assert preview[field] == 0
     original = f'inputs/parents/002/artifacts/experiments/{success}/artifacts/candidate-01.txt'
     assert bound_input_path(root, job, original).read_bytes() == b'original-01\n'
-    assert job == original_job and all(path.read_bytes() == data for path, data in before.items())
+    assert all(path.read_bytes() == data for path, data in before.items())
 
-    # Unknown is the final actual submission in a separate remote binding.
-    # Its real provider seam supplies the unresolved original; no receipt is edited.
     remote = tmp_path / 'remote'; remote.mkdir()
-    root, _, config, _ = case(remote, monkeypatch, outcome='unknown')
-    source = c.workspace(root, 2) / 'code/source.json'; source.parent.mkdir()
+    root, job, config, _ = case(remote, monkeypatch, outcome='unknown')
+    source = c.workspace(root, 2) / 'code/source.json'; source.parent.mkdir(exist_ok=True)
     source.write_bytes(b'{"message":"remote-original"}')
     submissions = []
     submit = DifferentExternalIdentity.submit
@@ -208,27 +167,22 @@ def test_registered_unknown_measurement_and_failed_unknown_execution_keep_distin
         return submit(adapter, descriptor)
     monkeypatch.setattr(DifferentExternalIdentity, 'submit', submitted)
     assert e.main(['--config', str(c.workspace(root, 2) / 'work/experiment-config.json'),
-        'run', '--payload', str(source), '--new-plan', '--mechanism', 'h001.m1']) == 2
+        'run', '--payload', str(source), '--new-plan', '--research', research_path(root, '1')]) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'unknown', result
     unknown = result['call_id']
     accepted = e.Records(config).accepted(unknown)
     assert 'result' not in c.read(e.Records(config).directory(unknown) / 'completed.json')
-    facts = _seal_worker(root, observed=())
-    assert [row['call_id'] for row in facts['managed_calls']] == [unknown]
-    assert facts['managed_calls'][0]['status'] == 'unknown' and facts['candidates'] == []
-    assert 'execution' not in facts['managed_calls'][0]
-    job = c.build_job(root, 3, 'A', [1, 2])
-    original_job = copy.deepcopy(job)
-    before = _snapshot(root, job, facts, config)
-    view = c.science_view(job, root)
-    _, calls = _pages(root, job, 'experiments')
-    assert _pages(root, job, 'candidates') == ([], [])
-    assert _candidate_count(view) == 0
-    assert len(calls) == 1 and calls[0]['call_id'] == unknown
-    assert calls[0]['step'] == 2 and calls[0]['execution_status'] == 'unknown'
-    assert 'outputs' not in calls[0] and 'result_status' not in calls[0]
-    assert len(e.Records(config).calls()) == 1
-    assert submissions == [unknown]
+    facts = observe_calls(root, job, config)
+    assert [row['call_id'] for row in facts] == [unknown]
+    assert facts[0]['status'] == 'unknown' and 'execution' not in facts[0]
+    directory = e.Records(config).directory(unknown)
+    before = {directory/name: (directory/name).read_bytes()
+        for name in ('accepted.json', 'completed.json', 'submission.json')}
+    assert e.main(['--config', str(c.workspace(root, 2) / 'work/experiment-config.json'),
+        'run', '--payload', str(source), '--new-plan', '--research', research_path(root, '2')]) == 2
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated['status'] == 'unknown' and repeated['call_id'] == unknown
+    assert len(e.Records(config).calls()) == 1 and submissions == [unknown]
     assert e.Records(config).accepted(unknown) == accepted
-    assert job == original_job and all(path.read_bytes() == data for path, data in before.items())
+    assert all(path.read_bytes() == data for path, data in before.items())

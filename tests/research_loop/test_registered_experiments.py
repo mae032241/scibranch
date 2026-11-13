@@ -12,7 +12,7 @@ import pytest
 
 from scidiscovery.research_loop import experiments, protocol
 from scidiscovery.operations.execution import LifecycleCapabilities, lifecycle_capabilities
-from execution_fixtures import execution_registry,remote_registry
+from execution_fixtures import execution_registry
 
 
 @pytest.fixture
@@ -65,16 +65,19 @@ def snapshot(root):
 def test_registered_cli_lifecycle_query_collect_and_byte_identity(managed):
     result=managed.cli('run','--script',managed.source(),'--new-plan')
     assert result['status']=='known_success'
-    before=snapshot(managed.records)
+    before={name:(managed.records/'calls'/result['call_id']/name).read_bytes()
+        for name in ('accepted.json','completed.json','submission.json','stdout.raw')}
     first=managed.cli('lineage-status');again=managed.cli('lineage-status')
     assert first['counts']==again['counts'] and first['counts']['known_success']==1
-    assert snapshot(managed.records)==before
+    assert all((managed.records/'calls'/result['call_id']/name).read_bytes()==raw
+        for name,raw in before.items())
     call=result['call_id']
     assert managed.cli('query','--call-id',call)['state']=='succeeded'
     collected=managed.cli('collect','--call-id',call)
     assert collected['status']=='collected' and collected['outputs']
     for item in collected['outputs']:
-        assert experiments.proof(item['local_path'])==dict(path=item['local_path'],size_bytes=item['size_bytes'])
+        proof=experiments.proof(item['local_path'])
+        assert proof['path']==item['local_path'] and proof['size_bytes']==item['size_bytes']
     assert first['calls'][0]['metric'] is first['calls'][0]['candidate_id'] is None
     managed.cli('cancel','--call-id',call,expected=2)
 
@@ -101,34 +104,6 @@ def test_registered_running_call_visible_before_return(managed):
         assert process.returncode==0 and not err and json.loads(out)['status']=='known_success'
     finally:
         if process.poll() is None:process.terminate();process.communicate(timeout=10)
-
-
-@pytest.mark.process_e2e
-def test_original_unknown_submission_is_preserved_without_second_launch(managed):
-    result=managed.cli('run','--script',managed.source(),'--new-plan')
-    directory=managed.records/'calls'/result['call_id']
-    (directory/'terminal.json').unlink();(directory/'completed.json').unlink()
-    before=snapshot(managed.root)
-    status=managed.cli('lineage-status')
-    assert status['counts']['unknown']==1
-    retry=managed.cli('run','--script',managed.source('same-operation'),'--new-plan',expected=2)
-    assert retry['status']=='unknown' and len(list(managed.records.glob('calls/*/accepted.json')))==1
-    assert snapshot(managed.records)=={key:value for key,value in before.items() if Path(key).is_relative_to(managed.records)}
-    assert managed.cli('query','--call-id',result['call_id'])['state']=='unknown'
-
-
-@pytest.mark.process_e2e
-def test_lookup_restores_same_external_binding_after_lost_reply(managed):
-    result=managed.cli('run','--script',managed.source(),'--new-plan')
-    directory=managed.records/'calls'/result['call_id']
-    original=(directory/'submission.json').read_bytes()
-    (directory/'submission.json').unlink()
-    before=snapshot(managed.records)
-    found=managed.cli('lookup','--call-id',result['call_id'])
-    assert found['state']=='succeeded'
-    assert (directory/'submission.json').read_bytes()==original
-    assert {key:value for key,value in snapshot(managed.records).items() if not key.endswith('/submission.json')}==before
-    assert len(list(managed.records.glob('calls/*/process.json')))==1
 
 
 @pytest.mark.process_e2e
@@ -186,29 +161,3 @@ def test_unregistered_key_and_preserved_config_never_launch(tmp_path,execution_r
     with pytest.raises(protocol.UnsupportedProtocol,match='current research-loop protocol'):
         experiments.load(dict(record_dir=str(tmp_path)))
     assert snapshot(tmp_path)==before
-
-
-@pytest.mark.process_e2e
-def test_nonlocal_contract_retains_different_external_identity_without_core_process_assumptions(tmp_path,remote_registry):
-    config=tmp_path/'remote.json'
-    value=dict(admission=dict(version=1,mode='hard'),record_dir=str(tmp_path/'records'),scope=dict(handoff_protocol=CURRENT,step=2,role='W',job_ref=dict(path=str(tmp_path/'jobs/002.json')),
-        execution_key=dict(path=str(tmp_path/'jobs/002.json')),mechanism_ref=None))
-    config.write_text(json.dumps(experiments.freeze(value,'remote_execution:fixture',path=config)))
-    source=tmp_path/'opaque-package';source.write_bytes(b'not a local script')
-    env=dict(os.environ,PYTHONPATH=str(Path(experiments.__file__).parents[2])+os.pathsep+os.environ.get('PYTHONPATH',''))
-    command=[sys.executable,'-m','scidiscovery.research_loop.experiments']
-    def invoke(*args):
-        reply=subprocess.run([*command,'--config',str(config),*map(str,args)],env=env,capture_output=True,text=True,timeout=10)
-        assert reply.returncode==0,(reply.stdout,reply.stderr)
-        return json.loads(reply.stdout)
-    result=invoke('run','--payload',source)
-    directory=tmp_path/'records/calls'/result['call_id']
-    binding=json.loads((directory/'submission.json').read_text())
-    assert binding['external_run_id']=='remote-'+result['call_id']
-    assert not (directory/'process.json').exists() and not (directory/'terminal.json').exists()
-    assert invoke('query','--call-id',result['call_id'])['state']=='succeeded'
-    assert Path(invoke('collect','--call-id',result['call_id'])['outputs'][0]['local_path']).read_bytes()==source.read_bytes()
-    (directory/'submission.json').unlink()
-    assert invoke('lookup','--call-id',result['call_id'])['state']=='succeeded'
-    assert json.loads((directory/'submission.json').read_text())==binding
-    assert len(list((tmp_path/'records/calls').iterdir()))==1

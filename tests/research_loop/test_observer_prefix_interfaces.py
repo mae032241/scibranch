@@ -73,7 +73,11 @@ def capture_case(tmp_path, monkeypatch):
         return sources[step]['owner']
     monkeypatch.setattr(originals,'for_origin',for_origin)
     monkeypatch.setattr(handoff_state,'sealed_facts',sealed)
-    monkeypatch.setattr(handoff_state,'observation_from_facts',lambda current,facts:facts['observation_view'])
+    def observation_from_facts(current, facts, *, head):
+        assert current == root and head is fixture_head
+        return facts['observation_view']
+    fixture_head = head
+    monkeypatch.setattr(handoff_state,'observation_from_facts',observation_from_facts)
     def forbidden(*args,**kwargs):
         raise AssertionError('Observer capture traversed or rebuilt unrelated scientific history')
     monkeypatch.setattr(history,'source_sequence',forbidden)

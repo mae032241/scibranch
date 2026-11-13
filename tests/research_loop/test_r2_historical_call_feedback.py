@@ -266,7 +266,7 @@ def test_new_query_cannot_reclassify_an_unknown_preparation(server,unknown_prepa
 
 
 def test_refused_collect_preserves_existing_historical_implementation_read(server,tmp_path,monkeypatch):
-    from scidiscovery.research_loop import accepted_prefix, handoff_state, history, originals
+    from scidiscovery.research_loop import accepted_budget, accepted_prefix, handoff_state, history, originals
     old='old-W002-call';older=tmp_path/'older-node/artifacts';older.mkdir(parents=True)
     materials=[]
     for number in range(7):
@@ -278,14 +278,21 @@ def test_refused_collect_preserves_existing_historical_implementation_read(serve
         source=str(output),**{key:value for key,value in e.proof(output).items() if key!='path'}))
     seal=dict(materials=materials);receipt=dict(seal_ref='accepted-W002-seal')
     owner=originals.NodeSource(origin_identity={},step=2,original_root=str(tmp_path),storage_root=tmp_path)
-    facts=dict(owner=owner);loads=[]
+    from types import SimpleNamespace
+    head=SimpleNamespace(base=dict(frozen='accepted settings'))
+    facts=dict(owner=owner);loads=[];head_reads=[]
+    def load_head(root):
+        assert root==tmp_path
+        head_reads.append(root)
+        return head
     def member(root,receipts,step):
         assert root==tmp_path and receipts==['frozen-prefix'] and step==2
         return receipt
-    def source_facts(root,step):
-        assert root==tmp_path and step==2
+    def source_facts(root,step,*,head,base):
+        assert root==tmp_path and step==2 and base is head.base
         loads.append(step)
         return facts
+    monkeypatch.setattr(accepted_budget,'read',load_head)
     monkeypatch.setattr(accepted_prefix,'member',member)
     monkeypatch.setattr(handoff_state,'source_facts',source_facts)
     monkeypatch.setattr(handoff_state,'source_from_facts',
@@ -298,4 +305,4 @@ def test_refused_collect_preserves_existing_historical_implementation_read(serve
 
     assert material['path']==materials[-1]['path'] and Path(material['source'])==output
     assert Path(material['source']).read_bytes()==b'exact historical array original'
-    assert loads==[2] and e.Records(server.configuration).calls()==[]
+    assert head_reads==[tmp_path] and loads==[2] and e.Records(server.configuration).calls()==[]

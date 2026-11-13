@@ -233,6 +233,7 @@ def test_real_handler_keeps_unknown_failures_private_and_sends_json_reason(tmp_p
         connection.request('GET', '/manage?token=' + ui.management_token)
         response = connection.getresponse(); response.read()
         cookie = response.getheader('Set-Cookie').split(';', 1)[0]
+        display_settings = instance_ui.display.settings
         monkeypatch.setattr(instance_ui.display, 'settings', lambda *a: pytest.fail('session probe read instance settings'))
         connection.request('GET', '/session', headers={'Cookie': cookie})
         response = connection.getresponse(); payload = response.read()
@@ -240,6 +241,7 @@ def test_real_handler_keeps_unknown_failures_private_and_sends_json_reason(tmp_p
         connection.request('GET', '/session?token=forbidden', headers={'Cookie': cookie})
         response = connection.getresponse(); problem = json.loads(response.read())['error']
         assert response.status == 400 and problem['code'] == 'invalid_request'
+        monkeypatch.setattr(instance_ui.display, 'settings', display_settings)
         connection.request('POST', '/control/start', body='missing-fields=true', headers={
             'Cookie': cookie, 'Content-Type': 'application/x-www-form-urlencoded', 'Origin': 'http://' + ui.host})
         response = connection.getresponse(); payload = response.read()

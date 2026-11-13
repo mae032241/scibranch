@@ -285,7 +285,7 @@ Path(sys.argv[2]).write_text(
 )
 PY
     chmod 0640 "$stage/config/runner.json"
-    probe_request='{"schema_version":1,"operation":"rpc","payload":{"request":{"jsonrpc":"2.0","id":"install-probe","method":"tools/call","params":{"name":"tcad_capabilities","arguments":{}}}}}'
+    probe_request='{"schema_version":2,"operation":"rpc","payload":{"request":{"jsonrpc":"2.0","id":"install-probe","method":"tools/call","params":{"name":"tcad_capabilities","arguments":{}}}}}'
     printf -v quoted_root '%q' "$remote_root"
     printf -v quoted_runner '%q' "$remote_runner"
     printf -v quoted_config '%q' "$remote_config"
@@ -392,7 +392,7 @@ upgrade_remote_code() {
     install -d "$stage/bin"
     install -m 0750 "$RUNNER_SOURCE" \
         "$stage/bin/scidiscovery-tcad-ssh-runner"
-    probe_request='{"schema_version":1,"operation":"rpc","payload":{"request":{"jsonrpc":"2.0","id":"upgrade-probe","method":"tools/call","params":{"name":"tcad_capabilities","arguments":{}}}}}'
+    probe_request='{"schema_version":2,"operation":"rpc","payload":{"request":{"jsonrpc":"2.0","id":"upgrade-probe","method":"tools/call","params":{"name":"tcad_capabilities","arguments":{}}}}}'
     printf -v quoted_root '%q' "$remote_root"
     printf -v quoted_runner '%q' "$remote_runner"
     printf -v quoted_config '%q' "$remote_config"

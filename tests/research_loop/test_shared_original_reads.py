@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+from scidiscovery.archive_io import ArchiveError
 from scidiscovery.research_loop import originals
 
 
@@ -44,7 +45,7 @@ def test_original_resolution_rejects_missing_or_changed_declared_original(frozen
         alias = tmp_path / 'unbound-original'
         path.rename(alias)
         path.symlink_to(alias)
-    with pytest.raises((OSError, ValueError)):
+    with pytest.raises((OSError, ValueError, ArchiveError)):
         originals.resolve_ref(source, reference)
 
 

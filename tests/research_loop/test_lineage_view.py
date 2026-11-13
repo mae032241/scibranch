@@ -8,6 +8,7 @@ import pytest
 from scidiscovery.research_loop import contracts as c, controller, execution, history, lineage, protocol as current_protocol
 from execution_fixtures import execution_registry
 from test_history_handoff import finish
+from test_lineage import synthetic_host_launch
 
 
 def scene(tmp_path, *, version=1, observer=None):
@@ -23,18 +24,7 @@ def written(value):
     return (json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode()
 
 
-def pages(work,start,key):
-    rows=[];path=start
-    while path:
-        original=work/path;value=c.read(original)
-        assert original.stat().st_mode & 0o222 == 0
-        assert len(original.read_bytes())<=history.MAX_PAGE_BYTES
-        assert len(value[key])<=(8 if key=='records' else 16)
-        rows.extend(value[key]);path=value['next_page']
-    return rows
-
-
-def test_all_roles_have_one_lineage_brief_and_exact_science_pages(tmp_path):
+def test_all_roles_have_one_lineage_brief_and_exact_scientific_return(tmp_path):
     root=scene(tmp_path)
     for step,role in enumerate(['H','W','A','E'],1):
         parents=[step-1] if step>1 else []
@@ -44,50 +34,8 @@ def test_all_roles_have_one_lineage_brief_and_exact_science_pages(tmp_path):
         assert 'lineage' in view and 'history' not in view and 'search' not in view
         assert 'implementation_options' not in view
         assert len(written(view['lineage']))<=4096
-        if step>1:
-            rows=pages(work,view['lineage']['indexes']['nodes'],'records')
-            source=rows[-1]
-            detail=c.read(work/source['conclusion_pages'][0])
-            assert 'Complete original scientific text '*30 in detail['text']
+        assert c.read_scientific_output(record/'science-output.json')['scientific_result'] == 'Complete original scientific text '*30
         assert c.validate(work)['summary']=='A contribution'
-
-
-def test_ninth_node_and_seventeenth_candidate_implementation_are_reachable(tmp_path):
-    adapter=tmp_path/'observer.py'
-    adapter.write_text('''import json,sys
-r=json.load(sys.stdin)
-rows=[dict(id=f'candidate-{i}',label=f'Public candidate {i}',implementation=None,evaluation_key='public-v1',metric=i/100,direction='max',status='ok',evidence=['project/global/objective.md']) for i in range(1,18)] if r['step']==1 else []
-print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=None,coverage=dict(status='complete',note='Synthetic public observations'))))
-''')
-    root=scene(tmp_path,observer=dict(adapter=str(adapter),config={}))
-    finish(root,1,'H',[],files={f'a{i:02}.py':f'implementation {i}' for i in range(17)})
-    for step in range(2,10):finish(root,step,'H',[])
-    job=c.build_job(root,10,'W',[9]);work=c.workspace(root,10);view=c.science_view(job,root)['lineage']
-    nodes=pages(work,view['indexes']['nodes'],'records')
-    assert [row['step'] for row in nodes]==list(range(1,10))
-    assert pages(work,view['indexes']['candidates'],'candidates')[-1]['id']=='candidate-17'
-    options=pages(work,nodes[0]['implementation_index'],'implementations')
-    assert options[-1]['id']=='H001-I017'
-    finish(root,10,'W',[9],selection=['H001-I017'])
-    following=c.build_job(root,11,'A',[10])
-    assert following['selected_inputs'][0]['origin_step']==1
-    assert (c.workspace(root,11)/following['selected_inputs'][0]['material']['path']).read_text()=='implementation 16'
-    relation=pages(c.workspace(root,11),following['history']['view']['indexes']['relations'],'relations')[0]
-    assert relation['kind']=='reuse' and relation['implementation_id']=='H001-I017'
-    assert not any(key in written(relation).decode() for key in ('sha256',str(root),'"source":'))
-    assert not (c.workspace(root,11)/'inputs/parents/001/artifacts/a00.py').exists()
-
-
-@pytest.mark.parametrize('damage',['missing','changed'])
-def test_bound_lineage_page_damage_is_hard_before_acceptance(tmp_path,damage):
-    root=scene(tmp_path);finish(root,1,'H',[])
-    job=c.build_job(root,2,'W',[1]);work=c.workspace(root,2)
-    path=work/job['history']['view']['indexes']['nodes']
-    path.chmod(0o600)
-    if damage=='missing':path.unlink()
-    else:path.write_text('{}')
-    with pytest.raises(ValueError):c._validate_inputs(root,work,job)
-    assert not (execution.origin(root,2)/'native-intent.json').exists()
 
 
 @pytest.mark.parametrize('protocol',range(1,9))
@@ -122,52 +70,3 @@ def test_thousand_node_multibyte_brief_bounds_every_lineage_domain():
     assert value['candidates']['a_recommended']['candidate_id']=='candidate-2'
     assert value['candidates']['actual']['candidate_id']=='candidate-3'
     assert value['recent_omitted_count']==1000-len(value['recent'])
-
-
-@pytest.mark.process_e2e
-def test_long_candidate_member_references_bound_brief_and_keep_complete_catalogue(tmp_path,execution_registry):
-    from scidiscovery.research_loop import experiments
-    root=scene(tmp_path);finish(root,1,'H',[],action='experiment')
-    c.build_job(root,2,'W',[1])
-    c.write(execution.origin(root,2)/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
-    config=experiments.configure(root,2,'local_execution:command',dict(run_argv=[sys.executable]),
-        c.workspace(root,2)/'work/experiment-config.json')
-    directory=c.workspace(root,2)/'experiments/alternatives';directory.mkdir(parents=True)
-    prefix='/'.join(f'p{index:02d}'+('x'*177) for index in range(9))
-    artifacts=[f'artifacts/{prefix}/{name}.bin' for name in ('first','second')]
-    declaration=dict(version=1,metrics=[],outputs=[dict(path=path) for path in artifacts],
-        candidates=[dict(artifact=path) for path in artifacts])
-    script=directory/'run.py'
-    script.write_text('from pathlib import Path\n'
-        'for path in '+repr(artifacts)+':\n'
-        '    original=Path(path);original.parent.mkdir(parents=True,exist_ok=True);original.write_text(path)\n'
-        'Path("artifacts/result.json").write_text('+repr(json.dumps(declaration))+')\n')
-    result=experiments.dispatch(config,script,command_options=dict(experiment_directory=str(directory)))
-    assert result['status']=='known_success'
-    finish(root,2,'W',[1])
-    job=c.build_job(root,3,'A',[2]);work=c.workspace(root,3)
-    view=c.read(work/'science-task.json')['lineage']
-    assert len(written(view))<=history.MAX_BRIEF_BYTES
-    assert view['candidates']['candidate_facts_omitted_count']>0
-    candidates=pages(work,view['indexes']['candidates'],'candidates')
-    assert len(candidates)==2
-    assert {row['id'] for row in candidates}==set(job['history']['candidate_references'].values())
-    assert all(any(row['id'].endswith('/'+path) for row in candidates) for path in artifacts)
-
-
-@pytest.mark.process_e2e
-def test_known_failed_experiment_is_separate_from_original_scientific_conclusion(tmp_path):
-    from test_lineage import scene as call_scene
-    from cov_execution import lineage as cov
-    root,config,digest=call_scene(tmp_path)
-    script=c.workspace(root,2)/'work/train.py';script.write_text('failed')
-    failed=cov.run(config,script,new=True)
-    assert failed['status']=='known_failed' and failed['model'] is None
-    script.write_text('success');successful=cov.run(config,script,new=True)
-    finish(root,2,'W',[1],summary='Valid bounded negative scientific conclusion')
-    job=c.build_job(root,3,'A',[2]);work=c.workspace(root,3)
-    candidates=pages(work,job['history']['view']['indexes']['candidates'],'candidates')
-    assert next(row for row in candidates if row['id']==failed['candidate_id'])['execution_status']=='known_failed'
-    assert next(row for row in candidates if row['id']==successful['candidate_id'])['execution_status']=='known_success'
-    nodes=pages(work,job['history']['view']['indexes']['nodes'],'records')
-    assert nodes[-1]['summary']=='Valid bounded negative scientific conclusion'

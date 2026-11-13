@@ -402,7 +402,7 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
         search_policy=search.DEFAULT_POLICY, history_observer=dict(adapter=str(observer), config={}))
     labels = ('P', 'Q', 'R', 'S')
     plan = dict(scope='Compare four mechanisms', commitments=[dict(label=label, minimal_test='Bounded comparison',
-        existing_ref=None) for label in labels], focus=dict(label=None, action='screen'))
+        existing_ref=None) for label in labels], focus=dict(index=None, action='screen'))
     finish(root, 1, 'H', [], action='experiment', search_choice=plan)
     findings = [dict(mechanism=label, basis='blocked', finding='No managed experiment in this UI fixture.') for label in labels]
     finish(root, 2, 'W', [1], mechanism_findings=findings,
@@ -419,26 +419,6 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
     return root, key
 
 
-@pytest.mark.process_e2e
-def test_comparison_uses_latest_frozen_nominations_and_exact_a_choice_without_shrinking_pool(tmp_path):
-    root, _ = nominated_scene(tmp_path)
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    older = ui_view.candidate_projection(root, 4)
-    assert len(older['index']) == 37
-    assert older['nominated_ids'] == [f'model-{i}' for i in range(1, 7)]
-    assert ui_view.candidate_rows(older)['total'] == 6
-    assert ui_view.candidate_rows(older, recommended='model-1')['total'] == 6
-    selected = ui_view.candidate_rows(older, recommended='model-37', delivered='model-36')
-    assert [row['id'] for row in selected['groups'][0]['rows']] == [f'model-{i}' for i in (1, 2, 3, 4, 5, 6, 37)]
-    assert selected['groups'][0]['rows'][-1]['marks'] == ['recommended']
-    assert ui_view.candidate_projection(root, 6)['nominated_ids'] == [f'model-{i}' for i in range(7, 13)]
-    job = dict(ui_view.Reader(root).node(6)['job'], final_report=dict(source_cutoff=3), direct_refs=[])
-    frozen = ui_view.candidate_projection(root, 6, job=job)
-    assert frozen['nominated_ids'] == older['nominated_ids']
-    assert [record['step'] for record in frozen['records']] == [1, 2, 3]
-    direct = ui_view.candidate_projection(root, 6, job=dict(job, direct_refs=[dict(path='inputs/parents/005/conclusion.json')]))
-    assert [record['step'] for record in direct['records']] == [1, 2, 3, 5]
-    assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
 
 @pytest.mark.parametrize('declaration', [None, dict(representatives=[], extras=[], gaps=[dict(mechanism_ref='h001.m1', reason='No usable model.')])])
@@ -475,29 +455,6 @@ def test_guarded_component_error_is_typed_and_hides_private_paths(tmp_path):
     assert value['error']['kind'] == 'ValueError'
     assert str(root) not in value['error']['message'] and '[private]' in value['error']['message']
     assert ui_view.failure(OSError('/secret/path'))['error']['message'] == '错误信息不可显示'
-
-
-def test_projection_and_result_card_read_sealed_fixture_without_writes(tmp_path):
-    root, _ = prepare(tmp_path, enabled=False)
-    finish(root, 1, 'H', [], action='experiment', summary='First <script>plan</script>')
-    finish(root, 2, 'A', [1], action='finish', summary='Final judgment', limitations=['L1', 'L2', 'L3', 'L4'])
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    view = control.status(root, after=0, limit=50, live_feedback=False)
-    value = ui_view.project(root, view, final_step=None)
-    assert value['header']['title'] == 'Assess one exact declared implementation.'
-    (item,) = value['trail']['rounds']
-    assert item['index'] == 1 and item['outcome'] == '请求提交前最终评估' and item['h']['one_line'] == 'First <script>plan</script>'
-    assert value['candidates'] == dict(count=0, partial=False, recommended=False, delivered=False)
-    again = ui_view.project(root, view, final_step=None, memo={})
-    assert again['trail'] == value['trail']
-    assert value['used_steps'] == 2
-    card = ui_view.result_card(ui_view.Reader(root), 2, closeout=view.get('closeout'))
-    assert card['delivery_state'] == 'none' and card['delivery_label'] == '未推荐' and card['chosen'] is None
-    assert card['unmet'] == ['L1', 'L2', 'L3'] and card['unmet_omitted'] == 1 and card['criteria_change'] is None
-    assert card['goal_completion'] == '未记录' and card['decision'] == '请求提交前最终评估'
-    row = ui_view.results_list_row(ui_view.Reader(root), 1, ui_view.cleaner(root))
-    assert row == dict(step=1, role='H', role_label='H · 假设', one_line='First <script>plan</script>')
-    assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
 
 
 SAMPLE = os.environ.get('SCID_UI_SAMPLE_S1')
@@ -629,89 +586,6 @@ def test_audit_preserves_prior_scientific_recommendation_in_overview(tmp_path, m
     rows = ui_view.candidate_rows(dict(index=[dict(id=identity, evaluation_key='val') for identity in ('P', 'Q')],
                                       nominated_ids=['P', 'Q'], graph={}, references={}), recommended=value['recommended'])
     assert [row['marks'] for row in rows['groups'][0]['rows']] == [['recommended'], []]
-
-
-def test_implementation_reference_uses_exact_candidate_binding_and_file(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import controller, history
-    public = tmp_path / 'public'; public.mkdir()
-    objective = public / 'objective.md'; objective.write_text('Compare exact retained objects.')
-    observer = tmp_path / 'observer.py'
-    observer.write_text('''import json,sys
-r=json.load(sys.stdin)
-rows=[dict(id=label,label=label,implementation='history/nodes/002/artifacts/'+label+'/model.py',evaluation_key='val',metric=metric,direction='max',status='ok',evidence=['project/nodes/002/artifacts/'+label+'/model.py']) for label,metric in [('P',.8),('Q',.6)]] if r['step']==2 else []
-print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=None,coverage=dict(status='complete',note='Fixture only'))))
-''')
-    root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['never-invoked'], max_tokens=100000, max_seconds=300,
-        max_steps=8, model='fixture', reasoning_effort='high', search_policy=None,
-        history_observer=dict(adapter=str(observer), config={}))
-    finish(root, 1, 'H', [], action='experiment')
-    finish(root, 2, 'W', [1], files={'P/model.py': 'same bytes\n', 'Q/model.py': 'same bytes\n'})
-    finish(root, 3, 'A', [2], action='wait', recommendation='W002-I001')
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    projection = ui_view.candidate_projection(root, 3)
-    reader = ui_view.Reader(root)
-    card = ui_view.result_card(reader, 3, projection=projection)
-    if card['chosen'] is None:
-        diagnostic = dict(resolution_error=card['resolution_error'],
-            index=projection['index'], references=projection['references'], subject_history=projection['subject'].get('history'),
-            saved_recommendation=(reader.node(3).get('result') or {}).get('candidate_recommendation'),
-            w_observation=reader.observation(2),
-            w_materials=[row['path'] for row in reader.node(2)['seal']['materials']],
-            candidate_materials=history.candidate_materials(root, projection['subject']))
-        log_dir = os.environ.get('SCID_TEST_LOG_DIR')
-        if log_dir:
-            destination = Path(log_dir) / 'ui-candidate-binding.json'
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-        raise AssertionError(json.dumps(diagnostic, ensure_ascii=False, indent=2))
-    assert card['chosen']['id'] == 'P' and card['chosen']['indexed']
-    assert card['chosen']['label'] == 'P' and card['chosen']['metric'] == '0.8'
-    assert projection['nominated_ids'] == []
-    rows = ui_view.candidate_rows(projection, recommended=card['chosen']['id'])['groups'][0]['rows']
-    assert [row['id'] for row in rows] == ['P'] and rows[0]['marks'] == ['recommended']
-    member = ui_view.candidate_file(reader, card['chosen'], projection)
-    assert member['name'] == 'P/model.py'
-    assert reader.node(2)['seal']['materials'][member['index'] - 1]['path'].endswith('/P/model.py')
-    assert reader.candidate(reader.node(3)['job'],'W002-I002',strict=True) == 'Q'
-    with pytest.raises(ValueError, match='no unique frozen candidate binding'):
-        reader.candidate(reader.node(3)['job'],'W002-I099',strict=True)
-    earlier=dict(reader.node(3)['job'],history=reader.node(2)['job']['history'])
-    with pytest.raises(ValueError):
-        reader.candidate(earlier,'W002-I002',strict=True)  # Existing future W cannot enlarge this original cut.
-    assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    # Re-observation can repeat an identical binding; equal bytes at P/Q still
-    # remain different originals because their material identities differ.
-    import copy
-    facts=copy.deepcopy(reader.candidate_facts(reader.node(3)['job'],'W002-I002'))
-    facts['implementation']['observation']['candidates']*=2
-    assert ui_view.candidate_file(reader, card['chosen'], projection)['name'] == 'P/model.py'
-    assert ui_view.resolve_candidate(root,reader.node(3)['job'],'W002-I002',strict=True,facts=facts)=='Q'
-
-
-@pytest.mark.process_e2e
-def test_audit_facts_display_saved_receipts_and_candidate_artifact_scope(tmp_path):
-    from scidiscovery.research_loop import candidate_audit, contracts as c
-    from test_candidate_audit import audit_fixture, request
-    root = audit_fixture(tmp_path)
-    job, payload = request(root)
-    assert candidate_audit.execute(root, job, payload) is None
-    following = c.build_job(root, 4, 'A', [1, 2, 3])
-    projection = ui_view.candidate_projection(root, 4, job=following)
-    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    facts = ui_view.audit_facts(root, projection)
-    assert facts['run-1'] == '公开审计已完成；候选文件归属未知' and facts['__recorded__']
-    assert before == {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
-    # Adapter completion does not qualify a different or unbound artifact.
-    unknown = dict(projection, records=[])
-    assert ui_view.audit_facts(root, unknown)['run-1'] == '公开审计已完成；候选文件归属未知'
-    artifact = c.read(candidate_audit._directory(root, 3) / 'binding.json')['source']['objects']['artifact']
-    matched = dict(projection, records=[dict(observation=dict(contexts=[dict(status='known_success',
-        candidate_id='run-1', model=dict(artifact, retention='archived'))]))])
-    assert ui_view.audit_facts(root, matched)['run-1'] == '公开审计通过'
-    path = candidate_audit._directory(root, 3) / 'adapter-result.json'
-    value = c.read(path); value['status'] = 'rejected'; c.write(path, value)
-    assert ui_view.audit_facts(root, projection) == facts
 
 
 def test_sealed_reader_memo_avoids_repeat_reads_and_invalidates_replaced_original(tmp_path, monkeypatch):

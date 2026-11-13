@@ -1,6 +1,5 @@
 """Original ledger and public dispatch negatives; no solver/model qualification."""
 from concurrent.futures import ThreadPoolExecutor
-import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -9,12 +8,10 @@ import sys
 import pytest
 
 from scidiscovery.operations.execution import AdapterCapability, ExecutionInterfaceRegistration
-from scidiscovery.operations.runtime_plugins import (RuntimePluginFactory, RuntimePluginContribution,
-    HOST_EXECUTION_GATE_KEY, HOST_EXECUTION_GATE_SCHEMA, HOST_EXECUTION_GATE_CONTRACT)
+from scidiscovery.operations.runtime_plugins import RuntimePluginFactory, RuntimePluginContribution, HOST_EXECUTION_GATE_KEY, HOST_EXECUTION_GATE_SCHEMA, HOST_EXECUTION_GATE_CONTRACT
 from scidiscovery.research_loop import accepted_budget, budget, contracts as c, controller, execution, experiments as e
 from scidiscovery.research_loop import execution_authority as authority, qualification as q
 from execution_fixtures import execution_registry, DifferentExternalIdentity
-from test_formal_review import LAUNCHER
 from test_history_handoff import finish
 
 
@@ -43,6 +40,7 @@ def resource_factory(context):
         json.loads(context.config_bytes), context.execution_host_services)})
 
 
+# importlib resolves this exact entry-point name from the fixture metadata.
 RESOURCE_REGISTRATION = ExecutionInterfaceRegistration('resource_fixture', '1', RuntimePluginFactory(resource_factory))
 
 
@@ -145,15 +143,19 @@ def test_configure_rejects_old_factory_that_ignores_host_services(tmp_path, exec
 
 @pytest.mark.process_e2e
 def test_public_run_rejects_sealed_w_config_before_provider_or_reservation(tmp_path, monkeypatch, resource_registry):
-    launcher = tmp_path / 'codex'; launcher.write_text('#!' + sys.executable + '\n' + LAUNCHER); launcher.chmod(0o700)
-    home = tmp_path / 'native'; home.mkdir(); monkeypatch.setenv('CODEX_HOME', str(home))
-    monkeypatch.delenv('REVIEW_REUSE_AUTHOR', raising=False); monkeypatch.delenv('REVIEW_MISSING_AUTHOR', raising=False)
-    root = prepare(tmp_path, launcher=[str(launcher)])
-    assert controller.run(root)['status'] == 'finish'
-    # The current strategy starts W001; no hypothetical H/W/A/review step 5
-    # exists. Reuse the configuration made while that actual W was active.
-    job = c.read_job(root / 'jobs/001.json'); record = execution.origin(root, 1)
-    config = c.read(record / 'experiment-config.json')
+    root = prepare(tmp_path)
+    job = c.build_job(root, 1, 'W', [])
+    record = execution.origin(root, 1)
+    anchor = budget.accept_node(root, job)
+    intent = dict(task_ref=c.record_ref(root/'jobs/001.json'))
+    if anchor is not None:
+        intent['budget_slice'] = anchor
+    accepted_budget.accept_native(root, 1, record, intent)
+    selected = c.settings(root, job)['execution_config']
+    config = e.configure(root, 1, selected['executor'], selected['configuration'],
+        c.workspace(root, 1)/'work/experiment-config.json')
+    finish(root, 1, 'W', [], files={'model.txt': 'Exact sealed fixture model'},
+        preserve_native_intent=True)
     assert job['role'] == 'W' and job['research_strategy_version'] == 3
     assert config['scope']['job_ref'] == c.record_ref(root / 'jobs/001.json')
     assert config['native_attempt'] == dict(number=0, execution_key=execution.identity(root, 1, 0))

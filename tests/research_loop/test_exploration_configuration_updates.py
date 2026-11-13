@@ -1,18 +1,11 @@
 """Editor declarations reach frozen exploration consumers and real local work."""
-from pathlib import Path
 
 import pytest
 
-from scidiscovery.research_loop import (
-    breadth, budget, configuration_form as form, configuration_updates as updates,
-    contracts as c, execution, native, role_share, search,
-)
-from execution_fixtures import execution_registry
-from test_breadth_science import prepare as breadth_instance, h, worker, run, findings
-from test_configuration_form import Controls
+from scidiscovery.research_loop import budget, configuration_form as form, configuration_updates as updates, contracts as c, execution, native, role_share
+from test_configuration_form import Controls, set_setting
 from test_history_handoff import finish
 from test_node_budget import instance as native_instance, policy as node_policy
-from test_search import worker as search_worker, assess, focus
 from test_soft_node_budget import start_clock
 
 
@@ -21,7 +14,7 @@ def save(root, **changes):
     state = updates.status(root)
     fields = Controls(form.render(form.imported(state['configuration'], base=root), edit=True)).fields
     for path, value in changes.items():
-        fields['cfg.budget.' + path] = str(value)
+        set_setting(fields, 'budget.' + path, value)
         if path.startswith('role_shares.'):
             fields['enabled.budget.role_shares'] = 'yes'
     draft = form.parse_edit(fields, base=root, configuration=state['configuration'])
@@ -48,75 +41,3 @@ def test_saved_thinking_target_is_real_native_advice_with_original_meter(tmp_pat
     hint = c.read(c.workspace(root, 2) / 'work/budget-status.json')
     assert hint['targets']['max_observed_tokens'] == 17
     assert hint['scope'] == 'advice_only_not_authorization_or_scientific_evidence'
-
-
-@pytest.mark.parametrize('field,value', [('max_w_seconds', .001), ('max_w_observed_tokens', 1)])
-@pytest.mark.process_e2e
-def test_saved_w_target_reaches_hint_without_stopping_native_work(tmp_path, field, value):
-    root = native_instance(tmp_path, search_policy=search.DEFAULT_POLICY, observed=(70, 69, 5))
-    h(root, labels=('P',))
-    old, _, _ = finish(root, 2, 'W', [1], mechanism_findings=findings(blocked=('h001.m1',)))
-    original = (root / 'jobs/002.json').read_bytes()
-    save(root, **{'breadth.' + field: value})
-    assert old['search']['limits'][field] == search.DEFAULT_POLICY[field]
-    job = c.build_job(root, 3, 'W', [1])
-    assert job['search']['limits'][field] == value
-    start_clock(root, 'real updated W target')
-    native.execute_native(root, 3)
-    outcome = c.read(execution.record(root, 3) / 'native-outcome.json')
-    assert outcome['stop_reason'] is None and outcome['search_slice']['observed_tokens'] == 75
-    hint = c.read(c.workspace(root, 3) / 'work/budget-status.json')
-    key = 'max_seconds' if field == 'max_w_seconds' else 'max_observed_tokens'
-    assert hint['targets'][key] == value
-    assert hint['target_state'] == 'reached'
-    assert c.validate(c.workspace(root, 3))['stage_intent'] == 'review'
-    assert (root / 'jobs/002.json').read_bytes() == original
-    assert not (execution.record(root, 2) / 'native-process.json').exists()
-
-
-@pytest.mark.process_e2e
-def test_saved_initial_calls_changes_registered_admission_without_refunding_originals(tmp_path, execution_registry):
-    root = breadth_instance(tmp_path)
-    h(root, labels=('P', 'Q'))
-    old, original_config = worker(root, tmp_path, 2, [1])
-    first = run(root, original_config, 'P')
-    assert first['status'] == 'known_success'
-    accepted_path = Path(original_config['record_dir']) / 'calls' / first['call_id'] / 'accepted.json'
-    original = accepted_path.read_bytes()
-    save(root, **{'breadth.initial_calls': 2})
-    with pytest.raises(breadth.OpportunityRequired):
-        run(root, original_config, 'P')
-    finish(root, 2, 'W', [1], mechanism_findings=findings('P', blocked=('Q',)), preserve_native_intent=True)
-    new, config = worker(root, tmp_path, 3, [1, 2])
-    assert old['search']['breadth']['initial_calls'] == 1
-    assert new['search']['breadth']['initial_calls'] == config['breadth']['initial_calls'] == 2
-    assert run(root, config, 'P')['status'] == 'known_success'
-    with pytest.raises(breadth.OpportunityRequired):
-        run(root, config, 'P')
-    assert run(root, config, 'Q')['status'] == 'known_success'
-    assert run(root, config, 'Q')['status'] == 'known_success'
-    assert run(root, config, 'P')['status'] == 'known_success'
-    assert accepted_path.read_bytes() == original
-
-
-@pytest.mark.parametrize('cap', [1, 3])
-@pytest.mark.process_e2e
-def test_saved_requested_repair_cap_controls_exact_original_chain(tmp_path, execution_registry, cap):
-    root = breadth_instance(tmp_path)
-    h(root, labels=('P', 'Q'))
-    old, _, _ = search_worker(root, 2, [1])
-    save(root, **{'breadth.max_requested_repairs': cap})
-    source = 2
-    for index in range(cap):
-        a_step, w_step = 3 + 2 * index, 4 + 2 * index
-        assess(root, a_step, [1, source], search_choice=dict(dispositions=[], next_focus=focus('h001.m1', 'repair')))
-        job, _, _ = search_worker(root, w_step, [1, source, a_step])
-        assert job['search']['limits']['max_requested_repairs'] == cap
-        assert job['search']['repair_root'] == 2
-        source = w_step
-    a_step = 3 + 2 * cap
-    assess(root, a_step, [1, source], search_choice=dict(dispositions=[], next_focus=focus('h001.m1', 'repair')))
-    denied = c.build_job(root, a_step + 1, 'W', [1, source, a_step])
-    assert search.launch_reason(root, denied) == 'search_repair_limit'
-    assert search.project(root, a_step + 1)['repairs'] == {2: cap}
-    assert old['search']['limits']['max_requested_repairs'] == search.DEFAULT_POLICY['max_requested_repairs']

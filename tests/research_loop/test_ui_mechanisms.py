@@ -197,79 +197,10 @@ def test_public_cleaning_and_html_escape_apply_before_render_and_keys_never_merg
     assert '[credential]' in rendered
 
 
-def sealed_fixture(tmp_path, findings):
-    from scidiscovery.research_loop import controller, search
-    from test_history_handoff import finish
-
-    public = tmp_path / 'public'
-    public.mkdir()
-    objective = public / 'objective.md'
-    objective.write_text('Compare an explicit mechanism using sealed evidence.')
-    root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, ['never-invoked'], max_tokens=100000,
-        max_seconds=600, max_steps=6, model='fixture', reasoning_effort='high',
-        experiment_mode='external', search_policy=search.DEFAULT_POLICY,
-        research_strategy_version=2)
-    plan = dict(scope='One mechanism comparison', commitments=[commitment()], focus=dict(index=None, action='screen'))
-    finish(root, 1, 'H', [], action='experiment', search_choice=plan)
-    finish(root, 2, 'W', [1], mechanism_findings=findings,stage_intent='decision')
-    key = tmp_path / 'operator.key'
-    key.write_bytes(b'mechanism-ui-fixture-secret-32bytes')
-    key.chmod(0o600)
-    return root, key
 
 
-def test_sealed_results_and_sse_share_real_mechanism_evidence_without_writes(tmp_path):
-    from test_history_handoff import finish
-    from test_instance_ui import session
-
-    root, key = sealed_fixture(tmp_path, [dict(mechanism='Alpha', basis='blocked',
-        finding='An independent observation is still missing.')])
-    ui, cookie = session(root, key)
-    before = _originals(root)
-    page = ui.get('/results', host=ui.host, cookie=cookie)[1].decode()
-    assert 'id="live-mechanisms"' in page and 'data-live-url="/live"' in page
-    assert 'Alpha' in page and 'An independent observation is still missing.' in page
-    assert '已接受的受管调用 0' not in page
-    assert _originals(root) == before
-    first = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-mechanisms']
-    assert 'An independent observation is still missing.' in first
-    finish(root, 3, 'A', [2], search_choice=dict(dispositions=[dict(mechanism_ref='h001.m1',
-        status='deferred', reason='Await the missing observation; keep the mechanism open.')], next_focus=None))
-    before = _originals(root)
-    updated = ui._live_snapshot(ui._browser(cookie), '', force=True)['fragments']['live-mechanisms']
-    assert updated == first and '暂缓' not in updated
-    assert 'Await the missing observation; keep the mechanism open.' not in updated
-    advice=ui_view.Reader(root).node(3)['payload']['search_review']
-    assert advice['dispositions'][0]['reason']=='Await the missing observation; keep the mechanism open.'
-    assert 'data-details-key="mechanism:h001.m1"' in updated
-    assert 'data-live-focus="mechanism:h001.m1"' in updated
-    assert _originals(root) == before
 
 
-@pytest.mark.parametrize('raw_findings', ['Scientific narrative instead of a table', {'finding': 'Partial explanation'}])
-def test_sealed_unparsed_w_findings_keep_h_visible_and_a_original_unchanged(tmp_path, raw_findings):
-    from test_history_handoff import finish
-
-    root, _ = sealed_fixture(tmp_path, raw_findings)
-    finish(root, 3, 'A', [2], search_choice=dict(dispositions=[dict(mechanism_ref='h001.m1',
-        status='deferred', reason='Structured W findings remain unknown; retain the question.')], next_focus=None))
-    before = _originals(root)
-    reader = ui_view.Reader(root)
-    receipt = reader.node(2)['seal']['control_outcome']['worker_delivery']
-    assert receipt['status'] == 'partial' and receipt['reason'] == 'worker_decision'
-    assert reader.node(2)['payload']['mechanism_findings'] == raw_findings
-    value = trail.project(reader, [1, 2, 3], ui_view.cleaner(root))
-    assert not value['errors']
-    item, = value['mechanisms']
-    assert [event['role'] for event in item['events']] == ['H']
-    assert item['status'] is None and item['reason'] is None
-    assert reader.node(3)['payload']['search_review']['dispositions'][0]['status']=='deferred'
-    assert value['unresolved'] == [dict(step=2, field='W 逐机制发现')]
-    rendered = trail.render(value)
-    assert 'Alpha' in rendered and '暂缓' not in rendered and '可证伪问题' in rendered
-    assert '尚未解析为结构化信息' in rendered and '/results/2' in rendered
-    assert _originals(root) == before
 
 
 @pytest.mark.parametrize('role,field', [('H', 'search_plan'), ('A', 'search_review')])

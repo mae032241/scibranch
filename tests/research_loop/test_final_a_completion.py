@@ -49,7 +49,7 @@ payload['final_coverage']=[dict(mechanism_ref=row['mechanism_ref'],status='unexp
  for row in task.get('final_coverage_mechanisms',[])] or None
 raw=json.dumps(payload)
 binding=dict(sha256=hashlib.sha256(raw.encode()).hexdigest(),size_bytes=len(raw.encode()))
-print(json.dumps(dict(type='item.completed',item=dict(type='agent_message',text=raw,
+print(json.dumps(dict(type='item.completed',item=dict(type='agent_message',text=raw,phase='final_answer',
  native_final=True,final_binding=binding))),flush=True)
 usage=dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34)
 if config.get('bad_terminal'):usage['input_tokens']=200000
@@ -211,7 +211,7 @@ def test_final_token_permission_does_not_qualify_bad_transport(tmp_path,config):
 def external_scene(tmp_path,monkeypatch,*,action='deliver'):
     import test_closeout_protocol as protocol
     old="pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\nif item.get('pause'):(root/'pause.request').touch()\nprint(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)"
-    replacement="print(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34))),flush=True)\ntime.sleep(.2)\npathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\nif item.get('pause'):(root/'pause.request').touch()"
+    replacement="print(json.dumps(dict(type='item.completed',item=dict(type='agent_message',phase='final_answer',text=json.dumps(payload)))),flush=True)\nprint(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=280900,cached_input_tokens=100000,output_tokens=34))),flush=True)\ntime.sleep(.2)\npathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(payload))\nif item.get('pause'):(root/'pause.request').touch()"
     assert old in protocol.NATIVE
     monkeypatch.setattr(protocol,'NATIVE',protocol.NATIVE.replace('import json,os,pathlib,sys','import json,os,pathlib,sys,time').replace(old,replacement))
     root=protocol.scene(tmp_path,[dict(action=action,candidate='run-1' if action=='deliver' else None)],node_budget_mode='soft')
@@ -273,7 +273,14 @@ def test_unknown_final_delivery_confirms_same_original_once_per_explicit_run(tmp
 def test_final_a_can_decline_every_available_candidate_without_submission(tmp_path,monkeypatch):
     root=external_scene(tmp_path,monkeypatch,action='finish')
     result=controller.closeout(root)
-    assert result['status']=='final_a_completed',json.dumps(result,indent=2)
+    diagnostics=dict(result=result)
+    if result['status']!='final_a_completed':
+        record=c.host_record(c.workspace(root,3))
+        for name in ('native-outcome.json','usage-observation.json','science-output.json',
+                'science-result.schema.json'):
+            path=record/name
+            diagnostics[name]=path.read_text() if path.is_file() else 'missing'
+    assert result['status']=='final_a_completed',json.dumps(diagnostics,indent=2)
     _,step,record=accepted(root)
     assert step==3 and c.validate(c.workspace(root,step))['next_action']=='finish'
     assert c.validate(c.workspace(root,step))['candidate_recommendation'] is None

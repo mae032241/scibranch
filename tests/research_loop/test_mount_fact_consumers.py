@@ -210,7 +210,7 @@ def test_wake_producer_reads_selected_originals_once_and_refreshes_the_next_oper
     observed = accepted.with_name('observation.json')
     config = record / 'experiment-config.json'
     c.write(config, dict(scope=scope, execution_interface=interface))
-    c.write(accepted, dict(scope=scope, interface=interface, native_attempt=dict(number=0)))
+    c.write(accepted, dict(call_id='original-wake', scope=scope, interface=interface, native_attempt=dict(number=0)))
     c.write(observed, dict(accepted=c.file_ref(accepted), outputs=[], proofs=[], scientific_outputs=[]))
     intent = dict(task_ref=c.record_ref(scene / 'jobs/002.json'),
         execution_wake=dict(observations=[c.file_ref(observed), c.file_ref(observed)]))
@@ -240,18 +240,18 @@ def test_author_manifest_is_loaded_once_and_pure_validation_keeps_its_original_f
     native_record = execution.origin(scene, 2)
     intent = dict(task_ref=c.record_ref(scene / 'jobs/002.json'), author_context_version=1,
         author_closeout_science_context=proof)
+    sources = views.load_source_facts(scene, job, c.workspace(scene, 2),
+        native=dict(record=native_record, intent=intent), input_policy=facts['input_policy'],
+        author_facts=facts)
+    assert sources['author'] is facts
     with monkeypatch.context() as patch:
         _no_reads(patch)
-        sources = views.load_source_facts(scene, job, c.workspace(scene, 2),
-            native=dict(record=native_record, intent=intent), input_policy=facts['input_policy'],
-            author_facts=facts)
-        assert sources['author'] is facts
         assert views.logical_original_from_facts(sources,
             c.workspace(scene, 2) / 'science-task.json') == facts['directory'] / 'science-task.json'
-        with pytest.raises(UnsupportedExecution, match='another exact context'):
-            views.load_source_facts(scene, job, c.workspace(scene, 2),
-                native=dict(record=native_record, intent=intent), input_policy=facts['input_policy'],
-                author_facts=None)
+    with pytest.raises(UnsupportedExecution, match='another exact context'):
+        views.load_source_facts(scene, job, c.workspace(scene, 2),
+            native=dict(record=native_record, intent=intent), input_policy=facts['input_policy'],
+            author_facts=None)
     assert counts == Counter({manifest: 1})
     task = next(row for row in facts['entries'] if row['item']['kind'] == 'task')
     original = task['display'].read_bytes()

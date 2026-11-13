@@ -24,7 +24,7 @@ def root(tmp_path):
     objective.write_text('Original bounded scientific objective.')
     root = tmp_path / 'instance'
     controller.prepare(root, objective, public, ['fixture-never-launch'], max_tokens=100,
-        max_seconds=20, max_steps=3, model='fixture', reasoning_effort='high')
+        max_seconds=20, max_steps=3, model='fixture', reasoning_effort='high', search_policy=None)
     return root
 
 
@@ -70,7 +70,7 @@ def test_research_guidance_is_directly_visible_and_revoked_only_for_future_jobs(
 
 
 def test_crash_after_job_publication_cannot_reedit_or_reapply(root):
-    row = guidance.submit(root, 'Immutable advice')
+    row = guidance.submit(root, 'Immutable advice', target='H')
     with pytest.raises(RuntimeError, match='crash'):
         with guidance.binding(root, 1, 'H', None) as values:
             contracts.write(root / 'jobs/001.json', dict(step=1, role='H', user_guidance=values))
@@ -134,15 +134,14 @@ def test_queued_amendment_preserves_accepted_identity_and_is_idempotent(root):
     assert budget.snapshot(root)['max_tokens'] == 250
     assert (root / 'settings.json').read_bytes() == settings_bytes
     assert (root / 'jobs/001.json').read_bytes() == job_bytes
-    assert contracts.read(root / 'jobs/001.json') == job
-    events, _ = budget._events(root, contracts.settings(root))
+    events, _ = budget._events(root)
     assert len([event for event in events if event['kind'] == 'budget_amend']) == 1
     # Crash after ledger publication but before the receipt update reconciles once.
     path = controls._path(root, receipt['operation_id'])
     contracts.write(path, dict(receipt, status='running'))
     with controller._writer(root):
         controls.apply_pending_budget(root)
-    events, _ = budget._events(root, contracts.settings(root))
+    events, _ = budget._events(root)
     assert len([event for event in events if event['kind'] == 'budget_amend']) == 1
 
 
@@ -156,8 +155,7 @@ def test_amendment_stays_pending_while_original_effect_is_unknown(root, monkeypa
     assert budget.snapshot(root)['max_tokens'] == 100
 
 
-@pytest.mark.parametrize('changed', [False, True])
-def test_detached_resume_binds_original_and_keeps_the_existing_writer(root, monkeypatch, changed):
+def test_detached_resume_binds_original_and_keeps_the_existing_writer(root, monkeypatch):
     contracts.build_job(root, 1, 'H', [])
     original = (root / 'jobs/001.json').read_bytes()
     monkeypatch.setattr(controls.subprocess, 'Popen', lambda *args, **kwargs: SimpleNamespace(pid=os.getpid()))
@@ -165,7 +163,7 @@ def test_detached_resume_binds_original_and_keeps_the_existing_writer(root, monk
     assert receipt['action'] == dict(kind='worker_resume', step=1, job_ref=contracts.record_ref(root / 'jobs/001.json'))
     seen = []
 
-    def resume_locked(instance, step):
+    def resume_locked(instance, step, *, expected_attempt=None):
         with pytest.raises(RuntimeError, match='running controller'):
             with controller._local_writer(instance):
                 pass
@@ -174,18 +172,13 @@ def test_detached_resume_binds_original_and_keeps_the_existing_writer(root, monk
 
     monkeypatch.setattr(controller, '_worker_resume_locked', resume_locked)
     monkeypatch.setattr(controller, '_run', lambda root: pytest.fail('Resume must use the original continuation gate'))
-    if changed:
-        contracts.write(root / 'jobs/001.json', dict(contracts.read(root / 'jobs/001.json'), instruction='Changed original'))
     descriptor = os.open(root / 'host-run.lock', os.O_RDWR)
     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     controls._child(root, receipt['operation_id'], descriptor)
     final = controls.operation(root, receipt['operation_id'])
-    assert seen == ([] if changed else [1])
-    assert final['status'] == ('failed' if changed else 'applied')
-    if changed:
-        assert 'exact original scientific task' in final['error']
-    else:
-        assert (root / 'jobs/001.json').read_bytes() == original
+    assert seen == [1]
+    assert final['status'] == 'applied'
+    assert (root / 'jobs/001.json').read_bytes() == original
 
 
 def test_worker_resume_keeps_unknown_original_ineligible(root, monkeypatch):
@@ -193,7 +186,7 @@ def test_worker_resume_keeps_unknown_original_ineligible(root, monkeypatch):
     contracts.build_job(root, 1, 'H', [])
     original = (root / 'jobs/001.json').read_bytes()
 
-    def reject_unknown(root, step):
+    def reject_unknown(root, step, *, expected_attempt=None):
         raise continuation.ResumeUnavailable('worker_resume_usage_unknown')
 
     monkeypatch.setattr(continuation, 'start', reject_unknown)

@@ -68,13 +68,11 @@ def test_role_opt_in_freezes_expanded_set_without_recalling_plugin_for_resume(of
     executable = options['root'].parent / 'codex'
     executable.write_text('#!/bin/sh\nexit 99\n'); executable.chmod(0o700)
     options['launcher'] = [str(executable)]
-    monkeypatch.setattr(research_config.shutil, 'which', lambda _: str(executable))
     options['role_profiles'] = {'H': dict(worker='analyst')}
     options['worker_profiles'] = {'analyst': dict(model='worker-model', skill_set='domain')}
     prepared = research_config.normalize(options)
-    # Suppress auto-resume only in the fixture: this test concerns the exact
-    # already-expanded provider declaration, not executable discovery.
-    prepared.pop('resume_policy', None); prepared.pop('node_budget_policy', None)
+    # Keep the normalized launcher and finite original budgets even though
+    # this projection check never starts the declared executable.
     settings = controller.prepare(**prepared)
     root = options['root']; job = c.build_job(root, 1, 'H', [])
     intent = profiles.binding(settings, job)

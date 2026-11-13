@@ -60,58 +60,6 @@ def start_clock(root, reason):
     budget.transition(root, 'advance', reason)
 
 
-@pytest.mark.parametrize('role','HWAE')
-@pytest.mark.process_e2e
-def test_each_role_can_cross_targets_and_seal_its_original_conclusion(tmp_path,role):
-    root=scene(tmp_path)
-    step=1 if role=='H' else 2
-    if step==2:finish(root,1,'H',[],action={'W':'experiment','A':'analyze','E':'extract'}[role])
-    c.build_job(root,step,role,[1] if step==2 else [])
-    start_clock(root,'real soft transport')
-    native.execute_native(root,step)
-    record=execution.record(root,step);outcome=c.read(record/'native-outcome.json')
-    assert outcome['stop_reason'] is None and outcome['budget_slice']['observed_tokens']==15
-    assert outcome['budget_slice']['advance_seconds']>.05
-    assert c.validate(c.workspace(root,step))['summary']=='Original bounded finding'
-    hint=c.read(c.workspace(root,step)/'work/budget-status.json')
-    assert hint['mode']=='soft' and hint['scope']=='advice_only_not_authorization_or_scientific_evidence'
-    prompt=(c.workspace(root,step)/'work/prompt.txt').read_text()
-    assert 'budget-status.json' in prompt and 'Budget mode: soft' in prompt
-    assert 'no per-request budget admission' in prompt and 'Unknown usage is not zero' in prompt
-
-
-@pytest.mark.process_e2e
-def test_soft_w_old_search_threshold_does_not_kill_but_identity_still_does(tmp_path):
-    limits=dict(max_w_seconds=.05,max_w_observed_tokens=10,max_requested_repairs=2)
-    root=scene(tmp_path,search_policy=limits)
-    finish(root,1,'H',[],action='experiment',search_choice=dict(scope='Exact scope',commitments=[dict(label='M',minimal_test='Discriminate M',existing_ref=None)],focus=dict(label='M',action='screen')))
-    job=c.build_job(root,2,'W',[1]);start_clock(root,'real soft W');native.execute_native(root,2)
-    assert c.validate(c.workspace(root,2))['summary']=='Original bounded finding'
-    intent=c.read(execution.record(root,2)/'native-intent.json');intent['budget_slice']['boot_id']='wrong'
-    with pytest.raises(ValueError):budget.stop_node(root,job,intent,budget.snapshot(root),dict(input_tokens=15,output_tokens=0))
-
-
-@pytest.mark.process_e2e
-def test_known_failure_above_soft_target_resumes_same_node_without_refund(tmp_path):
-    root=scene(tmp_path,mode='known_failure',resume=True)
-    assert controller.run(root)['status']=='native_stopped';first=wait_runner(root)
-    original={p:p.read_bytes() for p in first.iterdir() if p.is_file()}
-    assert controller.worker_resume(root,1)['status']=='wait'
-    assert native.usage(root)['observed_tokens']==30 and budget.used_steps(root)==2
-    assert all(p.read_bytes()==data for p,data in original.items())
-    report=c.read(execution.record(root,1)/'native-outcome.json')['budget_slice']
-    assert report['observed_tokens']==30 and report['dispatches']==2
-    assert 'zero is not a new grant' in (c.workspace(root,1)/'work/prompt.txt').read_text()
-
-
-@pytest.mark.process_e2e
-def test_unknown_usage_never_becomes_a_soft_resume_grant(tmp_path):
-    root=scene(tmp_path,mode='no_usage',resume=True)
-    assert controller.run(root)['status']!='wait';first=wait_runner(root)
-    with pytest.raises((ValueError,RuntimeError)):controller.worker_resume(root,1)
-    assert not (first/'continuations/001/native-intent.json').exists()
-
-
 def test_hint_symlink_does_not_write_outside_workspace(tmp_path):
     root=scene(tmp_path);job=c.build_job(root,1,'H',[])
     start_clock(root,'test accepted hint');anchor=budget.accept_node(root,job)

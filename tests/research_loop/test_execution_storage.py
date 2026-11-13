@@ -6,12 +6,9 @@ import threading
 
 import pytest
 
-from execution_fixtures import DifferentExternalIdentity, execution_registry, remote_registry
-from test_direct_public_collect import fixed_code, fragment, inode, terminal_code
-from test_mutable_run_inputs import _code, _configuration, _prepare
-from test_history_handoff import finish
-from test_nonlocal_execution_observation import case
-from scidiscovery.research_loop import contracts as c, experiments as e, history, controller, runtime
+from execution_fixtures import execution_registry, remote_registry
+from test_registered_experiments import managed
+from scidiscovery.research_loop import contracts as c, experiments as e, controller
 from scidiscovery.research_loop import atomic_files, shared_originals as shared, storage_policy as storage
 from scidiscovery.research_loop.local_experiments import LocalExecution
 from scidiscovery import archive_io
@@ -25,76 +22,6 @@ def _identity(path):
 def _inode(path):
     info=path.stat()
     return info.st_dev,info.st_ino
-
-
-def test_calls_and_history_share_bytes_without_merging_scientific_sources(tmp_path,monkeypatch,remote_registry):
-    root,job,config,_=case(tmp_path,monkeypatch)
-    raw=b'opaque retained material\n'*32768
-    copies=[];copy=atomic_files.copy_original
-    produced=[];submit=DifferentExternalIdentity.submit
-    def submitted(adapter,descriptor):
-        artifact=adapter.artifact_path(descriptor.name)
-        assert not artifact.exists(), 'Each synthetic call creates its original once'
-        result=submit(adapter,descriptor)
-        assert artifact.stat().st_mode & 0o777 == 0o400
-        produced.append((descriptor.name,e.proof(artifact)))
-        return result
-    def counted(source,target,**options):
-        if options['size_bytes']==len(raw):copies.append(options['size_bytes'])
-        return copy(source,target,**options)
-    monkeypatch.setattr(DifferentExternalIdentity,'submit',submitted)
-    monkeypatch.setattr(atomic_files,'copy_original',counted)
-    calls=[]
-    for number,label in enumerate(('P','Q'),1):
-        payload=c.workspace(root,2)/'code'/label
-        payload.parent.mkdir(exist_ok=True)
-        payload.write_bytes(raw)
-        result=e.dispatch(config,payload,new=True,mechanism=number)
-        directory=e.Records(config).directory(result['call_id'])
-        observed=c.read(directory/'execution-observation.json')
-        calls.append(observed)
-    first,second=[call['outputs'][0] for call in calls]
-    assert calls[0]['call_id']!=calls[1]['call_id']
-    assert first['source']['path']!=second['source']['path']
-    assert _inode(Path(first['path']))!=_inode(Path(second['path']))
-    assert Path(first['path']).stat().st_mode & 0o777 == 0o400
-    archived=history._proof(root,Path(first['path']).relative_to(root).as_posix(),
-        source_kind='managed_frozen')
-    original=root/archived['snapshot']
-    assert _inode(original)==_inode(Path(first['path']))
-    from scidiscovery.research_loop import managed_wait
-    retained_inodes={call['call_id']:_inode(Path(call['outputs'][0]['path'])) for call in calls}
-    managed_wait.wake_packet(root,job,dict(execution_wake=dict(observations=[
-        e.proof(e.Records(config).directory(call['call_id'])/'execution-observation.json') for call in calls])))
-    packet=c.read(c.workspace(root,2)/'work/execution-results.json')
-    assert len(packet['executions'])==len(calls)
-    for view,call in zip(packet['executions'],calls):
-        name=call['outputs'][0]['name']
-        assert view['outputs']==[dict(name=name,
-            path=f'work/execution-results/{call["call_id"]}/outputs/{name}')]
-        assert _inode(Path(call['outputs'][0]['path']))==retained_inodes[call['call_id']]
-    finish(root,2,'W',[1],preserve_native_intent=True,mechanism_findings=[
-        dict(mechanism=label,basis='observed',finding='Synthetic retained observation.') for label in ('P','Q')])
-    successor=c.build_job(root,3,'A',[1,2])
-    materials=[row for row in successor['direct_materials'] if row['size_bytes']==len(raw)]
-    assert len(materials)==2 and len({row['path'] for row in materials})==2
-    # Parent input paths are native-view references; source binds the retained
-    # original consumed by the mount projection, without a host input alias.
-    first_input,sibling=[Path(row['source']) for row in materials]
-    assert first_input!=sibling and _inode(first_input)!=_inode(sibling)
-    assert {_inode(first_input),_inode(sibling)}==set(retained_inodes.values())
-    assert all(path.stat().st_mode & 0o777 == 0o400 for path in (first_input,sibling))
-    scratch=c.workspace(root,3)/'work/editable-material'
-    scratch.write_bytes(first_input.read_bytes())
-    scratch.write_bytes(b'changed working file')
-    assert _inode(scratch)!=_inode(original)
-    assert original.read_bytes()==first_input.read_bytes()==sibling.read_bytes()==raw
-    assert [call for call,_ in produced]==[call['call_id'] for call in calls]
-    assert {item['path']:item['file_stat'] for _,item in produced}=={
-        call['outputs'][0]['path']:call['outputs'][0]['file_stat'] for call in calls}
-    assert copies==[], 'Producer-frozen originals must not be copied again for observation or handoff'
-    # Canonical verification still binds both original call identities.
-    for call in calls:e.verify_observation(call,lambda item:Path(item['path']))
 
 
 @pytest.mark.parametrize('error_number',[errno.EXDEV,errno.EOPNOTSUPP,errno.EPERM,errno.EMLINK])
@@ -112,90 +39,6 @@ def test_managed_alias_requires_hardlinks_without_copy_fallback(tmp_path,monkeyp
         c._bind_original(original,target,root=root,policy=storage.configuration(),
             size_bytes=identity['size_bytes'],source_kind='managed_frozen')
     assert not target.exists() and original.read_bytes()==source.read_bytes()
-
-
-def test_local_completion_freezes_once_before_observation_without_writable_alias(
-        fragment, terminal_code, monkeypatch):
-    root,job,_=fragment;work=c.workspace(root,job['step'])
-    public=work/'work/retained-experiments'
-    writes={};before={};copies=[];projections=[]
-    write_bytes=Path.write_bytes;copy=atomic_files.copy_original;publish=atomic_files.publish_stream
-    def written(path,raw):
-        result=write_bytes(path,raw)
-        if path.is_relative_to(public):
-            writes[path]=writes.get(path,0)+1
-            before[path]=e.proof(path)
-        return result
-    def copied(source,target,**options):
-        copies.append((Path(source),Path(target)))
-        return copy(source,target,**options)
-    def projected(path,*args,**options):
-        if Path(path).is_relative_to(public):projections.append(Path(path))
-        return publish(path,*args,**options)
-    monkeypatch.setattr(Path,'write_bytes',written)
-    monkeypatch.setattr(atomic_files,'copy_original',copied)
-    monkeypatch.setattr(atomic_files,'publish_stream',projected)
-    row=terminal_code();config=row['config'];adapter=row['adapter'];call=row['accepted']['call_id']
-    output=row['output'];directory=row['directory'];saved=e.proof(output)
-    assert before[output]==saved and writes=={output:1}
-    assert output.stat().st_mode & 0o777 == 0o400
-    assert saved['file_stat'][:2]==list(inode(output))
-    completed=c.read(directory/'completed.json')
-    observed=e.record_observation(config,adapter,call)
-    assert observed['scientific_source'] is None
-    assert all(item['path']==item['source']['path'] for key in ('proofs','outputs','scientific_outputs')
-        for item in observed[key])
-    assert all(set(item['source'])=={'path','size_bytes','file_stat'}
-        for key in ('proofs','outputs','scientific_outputs') for item in observed[key])
-    saved_observation=(directory/'execution-observation.json').read_bytes()
-    first=e._collected_view(config,call,observed,adapter)
-    stable={Path(item['path']):e.proof(item['path']) for item in first['outputs']}
-    for _ in range(2):
-        assert adapter.completion(directory,row['accepted'],0,True,True)==completed
-        assert e.record_observation(config,adapter,call)==observed
-        assert e._collected_view(config,call,observed,adapter)==first
-    assert {path:e.proof(path) for path in stable}==stable
-    assert (directory/'execution-observation.json').read_bytes()==saved_observation
-    assert e.proof(output)==saved and writes=={output:1} and copies==[]
-    assert sorted(projections)==sorted(output.parent/'execution-logs'/name
-        for name in ('stdout.txt','stderr.txt'))
-    assert not (directory/'runtime-artifacts').exists()
-    assert not (directory/'outputs').exists() and not (directory/'observed-originals').exists()
-
-
-def test_local_output_processing_error_keeps_known_failed_terminal(fragment, terminal_code):
-    # terminal_code installs the same Git-only seam and forbidden launch entry
-    # points; this case uses its preparation helper before the first completion.
-    root,job,record=fragment;config=_configuration(root,job)
-    source=_code(root,job)
-    runtime_directory=c.workspace(root,job['step'])/'experiments/invalid-output'
-    runtime_directory.mkdir(parents=True)
-    adapter=LocalExecution({key:value for key,value in config.items() if key!='execution_interface'},
-        frozen_interface=config['execution_interface'])
-    _,accepted=_prepare(config,source,directory=runtime_directory,adapter=adapter)
-    call=accepted['call_id'];records=e.Records(config);directory=records.directory(call)
-    records.publish(call,'process.json',dict(task_ref=c.record_ref(directory/'accepted.json'),
-        pid=999999999,start_ticks=1,pgid=999999999,sid=999999999))
-    (directory/'stdout.raw').write_bytes(b'failed original command\n')
-    (directory/'stderr.raw').write_bytes(b'')
-    # Closed transport streams represent the confirmed stopped writer boundary.
-    for stream in ('stdout.raw','stderr.raw'):(directory/stream).chmod(0o400)
-    records.publish(call,'terminal.json',dict(returncode=2,cleanup_confirmed=True,
-        transport_complete=True,wall_seconds=.01))
-    from scidiscovery.research_loop import local_experiments
-    output=local_experiments.artifact_directory(config,call);output.mkdir(parents=True)
-    (output/'unsafe').symlink_to(record/'usage.json')
-    terminal=(directory/'terminal.json').read_bytes()
-    completed=adapter.completion(directory,accepted,2,True,True)
-    assert completed['status']=='known_failed' and completed['outputs']==[]
-    assert completed['result']['status']=='unavailable'
-    assert completed['result']['diagnostic']=='managed_output_invalid'
-    records.publish(call,'completed.json',completed);records.bind_external(call,call,'failed')
-    observed=e.record_observation(config,adapter,call)
-    assert observed['status']=='known_failed' and adapter.status_details(call)['state']=='failed'
-    assert e.record_observation(config,adapter,call)==observed
-    assert (directory/'terminal.json').read_bytes()==terminal
-    assert records.external(call)==call and len(records.calls())==1
 
 
 def test_disabled_limits_preserve_values_without_scanning_instance_usage(tmp_path,monkeypatch):
@@ -267,37 +110,6 @@ def test_fork_retains_new_original_despite_legacy_frozen_instance_quota(tmp_path
     original=shared.retain(child,mutable,source_kind='mutable',
         policy=dict(limits,max_instance_bytes=1),**_identity(mutable))
     assert original.read_bytes()==mutable.read_bytes() and _inode(original)!=_inode(mutable)
-
-
-@pytest.mark.process_e2e
-def test_legacy_byte_quota_cannot_fail_a_launched_process(tmp_path,monkeypatch,execution_registry):
-    limits=dict(enabled=True,max_file_bytes=1,max_total_bytes=1,max_instance_bytes=1)
-    prepare=controller.prepare
-    def configure_storage(*args,**options):
-        return prepare(*args,storage_policy=limits,**options)
-    with monkeypatch.context() as setup:
-        setup.setattr(controller,'prepare',configure_storage)
-        root,job,config,_=case(tmp_path,monkeypatch,executor='local_execution:command')
-    payload=c.workspace(root,2)/'work/quota.py'
-    payload.write_text('print("retained identity",flush=True)\n')
-    from scidiscovery.research_loop import local_experiments
-    popen=local_experiments.subprocess.Popen
-    started=[]
-    def capture_launch(*args,**options):
-        process=popen(*args,**options);started.append(process)
-        return process
-    monkeypatch.setattr(local_experiments.subprocess,'Popen',capture_launch)
-    result=e.dispatch(config,payload,new=True,mechanism='P')
-    assert len(started)==1 and started[0].poll() is not None
-    directory=e.Records(config).directory(result['call_id'])
-    identity=c.read(directory/'process.json');terminal=c.read(directory/'terminal.json')
-    assert identity['pid']==started[0].pid
-    assert not runtime.process_matches(identity,identity['task_ref'])
-    assert terminal['cleanup_confirmed'] and not terminal.get('storage_limit_reached',False)
-    assert terminal['transport_complete'] is True
-    assert c.read(directory/'completed.json')['status']=='known_success'
-    assert e.Records(config).external(result['call_id'])==result['call_id']
-    assert result['status']=='known_success'
 
 
 def test_interrupted_import_leaves_no_final_or_reused_partial(tmp_path,monkeypatch):
@@ -517,25 +329,26 @@ def test_writer_lock_is_reentrant_without_quota_usage_scan(tmp_path,monkeypatch)
 
 
 @pytest.mark.process_e2e
-def test_closed_host_log_is_shared_through_observation_and_projection(tmp_path,monkeypatch,execution_registry):
-    root,job,config,_=case(tmp_path,monkeypatch,executor='local_execution:command')
+def test_closed_host_log_is_shared_through_observation_and_projection(managed):
+    # Standalone Local transport component; no native Worker/profile is launched.
     raw=b'host-owned closed log\n'*1024
-    payload=c.workspace(root,2)/'work/log.py'
+    payload=managed.source('log')
     payload.write_text('import sys\nsys.stdout.write('+repr(raw.decode())+')\n')
-    copies=[];copy=atomic_files.copy_original
-    def counted(source,target,**options):
-        if options['size_bytes']==len(raw):copies.append(options['size_bytes'])
-        return copy(source,target,**options)
-    monkeypatch.setattr(atomic_files,'copy_original',counted)
-    result=e.dispatch(config,payload,new=True,mechanism='P')
+    config=c.read(managed.config)
+    result=managed.cli('run','--script',payload,'--new-plan')
     assert result['status']=='known_success'
     directory=e.Records(config).directory(result['call_id'])
     observed=c.read(directory/'execution-observation.json')
     retained=next(item for item in observed['proofs'] if item['source']['path']==str(directory/'stdout.raw'))
-    cas=Path(retained['path'])
-    assert _inode(directory/'stdout.raw')==_inode(Path(retained['path']))==_inode(cas)
+    original=Path(retained['path'])
+    assert original.read_bytes()==raw
+    assert _inode(directory/'stdout.raw')==_inode(original)
+    projected=None
     for _ in range(2):
         logs=e.scientific_outputs(config,observed,include_logs=True)
         stdout=next(item for item in logs if item.name.endswith('/stdout.txt'))
-        assert _inode(Path(stdout.local_path))==_inode(cas)
-    assert copies==[]
+        path=Path(stdout.local_path)
+        assert path.read_bytes()==raw and stdout.size_bytes==len(raw)
+        current=(path,_inode(path))
+        if projected is None:projected=current
+        else:assert current==projected

@@ -13,6 +13,23 @@ from test_native_execution_inputs import chain, _reviewed_execution
 from scidiscovery.research_loop.cli import main
 
 
+def _assert_maintenance_ledger(root, original, config, call, *, settled):
+    current = {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
+    assert all(current[name] == raw for name, raw in original.items())
+    added = set(current) - set(original)
+    if not settled:
+        assert not added
+        return
+    assert len(added) == 1
+    event = json.loads(current[added.pop()])
+    records = e.Records(config)
+    reservation = records.accepted(call)['execution_reservation']
+    assert event['kind'] == 'resource_settle'
+    assert event['reservation'] == reservation
+    assert event['observation'] == q._ref(root, records.directory(call) / 'execution-observation.json')
+    assert event['actual'] == budget.execution_reservation(root, reservation)['actual']
+
+
 def _clock(monkeypatch):
     now = dict(at_unix=100., at_boottime=100., boot_id='old-boot')
     monkeypatch.setattr(budget, 'clock_stamp', lambda: dict(now))
@@ -106,9 +123,10 @@ def test_clock_bridge_rejects_unpaused_stale_or_elapsed_checkpoints(tmp_path, mo
         budget._paused_checkpoint(root, dict(settings, time_budget_basis='elapsed'), [])
 
 
+@pytest.mark.process_e2e
 def test_cross_boot_original_maintenance_collects_without_scientific_dispatch(chain, capsys, monkeypatch):
     root, backend, output, active, config, _ = _reviewed_execution(chain, capsys)
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(active).with_name('research.json'))]) == 2
     call = json.loads(capsys.readouterr().out)['call_id']; records = e.Records(config)
     accepted = (records.directory(call) / 'accepted.json').read_bytes()
     original_ledger = {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')}
@@ -138,7 +156,7 @@ def test_cross_boot_original_maintenance_collects_without_scientific_dispatch(ch
     assert observed['external_run_id'] == records.external(call) and observed['outputs']
     assert backend.submits == 1 and len(backend.prepared) == 1
     assert (records.directory(call) / 'accepted.json').read_bytes() == accepted
-    assert {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == original_ledger
+    _assert_maintenance_ledger(root, original_ledger, config, call, settled=True)
     assert all(path.read_bytes() == raw for path, raw in old_seals.items())
     missing = '9999-' + 'f' * 32
     assert controller.execution_resume(root, 6, missing, maintenance='query', **args)['status'] == 'unknown'
@@ -166,10 +184,11 @@ def test_cross_boot_original_maintenance_collects_without_scientific_dispatch(ch
     ('cancel', 'cancelled', 0, 'cancelled'),
     ('cancel', 'unknown', 2, 'unknown'),
 ])
+@pytest.mark.process_e2e
 def test_original_maintenance_cli_reports_control_outcome(
         chain, capsys, monkeypatch, action, state, expected_code, expected):
     root, backend, output, active, config, _ = _reviewed_execution(chain, capsys)
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(active).with_name('research.json'))]) == 2
     call = json.loads(capsys.readouterr().out)['call_id']
     records = e.Records(config); directory = records.directory(call)
     accepted = (directory / 'accepted.json').read_bytes()
@@ -207,7 +226,7 @@ def test_original_maintenance_cli_reports_control_outcome(
     assert cancellations == ([records.external(call)] if action == 'cancel' else [])
     assert backend.submits == 1 and len(backend.prepared) == 1
     assert (directory / 'accepted.json').read_bytes() == accepted
-    assert {path.name: path.read_bytes() for path in (root / 'control-ledger').glob('*.json')} == ledger
+    _assert_maintenance_ledger(root, ledger, config, call, settled=action == 'collect' and expected_code == 0)
     assert all(path.read_bytes() == raw for path, raw in seals.items())
 
 

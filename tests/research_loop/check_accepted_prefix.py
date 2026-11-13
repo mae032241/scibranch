@@ -120,7 +120,8 @@ def test_fork_uses_selected_task_input_snapshot_and_freezes_public_members(insta
 
 def test_cold_controller_without_disposable_route_starts_at_the_current_accepted_job(instance,monkeypatch):
     from scidiscovery.research_loop import handoff_state
-    for step in range(1,9):seal(instance,step,parents=[step-1] if step>1 else [])
+    # No direct predecessor input: an old seal is irrelevant to this routing check.
+    for step in range(1,9):seal(instance,step)
     (instance/'host-history/controller-route.json').unlink(missing_ok=True)
     read=c.read
     class RoutedCurrent(Exception):pass

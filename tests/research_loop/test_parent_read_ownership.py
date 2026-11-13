@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from scidiscovery.research_loop import (
-    accepted_budget, accepted_prefix, candidate_nominations, candidate_refs, contracts as c,
+    accepted_budget, accepted_prefix, accepted_search, candidate_nominations, candidate_refs, contracts as c,
     handoff_state, originals, qualification as q,
 )
 from test_history_handoff import scene, finish
@@ -48,7 +48,7 @@ def test_original_and_control_source_share_one_physical_parse(scene, monkeypatch
         with handoff_state.scope(scene):
             one = handoff_state.source(scene, 1, resolve_choices=first)
             two = handoff_state.source(scene, 1, resolve_choices=not first)
-            facts = handoff_state.source_facts(scene, 1)
+            facts = handoff_state.source_facts(scene, 1, head=accepted_budget.read(scene))
             assert len(one) == len(two) == 4
             assert handoff_state.source_from_facts(facts, resolve_choices=False)[1] is facts['payload']
             assert handoff_state.source_from_facts(facts)[2] is facts['seal']
@@ -165,7 +165,7 @@ def test_compared_provenance_document_feeds_status_without_a_second_read(scene, 
 def test_source_projection_consumers_do_not_load_or_accept(scene, monkeypatch):
     finish(scene, 1, 'H', [], action='wait')
     job = c.build_job(scene, 2, 'E', [1])
-    facts = handoff_state.source_facts(scene, 1)
+    facts = handoff_state.source_facts(scene, 1, head=accepted_budget.read(scene))
     ref = job['direct_refs'][0]
     member = accepted_prefix.member(scene, accepted_prefix.for_job(job), 1)
     _, public = c._parent_public(job, ref, source=facts)
@@ -262,8 +262,8 @@ def test_source_cache_is_bound_to_origin_and_retained_attempt(tmp_path):
         c.write(original / 'native-evidence/001/result-identity.json',
             dict(job_ref=dict(path=str(original / 'jobs/001.json')), raw_ref=c.file_ref(raw)))
     with handoff_state.scope(root):
-        first = handoff_state.source_facts(root, 1, owner=owners[0], resolve_choices=False)
-        second = handoff_state.source_facts(root, 1, owner=owners[1], resolve_choices=False)
+        first = handoff_state.source_facts(root, 1, owner=owners[0], head=None, resolve_choices=False)
+        second = handoff_state.source_facts(root, 1, owner=owners[1], head=None, resolve_choices=False)
         assert first is not second
         assert first['payload']['summary'] == 'one' and second['payload']['summary'] == 'two'
         wrong = originals.NodeSource(owners[0].origin_identity, 1, owners[0].original_root,
@@ -276,7 +276,7 @@ def test_new_job_binds_new_configuration_after_parent_facts_were_loaded(scene):
     from test_configuration_updates import edit
     parent, _, _ = finish(scene, 1, 'H', [], action='wait')
     with handoff_state.scope(scene):
-        facts = handoff_state.source_facts(scene, 1)
+        facts = handoff_state.source_facts(scene, 1, head=accepted_budget.read(scene))
         frozen_parent = deepcopy(facts['job'])
         edit(scene, model='fixture-next-node')
         job = c.build_job(scene, 2, 'E', [1])
@@ -309,7 +309,10 @@ def test_nomination_dict_consumes_supplied_sealed_source_without_loading(monkeyp
 def test_inherited_projection_reuses_owner_mapping_without_renaming_science(monkeypatch):
     owner = originals.NodeSource(dict(goal_id='origin', settings_ref=dict(path='/origin/settings.json')),
         2, '/origin', Path('/retained'),entries=())
-    job = dict(step=2,role='H',history=dict(candidate_ids=['raw'], candidate_references={'raw': 'W001-C001'}))
+    prefix=accepted_prefix.empty(Path('/origin'),dict(goal_id='origin'))
+    prefix.update(cutoff=1,count=1)
+    job = dict(step=2,role='H',history=dict(prefix=prefix,
+        candidate_ids=['raw'], candidate_references={'raw': 'W001-C001'}))
     mapping = {'raw': 'source:origin:raw'}
 
     def forbidden(*args, **kwargs):
@@ -330,18 +333,21 @@ def test_inherited_projection_reuses_owner_mapping_without_renaming_science(monk
     facts=dict(owner=owner,job=job,seal=seal,seal_ref={},payload=authored,observation=observation)
     calls=[]
 
-    def produce_mapping(source,current):
-        assert source is owner and current is job
-        calls.append(source)
-        return mapping
+    class AcceptedRows:
+        def row(self, key):
+            assert key==accepted_search.key('candidate',mapping['raw'])
+            calls.append(key)
+            return dict(origin_identity=owner.origin_identity,first_step=1,
+                observation=dict(id=mapping['raw']))
 
-    monkeypatch.setattr(handoff_state,'sealed_facts',lambda *args,**kwargs:facts)
-    monkeypatch.setattr(candidate_refs,'source_input_mapping',produce_mapping)
+    head=AcceptedRows()
     monkeypatch.setattr(c,'read_scientific_output',forbidden)
+    monkeypatch.setattr(accepted_budget,'read',forbidden)
     with handoff_state.scope(Path('/consumer')):
-        handoff_state.observation(Path('/consumer'),job,seal)
-        monkeypatch.setattr(candidate_refs,'source_input_mapping',forbidden)
-        assert handoff_state.source_facts_from_sealed(Path('/consumer'),facts) is facts
-    assert calls==[owner] and facts['input_mapping'] is mapping
+        handoff_state.observation_from_facts(Path('/consumer'),facts,head=head)
+        produced=facts['input_mapping']
+        assert handoff_state.source_facts_from_sealed(Path('/consumer'),facts,head=head) is facts
+    assert calls==[accepted_search.key('candidate',mapping['raw'])]
+    assert facts['input_mapping'] is produced and produced==mapping
     assert facts['control'][1]['candidate_recommendation']=='source:origin:raw'
     assert facts['payload']['candidate_recommendation']=='raw'

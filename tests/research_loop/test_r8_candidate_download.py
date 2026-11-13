@@ -99,7 +99,11 @@ def test_recommended_candidate_button_downloads_exact_retained_bytes_with_curren
             super().serve_forever(**options)
 
     monkeypatch.setattr(instance_ui, 'ThreadingHTTPServer', Server)
-    monkeypatch.setattr(instance_ui, 'InstanceUI', lambda *args, **options: ui)
+    original_ui = instance_ui.InstanceUI
+    class PreparedUI(original_ui):
+        def __new__(cls, *args, **options):
+            return ui
+    monkeypatch.setattr(instance_ui, 'InstanceUI', PreparedUI)
     monkeypatch.setattr(instance_ui, 'print', lambda *args, **options: None, raising=False)
 
     def serve():

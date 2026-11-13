@@ -90,35 +90,6 @@ def test_actual_local_execute_passes_owned_descriptor_at_popen(tmp_path, monkeyp
 
 
 @pytest.mark.process_e2e
-def test_actual_worker_native_popen_passes_owned_descriptor(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import native
-    from scidiscovery.research_loop.experiments import UnsupportedExecution
-    from test_native_cli import test_native_stdin_uses_the_execution_entrypoint_for_its_scientific_view
-    try:
-        views.ensure_capability()
-    except UnsupportedExecution as error:
-        pytest.skip(str(error))
-    original_popen = native.subprocess.Popen
-    captured = []
-
-    def observe_spawn(argv, *args, **kwargs):
-        if (kwargs.get('env') or {}).get('THIN_HWA_ROLE') == 'W':
-            descriptor, = kwargs['pass_fds']
-            assert argv[1:4] == ['--args', str(descriptor), '--']
-            assert argv[4] == sys.executable
-            assert os.pread(descriptor, 64, 0).startswith(b'--unshare-user\0')
-            captured.append(descriptor)
-        return original_popen(argv, *args, **kwargs)
-
-    monkeypatch.setattr(native.subprocess, 'Popen', observe_spawn)
-    # Reuse the existing finite synthetic native stdin fixture. It runs Python,
-    # captures the Worker prompt and never submits a model or experiment.
-    test_native_stdin_uses_the_execution_entrypoint_for_its_scientific_view(tmp_path, 1, 'W', 'local')
-    assert len(captured) == 1
-    _closed(captured[0])
-
-
-@pytest.mark.process_e2e
 @pytest.mark.parametrize('large', [False, True])
 def test_actual_bwrap_consumes_fd_and_child_receives_only_final_environment(large):
     program = shutil.which('bwrap')

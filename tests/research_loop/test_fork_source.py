@@ -106,7 +106,7 @@ def test_completed_parent_with_original_unknown_managed_call_cannot_fork(tmp_pat
     # A retained historical pre-wait seal is a genuine unknown call; it is not
     # manufactured by changing a sealed terminal or reconciling future effects.
     with monkeypatch.context() as patch:
-        patch.setattr(managed_wait, 'before_seal', lambda *args: None)
+        patch.setattr(managed_wait, 'before_seal', lambda *args, **kwargs: None)
         finish(root, 2, 'W', [1], preserve_native_intent=True, mechanism_findings=[
             dict(mechanism=label, basis='blocked', finding='Original backend call remains pending.')
             for label in ('P', 'Q')])

@@ -13,7 +13,7 @@ from scidiscovery import execution_security as security
 from scidiscovery.research_loop import contracts as c, controller, execution_authority as authority
 from scidiscovery.research_loop import qualification as q
 from scidiscovery.research_loop.instance_ui import InstanceUI
-from test_formal_review import LAUNCHER
+from test_native_execution_inputs import chain, _reviewed_execution
 from test_history_handoff import finish
 
 
@@ -88,16 +88,13 @@ def test_loopback_host_rejects_origin_and_old_boot_without_http(tmp_path):
 
 
 @pytest.mark.process_e2e
-def test_exact_review_to_ui_receipt_rejects_forgery_and_never_dispatches(tmp_path, monkeypatch):
-    # Reuses the real thin native/seal/review route with synthetic platform events.
-    # The grant below is only an opaque authority-binding fixture: no budget owner
-    # or TCAD admission is implemented/claimed in this P3c test.
-    launcher = tmp_path / 'codex'; launcher.write_text('#!' + sys.executable + '\n' + LAUNCHER); launcher.chmod(0o700)
-    home = tmp_path / 'native'; home.mkdir(); monkeypatch.setenv('CODEX_HOME', str(home))
-    monkeypatch.delenv('REVIEW_REUSE_AUTHOR', raising=False); monkeypatch.delenv('REVIEW_MISSING_AUTHOR', raising=False)
-    root, secret_file = prepare(tmp_path, launcher=[str(launcher)])
-    assert controller.run(root)['status'] == 'finish'
-    job, _, record = finish(root, 6, 'W', [2, 5])
+def test_exact_review_to_ui_receipt_rejects_forgery_and_never_dispatches(chain, capsys):
+    # Component producers bind a real exact subject and independent synthetic
+    # reviewer; this UI receipt grants no adapter/resource dispatch permission.
+    root, _, _, _, _, _ = _reviewed_execution(chain, capsys)
+    secret_file = root / 'operator.key'
+    job = c.read(root/'jobs/006.json')
+    record = c.host_record(c.workspace(root, 6))
     assert len(job['execution_qualifications']) == 1
     ref = job['execution_qualifications'][0]; subject = q._read(root, ref)['subject']
     ui = InstanceUI(root, secret_file=secret_file); ui.host = '127.0.0.1:18752'
@@ -121,7 +118,7 @@ def test_exact_review_to_ui_receipt_rejects_forgery_and_never_dispatches(tmp_pat
     before = original.read_bytes()
     assert ui.post('/requests/' + request_id + '/decision', **arguments)[0] == 303
     assert original.read_bytes() == before
-    assert authority.status(root, request_id, secret=ui.secret)['production'] == 'blocked_pending_resource_gate'
+    assert authority.status(root, request_id, secret=ui.secret)['production'] == 'trusted_resource_gate_required'
     assert not list(root.glob('**/accepted.json')) and not list(root.glob('**/submission.json'))
     with pytest.raises(ValueError, match='different content'):
         ui.post('/requests/' + request_id + '/decision', **dict(arguments,

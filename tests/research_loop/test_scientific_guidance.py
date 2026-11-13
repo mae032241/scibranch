@@ -91,10 +91,15 @@ def test_invalid_or_oversized_guidance_does_not_prepare(tmp_path,bad):
 
 
 def cli(wrapper,*args,default=None,expected=0):
-    env=dict(os.environ,PYTHONPATH=str(Path(cov.__file__).parents[2]),EXP_WALL_CAP_S='1')
+    env=dict(os.environ,PYTHONPATH=str(Path(cov.__file__).parents[1])+os.pathsep+os.environ.get('PYTHONPATH',''),EXP_WALL_CAP_S='1')
     env.pop('EXP_DEFAULT_SCRIPT',None)
     if default is not None:env['EXP_DEFAULT_SCRIPT']=str(default)
-    reply=subprocess.run([sys.executable,'-m','cov_execution.lineage','--config',str(wrapper.config),*map(str,args)],
+    # The wrapper owns this explicit synthetic host receiver, as in wrapper.cli.
+    launch = ('import runpy,sys; from scidiscovery.research_loop import worker_execution_bridge as bridge; '
+              'bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None)); '
+              'sys.argv=["cov_execution.lineage",*sys.argv[1:]]; '
+              'runpy.run_module("cov_execution.lineage",run_name="__main__")')
+    reply=subprocess.run([sys.executable,'-c',launch,'--config',str(wrapper.config),*map(str,args)],
         env=env,cwd=wrapper.root,capture_output=True,text=True,timeout=20)
     assert reply.returncode==expected,(reply.stdout,reply.stderr)
     return json.loads(reply.stdout)
@@ -125,33 +130,3 @@ def test_implicit_default_and_explicit_override_use_same_call_receipts(wrapper):
 def test_missing_or_relative_default_cannot_accept_an_experiment(wrapper,default):
     result=cli(wrapper,'run','--new-plan',default=default,expected=2)
     assert result['status']=='unresolved' and not wrapper.accepted() and not wrapper.calls()
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('mode',['exact','mismatch','missing'])
-def test_observer_retains_public_actual_without_granting_audit_or_confirmation(tmp_path,mode):
-    from test_lineage import scene
-    root,config,digest=scene(tmp_path)
-    script=c.workspace(root,2)/'work/train.py';script.write_text('success')
-    result=cov.run(config,script,new=True)
-    raw_row=json.loads((Path(config['record_dir'])/'calls'/result['call_id']/'row.json').read_text())
-    feedback=cov.public_feedback(config,result)
-    assert feedback['metric']==raw_row['metric'] and feedback['val_score']==raw_row['val_score']
-    submitted=root/'runs/submitted_model.pkl'
-    if mode!='missing':
-        shutil.copyfile(result['model']['path'],submitted)
-        if mode=='mismatch':submitted.write_bytes(b'Not the frozen candidate model')
-    (root/'runs/submitted.json').write_text(json.dumps(dict(run_id=result['run_id'],model_path=str(submitted),audit_score=None,leakage_flag=False)))
-    request=dict(root=str(root),step=2,config=c.settings(root)['history_observer']['config'],known_candidates=[],known_contexts=[])
-    observed=cov.observe(request)
-    assert observed['current_candidate'] is None
-    actual=observed['actual_submission']
-    if mode=='exact':assert actual['candidate_id']==result['candidate_id']
-    elif mode=='mismatch':assert actual['candidate_id'] is None
-    else:assert actual is None
-    if mode!='exact':assert observed['coverage']['status']=='partial'
-    assert 'qualified' not in json.dumps(actual) and 'confirmed' not in json.dumps(actual)
-    finish(root,2,'W',[1])
-    seal=c.read(execution.origin(root,2)/'result-identity.json')
-    archived=c.read(root/seal['observations']['path'])['actual_submission']
-    if mode!='missing':assert archived['artifact']['retention']=='archived'

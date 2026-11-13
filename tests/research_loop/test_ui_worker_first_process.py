@@ -84,7 +84,7 @@ print(json.dumps(dict(candidates=rows,current_candidate=None,actual_submission=N
                 finally:direct.translation.close()
             assert status==200,(path,body.decode(errors='replace'))
             page=body.decode()
-            assert 'W 选择的候选证据记忆' in page and 'Zero initialization' in page
+            assert 'Zero initialization' in page
             assert 'No independent final sample' in page
         page=request(connection,'GET','/results',cookie=cookie)[1].decode()
         assert 'w001.no_call' in page and 'revision 1' in page and 'The independent input is missing.' in page

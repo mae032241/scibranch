@@ -1094,7 +1094,7 @@ def _capture(root, job, payload, materials, *, inventory):
             facts=handoff_state.sealed_facts(root,step,owner=owner,known=supplied)
             if facts['seal_ref']!=member['seal_ref']:
                 raise ObserverIntegrityError('Observer source differs from its frozen prefix')
-            observed=handoff_state.observation_from_facts(root,facts)
+            observed=handoff_state.observation_from_facts(root,facts,head=inventory.head)
             prior_sources[key]=(facts,observed)
             if observed is not None:
                 remember_outputs(observed.get('managed_calls',[]),owner)
@@ -1372,8 +1372,9 @@ def resolve_implementation(root, object_id, receipts):
     from . import accepted_prefix
     try:receipt=accepted_prefix.member(root,receipts,step)
     except FileNotFoundError:receipt=None
-    from . import handoff_state, originals
-    facts=handoff_state.source_facts(root,step) if receipt else None
+    from . import accepted_budget, handoff_state, originals
+    head=accepted_budget.read(root) if receipt else None
+    facts=handoff_state.source_facts(root,step,head=head,base=head.base) if receipt else None
     job, _, seal, seal_sha = (handoff_state.source_from_facts(facts)
         if receipt else (None, None, None, None))
     if receipt is not None and seal_sha != receipt['seal_ref']:
@@ -1416,14 +1417,14 @@ def load_source_sequence_from_facts(root, before_step, *, source_facts, base, he
     events = budget._events_from_state(head)[0]
     def selected(step):
         if step not in source_facts:
-            source_facts[step] = handoff_state.source_facts(root, step, base=base)
+            source_facts[step] = handoff_state.source_facts(root, step, base=base, head=head)
         else:
             facts = source_facts[step]
             if 'raw_path' not in facts:
                 # Selected-fork inputs may have produced only their exact
                 # owner; complete that same owner, never select a new origin.
                 handoff_state.sealed_facts(root, step, owner=facts['owner'], known=facts)
-            handoff_state.source_facts_from_sealed(root, facts)
+            handoff_state.source_facts_from_sealed(root, facts, head=head)
         return handoff_state.source_from_facts(source_facts[step])
     if (Path(root) / originals.MANIFEST).exists():
         from . import handoff_state
@@ -1571,7 +1572,7 @@ def load_records_from_source_facts(root, sources, *, source_facts, write_cache=T
             from . import handoff_state
             facts = source_facts[step]
             observation = (facts['observation_view'] if 'observation_view' in facts else
-                handoff_state.observation_from_facts(root, facts))
+                handoff_state.observation_from_facts(root, facts, head=facts['accepted_head']))
             if observation['binding']['source_ref'] != raw_ref:
                 raise ValueError('Observer snapshot differs from scientific source')
         row = dict(step=step, role=job['role'], seal_ref=seal_sha, view=view, detail=detail,

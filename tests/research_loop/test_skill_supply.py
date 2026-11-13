@@ -172,7 +172,7 @@ def test_named_worker_edit_reexpands_only_explicit_role_references(tmp_path):
         'selected': dict(model='first-model', skill_set='first'),
         'unused': dict(model='unused-model', skill_set='second')})
     document = research_config.to_document(root)
-    assert document['agent']['roles'] == {'W': {'worker': 'selected'}}
+    assert document['agent']['roles'] == {'W': {'worker': 'selected','subagents':True}}
     document['agent']['workers']['selected'].update(model='next-model', skill_set='second')
     settings = research_config.validate_update(root, document)
     assert profiles.selected(settings, 'W')['model'] == 'next-model'
@@ -207,13 +207,11 @@ def test_no_role_selection_does_not_require_source_or_native_loading_contract(tm
     assert 'launcher' not in c.settings(root)['skills']
 
 
-def test_empty_sets_keep_custom_backend_and_native_permissions(tmp_path):
+def test_empty_sets_do_not_upgrade_custom_backend_subagent_permission(tmp_path):
     permissions = dict(workspace='danger-full-access', network=True, web='live', subagents=True)
-    root, _ = prepare(tmp_path, sets={'empty': dict(items=[])}, roles={'H': dict(skill_set='empty')},
-        launcher=['custom'], native_backend='protocol', native_options=permissions)
-    job = c.build_job(root, 1, 'H', [])
-    assert c.settings(root)['native_options'] == permissions
-    assert skill_supply.native_mounts(root, job) == [(str(c.workspace(root, 1) / '.agents/skills'),) * 2]
+    with pytest.raises(ValueError,match='does not support subagents'):
+        prepare(tmp_path, sets={'empty': dict(items=[])}, roles={'H': dict(skill_set='empty')},
+            launcher=['custom'], native_backend='protocol', native_options=permissions)
 
 
 def test_custom_backend_with_selected_skills_fails_before_creation(tmp_path):
@@ -356,11 +354,11 @@ def test_retired_skill_bindings_fail_before_reading_assets_or_launcher(tmp_path,
     assert not root.exists()
 
 
+@pytest.mark.process_e2e
 def test_current_fork_preserves_installation_binding_without_instance_skill_bytes(tmp_path, monkeypatch):
     from scidiscovery.research_loop import fork_runtime, fork_service
     parent, source = prepare(tmp_path, sets=dict(first=dict(items=['alpha'])))
     _finish(monkeypatch, parent, 1, 'H', [], action='analyze')
-    _finish(monkeypatch, parent, 2, 'A', [1], action='finish')
     child = tmp_path / 'child'
     limits = dict(max_tokens=200, max_seconds=30, max_steps=2)
     preview = fork_service.preview(parent, 1, child, budget=limits)

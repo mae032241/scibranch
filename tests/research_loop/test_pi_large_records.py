@@ -104,8 +104,8 @@ def test_large_session_record_meter_resume_and_exact_original(tmp_path):
     assert resumed.terminal()['coverage'] == 'terminal'
     assert resumed.snapshot()['tokens'] == pi_sessions.usage_tokens(USAGE)
     assert path.read_bytes() == original + appended
-    # The size change must not weaken immutable-original reconciliation.
-    path.write_bytes(original.replace('原始'.encode(), '改写'.encode(), 1))
+    # The SDK owns mutable context; the frozen session identity remains exact.
+    path.write_bytes(original.replace(b'exact-session', b'other-session', 1))
     with pytest.raises(ValueError, match='changed'): pi_sessions.recheck_prefix(acquired)
 
 
@@ -128,6 +128,7 @@ def test_large_total_size_is_valid_binding_and_streamed_proof(tmp_path, monkeypa
     class Stream:
         def __init__(self): self.remaining = size; self.read_sizes = []
         def fileno(self): return 42
+        def readline(self, count): return header
         def read(self, count):
             self.read_sizes.append(count)
             data = b'x' * min(count, self.remaining); self.remaining -= len(data)
@@ -145,7 +146,8 @@ def test_large_total_size_is_valid_binding_and_streamed_proof(tmp_path, monkeypa
     assert meter.verified_offset == size and meter.fault is None
     pi_sessions.recheck_prefix(dict(session=session, info=info, digest=Digest()))
     assert len(acquired) == 2
-    assert all(stream.remaining == 0 for stream in acquired)
+    assert acquired[0].remaining == 0
+    assert acquired[1].remaining == size  # Resume checks identity, without rehashing SDK context.
     assert all(0 < count <= 1024 * 1024 for stream in acquired for count in stream.read_sizes)
 
 

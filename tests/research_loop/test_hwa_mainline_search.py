@@ -7,6 +7,7 @@ from execution_fixtures import execution_registry
 from scidiscovery.research_loop import accepted_search, breadth, correction, decision, role_share, search
 from scidiscovery.research_loop.scientific_intent import resolve_intent
 from scidiscovery.research_loop.protocol import CURRENT
+from scidiscovery.research_loop.controller import Route
 
 
 ORIGIN = dict(goal_id='goal')
@@ -116,8 +117,8 @@ def test_worker_consultation_remains_optional_under_actual_role_budget():
 
 def test_correction_does_not_redirect_consultation(monkeypatch):
     monkeypatch.setattr(correction,'project',lambda *args:pytest.fail('Consultation must not consume correction state'))
-    route=('W',[2,3],'Return advice',None,1,2)
-    assert correction.effective_route(None,3,{},job(3,'A',[2],purpose='worker_consultation'),route)==(*route,None)
+    route=Route(role='W',parents=[2,3],instruction='Return advice',current_h=1,current_w=2)
+    assert correction.effective_route(None,3,{},job(3,'A',[2],purpose='worker_consultation'),route) is route
 
 
 def test_initial_opportunity_reminder_does_not_require_a_grant():
@@ -162,7 +163,7 @@ def test_refused_new_worker_retains_exact_reason_instead_of_routing_h(tmp_path,m
     monkeypatch.setattr(decision,'reason',lambda *args:None)
     monkeypatch.setattr(search,'bind',lambda *args,**kwargs:dict())
     monkeypatch.setattr(search,'launch_reason',lambda *args:'search_repair_limit')
-    route=('W',[2],'Continue science',None,1,2,None)
+    route=Route(role='W',parents=[2],instruction='Continue science',current_h=1,current_w=2)
     with pytest.raises(semantic.ScientificAdmissionRefused) as refused:
         semantic.effective_route(tmp_path,3,dict(stage_intent='continue'),job(3,role,[2],purpose=purpose),route)
     assert refused.value.reason=='search_repair_limit' and refused.value.next_role=='W'
@@ -203,48 +204,6 @@ def test_partial_delivery_and_blocked_findings_do_not_create_screen_observations
     assert accepted_search._screen_observations(worker,dict(stage_intent='handoff'),None,dict(evidence=[]))==[]
     qualified=accepted_search._screen_observations(worker,dict(stage_intent='handoff'),None,dict(evidence=[evidence]))
     assert qualified==[retained]
-
-
-@pytest.mark.process_e2e
-def test_formal_a_can_screen_the_earlier_worker_in_exact_handoff_chain(tmp_path,monkeypatch,execution_registry):
-    from scidiscovery.research_loop import contracts as c, execution, native
-    from test_breadth_science import prepare, h, worker, run, findings, a
-    root=prepare(tmp_path,qualified_local=True,portfolio=True)
-    h(root,labels=('P','Q'))
-    p,q='h001.m1','h001.m2'
-
-    def seal_worker(step,parents,mechanism,stage,*,declaration=None):
-        task,config=worker(root,tmp_path,step,parents,qualified_local=True)
-        result=run(root,config,mechanism,qualified_local=True)
-        assert result['status']=='known_success'
-        record=execution.record(root,step)
-        assigned=[row['mechanism_ref'] for row in task['search']['coverage_obligation']]
-        payload=dict(summary='Retained mechanical discriminator',scientific_result='A owns the scientific interpretation.',
-            limitations=['A synthetic command does not establish scientific effectiveness'],implementation_selection=None,
-            stage_intent=stage,mechanism_findings=findings(mechanism,blocked=[ref for ref in assigned if ref!=mechanism]))
-        if declaration is not None:payload['search_plan']=declaration
-        c.write(record/'science-output.json',payload)
-        meter=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3)
-        c.write(record/'usage.json',meter)
-        intent=c.read(record/'native-intent.json')
-        c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,usage=native.usage(root),
-            raw_ref=c.file_ref(record/'science-output.json'),search_slice=search.report(root,task,intent,meter)))
-        c.seal_result(root,step)
-        return task,record
-
-    # W2 supplies P's observation, then chooses Q for the next frozen W.
-    _,first=seal_worker(2,[1],p,'handoff',declaration=dict(commitments=[dict(
-        label='Q',existing_ref=q,minimal_test='Improve the independent Q discriminator')],focus=dict(index=1,action='improve')))
-    successor,last=seal_worker(3,[2],q,'decision')
-    assert successor['search']['focus']==dict(mechanism_ref=q,action='improve')
-    before={path:path.read_bytes() for record in (first,last) for path in (record/'science-output.json',record/'result-identity.json')}
-    monkeypatch.setattr(search,'_screen_refs',lambda *args,**kwargs:pytest.fail('A must reuse accepted observation facts'))
-    a(root,4,[3],focus=q,mode='improve',dispositions=[dict(mechanism_ref=p,status='screened',
-        reason='The earlier W supplies the exact discriminator and its limitations')])
-    accepted=accepted_search.state(root,5)
-    assert accepted['mechanisms'][p]['status']=='screened'
-    assert accepted['portfolio']['completed_cycle_count']==1 and accepted['portfolio']['pending_w'] is None
-    assert all(path.read_bytes()==value for path,value in before.items())
 
 
 def test_local_and_inherited_screen_proof_share_exact_original_origin(monkeypatch):

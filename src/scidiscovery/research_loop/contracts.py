@@ -74,6 +74,8 @@ def native_outcome(record, *, original_record=None, output_path=None):
     from . import backends
     record=Path(record)
     outcome=read(regular(record/'native-outcome.json'))
+    if not isinstance(outcome, dict):
+        raise ValueError('Native outcome original must be an object')
     if not _native_outcome_candidate(outcome):return outcome
     try:
         meter=read(regular(record/'usage.json'))
@@ -536,12 +538,12 @@ def _parent_view(job, ref, *, source=None, limitation_bytes=1024):
     return view
 
 
-def _load_parent_source(root, step, *, base, sources, members, prefix, resolve_choices=False):
+def _load_parent_source(root, step, *, base, head, sources, members, prefix, resolve_choices=False):
     from . import handoff_state, accepted_prefix
     if step not in sources:
-        sources[step]=handoff_state.source_facts(root,step,base=base,resolve_choices=resolve_choices)
+        sources[step]=handoff_state.source_facts(root,step,base=base,head=head,resolve_choices=resolve_choices)
     elif 'payload' not in sources[step] or resolve_choices and 'control' not in sources[step]:
-        handoff_state.source_facts_from_sealed(root,sources[step],resolve_choices=resolve_choices)
+        handoff_state.source_facts_from_sealed(root,sources[step],head=head,resolve_choices=resolve_choices)
     if step not in members:
         members[step]=accepted_prefix.member(root,prefix,step)
     if members[step]['seal_ref'] != sources[step]['seal_ref']:
@@ -853,7 +855,7 @@ def _assessment_handoff(job, *, sources, members, policy):
     return view
 
 
-def _load_assessment_handoff(root, job, *, base, sources, members, policy):
+def _load_assessment_handoff(root, job, *, base, head, sources, members, policy):
     """Load only a source explicitly reached by this task's existing route."""
     from . import accepted_prefix, handoff_state
     while True:
@@ -868,7 +870,7 @@ def _load_assessment_handoff(root, job, *, base, sources, members, policy):
             elif step in members:
                 if 'payload' in sources[step]:
                     raise
-                handoff_state.source_facts_from_sealed(root,sources[step],resolve_choices=False)
+                handoff_state.source_facts_from_sealed(root,sources[step],head=head,resolve_choices=False)
             if step not in members:
                 members[step]=accepted_prefix.member(root,accepted_prefix.for_job(job),step)
 
@@ -934,7 +936,7 @@ def science_view(job, root=None):
             sources,members={},{}
             for ref in job['direct_refs']:
                 step=int(Path(ref['path']).parts[2])
-                source=_load_parent_source(root,step,base=base,sources=sources,members=members,
+                source=_load_parent_source(root,step,base=base,head=head,sources=sources,members=members,
                     prefix=accepted_prefix.for_job(job))
                 parents[step]=dict(facts=source,member=members[step],
                     public=_accept_parent_public(root,job,ref,source=source))
@@ -1907,12 +1909,12 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         materials=review_binding['materials'];selected=review_binding['selected']
     relay_predecessor = None
     if review_binding is None and step - 1 in parents:
-        predecessor = _load_parent_source(root, step - 1, base=base,
+        predecessor = _load_parent_source(root, step - 1, base=base, head=head,
             sources=parent_facts, members=parent_members, prefix=head['prefix'])
         if 'relayed_material_refs' in predecessor['seal']:
             relay_predecessor = step - 1
     for parent in ([] if review_binding is not None else parents):
-        facts=_load_parent_source(root,parent,base=base,sources=parent_facts,members=parent_members,
+        facts=_load_parent_source(root,parent,base=base,head=head,sources=parent_facts,members=parent_members,
             prefix=head['prefix'],resolve_choices=True)
         parent_source=handoff_state.source_from_facts(facts)
         parent_sources.append(parent_source)
@@ -2099,7 +2101,7 @@ def build_job(root: Path, step: int, role: str, parents: list[int], instruction=
         if 'assessment_handoff' in retained:
             job['assessment_handoff'] = retained['assessment_handoff']
     elif correction_request is None:
-        handoff = _load_assessment_handoff(root,job,base=base,sources=parent_facts,
+        handoff = _load_assessment_handoff(root,job,base=base,head=head,sources=parent_facts,
             members=parent_members,policy=policy)
         if handoff is not None:
             job['assessment_handoff'] = handoff
@@ -2556,7 +2558,7 @@ def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
     members={}
     for ref in job['direct_refs']:
         step=int(Path(ref['path']).parts[2])
-        _load_parent_source(root,step,base=base,sources=sources,members=members,
+        _load_parent_source(root,step,base=base,head=head,sources=sources,members=members,
             prefix=accepted_prefix.for_job(job))
     delivery_review.validate_parent(job,sources)
     inputs=qualification.input_facts(root,job,base=base,head=head,sources=sources,
@@ -2637,7 +2639,7 @@ def load_validated_input_facts(root,work,job,*,base,policy,head,sources=None):
     from . import history
     history.validate(root, work, job['history'])
     if 'assessment_handoff' in job:
-        handoff=_load_assessment_handoff(root,job,base=base,sources=sources,members=members,policy=policy)
+        handoff=_load_assessment_handoff(root,job,base=base,head=head,sources=sources,members=members,policy=policy)
         if job['assessment_handoff'] != handoff:
             raise ValueError('Assessment sources changed their exact W/H decision lineage')
         original = _assessment_original(job['assessment_handoff'],sources=sources)

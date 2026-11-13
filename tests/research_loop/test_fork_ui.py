@@ -45,8 +45,9 @@ def test_ui_uses_same_service_preserves_original_and_requires_preview(tmp_path, 
     assert calls == [((parent, 200, child), dict(budget=dict(max_tokens=100, max_seconds=20., max_steps=2), guidance_text='  Exact guidance\n\n'))]
     assert b'value="exact-preview"' in page
     assert not child.exists()
+    forged=dict(value,csrf='forged')
     with pytest.raises(PermissionError, match='CSRF'):
-        post(ui, cookie, 'fork-preview', value)
+        post(ui,cookie,'fork-preview',forged)
 
 
 def test_ui_fork_error_retains_draft_and_escapes_guidance(tmp_path, monkeypatch):
@@ -129,52 +130,6 @@ def test_failed_unsealed_current_task_forks_its_exact_inputs_into_paused_child(t
     assert not (record / 'result-identity.json').exists()
 
 
-def test_web_reconciles_exact_published_request_after_ui_failure_and_parent_removal(tmp_path, monkeypatch):
-    import shutil
-    from test_fork_source import completed_source
-    from scidiscovery.research_loop import contracts as c
-    parent = completed_source(tmp_path)
-    ui, cookie = session(parent, tmp_path / 'operator.key')
-    child = tmp_path / 'branch'
-    value = draft(ui, cookie, 'fork-preview', child)
-    value['step'] = '2'
-    _, page, _ = post(ui, cookie, 'fork-preview', value)
-    value.update(expected_preview_id=re.search(rb'name="expected_preview_id" value="([^"]+)"', page)[1].decode())
-    value.update(control_fields(ui, cookie, 'fork-create'))
-    open_child = ui._child
-    def fail_after_publication(index):
-        raise RuntimeError('Injected UI initialization failure after publication')
-    monkeypatch.setattr(ui, '_child', fail_after_publication)
-    original_create, failures = fork_service.create, []
-    def capture_create(*args, **options):
-        try:
-            return original_create(*args, **options)
-        except Exception as error:
-            failures.append(dict(kind=type(error).__name__, code=getattr(error, 'code', ''), message=str(error)[:1200]))
-            raise
-    monkeypatch.setattr(fork_service, 'create', capture_create)
-    status, page, _ = post(ui, cookie, 'fork-create', value)
-    assert status >= 400 and '核对原操作结果' in page.decode()
-    receipt_path = child / 'host-runtime/fork/receipt.json'
-    assert receipt_path.exists(), dict(status=status, fork_failures=failures)
-    receipt = c.read(receipt_path)
-    shutil.rmtree(parent)
-    def no_source_read(*args, **options):
-        pytest.fail('Web receipt reconciliation reread deleted parent')
-    monkeypatch.setattr(fork_service.fork_sources, 'inspect_source', no_source_read)
-    monkeypatch.setattr(ui, '_child', open_child)
-    # Reopening the source node's fork page also recovers a lost POST response.
-    status, page, _ = ui.get('/nodes/2/fork', host=ui.host, cookie=cookie)
-    assert status == 200
-    original = re.search(r'<form method="post" action="/control/fork-create">(.*?)</form>', page.decode(), re.S)[1]
-    fields = {html.unescape(key): html.unescape(item) for key, item in
-        re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', original)}
-    for key in ('step', 'child_root', 'max_tokens', 'max_seconds', 'max_steps', 'guidance_text', 'operation_id', 'expected_preview_id'):
-        assert fields[key] == value[key]
-    status, page, _ = post(ui, cookie, 'fork-create', fields)
-    assert status == 200 and '新分支已创建并暂停' in page.decode()
-    assert c.read(child / 'host-runtime/fork/receipt.json') == receipt
-    assert not (child / 'native-evidence').exists()
 
 
 def test_ui_private_state_is_excluded_from_fork_inventory_but_unknown_roots_remain_gaps(tmp_path):

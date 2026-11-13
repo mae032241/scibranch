@@ -93,13 +93,15 @@ def test_final_readonly_aliases_cover_editable_output_and_parent_views(project_v
 
 @pytest.mark.process_e2e
 def test_worker_wrap_keeps_scientific_hardlinks_readonly_at_all_project_aliases(project_view, tmp_path, monkeypatch):
-    from scidiscovery.research_loop import contracts, experiment_client, originals, skill_supply
+    from scidiscovery.research_loop import accepted_prefix, contracts, experiment_client, originals, skill_supply
     project, base, work, _ = project_view
     try:
         program = views.ensure_capability()
     except UnsupportedExecution as error:
         pytest.skip(str(error))
     root = tmp_path/'instance'
+    prefix = accepted_prefix.empty(root, dict(goal_id='project-mount-fixture'))
+    (root/prefix['visibility_root']['path']).mkdir(parents=True)
     original = tmp_path/'scientific-original.txt'
     original.write_text('scientific original')
     draft = work/'project/src/shared.txt'
@@ -112,8 +114,6 @@ def test_worker_wrap_keeps_scientific_hardlinks_readonly_at_all_project_aliases(
     monkeypatch.setattr(contracts, 'settings', lambda *args: settings)
     monkeypatch.setattr(experiment_client, '_input_rows', lambda job: [dict(path='inputs/data.txt')])
     monkeypatch.setattr(originals, 'material_path', lambda root, row: original)
-    monkeypatch.setattr(views, '_wake_mappings', lambda *args: [])
-    monkeypatch.setattr(views, '_author_context', lambda *args: None)
     monkeypatch.setattr(views, 'selected_code_mounts', lambda *args, **kwargs: [])
     monkeypatch.setattr(skill_supply, 'native_mounts', lambda *args: [])
     # Keep the actual wrap/mount_arguments/inode inventory path. This policy
@@ -135,7 +135,8 @@ for path in paths:
     # wrap accepts opaque argv; its declaration check sees an explicit inert
     # -c pair after Python's payload arguments, without executing a model.
     argv = [sys.executable, '-I', '-c', payload, *map(str, paths), str(base/'src'), '-c', declaration]
-    wrapped = views.wrap(root, dict(step=1, role='W', project=project), work, argv)
+    wrapped = views.wrap(root, dict(step=1, role='W', project=project,
+        history=dict(prefix=prefix)), work, argv)
     assert wrapped[0] == program
     assert isinstance(wrapped, views._BwrapCommand)
     with views.popen_arguments(wrapped) as (launch_args, pass_fds):

@@ -156,8 +156,13 @@ def live(root, job):
             if 'result' in row and (not registered or row['returncode'] is not None and type(row['returncode']) is not int
                     or not isinstance(row['result'],dict)):
                 raise ValueError('Registered result observation is malformed')
-            if 'mechanism_ref' in row and (not isinstance(row['mechanism_ref'],str) or row['mechanism_ref'] not in {item['mechanism_ref'] for item in (job.get('search') or {}).get('breadth',{}).get('mechanisms',[])}):
-                raise history.ObserverIntegrityError('Progress mechanism escaped frozen H combination')
+            if 'mechanism_ref' in row:
+                if not isinstance(row['mechanism_ref'],str):
+                    raise history.ObserverIntegrityError('Progress mechanism identity is malformed')
+                # Registered progress already consumes Records.accepted's exact
+                # worker/breadth binding; only the adapter projection needs H membership.
+                if not registered and row['mechanism_ref'] not in {item['mechanism_ref'] for item in (job.get('search') or {}).get('breadth',{}).get('mechanisms',[])}:
+                    raise history.ObserverIntegrityError('Progress mechanism escaped frozen H combination')
             if any(row[key] is not None and (not isinstance(row[key], str) or len(row[key].encode()) > 80)
                    for key in ('candidate_id', 'evaluation_key', 'parent_candidate')):
                 raise ValueError('Progress text exceeds its bound')

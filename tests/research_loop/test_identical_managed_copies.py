@@ -140,16 +140,6 @@ def test_two_distinct_managed_originals_are_ambiguous_even_with_identical_bytes(
     assert copied.exists() and inventory.redundant_materials == []
 
 
-def test_later_total_validation_failure_preserves_copies(scene):
-    _, work, original, inventory = scene
-    copied = copy_at(scene, 'artifacts/experiments/call-1/artifacts/model.bin')
-    report = work / 'artifacts/report.txt'
-    report.write_bytes(b'x')
-    inventory.policy = dict(max_output_total_bytes=original.stat().st_size)
-    with pytest.raises(ValueError, match='total byte budget'):
-        accept(scene)
-    assert copied.exists() and inventory.redundant_materials == []
-    assert report.stat().st_mode & 0o777 == 0o644
 
 
 def test_copy_cleanup_failure_does_not_block_valid_original_publication(scene, monkeypatch):

@@ -17,7 +17,10 @@ def test_scientific_references_do_not_open_payloads(tmp_path, monkeypatch):
     assert contracts.record_ref(source) == {'path': str(source)}
     expected = {'path': str(source), 'size_bytes': 2 * 1024 * 1024}
     assert contracts.file_ref(source) == expected
-    assert experiments.proof(source) == expected
+    proof = experiments.proof(source)
+    assert {key: proof[key] for key in expected} == expected
+    stat = source.stat()
+    assert proof['file_stat'] == [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
 
 
 def test_private_control_references_are_absent_from_scientific_projection():

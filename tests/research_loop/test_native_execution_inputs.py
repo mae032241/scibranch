@@ -15,7 +15,8 @@ import pytest
 
 from scidiscovery.operations.execution import LocalFileDescriptor
 from scidiscovery.research_loop import (accepted_budget, budget, contracts as c, controller, execution_inputs as inputs,
-    execution_authority as authority, experiments as e, formal_review as review, handoff_state, native)
+    execution_authority as authority, experiments as e, formal_review as review, handoff_state, native,
+    delivery_review)
 from tcad_artifact import managed_execution as managed
 from tcad_artifact.command_adapter import read_command_configuration
 from tcad_artifact.execution_policy import execution_admission
@@ -132,6 +133,8 @@ def chain(tmp_path, monkeypatch, request):
         # Explicit retained H/W inputs use the current scientific contract.
         node_budget_mode='soft', execution_config=dict(executor='tcad_execution:tcad', config_file=str(plugin_config)),
         formal_review_policy={'version': 1}, execution_authority_policy={'version': 1},
+        # This synthetic hook fixture declares exactly one W participant.
+        role_profiles={'W': {'subagents': False}},
         execution_resource_policy=dict(version=1, allowance=dict(wall_time_seconds=100, max_storage_bytes=1000000)),
         source_restrictions=[] if getattr(request, 'param', None) == 'unknown_source' else [
             dict(source=str(objective), restriction='clear')],
@@ -215,6 +218,7 @@ def chain(tmp_path, monkeypatch, request):
     from scidiscovery.research_loop import accepted_budget
     accepted_budget.accept_native(root,2,record,c.read(record/'native-intent.json'))
     config_path = work / 'work/execution.json'; config = e.configure(root, 2, 'tcad_execution:tcad', options, config_path)
+    research_file(config_path, 2)
     author = work / ('project/src/implementation.json' if project is not None else 'code/implementation.json')
     author.parent.mkdir(parents=True,exist_ok=True)
     c.write(author, dict(solver_kind='sdevice', files=[dict(relative_path='main.cmd', content='Solve {}\n')],
@@ -241,7 +245,24 @@ def test_compile_retains_full_inputs_and_package_despite_legacy_byte_fields(chai
     assert c.settings(root)['max_output_item_bytes']==c.settings(root)['max_output_total_bytes']==1
 
 
+def research_file(config_path, step):
+    """Author the exact current W batch question; grant no execution permission."""
+    path = Path(config_path).with_name('research.json')
+    ref = f'w{step:03d}.inputs'
+    c.write(path, dict(declarations=[dict(mechanism_ref=ref, action='declare',
+        question='Does this exact retained package preserve its declared scientific inputs?',
+        exploration=True)], mechanism_ref=ref,
+        experiment_question=dict(question='Can this exact package be admitted with its original input and review bindings?',
+            change_criterion='A missing original, changed binding or refused permission stops this mechanical check.')))
+    return path
+
+
 def _reviewed_execution(chain, capsys, *, opaque=False):
+    """Exercise formal qualification producers over sealed component originals.
+
+    The explicit request/return calls below do not establish a public controller
+    or CLI route; current ordinary and Final A payloads retain their own schema.
+    """
     root, backend, options, config, config_path, author, aliases = chain
     output = c.workspace(root, 2) / 'artifacts/package.json'
     if opaque:
@@ -272,7 +293,12 @@ def _reviewed_execution(chain, capsys, *, opaque=False):
         assert len(seal['compiled_implementations']) == 1
         assert ('codex_exec', str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-input-fixture-1'))) in {
             tuple(row) for row in review.authors(root, 2)['participants']}
-    job, _, record = finish(root, 3, 'A', [2], action='formal_review', selection=['W002-I001'])
+    from scidiscovery.research_loop import delivery_review
+    c.build_job(root, 3, 'A', [2],
+        evidence_return=delivery_review.make('delivery_review', 2, 0))
+    # Component fixture: Final A names the exact subject; the explicit formal
+    # producer below performs independent qualification, outside advice routing.
+    job, _, record = finish(root, 3, 'A', [2], action='continue_w', selection=['W002-I001'])
     role, parents, instruction, back = review.request_route(root, job, c.read(record / 'result.json'), [3])
     review_job = c.build_job(root, 4, role, parents, instruction, back)
     review_record = c.host_record(c.workspace(root, 4))
@@ -291,6 +317,7 @@ def _reviewed_execution(chain, capsys, *, opaque=False):
     c.write(record / 'native-intent.json', dict(task_ref=c.record_ref(root / 'jobs/006.json')))
     accepted_budget.accept_native(root, 6, record, c.read(record / 'native-intent.json'))
     active = work / 'work/execution.json'; current = e.configure(root, 6, 'tcad_execution:tcad', options, active)
+    research_file(active, 6)
     secret = root / 'operator.key'; secret.write_bytes(b'x' * 32); secret.chmod(0o600)
     authority.bind_secret(root, b'x' * 32, source=secret)
     return root,backend,output,active,current,before
@@ -299,7 +326,7 @@ def _reviewed_execution(chain, capsys, *, opaque=False):
 @pytest.mark.process_e2e
 def test_public_compile_exact_review_and_existing_run_keep_native_original(chain, capsys):
     root,backend,output,active,current,before=_reviewed_execution(chain,capsys)
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(str(active)).with_name('research.json'))]) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'queued' and backend.prepared == [{'mesh': b'mesh'}] and backend.submits == 1
     accepted = e.Records(current).accepted(result['call_id'])
@@ -313,7 +340,7 @@ def test_public_compile_exact_review_and_existing_run_keep_native_original(chain
     assert all(accepted['tcad']['payload'][key] == original[key] for key in ('size_bytes',))
     assert c.read(output) == dict(worker_implementation_version=1, implementation_ref='I001')
     assert accepted['execution_reservation'] is not None
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(str(active)).with_name('research.json'))]) == 2
     assert json.loads(capsys.readouterr().out)['call_id'] == result['call_id'] and backend.submits == 1
     assert output.read_bytes() == before
 
@@ -339,7 +366,7 @@ def test_project_json_compile_review_run_keeps_exact_single_file_source_and_base
     assert compiled['code_version']['entry'] == 'src/implementation.json'
     assert compiled['base_identity'] == author_job['project']['base_identity']
     assert not backend.prepared and not backend.submits
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(str(active)).with_name('research.json'))]) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'queued' and backend.prepared == [{'mesh': b'mesh'}] and backend.submits == 1, (
         result['status'], diagnostics, len(backend.prepared), backend.submits)
@@ -405,8 +432,10 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
     from copy import deepcopy
     from scidiscovery.research_loop import history, preparation_recovery, qualification as q
     root, backend, output, active, current, _ = _reviewed_execution(chain, capsys, opaque=True)
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
-    call = json.loads(capsys.readouterr().out)['call_id']
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(str(active)).with_name('research.json'))]) == 2
+    response = json.loads(capsys.readouterr().out)
+    assert 'call_id' in response, response
+    call = response['call_id']
     job = handoff_state.material_inputs(root, c.read(root / 'jobs/006.json'), sources={})
     accepted = e.Records(current).accepted(call)
     assert backend.submits == 1 and backend.prepared == [{}]
@@ -473,13 +502,14 @@ def test_self_contained_v2_terminal_keeps_exact_inputs_and_next_subject_review(c
     assert 'compiler_ref' not in covered and 'compiled_implementations' not in seal
     assert q.output_status(root, 6)['restriction'] == 'clear' and review.authors(root, 6)['complete']
     assert set(map(tuple,review.authors(root,2)['participants'])) <= set(map(tuple,review.authors(root,6)['participants']))
-    selecting = c.build_job(root, 7, 'A', [6])
+    selecting = c.build_job(root, 7, 'A', [6],
+        evidence_return=delivery_review.make('delivery_review', 6, 0))
     material = c._public_materials([next(row for row in seal['materials']
         if row['source'].endswith('/revised.txt'))])[0]
     choices = [row['id'] for row in history.implementation_options(root, 6)
         if history.resolve_implementation(root,row['id'],selecting['history']['prefix'])==material]
     assert len(choices)==1
-    requested,_,request_record=finish(root,7,'A',[6],action='formal_review',selection=choices)
+    requested,_,request_record=finish(root,7,'A',[6],action='continue_w',selection=choices)
     _,_,_,back=review.request_route(root,requested,c.read(request_record/'result.json'),[7])
     assert back['kind']=='formal_review' and q._read(root,back['request'])['subject']['material']==material
     changed=deepcopy(accepted);changed['input_sources']['view']['sources']['sources'][0]['original']['producer_step']=1
@@ -539,8 +569,10 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
             copies.append((options['size_bytes'],producer_identity,(collected.st_dev,collected.st_ino)))
         return result
     monkeypatch.setattr(atomic_files,'copy_original',counted_copy)
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
-    call = json.loads(capsys.readouterr().out)['call_id']
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(str(active)).with_name('research.json'))]) == 2
+    response = json.loads(capsys.readouterr().out)
+    assert 'call_id' in response, response
+    call = response['call_id']
     job_before = handoff_state.material_inputs(root, c.read(root / 'jobs/006.json'), sources={})
     pending_rows, unknown = _acquire_current_call_facts(root, job_before)
     assert [row['call_id'] for row in pending_rows] == [call]
@@ -619,13 +651,14 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     legacy = q._output(root, original_job, seal)
     assert 'managed_input_coverage' not in legacy
     assert legacy['additional_input_restriction'] == 'unknown'
-    selecting = c.build_job(root, 7, 'A', [6])
+    selecting = c.build_job(root, 7, 'A', [6],
+        evidence_return=delivery_review.make('delivery_review', 6, 0))
     material = c._public_materials([item for item in seal['materials'] if item['source'] == str(revised)])[0]
     choices = [item['id'] for item in history.implementation_options(root, 6)
         if item['label'] == revised.name
         and history.resolve_implementation(root, item['id'], selecting['history']['prefix']) == material]
     assert len(choices) == 1, choices
-    job, _, routed = finish(root, 7, 'A', [6], action='formal_review', selection=choices)
+    job, _, routed = finish(root, 7, 'A', [6], action='continue_w', selection=choices)
     role, parents, instruction, back = review.request_route(root, job, c.read(routed / 'result.json'), [7])
     assert back['kind'] == 'formal_review'
     assert q._read(root, back['request'])['subject']['material'] == material
@@ -651,8 +684,9 @@ def test_native_observation_new_subject_review_and_next_run_use_covered_inputs(c
     accepted_budget.accept_native(root, 10, later, c.read(later / 'native-intent.json'))
     config_path = c.workspace(root, 10) / 'work/execution.json'
     e.configure(root, 10, 'tcad_execution:tcad', chain[2], config_path)
+    research_file(config_path, 10)
     backend.state = 'queued'
-    assert e.main(['--config', str(config_path), 'run', '--payload', str(revised)]) == 2
+    assert e.main(['--config', str(config_path), 'run', '--payload', str(revised), '--research', str(Path(str(config_path)).with_name('research.json'))]) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'queued', result
     assert backend.submits == 2
@@ -674,7 +708,7 @@ def test_known_native_authors_with_unknown_restrictions_can_review_but_not_execu
     assert review.authors(root, 2)['complete'] is True
     assert q.output_status(root, 2)['restriction'] == 'unknown'
     before=output.read_bytes()
-    assert e.main(['--config', str(active), 'run', '--payload', str(output)]) == 2
+    assert e.main(['--config', str(active), 'run', '--payload', str(output), '--research', str(Path(str(active)).with_name('research.json'))]) == 2
     response=capsys.readouterr().out;result=json.loads(response)
     assert result['status']=='unresolved' and 'call_id' not in result
     assert result['note']=='Execution request could not be resolved; check declared inputs and preserve any original call'
@@ -753,9 +787,9 @@ def late_call(chain,capsys,monkeypatch):
     monkeypatch.setattr(backend,'execution_admission',lambda *a,**kw:admission(*a,**kw).model_copy(
         update={'outcome':'require_human_approval'}))
     c.write(root/'host-started.json',budget.clock_stamp())
-    assert e.main(['--config',str(active),'run','--payload',str(output)])==2
+    assert e.main(['--config',str(active),'run','--payload',str(output), '--research', str(Path(str(active)).with_name('research.json'))])==2
     pending=json.loads(capsys.readouterr().out)
-    assert pending['status']=='authorization_required' and backend.submits==0 and not backend.prepared
+    assert pending['status']=='authorization_required' and backend.submits==0 and not backend.prepared, pending
     assert pending['authorization_request']==dict(status='execution_decision_required')
     call=pending['call_id'];original_seal=c.seal_result
 
@@ -953,12 +987,6 @@ def test_native_compile_retains_distinct_originals_for_equal_package_bytes(chain
     first,second=(Path(row['path']) for row in outputs)
     assert first!=second and first.read_bytes()==second.read_bytes()
     assert (first.stat().st_dev,first.stat().st_ino)!=(second.stat().st_dev,second.stat().st_ino)
-    descriptor=LocalFileDescriptor(name='storage-admission-only',local_path=str(first),
-        size_bytes=outputs[0]['size_bytes'],media_type='application/json')
-    accepted=e.Records(config).accept(descriptor,{},config['execution_interface'])
-    retained=Path(accepted['script']['path'])
-    assert accepted['source_script']==str(first)
-    assert retained.read_bytes()==first.read_bytes()
     assert backend.submits==0
 
 

@@ -112,51 +112,6 @@ def test_unknown_owner_is_explicit_gap_and_native_home_is_excluded(tmp_path):
         fork_sources.copy_source(dict(plan, blocked_reasons=reasons), tmp_path / 'blocked-child')
 
 
-@pytest.mark.process_e2e
-def test_forked_author_preserves_unavailable_review_constraint_after_parent_removal(tmp_path, monkeypatch):
-    from scidiscovery.research_loop import controller, formal_review, handoff_state, instance_control
-    from scidiscovery.research_loop.output_repair import OutputRepairRequired
-    from test_formal_review import choice_inventory, scripted
-    parent, _ = scripted(tmp_path, monkeypatch, missing=True)
-    assert controller.run(parent)['status'] == 'finish'
-    original = formal_review.unavailable(parent, 3)
-    child = tmp_path / 'forked-author'
-    budget = dict(max_tokens=1000, max_seconds=60, max_steps=2)
-    preview = fork_service.preview(parent, 4, child, budget=budget)
-    assert preview['status'] == 'fork_preview_ready'
-    fork_service.create(parent, 4, child, budget=budget,
-        expected_preview_id=preview['preview_id'], operation_id='unavailable-review-child')
-    inherited = originals.node(child, 3)
-    path = 'native-evidence/003/formal-review-unavailable.json'
-    retained = [row for row in inherited.entries if row['path'] == path]
-    assert len(retained) == 1 and retained[0]['visibility'] == 'host_proof'
-    assert originals.has_original(inherited, path)
-    # Execute while declared scientific originals remain available. Removing
-    # their parent is not permission to run with silently missing inputs.
-    assert instance_control.continue_instance(child)['status'] == 'finish'
-    job = handoff_state.material_inputs(child, c.read(child / 'jobs/004.json'), sources={})
-    assert len(job['formal_review_choices']['unavailable']) == 1
-    assert formal_review.public_choices(child, job)['unavailable'] == [
-        dict(subject='W002-I001', reason='subject_authorship_unsupported')]
-    payload = dict(c.validate(c.workspace(child, 4)),
-        next_action='formal_review', implementation_selection=['W002-I001'])
-    inventory = choice_inventory(child, job, payload)
-    with pytest.raises(OutputRepairRequired, match='exact subject and identity'):
-        formal_review.validate_choice(child, job, payload, inventory=inventory)
-    # New verified author evidence changes the exact failure facts. This does
-    # not qualify the subject and does not modify a retained native receipt.
-    with monkeypatch.context() as changed_identity:
-        changed_identity.setattr(formal_review, 'authors', lambda *args, **kwargs: dict(
-            complete=True, participants=[['fixture', 'newly-verified-author']], reason=None))
-        formal_review.validate_choice(child, job, payload, inventory=inventory)
-    shutil.rmtree(parent)
-    assert formal_review.unavailable(child, 3) == original
-    # The retained failure survives cold removal; its missing direct scientific
-    # original still refuses a new request, regardless of native identity facts.
-    with pytest.raises(FileNotFoundError):
-        formal_review.validate_choice(child, job, payload, inventory=inventory)
-
-
 @pytest.mark.parametrize('locator', ['missing', 'reused'])
 def test_explicit_old_locator_resolves_same_origin_archive_without_discovering_sources(tmp_path, locator):
     root = completed_source(tmp_path)

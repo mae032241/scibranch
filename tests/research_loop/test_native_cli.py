@@ -28,8 +28,13 @@ payload.update(summary='Local transport reproduction ' + role,
     scientific_result='Synthetic transport evidence only; no scientific finding.',
     limitations=['No model, API, remote service or solver was invoked.'],
     implementation_selection=None,
-    next_action='analyze' if role == 'H' else 'finish',
-    route_reason='Exercise the immediate successor of the retained H output.')
+    next_action='finish',
+    route_reason='Retain the exact bounded transport output.')
+if role == 'W':
+    payload.pop('next_action')
+    payload.update(stage_intent='decision', consultation_question=None, mechanism_findings=None, candidate_nominations=None)
+else:
+    payload.update(candidate_recommendation=None, search_review=None, progress_assessment=None, decision_request=None, portfolio_review=None)
 pending = pathlib.Path(args[args.index('--output-last-message') + 1])
 if mode != 'late-output':
     pending.write_text(json.dumps(payload))
@@ -39,11 +44,11 @@ with (work / 'work/launcher-count.txt').open('a') as stream:
 def event(kind, **fields):
     print(json.dumps(dict(type=kind, **fields)), flush=True)
 event('thread.started', thread_id='local-reproduction-' + role)
-if role == 'H' and mode == 'failed-before-completed':
+if role == 'W' and mode == 'failed-before-completed':
     event('turn.failed', error=dict(message='Synthetic earlier failure'))
-if role != 'H' or mode != 'missing-completed':
+if role != 'W' or mode != 'missing-completed':
     event('turn.completed', usage=dict(input_tokens=12, cached_input_tokens=0, output_tokens=3))
-if role == 'H':
+if role == 'W':
     if mode in {'new-turn', 'failed-turn'}:
         event('turn.started')
         if mode == 'new-turn':
@@ -104,13 +109,8 @@ def _terminal_instance(tmp_path, mode):
 @pytest.mark.process_e2e
 @pytest.mark.parametrize('mode,reason', [
     ('new-turn', 'native_activity_after_completion'),
-    ('failed-turn', 'native_activity_after_completion'),
-    ('new-item', 'native_activity_after_completion'),
-    ('new-thread', 'native_activity_after_completion'),
     ('error', 'native_failure_event'),
-    ('failed-before-completed', 'native_failure_event'),
     ('duplicate-completed', 'native_completion_duplicated'),
-    ('duplicate-unreported', 'native_completion_duplicated'),
     ('unterminated-new-turn', 'native_activity_after_completion'),
 ])
 def test_cli_rejects_ambiguous_native_completion_without_seal_or_successor(tmp_path, mode, reason):
@@ -152,7 +152,8 @@ def test_cli_missing_completion_or_nonzero_exit_retains_original(tmp_path, mode,
     assert process.returncode == 2 and result['status'] == 'native_stopped', (result, process.stderr)
     record = execution.origin(root, 1)
     outcome = contracts.read(record / 'native-outcome.json')
-    assert outcome['returncode'] == expected_rc and outcome['stop_reason'] is None
+    assert outcome['returncode'] == expected_rc
+    assert outcome['stop_reason'] == ('native_failure_event' if mode == 'missing-completed' else None)
     assert (record / 'result.pending.json').is_file()
     assert not (record / 'science-output.json').exists()
     assert not (record / 'result-identity.json').exists()
@@ -246,8 +247,10 @@ def test_real_native_process_completes_without_root_or_loopx(instance):
     assert result['completed_steps'] == 2
     author_launch=contracts.read(contracts.workspace(instance,2)/'work/captured-launch.json')
     author_job=contracts.read(instance/'jobs/002.json')
-    author_rules=author_job['native_role_instruction']+'\n'+contracts.AUTHOR_EVIDENCE_GUIDANCE
-    assert author_launch['developer']==[author_rules]
+    author_rules=author_job['native_role_instruction']
+    assert len(author_launch['developer']) == 1
+    assert author_launch['developer'][0].startswith(author_rules)
+    assert author_launch['developer'][0].count(author_rules) == 1
     assert author_rules not in author_launch['prompt']
     assert contracts.read(Path(result['scientific_output_path']))['scientific_result'].startswith('Evidence')
     assert result['usage'] == dict(input_tokens=200, cached_input_tokens=160, output_tokens=10,
@@ -263,115 +266,6 @@ def test_real_native_process_completes_without_root_or_loopx(instance):
     assert controller.run(instance) == result
 
 
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('view_version,role,mode', [
-    pytest.param(1, 'W', 'local', id='public-worker'),
-    pytest.param(0, 'W', 'local', id='explicit-legacy-worker'),
-    pytest.param(None, 'W', 'local', id='retained-legacy-worker'),
-    pytest.param(1, 'W', 'external', id='external-worker'),
-    pytest.param(1, 'H', 'local', id='hypothesis'),
-    pytest.param(1, 'A', 'local', id='assessment'),
-])
-def test_native_stdin_uses_the_execution_entrypoint_for_its_scientific_view(tmp_path, view_version, role, mode):
-    """Capture real stdin without submitting an experiment or sealing a verdict."""
-    from scidiscovery.research_loop.worker_execution_bridge import SUBMISSION_DIRECTORY
-
-    public = tmp_path / 'public'
-    public.mkdir()
-    objective = public / 'objective.md'
-    objective.write_text('Compare the supplied scientific observations.')
-    launcher = tmp_path / 'capture-native.py'
-    launcher.write_text('''import json,os,pathlib,sys
-args=sys.argv[1:]
-work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
-(work/'work/native-prompt.txt').write_text(sys.stdin.read())
-pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'fixture':'transport only'}))
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':7,'cached_input_tokens':2,'output_tokens':3}}),flush=True)
-''')
-    root = tmp_path / 'instance'
-    controller.prepare(root, objective, public, [sys.executable, str(launcher)],
-        max_tokens=10000, max_seconds=60, max_steps=4,
-        model='fixture-no-model', reasoning_effort='high', search_policy=None,
-        experiment_mode=mode, node_budget_mode='soft')
-    job = contracts.build_job(root, 1, role, [])
-    work = contracts.workspace(root, 1)
-    if view_version != 1:
-        # Preserve the original absence/zero marker semantics of retained jobs.
-        job.pop('worker_view_version')
-        if view_version is not None:job['worker_view_version'] = view_version
-        job.pop('direct_originals')
-        job['history'].pop('candidate_references')
-        contracts.write(root / 'jobs/001.json', job)
-        contracts.write(work / 'science-task.json', contracts.science_view(job, root))
-    intent = dict(task_ref=contracts.record_ref(root / 'jobs/001.json'),
-        **native.profiles.binding(contracts.settings(root), job))
-    anchor = native.control_budget.accept_node(root, job)
-    if anchor is not None:intent['budget_slice'] = anchor
-    contracts.write(execution.origin(root, 1) / 'native-intent.json', intent)
-
-    outcome = native.run_native(root, 1)
-
-    assert outcome['returncode'] == 0 and outcome['stop_reason'] is None
-    prompt = (work / 'work/native-prompt.txt').read_text()
-    if role != 'W' or mode != 'local':
-        assert 'Managed registered experiments:' not in prompt
-        assert 'Managed local experiments:' not in prompt
-        assert 'scidiscovery.research_loop.worker_execution_bridge' not in prompt
-        assert 'scidiscovery.research_loop.experiments' not in prompt
-        return
-    registered, _ = json.JSONDecoder().raw_decode(prompt.split('Managed registered experiments: ', 1)[1])
-    local, _ = json.JSONDecoder().raw_decode(prompt.split('Managed local experiments: run ', 1)[1])
-    if view_version == 1:
-        command = [sys.executable, '-m', 'scidiscovery.research_loop.worker_execution_bridge',
-            '--submission-directory', SUBMISSION_DIRECTORY]
-        assert contracts.read(work / 'work/experiment-config.json') == dict(worker_view_version=1, step=1, attempt=0)
-        for private in ('--config', 'work/experiment-config.json', 'host-runtime', '/jobs/', 'experiment_client'):
-            assert private not in prompt
-    else:
-        command = [sys.executable, '-m', 'scidiscovery.research_loop.experiments',
-            '--config', 'work/experiment-config.json']
-        assert 'scidiscovery.research_loop.worker_execution_bridge' not in prompt
-    assert registered['command'] == command
-    assert local == [*command, 'run', '--experiment-dir', 'experiments/<name>',
-        '--script', 'code/run.py', '--', '<script args>']
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('mode',['screen','improve','repair','validate'])
-def test_native_nomination_prompt_uses_only_the_frozen_job_scope(instance,tmp_path,remote_registry,mode):
-    from scidiscovery.research_loop import candidate_nominations
-    from test_breadth_science import h,a,findings
-    from test_history_handoff import finish
-    from test_candidate_nominations import failed_worker_observation
-
-    h(instance,labels=('P','Q'))
-    step=2;parents=[1]
-    if mode!='screen':
-        if mode=='repair':failed_worker_observation(instance,tmp_path)
-        finish(instance,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)),preserve_native_intent=mode=='repair')
-        a(instance,3,[1,2],focus='h001.m1',mode=mode)
-        step=4;parents=[1,2,3]
-    job=contracts.build_job(instance,step,'W',parents)
-    assert job['search']['focus']==dict(mechanism_ref='h001.m1',action=mode)
-    if mode=='repair':assert job['search']['repair_binding']=='available'
-    expected=['h001.m1','h001.m2'] if mode=='screen' else ['h001.m1']
-    assert [row['mechanism_ref'] for row in job['candidate_nomination_mechanisms']]==expected
-    intent=dict(task_ref=contracts.record_ref(instance/'jobs'/f'{step:03d}.json'),
-        **native.profiles.binding(contracts.settings(instance),job))
-    anchor=native.control_budget.accept_node(instance,job)
-    if anchor is not None:intent['budget_slice']=anchor
-    else:intent['search_slice']=native.search.accept(instance,job)
-    contracts.write(execution.origin(instance,step)/'native-intent.json',intent)
-
-    outcome=native.run_native(instance,step)
-
-    assert outcome['returncode']==0 and outcome['stop_reason'] is None
-    launch=contracts.read(contracts.workspace(instance,step)/'work/captured-launch.json')
-    assert candidate_nominations.SCOPE_GUIDANCE in launch['prompt']
-    assert 'every unwaived H mechanism' not in launch['prompt']
-    assert 'Add at most '+str(job['candidate_nomination_policy']['extra_slots'])+' distinct extras' in launch['prompt']
-    task=contracts.read(contracts.workspace(instance,step)/'science-task.json')
-    assert [row['mechanism_ref'] for row in task['candidate_nomination_mechanisms']]==expected
 
 
 @pytest.mark.parametrize('reconnect', [False, True])

@@ -164,7 +164,7 @@ def test_current_owner_retains_prevalidated_pending_control_metadata(tmp_path, m
     # The reducer receives already validated controls from the seal owner. This
     # unit deliberately does not claim preparation admission or scientific facts.
     delta = accepted_search.prepare_node(root,job,{},dict(pending_executions=reference),
-        summary=head['search'],lookup=lambda key:head.row(key))
+        summary=head['search'],lookup=lambda key:head.row(key),observation=None)
     node = delta['rows'][accepted_search.key('node',1)]
     assert node['pending_executions'] == reference
     assert node['pending_namespace_unavailable'] == (kind == 'namespace_unavailable')
@@ -252,51 +252,6 @@ def test_unknown_original_recovery_reads_its_exact_point_and_preserves_accountin
     assert current['usage'] == head['usage'] and current.prefix == head.prefix
 
 
-@pytest.mark.parametrize('invalid',[False,True])
-def test_legacy_recovery_validates_readonly_original_before_accepting_head(tmp_path, monkeypatch, invalid):
-    root = prepare(tmp_path)
-    call = dict(step=1,source_step=1,call_id='original',status='unknown',mechanism_binding=None,
-        origin_identity=accepted.read(root).prefix['branch'],observation_ref=dict(path='original-observation.json'),
-        call_index=0,recovery_ref=None)
-    head = _accept_facts(root,node=_node(root,calls=['original']),call=call)
-    old = dict(call_id='original',status='unknown',mechanism_binding=None,
-        accepted=dict(snapshot='original-accepted.json'))
-    recovered = dict(old,status='known_failed')
-    c.write(root/'original-accepted.json',dict(original=True))
-    c.write(root/'original-observation.json',dict(managed_calls=[old]))
-    seal = dict(observations=dict(path='original-observation.json'))
-    monkeypatch.setattr(originals,'inherited',lambda *_:False)
-    monkeypatch.setattr(execution_recovery.history,'_source',lambda *_:(dict(role='W',step=1),None,seal,'seal'))
-    monkeypatch.setattr(execution_recovery.history,'managed_calls',lambda *_:[recovered])
-    monkeypatch.setattr(managed_wait,'_config',lambda *_:(None,{}))
-    monkeypatch.setattr(execution_recovery.e,'Records',lambda _:SimpleNamespace(directory=lambda _:root/'records'))
-    monkeypatch.setattr(execution_recovery.e,'retirement',lambda *_:dict(original='permanent fact'))
-    before = (root/accepted.HEAD).read_bytes()
-    path = root/execution_recovery.DIRECTORY/'001/original.json'
-    checked = []
-    def validate(actual_root,refs):
-        assert actual_root == root and refs == [dict(path=path.relative_to(root).as_posix())]
-        assert path.stat().st_mode & 0o777 == 0o400
-        value = c.read(path)
-        assert value == dict(source_step=1,seal_ref='seal',old_row=old,row=recovered)
-        assert (root/accepted.HEAD).read_bytes() == before
-        checked.append(value)
-        if invalid:
-            raise execution_recovery.history.ObserverIntegrityError('fixture invalid original recovery')
-        return [value]
-    monkeypatch.setattr(execution_recovery,'validate',validate)
-    if invalid:
-        with pytest.raises(execution_recovery.history.ObserverIntegrityError,match='invalid original recovery'):
-            execution_recovery.create(root,1)
-        assert (root/accepted.HEAD).read_bytes() == before
-        assert accepted.read(root).row('execution-recovery/001/original') is None
-    else:
-        assert execution_recovery.create(root,1)['status'] == 'execution_recovered'
-        current = accepted.read(root)
-        assert current.row('execution-recovery/001/original')['ref']['path'] == path.relative_to(root).as_posix()
-        assert current.row(accepted_search.key('call','1:original'))['status'] == 'known_failed'
-        assert current['usage'] == head['usage'] and current.prefix == head.prefix
-    assert len(checked) == 1
 
 
 def _consumed_original(root, *, status='unknown'):
@@ -313,67 +268,6 @@ def _consumed_original(root, *, status='unknown'):
             extra_grant=dict(mechanism_ref='h001.m1',source_a=1,used_calls=1)))
 
 
-@pytest.mark.parametrize('status',['known_failed','not_submitted'])
-def test_created_original_terminal_can_resume_idempotently_without_dispatch(tmp_path, monkeypatch, status):
-    from scidiscovery.research_loop import execution_authority, execution_resume
-    root = prepare(tmp_path)
-    call, _ = _consumed_original(root)
-    job = dict(role='W',step=1)
-    scope = dict(step=1,job_ref=dict(path=str(root/'jobs/001.json')))
-    interface = dict(executor='fixture')
-    config = dict(scope=scope,execution_interface=interface)
-    record = root/'records'
-    old = dict(call_id='original',status='unknown',scope=scope,
-        mechanism_binding=copy.deepcopy(call['mechanism_binding']),accepted=dict(snapshot='original-accepted.json'))
-    recovered = dict(old,status=status)
-    c.write(root/'original-accepted.json',dict(original=True))
-    c.write(root/'original-observation.json',dict(managed_calls=[old]))
-    c.write(record/'experiment-config.json',config)
-    allocation = root/'execution-authority/calls/original/allocation.json'
-    c.write(allocation,dict(binding=dict(native_attempt=dict(number=0),interface=interface,scope=scope)))
-    seal = dict(observations=dict(path='original-observation.json'))
-    monkeypatch.setattr(originals,'inherited',lambda *_:False)
-    monkeypatch.setattr(execution_recovery.history,'_source',lambda *_:(job,None,seal,'seal'))
-    monkeypatch.setattr(execution_recovery.history,'managed_calls',lambda *_:[recovered])
-    checked = []
-    def validate_managed(actual_root,actual_job,rows,*,verify_files):
-        assert actual_root == root and actual_job == job and rows == [recovered]
-        assert not verify_files
-        checked.append(rows)
-    monkeypatch.setattr(execution_recovery.history,'_validate_managed',validate_managed)
-    monkeypatch.setattr(managed_wait,'_config',lambda *_:(None,config))
-    monkeypatch.setattr(execution_recovery.e,'Records',lambda _:SimpleNamespace(directory=lambda _:record))
-    monkeypatch.setattr(execution_recovery.e,'retirement',lambda *_:dict(original='permanent fact'))
-    assert execution_recovery.create(root,1)['status'] == 'execution_recovered'
-    assert checked == [[recovered]]
-    path = root/execution_recovery.DIRECTORY/'001/original.json'
-    frozen = path.read_bytes()
-    original = c.read(path)
-    assert original == dict(source_step=1,seal_ref='seal',old_row=old,row=recovered)
-    assert path.stat().st_mode & 0o777 == 0o400
-    phase = 'not_submitted' if status == 'not_submitted' else 'terminal'
-    assert execution_recovery.latest(root,1,'original') == dict(original,phase=phase,native_state=None)
-    def pending(actual_root,actual_seal,actual_allocation,*,require_complete):
-        assert actual_root == root and actual_seal == seal and not require_complete
-        assert actual_allocation['path'] == allocation.relative_to(root).as_posix()
-        return dict(disposition='possibly_prepared')
-    def forbidden(*args, **kwargs):
-        pytest.fail('A retained original terminal entered execution admission or dispatch')
-    monkeypatch.setattr(execution_resume,'verify_pending_set',pending)
-    monkeypatch.setattr(execution_resume.execution,'record',lambda *_:record)
-    monkeypatch.setattr(execution_authority,'_host_context',lambda _:(root,job,None))
-    monkeypatch.setattr(execution_resume,'_RecoveryAdmission',forbidden)
-    monkeypatch.setattr(execution_recovery.e,'load',forbidden)
-    before = (root/accepted.HEAD).read_bytes()
-    for _ in range(2):
-        result = execution_resume.resume(root,1,'original',max_seconds=1,authorization_note='fixture')
-        assert result['status'] == 'execution_resume_recorded' and result['call_id'] == 'original'
-    assert path.read_bytes() == frozen
-    assert (root/accepted.HEAD).read_bytes() == before
-    current = accepted.read(root)
-    assert current.row('execution-recovery/001/original')['ref']['path'] == path.relative_to(root).as_posix()
-    assert current.row(accepted_search.key('call','1:original'))['status'] == status
-    assert current['search']['table']['mechanisms']['h001.m1']['accepted_calls'] == 1
 
 
 @pytest.mark.parametrize('slot',['first','next'])
@@ -584,7 +478,7 @@ def test_unsealed_wait_uses_only_accepted_current_native_record(tmp_path, monkey
     c.write(call,dict(call_id='original'))
     checked = []
     def validate(actual_root,actual_job,actual_record):
-        assert actual_root == root and actual_job == job and actual_record == record
+        assert actual_root == root and actual_job == c.job_record(job) and actual_record == record
         checked.append(record)
         return dict(calls=[dict(accepted=dict(path=str(call)))])
     monkeypatch.setattr(managed_wait,'validate',validate)

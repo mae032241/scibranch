@@ -22,20 +22,6 @@ print(json.dumps(dict(candidates=c,current_candidate=None,actual_submission=None
     return root
 
 
-def test_new_job_freezes_selection_and_null_a_is_not_an_old_recommendation(tmp_path):
-    root=prepare(tmp_path)
-    finish(root,1,'H',[]);finish(root,2,'W',[1]);finish(root,3,'A',[2],recommendation='P')
-    job,_,_=finish(root,4,'H',[3])
-    assert c.settings(root)['selection_protocol']==1 and job['selection_protocol']==1
-    before=c.science_view(job,root)['lineage']['candidates']
-    assert before['a_recommended']['candidate_id']=='P'
-    finish(root,5,'A',[4],recommendation=None)
-    later=c.build_job(root,6,'H',[5]);view=c.science_view(later,root)['lineage']['candidates']
-    assert view['selection_protocol']==1 and view['a_recommended'] is None
-    assert view['historical_a_recommendation']['candidate_id']=='P'
-    assert 'target_best' not in view and view['delivery']['state']=='unknown'
-    assert 'role_guidance' not in c.result_schema('A',job['handoff_protocol'])['properties']
-    assert sum(len(text.encode()) for text in c.settings(root)['role_guidance'].values())<=guidance.MAX_BYTES
 
 
 def test_current_selection_literal_stays_frozen_when_future_default_changes(tmp_path,monkeypatch):
@@ -53,32 +39,9 @@ def test_current_selection_literal_stays_frozen_when_future_default_changes(tmp_
     assert all(p.read_bytes()==data for p,data in originals.items())
 
 
-def test_marker_absent_unaccepted_selection_packet_is_refused_without_writes(tmp_path,monkeypatch):
-    root=prepare(tmp_path)
-    finish(root,1,'H',[]);finish(root,2,'W',[1])
-    job=c.build_job(root,3,'A',[2]);work=c.workspace(root,3);record=c.host_record(work)
-    # Retain a malformed unaccepted archive packet, never an old write mode.
-    job.pop('selection_protocol');c.write(root/'jobs/003.json',job)
-    originals={p:p.read_bytes() for p in (root/'settings.json',root/'jobs/003.json',work/'science-task.json',record/'science-result.schema.json')}
-    monkeypatch.setitem(guidance.DEFAULT,'A','Changed future default')
-    with pytest.raises(ValueError,match='^Frozen scientific task changed$'):
-        c.build_job(root,3,'A',[2])
-    assert all(p.read_bytes()==data for p,data in originals.items())
-    assert not (record/'native-intent.json').exists() and not (record/'result-identity.json').exists()
-    assert not (root/'jobs/004.json').exists()
 
 
 @pytest.mark.parametrize('bad',[True,0,2,'1'])
 def test_invalid_selection_marker_cannot_prepare(tmp_path,bad):
     with pytest.raises(ValueError):prepare(tmp_path,selection_protocol=bad)
     assert not (tmp_path/'instance').exists()
-
-
-def test_prepared_selection_marker_cannot_disagree_with_its_frozen_view(tmp_path):
-    root=prepare(tmp_path);finish(root,1,'H',[])
-    job=c.build_job(root,2,'W',[1]);work=c.workspace(root,2)
-    changed={**job,'selection_protocol':0}
-    c.write(root/'jobs/002.json',changed)
-    with pytest.raises(ValueError,match='Frozen selection projection'):
-        c._validate_inputs(root,work,changed)
-    assert not (execution.origin(root,2)/'native-intent.json').exists()

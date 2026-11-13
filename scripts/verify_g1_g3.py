@@ -60,7 +60,7 @@ WORKER_CHECKS = (
 WORKER_INPUT_ENV = "SCID_G1_G3_WORKER_OPTIONS"
 # Exact selections only: these fixtures' simulated layers are part of the scope.
 COMPONENT_CASES = (
-    ("git-component", "process", 14, "real host Git; same-process capture mutation, not V2 two-process acceptance", (
+    ("git-component", "process", 11, "real host Git; same-process capture mutation, not V2 two-process acceptance", (
         "test_git_code_versions.py::test_capture_barrier_rechecks_drift_before_pinning",
         "test_git_code_versions.py::test_preflight_rejects_bounds_and_nonregular_code_before_repository_writes",
         "test_git_code_versions.py::test_transfer_preserves_exact_calls_after_source_git_is_deleted")),
@@ -74,15 +74,14 @@ COMPONENT_CASES = (
         "test_execution_recovery_reliability.py::test_recorded_resume_only_cleans_saved_original_terminal_export")),
     ("fork-component", "process", 1, "real Git transfer; synthetic compiler/native facts; parent Git removed", (
         "test_fork_consumer_recovery.py::test_fork_keeps_compiler_commit_and_dirty_drafts_in_child_git",)),
-    ("retirement-component", "source", 16, "six CLI/API package retirements and direct originals; no HTTP/UI runtime", (
+    ("retirement-component", "source", 15, "six CLI/API package retirements and direct originals; no HTTP/UI runtime", (
         "test_instance_archive.py::test_archive_public_apis_are_unavailable",
         "test_instance_archive.py::test_archive_commands_reject_before_touching_originals",
         "test_instance_archive.py::test_help_has_no_archive_or_cold_package_commands",
         "test_instance_archive.py::test_sealed_node_views_and_successor_reuse_originals_without_package",
         "test_cold_checkpoint.py::test_cold_checkpoint_public_apis_are_unavailable",
         "test_cold_checkpoint.py::test_cold_checkpoint_commands_reject_before_creating_state",
-        "test_cold_checkpoint.py::test_ordinary_owner_and_paused_controls_preserve_existing_budget",
-        "test_direct_checkpoint_references.py::test_checkpoint_keeps_mutable_drafts_and_reuses_terminal_originals")),
+        "test_cold_checkpoint.py::test_ordinary_owner_and_paused_controls_preserve_existing_budget",)),
     ("delete-component", "source", 10, "bounded synthetic disposal and IO retry; unknown retains budget; external original identity preserved", (
         "test_instance_delete.py::test_delete_removes_own_git_and_exports_without_reading_external_inputs_or_neighbors",
         "test_instance_delete.py::test_expired_io_context_leaves_original_tombstone_for_same_operation_retry",

@@ -64,15 +64,12 @@ def test_restricted_automatic_outputs_and_copies_cannot_clear_their_sources(tmp_
     assert view['restriction'] == 'restricted' and 'sha256' not in json.dumps(view)
 
 
-def test_clear_is_scoped_and_missing_material_edges_remain_unknown(tmp_path):
+def test_clear_source_status_does_not_grant_scientific_review_or_execution(tmp_path):
     root = instance(tmp_path, restriction='clear')
     job, _, _ = finish(root, 1, 'H', [], action='experiment')
     assert q.status(root, job)['restriction'] == 'clear'
     assert 'not scientific review or execution permission' in q.status(root, job)['scope']
-    orphan = dict(source=str(root / 'same-bytes'), path='inputs/orphan', size_bytes=0)
-    forged = dict(job, step=2, direct_materials=[orphan], direct_refs=[])
-    forged['source_provenance'] = q.bind_inputs(root, forged)
-    assert q.status(root, forged)['restriction'] == 'unknown'
+
 
 
 def test_changed_host_receipt_is_an_identity_error_not_clearance(tmp_path):

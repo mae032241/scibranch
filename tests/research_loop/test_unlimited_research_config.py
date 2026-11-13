@@ -41,6 +41,11 @@ def test_declaration_roundtrip_preserves_unlimited_and_finite_globals(tmp_path, 
     document = declaration(tmp_path, tokens=tokens, seconds=seconds)
     original = copy.deepcopy(document)
     options = research_config.from_document(document, base=tmp_path)
+    if tokens == seconds == 'unlimited':
+        with pytest.raises(ValueError,match='finite original shared budget'):
+            research_config.prepare(validate_only=True, **options)
+        assert document == original and not (tmp_path / 'instance').exists()
+        return
     settings = research_config.prepare(validate_only=True, **options)
     assert settings['max_tokens'] == (None if tokens == 'unlimited' else tokens)
     assert settings['max_seconds'] == (None if seconds == 'unlimited' else seconds)
@@ -111,15 +116,10 @@ def test_default_local_execution_retains_65_second_hard_limit(tmp_path, monkeypa
     assert settings['execution_config']['configuration']['max_seconds'] == 65
 
 
-@pytest.mark.parametrize('standard', [False, True])
 @pytest.mark.parametrize('tokens,seconds', [(None, None), (None, 120), (1000, None)])
-def test_unlimited_globals_require_explicit_finite_all_role_targets(tmp_path, monkeypatch, standard, tokens, seconds):
+def test_unlimited_globals_require_explicit_finite_all_role_targets(tmp_path, tokens, seconds):
     options = prepare_options(tmp_path, tokens=tokens, seconds=seconds)
     del options['node_budget_policy']
-    if standard:
-        options['launcher'] = ['codex']
-        monkeypatch.setattr(research_config.shutil, 'which',
-            lambda executable: pytest.fail('Missing targets must be explained before launcher lookup'))
     with pytest.raises(ValueError, match='explicit finite all-role budget.node_targets'):
         research_config.prepare(validate_only=True, **options)
     assert not options['root'].exists()

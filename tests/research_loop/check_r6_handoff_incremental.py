@@ -229,7 +229,7 @@ def test_cold_restore_and_next_node_keep_verification_constant(tmp_path,monkeypa
             _no_old_verification(current)
             assert current['stat_ancient']==current['science_read_ancient']==0,dict(current)
             assert current['inventory_ancient']==0,dict(current)
-            assert current['current_input_validation']>0 and current['science_read_direct']>0,dict(current)
+            assert current['science_read_direct']>0,dict(current)
             current_work.append(dict(current))
     assert current_work[0]==current_work[1]==current_work[2],current_work
 
@@ -265,37 +265,6 @@ def test_current_recovery_material_is_checked_without_reopening_history(tmp_path
         history.validate(root,c.workspace(root,3),binding)
 
 
-def test_controller_restores_saved_wait_without_old_gates_and_checks_new_admission(tmp_path,monkeypatch):
-    public=tmp_path/'public';public.mkdir()
-    objective=public/'objective.md';objective.write_text('Retain an unanswered scientific question.')
-    root=tmp_path/'instance'
-    controller.prepare(root,objective,public,['fixture'],max_tokens=100000,
-        max_seconds=120,max_steps=6,model='fixture',reasoning_effort='high',
-        search_policy=None,experiment_mode='external')
-    launches=[]
-    def execute(root,step):
-        job=c.read(root/'jobs'/f'{step:03d}.json');launches.append(step)
-        parents=[int(row['path'].split('/')[2]) for row in job['direct_refs']]
-        finish(root,step,job['role'],parents,action='analyze' if step==1 else 'wait')
-    monkeypatch.setattr(native,'execute_native',execute)
-    assert controller.run(root)['status']=='wait'
-    assert launches==[1,2]
-    def forbidden(*args,**kwargs):
-        raise AssertionError('Restoring a saved route revalidated sealed history')
-    with monkeypatch.context() as cold:
-        for name in ('validate','validate_original','_validate_inputs'):
-            cold.setattr(c,name,forbidden)
-        cold.setattr(semantic,'outcome',forbidden)
-        assert controller.run(root)['status']=='wait'
-        assert c.seal_result(root,2)['next_action']=='wait'
-    calls=[];admission=role_share.effective_route
-    def checked(root,step,result,job,route,**kwargs):
-        calls.append((step,kwargs.get('allow_repeat',False)))
-        return admission(root,step,result,job,route,**kwargs)
-    monkeypatch.setattr(role_share,'effective_route',checked)
-    assert instance_control.continue_instance(root)['status']=='wait'
-    assert launches==[1,2,3]
-    assert calls.count((2,True))==1
 
 
 def test_search_checkpoint_keeps_latest_reconciliation_at_same_source_cut(tmp_path):

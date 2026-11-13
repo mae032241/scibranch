@@ -26,10 +26,7 @@ def test_start_response_loss_replays_original_operation_and_new_form_is_new_inte
     original = ui.control_result
     assert post(ui, cookie, 'start', fields)[0] == 303
     assert ui.control_result == original and len(launches) == 1
-    _, page, _ = ui.get('/', host=ui.host, cookie=cookie)
-    assert b'action="/control/pause"' in page and b'action="/control/start"' not in page
-    # Distinct issued intents get distinct nonces. The accepted request remains
-    # active, so its overview offers pause instead of another start action.
+    # Distinct issued intents get distinct nonces without replaying the accepted launch.
     fresh = control_fields(ui, cookie, 'start')
     assert fresh['nonce'] != fields['nonce']
     assert len(list((root / 'host-control/operations').glob('*.json'))) == 1

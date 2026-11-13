@@ -78,7 +78,57 @@ def _check_mounts(root):
         raise DeleteError('delete_mount_unsafe', 'Delete target contains a mounted tree')
 
 
-def _preflight_tree(root, identity, *, context=None):
+def _file_identity(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise DeleteError('delete_path_unsafe', 'Retained settings must be original regular files')
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
+def _retained_settings(root, stores):
+    """Accept copied controls once, before cleanup can remove their manifest."""
+    from . import fork_sources
+    result = []
+    for store in stores:
+        manifest = store / 'manifest.json'
+        if not manifest.exists() and not manifest.is_symlink():
+            continue
+        for pair in fork_sources.retained_settings(store):
+            directory = pair['settings.json'].parent
+            result.append(dict(path=directory.relative_to(root).as_posix(),
+                directory_identity=_identity(directory),
+                files={name: _file_identity(path) for name, path in pair.items()}))
+    _validate_retained_settings(result)
+    return result
+
+
+def _validate_retained_settings(rows):
+    from . import originals
+    if not isinstance(rows, list):
+        raise DeleteError('delete_operation_conflict', 'Retained settings ownership is malformed')
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != {'path', 'directory_identity', 'files'}
+                or originals.relative(row['path']) in seen
+                or not isinstance(row['directory_identity'], dict)
+                or set(row['directory_identity']) != {'dev', 'ino'}
+                or any(type(value) is not int or value < 0 for value in row['directory_identity'].values())
+                or not isinstance(row['files'], dict)
+                or set(row['files']) != {'settings.json', 'settings-identity.json'}
+                or any(not isinstance(value, list) or len(value) != 4
+                    or any(type(number) is not int or number < 0 for number in value)
+                    for value in row['files'].values())):
+            raise DeleteError('delete_operation_conflict', 'Retained settings ownership is malformed')
+        seen.add(row['path'])
+
+
+def _preflight_owned_tree(root, identity, retained_settings):
+    if retained_settings:
+        return _preflight_tree(root, identity, retained_settings=retained_settings)
+    return _preflight_tree(root, identity)
+
+
+def _preflight_tree(root, identity, *, context=None, retained_settings=()):
     if context is not None:context.remaining_seconds()
     _same(root, identity)
     _check_mounts(root)
@@ -86,6 +136,24 @@ def _preflight_tree(root, identity, *, context=None):
         raise DeleteError('delete_path_unsafe', 'Symlink-safe directory removal is unavailable')
     def failed(error):
         raise error
+    retained = {row['path']: row for row in retained_settings}
+    for relative, row in retained.items():
+        if context is not None:context.remaining_seconds()
+        directory = files.check_path(root / relative)
+        try:
+            actual = _identity(directory)
+        except FileNotFoundError:
+            continue  # An earlier cleanup may already have removed this owner.
+        if actual != row['directory_identity']:
+            raise DeleteError('delete_nested_instance', 'Retained settings directory identity changed')
+        for name, saved in row['files'].items():
+            if context is not None:context.remaining_seconds()
+            try:
+                actual = _file_identity(directory / name)
+            except FileNotFoundError:
+                continue  # Missing controls are expected after partial cleanup.
+            if actual != saved:
+                raise DeleteError('delete_nested_instance', 'Retained settings file identity changed')
     for current, directories, names in os.walk(root, followlinks=False, onerror=failed):
         if context is not None:context.remaining_seconds()
         current = Path(current)
@@ -104,8 +172,8 @@ def _preflight_tree(root, identity, *, context=None):
                 raise DeleteError('delete_path_unsafe', 'Delete target contains a special file')
             originals[name] = info.st_mode
         # Identity damage must not turn an independent instance into payload.
-        # Fork originals retain these settings in separate hash-versioned trees,
-        # without an adjacent settings pair or local global-material directory.
+        # Only an operation's already accepted copied control pair is payload.
+        # Other instance markers stay unsafe even at the same retained path.
         settings = {'settings.json', 'settings-identity.json'} & originals.keys()
         project = False
         if current != root and settings and stat.S_ISDIR(originals.get('project', 0)):
@@ -113,9 +181,11 @@ def _preflight_tree(root, identity, *, context=None):
                 project = stat.S_ISDIR((current / 'project/global').lstat().st_mode)
             except FileNotFoundError:
                 pass
+        copied = retained.get(current.relative_to(root).as_posix())
+        copied_pair = copied is not None and len(settings) == 2
         if current != root and (
                 {owner.BINDING, owner.RETIREMENT} & originals.keys()
-                or len(settings) == 2
+                or len(settings) == 2 and not copied_pair
                 or project):
             raise DeleteError('delete_nested_instance', 'Delete target contains an independent nested instance')
     _same(root, identity)
@@ -227,7 +297,7 @@ def _receipt(path, record):
 
 def _validate_record(record, request, parent_identity, tombstone):
     if (not isinstance(record, dict) or record.get('version') != 1
-            or set(record) != {'version', 'request', 'parent_identity', 'root_identity',
+            or set(record) - {'retained_settings'} != {'version', 'request', 'parent_identity', 'root_identity',
                                'tombstone', 'owner_binding', 'phase'}
             or record.get('request') != request or record.get('parent_identity') != parent_identity
             or record.get('tombstone') != str(tombstone)
@@ -236,6 +306,7 @@ def _validate_record(record, request, parent_identity, tombstone):
             or set(record['root_identity']) != {'dev', 'ino'}
             or any(type(value) is not int or value < 0 for value in record['root_identity'].values())):
         raise DeleteError('delete_operation_conflict', 'Operation ID is bound to another request or storage identity')
+    _validate_retained_settings(record.get('retained_settings', []))
     binding = record['owner_binding']
     if binding is not None and (not isinstance(binding, dict)
             or set(binding) != {'version', 'instance_id', 'settings_ref', 'root', 'host',
@@ -271,7 +342,11 @@ def _perform(root, path, record):
             if binding is not None and anchor.get('state') == 'active':
                 raise DeleteError('delete_owner_conflict', 'Prepared tombstone has no retired external owner')
         if not retired and phase == 'prepared':
-            _preflight_tree(root, identity)
+            if 'retained_settings' not in record:
+                retained_settings = _retained_settings(root, [root / 'host-runtime/fork'])
+                if retained_settings:
+                    record = dict(record, retained_settings=retained_settings)
+            _preflight_owned_tree(root, identity, record.get('retained_settings', []))
             _verify_instance(root, request)
             marker = root / owner.RETIREMENT
             if marker.exists() or marker.is_symlink():
@@ -280,7 +355,7 @@ def _perform(root, path, record):
             with ExitStack() as locks:
                 archive._owner_locks(locks, root, disposing=True)
                 archive._quiescent(root)
-                _preflight_tree(root, identity)
+                _preflight_owned_tree(root, identity, record.get('retained_settings', []))
                 _verify_instance(root, request)
                 _write_record(path, record)
                 files.durable_json(marker, request)
@@ -301,7 +376,7 @@ def _perform(root, path, record):
             _write_record(path, record)
         if retired:
             # Repeat mount checks on every pending cleanup, including retries.
-            _preflight_tree(tombstone, identity)
+            _preflight_owned_tree(tombstone, identity, record.get('retained_settings', []))
             try:
                 _remove_tree(tombstone, identity)
             finally:

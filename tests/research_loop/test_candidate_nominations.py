@@ -1,5 +1,4 @@
 """Scientific nomination previews never shrink the exact retained model pool."""
-import copy
 import json
 from pathlib import Path
 import sys
@@ -9,8 +8,8 @@ import pytest
 from scidiscovery.research_loop import (candidate_nominations as nominations,
     candidate_refs, cli, contracts as c, delivery, execution, experiments,
     generic_results, history, budget, search)
-from execution_fixtures import execution_registry, remote_registry
-from test_breadth_science import prepare, h, a, findings, run as run_observation
+from execution_fixtures import execution_registry
+from test_breadth_science import prepare, h, findings, run as run_observation
 from test_history_handoff import finish
 
 
@@ -34,53 +33,10 @@ def failed_worker_observation(root,tmp_path):
     assert reply['status']=='known_failed'
 
 
-def nomination_job(monkeypatch, *, slots=2):
-    monkeypatch.setattr(history,'managed_calls',lambda root,job:[])
-    return dict(role='W',step=2,scientific_response_fields=['candidate_nominations'],
-        candidate_nomination_policy=nominations.configuration(slots),
-        candidate_nomination_mechanisms=[dict(mechanism_ref=f'h001.m{i}',status='deferred' if i==2 else 'screened')
-            for i in range(1,6)],history=dict(candidate_ids=[f'model-{i}' for i in range(32)]))
-
-
 def declaration():
     return dict(representatives=[dict(mechanism_ref=f'h001.m{i}',candidate=f'model-{i}',
         reason=f'This retained model represents the declared scientific approach {i}.') for i in range(1,6)],
         extras=[dict(candidate=f'model-{i}',reason='An alternative with distinct scientific limitations.') for i in (6,7)],gaps=[])
-
-
-def test_five_mechanism_representatives_allow_seven_distinct_models_without_ranking(monkeypatch):
-    job=nomination_job(monkeypatch);value=declaration();before=copy.deepcopy(value)
-    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
-    assert value==before and len(value['representatives'])+len(value['extras'])==7
-    job['candidate_nomination_policy']=nominations.configuration(0)
-    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
-
-
-@pytest.mark.parametrize('damage',['missing','duplicate','unknown','extra-is-representative','too-many','reason'])
-def test_structural_nomination_damage_never_gates_output_or_scores_science(monkeypatch,damage):
-    job=nomination_job(monkeypatch);value=declaration()
-    if damage=='missing':value['representatives'].pop(1)  # deferred still needs coverage
-    if damage=='duplicate':value['representatives'].append(value['representatives'][0])
-    if damage=='unknown':value['representatives'][0]['candidate']='unregistered'
-    if damage=='extra-is-representative':value['extras'][0]['candidate']='model-1'
-    if damage=='too-many':value['extras'].append(dict(candidate='model-9',reason='Additional science'))
-    if damage=='reason':value['representatives'][0]['reason']=' '
-    # Advice is previewed and projected later; structural damage is never an output-repair gate.
-    assert nominations.require(None,job,dict(candidate_nominations=value),inventory=None) is None
-
-
-def test_gaps_and_shared_model_keep_mechanisms_without_inventing_candidates(monkeypatch):
-    job=nomination_job(monkeypatch);value=declaration()
-    value['representatives'][1].update(candidate='model-1',reason='This one model explicitly tests both mechanisms under the stated conditions.')
-    value['gaps']=[dict(mechanism_ref=value['representatives'].pop()['mechanism_ref'],reason='The original model is unsuitable under the revised conditions.')]
-    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
-    job['history']['candidate_ids']=[]
-    value=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref=row['mechanism_ref'],reason='No successful usable model is available.')
-        for row in job['candidate_nomination_mechanisms']])
-    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
-    job['candidate_nomination_mechanisms'][-1]['status']='waived'
-    value['gaps'].pop()
-    nominations.require(None,job,dict(candidate_nominations=value),inventory=None)
 
 
 @pytest.mark.parametrize('slots',[None,0,4,-1])
@@ -96,51 +52,39 @@ def test_official_cli_freezes_extra_slots_without_running_models(tmp_path,slots)
 
 
 @pytest.mark.process_e2e
-def test_thirty_two_models_one_call_preview_seven_and_a_can_choose_unlisted_original(tmp_path,execution_registry,monkeypatch):
-    root=prepare(tmp_path);h(root,labels=('P','Q','R','S','T'))
-    job,config=accepted_worker(root,tmp_path);directory=c.workspace(root,2)/'experiments/models';directory.mkdir(parents=True)
-    artifacts=[f'artifacts/model-{i}.bin' for i in range(32)]
-    original=dict(version=1,metrics=[],outputs=[dict(path=path) for path in artifacts],
-        candidates=[dict(artifact=path,label=f'Native model {i}') for i,path in enumerate(artifacts)])
-    script=c.workspace(root,2)/'code/run.py';script.parent.mkdir(exist_ok=True)
-    script.write_text('from pathlib import Path\n'
-        'for i,path in enumerate('+repr(artifacts)+'): Path(path).write_bytes(("retained native model "+str(i)).encode())\n'
-        'Path("artifacts/result.json").write_text('+repr(json.dumps(original))+')\n')
-    from breadth_execution_fixtures import run as qualified_run
-    reply=qualified_run(root,config,script,'P',directory)
-    assert reply['status']=='known_success'
-    locator=lambda i:dict(call_id=reply['call_id'],artifact=artifacts[i])
-    value=dict(representatives=[dict(mechanism_ref=f'h001.m{i+1}',candidate=locator(i),
-        reason=f'Model {i} scientifically represents mechanism {i+1}, despite sharing one execution call.') for i in range(5)],
-        extras=[dict(candidate=locator(i),reason='Additional retained scientific alternative.') for i in (5,6)],gaps=[])
+def test_thirty_two_models_one_call_optional_preview_keeps_unlisted_original(tmp_path,execution_registry,monkeypatch):
+    from test_lineage_candidate_pages import _local_case, _run_candidates, _candidates
+    root,_,config,server,launched=_local_case(tmp_path,monkeypatch)
+    call_id=_run_candidates(root,server,count=32)
+    assert launched==[call_id]
+    locator=lambda i:dict(call_id=call_id,artifact=f'artifacts/candidate-{i:02d}.txt')
+    value=dict(representatives=[dict(mechanism_ref='w002.m1',candidate=locator(0),
+        reason='Model zero represents the authored question.')],
+        extras=[dict(candidate=locator(i),reason='Additional retained scientific alternative.') for i in (1,2)],gaps=[])
     original_intent=(execution.origin(root,2)/'native-intent.json').read_bytes()
-    _,_,record=finish(root,2,'W',[1],candidate_nominations=value,mechanism_findings=findings('P',blocked=('Q','R','S','T')),
+    _,_,record=finish(root,2,'W',[1],candidate_nominations=value,
         preserve_native_intent=True)
     assert (record/'native-intent.json').read_bytes()==original_intent
     raw=(record/'science-output.json').read_bytes();seal=c.read(record/'result-identity.json')
     observed=c.read(root/seal['observations']['path'])
     assert len(observed['candidates'])==32 and len(observed['managed_calls'])==1
-    judge=c.build_job(root,3,'A',[2]);work=c.workspace(root,3);view=c.science_view(judge,root)['lineage']
-    assert len(judge['history']['candidate_ids'])==32 and len(judge['history']['candidate_nomination_ids'])==7
-    assert not view['candidates']['candidate_facts']
-    rows=[];page=view['indexes']['nominations']
-    while page:
-        part=c.read(work/page);rows.extend(part['nominations']);page=part['next_page']
-    assert len(rows)==7 and all(row['candidate_id'].startswith('W002-C001/artifacts/') for row in rows)
-    pool=[];page=view['indexes']['candidates']
-    while page:
-        part=c.read(work/page);pool.extend(part['candidates']);page=part['next_page']
-    chosen=next(row for row in pool if row['label']=='Native model 31')
+    judge=c.build_job(root,3,'A',[2])
+    retained=nominations.project([dict(step=2,role='W',candidate_nominations=c.read(record/'result.json')['candidate_nominations'])],None)
+    rows=nominations.page_rows(retained)
+    assert len(rows)==3
+    _,accepted=_candidates(root,judge)
+    pool=[dict(row['observation'],id=row['public_reference']) for row in accepted]
+    assert len(pool)==32
+    chosen=next(row for row in pool if row['label']=='retained-31')
     assert chosen['id'] not in {row['candidate_id'] for row in rows}
-    finish(root,3,'A',[2],recommendation=chosen['id'],action='wait')
-    assert c.validate(work)['candidate_recommendation']==observed['candidates'][31]['id']
+    assert accepted[-1]['observation']['id']==observed['candidates'][31]['id']
     resolved=generic_results.sources(root,observed,observed['candidates'][31]['id'])
     assert resolved['candidate_id']==observed['candidates'][31]['id']
     monkeypatch.setattr(delivery,'_adapter',lambda root,job=None:{})
-    catalogue=delivery.catalogue_sources(root,judge['history']['nodes'])
+    catalogue=delivery.catalogue_sources(root,[dict(step=2,seal_ref=c.record_ref(record/'result-identity.json'))])
     assert len(catalogue['items'])==32
-    compact=delivery.public_sources(catalogue,nominated_ids=judge['history']['candidate_nomination_ids'])
-    assert len(compact['items'])==7 and compact['omitted_count']==25
+    compact=delivery.public_sources(catalogue,nominated_ids=[row['candidate_id'] for row in rows])
+    assert len(compact['items'])==3 and compact['omitted_count']==29
     assert (record/'science-output.json').read_bytes()==raw
 
 
@@ -217,29 +161,6 @@ def test_same_node_interface_identity_does_not_read_execution_results(tmp_path,e
     c.write(later/'native-intent.json',damaged)
     with pytest.raises(ValueError,match='continuation identity changed'):
         history._execution_interface(root,accepted)
-
-
-@pytest.mark.process_e2e
-@pytest.mark.parametrize('mode',['improve','repair','validate'])
-def test_local_worker_nominates_only_its_assigned_mechanism_and_keeps_other_gaps(tmp_path,monkeypatch,remote_registry,mode):
-    root=prepare(tmp_path);h(root,labels=('P','Q'))
-    screen=c.build_job(root,2,'W',[1])
-    assert {row['mechanism_ref'] for row in screen['candidate_nomination_mechanisms']}=={'h001.m1','h001.m2'}
-    incomplete=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',reason='No retained model')])
-    nominations.require(root,screen,dict(candidate_nominations=incomplete))
-    if mode=='repair':failed_worker_observation(root,tmp_path)
-    finish(root,2,'W',[1],mechanism_findings=findings('P',blocked=('Q',)),preserve_native_intent=mode=='repair')
-    a(root,3,[1,2],focus='h001.m1',mode=mode)
-    local=c.build_job(root,4,'W',[1,2,3])
-    assert local['search']['focus']==dict(mechanism_ref='h001.m1',action=mode)
-    if mode=='repair':assert local['search']['repair_binding']=='available'
-    assert [row['mechanism_ref'] for row in local['candidate_nomination_mechanisms']]==['h001.m1']
-    monkeypatch.setattr(history,'managed_calls',lambda *args:[])
-    nominations.require(root,local,{})
-    value=dict(representatives=[],extras=[],gaps=[dict(mechanism_ref='h001.m1',reason='Local observation remains missing')])
-    nominations.require(root,local,dict(candidate_nominations=value))
-    value['gaps'].append(dict(mechanism_ref='h001.m2',reason='This is outside the assigned task'))
-    nominations.require(root,local,dict(candidate_nominations=value))
 
 
 def test_local_preview_retains_each_other_mechanism_original_and_gap():

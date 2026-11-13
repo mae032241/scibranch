@@ -634,7 +634,11 @@ def assert_real_participants(root, job):
     seal = c.read(record/'result-identity.json')
     proof = q._read(root, seal['native_authorship'])
     accepted = review.participants(root, job, seal)
-    assert proof['complete'] and accepted['complete']
+    assert proof['complete'] and accepted['complete'], dict(
+        step=job['step'], proof_complete=proof['complete'], accepted_complete=accepted['complete'],
+        proof_reason=proof.get('reason'), accepted_reason=accepted.get('reason'),
+        attempts=[{key:row.get(key) for key in ('attempt','proof_kind','complete','reason')}
+            for row in proof.get('attempts',[])])
     assert len(proof['participants']) == 1
     for attempt in proof['attempts']:
         outcome, intent = q._read(root, attempt['outcome']), q._read(root, attempt['intent'])
@@ -708,7 +712,7 @@ def retain_fork_failure(root, job, *, directory):
 
 
 @pytest.mark.process_e2e
-def test_installed_pi_authors_repairs_reviews_and_retains_cold_fork_proofs(tmp_path, monkeypatch, record_property):
+def test_installed_pi_authors_reviews_and_retains_cold_fork_proofs(tmp_path, monkeypatch, record_property):
     """Actual native actors and shared review path; fixture science is not science."""
     from scidiscovery.research_loop import controller, fork_runtime, fork_service
     failure_log_dir = os.environ.get('SCID_TEST_LOG_DIR')  # Fixture clears this binding.
@@ -718,12 +722,14 @@ def test_installed_pi_authors_repairs_reviews_and_retains_cold_fork_proofs(tmp_p
         resume_policy=dict(pi.DEFAULT_RESUME_POLICY))
     value['public_root'].mkdir(); value['objective'].write_text('Review the exact inert authored UTF-8 artifact; no scientific claim.')
     authored = 'Inert authored original — 原件\n'
-    malformed = ' \n```json\n{坏}\n```\n\t'
     worker = ' \n'+json.dumps(dict(summary='Mechanical authorship', scientific_result='No scientific qualification.',
         limitations=['Finite deterministic loopback only.'], implementation_selection=None,
         stage_intent='review', consultation_question='Does this exact inert original retain its stated bytes?',
         mechanism_findings=None), ensure_ascii=False)+'\n\t'
-    with finite_peer([('write', dict(path='artifacts/subject.txt', content=authored)), malformed, worker]) as (url, requests, errors):
+    # Complete formal-review evidence uses a fresh author. Same-session repair
+    # retains incrementally metered originals but no whole-history author proof;
+    # that negative contract belongs to the installed repair/interface cases.
+    with finite_peer([('write', dict(path='artifacts/subject.txt', content=authored)), worker]) as (url, requests, errors):
         configure_installed_pi_fixture(agent, url)
         prepared = research_config.prepare(**value)
         assert prepared['research_strategy_version'] == 3
@@ -731,28 +737,25 @@ def test_installed_pi_authors_repairs_reviews_and_retains_cold_fork_proofs(tmp_p
         c.write(root/'host-started.json', budget.clock_stamp())
         budget.transition(root, 'advance', 'pi_authorship_mechanics_only')
         collect_step(root, 1)
-        assert len(requests) == 3 and errors == []
-    first, second = execution.records(root, 1)
-    assert (first/'science-output.json').read_bytes() == malformed.encode()
-    assert (second/'science-output.json').read_bytes() == worker.encode()
+        assert len(requests) == 2 and errors == []
+    records = execution.records(root, 1)
+    assert len(records) == 1
+    first = records[0]
+    assert (first/'science-output.json').read_bytes() == worker.encode()
     author_seal, author_proof, author = assert_real_participants(root, author_job)
-    assert len(author_proof['attempts']) == 2
-    outcomes = [c.read(path/'native-outcome.json') for path in (first, second)]
+    assert len(author_proof['attempts']) == 1
+    outcomes = [c.read(first/'native-outcome.json')]
     assert len({outcome['thread_id'] for outcome in outcomes}) == 1
     assert all(row['participant'] == author['participants'][0] for row in author_proof['attempts'])
     assert (c.workspace(root, 1)/'artifacts/subject.txt').read_bytes() == authored.encode()
     prefix = outcomes[0]['native_identity']['session']
     session_path = Path(prefix['path']); data = session_path.read_bytes()
-    assert len(data) > prefix['size_bytes']
-    assert hashlib.sha256(data[:prefix['size_bytes']]).hexdigest() == prefix['sha256']
+    assert len(data) == prefix['size_bytes']
+    assert hashlib.sha256(data).hexdigest() == prefix['sha256']
     assert c.read(first/'usage.json') == dict(input_tokens=34, cached_input_tokens=14, output_tokens=10)
-    assert c.read(second/'usage.json') == dict(input_tokens=17, cached_input_tokens=7, output_tokens=5)
-    assert native.usage(root)['observed_tokens'] == 66
+    assert native.usage(root)['observed_tokens'] == 44
     assert native.usage(root)['unknown_steps'] == []
-    repair_intent = c.read(second/'native-intent.json')
-    assert repair_intent['session'] == prefix and repair_intent['continuation_kind'] == 'repair'
-    assert repair_intent['budget_slice']['previous_tokens'] == 44
-    for path, outcome in zip((first, second), outcomes):
+    for path, outcome in zip(records, outcomes):
         assert outcome['budget_slice']['advance_seconds'] > 0
         assert outcome['metering']['context_windows']['windows_started'] == 1
         assert outcome['metering']['observation_capabilities']['native_calls']['status'] == 'unsupported'
@@ -764,27 +767,29 @@ def test_installed_pi_authors_repairs_reviews_and_retains_cold_fork_proofs(tmp_p
         for secret in private:
             assert secret not in public
             assert all(secret not in json.dumps(body) for body in requests)
-    # Shared producer acceptance must still reject an omitted repair attempt.
+    # Shared producer acceptance must still reject an omitted author attempt.
     with monkeypatch.context() as omitted:
         read_original = q._read
         def missing_tail(instance, reference, **kwargs):
             proof = read_original(instance, reference, **kwargs)
-            return dict(proof, attempts=proof['attempts'][:1]) if reference == author_seal['native_authorship'] else proof
+            return dict(proof, attempts=[]) if reference == author_seal['native_authorship'] else proof
         omitted.setattr(q, '_read', missing_tail)
         with pytest.raises(ValueError, match='omits a native attempt'):
             review.participants(root, author_job, author_seal)
-    # A real ordinary A requests the exact selected W original, not a host-made
-    # request or a capability flag masquerading as accepted scientific output.
+    # The real ordinary A returns scoped advice. The existing component
+    # fixture binds an explicit exact formal request to these sealed originals;
+    # ordinary A gains no formal dispatch action.
     requester = json.dumps(dict(summary='Request exact review', scientific_result='Assess only the inert subject.',
         limitations=['Mechanical fixture only.'], implementation_selection=['W001-I001'],
-        next_action='formal_review', route_reason='Assess exact authored bytes independently.'))
+        next_action='continue_w', decision_request=None,
+        route_reason='Assess exact authored bytes independently.'))
     requester_job = c.build_job(root, 2, 'A', [1])
     with finite_peer([requester]) as (url, requests, errors):
         configure_installed_pi_fixture(agent, url); collect_step(root, 2)
         assert len(requests) == 1 and errors == []
-    role, parents, instruction, back = review.request_route(root, requester_job,
-        c.validate(c.workspace(root, 2)), [1, 2])
-    assert role == 'A' and back['kind'] == 'formal_review'
+    from test_formal_review import exact_request
+    review_request = exact_request(root, 2, 1, 'subject.txt',
+        'Assess exact authored bytes independently.')
     # Readonly subject overlays do not make a workspace-write declaration
     # readonly. Queue a real next-node policy through its configuration owner;
     # external mode needs no managed Local write grants or execution config.
@@ -798,7 +803,8 @@ def test_installed_pi_authors_repairs_reviews_and_retains_cold_fork_proofs(tmp_p
     for prior_job in (author_job, requester_job):
         assert prior_job.get('configuration_revision') is None
         assert configuration_updates.for_job(root, prior_job) == prepared
-    reviewer_job = c.build_job(root, 3, role, parents, instruction=instruction, evidence_return=back)
+    reviewer_job = c.build_job(root, 3, 'A', [1], instruction=review.QUESTION,
+        evidence_return=dict(kind='formal_review', request=review_request))
     assert reviewer_job['configuration_revision']['revision'] == saved['revision']
     assert configuration_updates.for_job(root, reviewer_job) == saved['settings']
     reviewer_work = c.workspace(root, 3)
@@ -830,7 +836,7 @@ print('readonly-formal-a-ok')
     reviewer_outcome = c.read(reviewer_record/'native-outcome.json')
     assert reviewer_outcome['budget_notification']['status'] == 'unavailable'
     assert c.read(reviewer_record/'usage.json') == dict(input_tokens=34, cached_input_tokens=14, output_tokens=10)
-    assert native.usage(root)['observed_tokens'] == 132
+    assert native.usage(root)['observed_tokens'] == 110
     assert native.usage(root)['unknown_steps'] == []
     assert reviewer['participants'] != author['participants']
     receipt = reviewer_seal['formal_review']; proof = q._read(root, receipt)
@@ -842,7 +848,7 @@ print('readonly-formal-a-ok')
     original_paths = [root/'settings.json', root/reviewer_job['configuration_revision']['path'],
         root/'jobs/001.json', root/'jobs/002.json', root/receipt['path'],
         first/'result-identity.json', reviewer_record/'result-identity.json']
-    original_paths += [record/name for record in (first, second, reviewer_record)
+    original_paths += [record/name for record in (first, reviewer_record)
         for name in ('native-intent.json', 'native-outcome.json', 'science-output.json', 'usage.json')]
     retained_originals = {path: path.read_bytes() for path in original_paths}
     # Native copied-ID seeding is intentionally not fabricated. Route the real
@@ -940,4 +946,4 @@ print('readonly-formal-a-ok')
         source=inherited_again) == author
     assert c.read(originals.resolve_ref(inherited_again, nested_seal['native_authorship'])) == author_proof
     assert all(path.read_bytes() == data for path, data in retained_originals.items())
-    assert native.usage(root)['observed_tokens'] == 132
+    assert native.usage(root)['observed_tokens'] == 110

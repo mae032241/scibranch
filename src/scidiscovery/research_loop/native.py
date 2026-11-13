@@ -839,6 +839,8 @@ def run_native(root: Path, step: int, attempt=0):
                                 if not isinstance(event['result'], dict) or pending.exists() or pending.is_symlink():
                                     raise ValueError('Native protocol result is invalid or duplicated')
                                 write(pending,event['result'])
+                                encoded=pending.read_bytes()
+                                terminal_final_binding=dict(sha256=hashlib.sha256(encoded).hexdigest(),size_bytes=len(encoded))
                             if event.get('completed'):
                                 if not terminal_observed:completed_before = len(native_failures)
                                 terminal_observed = True

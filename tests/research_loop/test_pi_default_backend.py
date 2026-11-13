@@ -22,7 +22,7 @@ import pytest
 from execution_fixtures import execution_registry
 from scidiscovery.research_loop import (backends, budget, configuration_form,
     contracts as c, controller, execution, experiments, formal_review, native,
-    pi_backend as pi, pi_namespace, research_config, worker_research)
+    pi_backend as pi, pi_namespace, native_recovery, research_config, worker_research)
 from test_pi_backend_v2 import (OPTIONS, adapter,
     collect_separately, configure_installed_pi_fixture, installed_pi_fixture,
     options, settings)
@@ -84,14 +84,14 @@ def test_source_pi_example_normalizes_default_local_rpc_cadence_without_native_i
     assert value['model'] == 'provider/exact-model-id'
     assert value['reasoning_effort'] == 'high' and value['service_tier'] is None
     assert declared['native_options'] == value['native_options'] == dict(
-        workspace='workspace-write', network=True, web='disabled', subagents=False)
+        workspace='workspace-write', network=True, web='disabled', subagents=False, resource_mode='closed')
     # Normalization retains the omission; the common controller materializes Local.
     assert value.get('experiment_mode') is None and value.get('execution_config') is None
     backend = backends.selected(dict(value, native_launcher_argv=value['launcher']))
     assert backend.default_experiment_mode() == 'local'
-    assert value['resume_policy'] == dict(max_attempts=2, protocol='pi_rpc_v1',
-        usage_scope='turn', output_repair=True, output_only=True, execution_wake=True)
-    assert value['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1)
+    assert value['resume_policy'] == dict(pi.DEFAULT_RESUME_POLICY,
+        automatic_recovery=native_recovery.policy({}))
+    assert value['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1, context_handoff_version=2)
     ceilings = dict(max_tokens=2000000, max_seconds=3600, max_steps=32)
     assert {key: value[key] for key in ceilings} == ceilings
     assert all(type(value[key]) is int and value[key] > 0 for key in ceilings)
@@ -148,9 +148,9 @@ def test_default_resume_uses_selected_executable_without_auth_or_home_redirectio
             value, error = None, caught
     assert error is None and not forbidden_calls, (error, len(forbidden_calls))
     assert selected == ['operator-pi']
-    assert value == dict(launcher=['/operator/bin/pi'], policy=dict(max_attempts=2,
-        protocol='pi_rpc_v1', usage_scope='turn', output_repair=True, output_only=True,
-        execution_wake=True))
+    assert value['launcher'] == ['/operator/bin/pi']
+    assert value['policy'] == dict(pi.DEFAULT_RESUME_POLICY,
+        automatic_recovery=native_recovery.policy({}))
     value['policy']['max_attempts'] = 1
     assert pi.DEFAULT_RESUME_POLICY['max_attempts'] == 2
     assert backend.default_experiment_mode() == 'local'
@@ -169,10 +169,11 @@ def test_default_normalization_keeps_generic_cadence_and_control_policy_omission
     assert value == original
     # The controller, not normalization, materializes the implied mode.
     assert normalized.get('experiment_mode') is None
-    assert normalized['resume_policy'] == pi.DEFAULT_RESUME_POLICY
+    assert normalized['resume_policy'] == dict(pi.DEFAULT_RESUME_POLICY,
+        automatic_recovery=native_recovery.policy({}))
     assert normalized['launcher'] == [str(Path(sys.executable).absolute())]
     assert 'native_home' not in normalized['resume_policy']
-    assert normalized['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1)
+    assert normalized['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1, context_handoff_version=2)
     assert normalized['node_budget_policy'] == {role: dict(max_observed_tokens=1000,
         max_seconds=25) for role in 'HWAE'}
     for key in COMMON_POLICIES:
@@ -454,7 +455,7 @@ def test_installed_pi_defaults_use_actual_managed_local_and_current_collector(
         assert Path(prepared['native_launcher_argv'][0]).resolve() == Path(launcher)
         assert {k: prepared['resume_policy'][k] for k in pi.DEFAULT_RESUME_POLICY} == pi.DEFAULT_RESUME_POLICY
         assert 'native_home' not in prepared['resume_policy']
-        assert prepared['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1)
+        assert prepared['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1, context_handoff_version=2)
         assert prepared['node_budget_policy'] == {role: dict(max_observed_tokens=10000,
             max_seconds=45) for role in 'HWAE'}
         assert prepared['native_capabilities']['complete_native_authorship'] is True
@@ -483,7 +484,7 @@ def test_installed_pi_defaults_use_actual_managed_local_and_current_collector(
     if repair: expected.append(dict(input_tokens=17, cached_input_tokens=7, output_tokens=5))
     receipts = [c.read(record/'native-outcome.json') for record in records]
     user_ids = []
-    for record, receipt, debit in zip(records, receipts, expected):
+    for number, (record, receipt, debit) in enumerate(zip(records, receipts, expected)):
         assert receipt['native_started'] and receipt['returncode'] == 0 and receipt['stop_reason'] is None
         assert receipt['terminal_observed'] and receipt['cleanup'] == 'observed_group_cleaned'
         meter = receipt['metering']
@@ -493,8 +494,13 @@ def test_installed_pi_defaults_use_actual_managed_local_and_current_collector(
         assert meter['context_windows']['cursor']['thread_id'] == receipt['thread_id']
         assert meter['metadata_delivery']['acknowledged'] > 0 and not meter['metadata_delivery']['fault']
         assert meter['observation_capabilities']['native_calls']['status'] == 'unsupported'
-        assert receipt['native_identity']['participant_scope'] == pi.PARTICIPANT_SCOPE
-        assert receipt['native_identity']['controlled']['kind'] == pi.PARTICIPANT_PROOF
+        if number == 0:
+            assert receipt['native_identity']['participant_scope'] == pi.PARTICIPANT_SCOPE
+            assert receipt['native_identity']['controlled']['kind'] == pi.PARTICIPANT_PROOF
+        else:
+            assert receipt['native_identity']['participant_scope'] == 'unsupported'
+            assert 'controlled' not in receipt['native_identity']
+            assert 'sha256' not in receipt['native_identity']['session']
         assert c.file_ref(record/'science-output.json') == receipt['raw_ref']
         assert (record/'runner-process.json').is_file() and (record/'native-process.json').is_file()
         user_ids.append(meter['turn_id'])
@@ -502,7 +508,11 @@ def test_installed_pi_defaults_use_actual_managed_local_and_current_collector(
     session = Path(receipts[-1]['native_identity']['session']['path'])
     data = session.read_bytes()
     proof = receipts[-1]['native_identity']['session']
-    assert proof['size_bytes'] == len(data) and proof['sha256'] == hashlib.sha256(data).hexdigest()
+    assert proof['size_bytes'] == len(data)
+    if repair:
+        assert 'sha256' not in proof  # Runtime append identity is not whole-history proof.
+    else:
+        assert proof['sha256'] == hashlib.sha256(data).hexdigest()
     rows = [json.loads(row) for row in data.splitlines()]
     users = [row for row in rows if row.get('type') == 'message' and row['message']['role'] == 'user']
     assert [row['id'] for row in users] == user_ids

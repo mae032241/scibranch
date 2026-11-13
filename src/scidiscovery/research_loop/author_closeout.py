@@ -166,7 +166,8 @@ def science_context(root, job, record, *, permit=None, attempt=None):
         *job['direct_refs'], *history_inputs, *job['history'].get('execution_recovery_materials', [])]}
     paths={item['path']:'source' for item in [*job['global_materials'],*job['direct_materials']]}
     compiled={}
-    from . import execution_inputs,qualification
+    compiler_owners={}
+    from . import execution_inputs,qualification,handoff_state
     for material in job['direct_materials']:
         parts=Path(material['path']).parts
         source=(inputs['sources'].get(int(parts[2])) if len(parts)>=5 and parts[:2]==('inputs','parents')
@@ -184,7 +185,23 @@ def science_context(root, job, record, *, permit=None, attempt=None):
             client_binding=binding.get('client_binding'))
         compiled[material['path']]=dict(material=material,binding=binding,compiler=compiler)
         paths[material['path']]='compiler_author'
-        owner=qualification._read(root,compiler['job'])
+        # The input owner already loaded this sealed compiler task. Its raw
+        # job retains material references; expand that exact view once here.
+        if source is None or 'seal' not in source:
+            raise ValueError('Author compiler owner is absent from loaded input facts')
+        owner_source=source['owner']
+        owner_ref=compiler['job']
+        owner_path=Path(owner_source.original_root)/owner_ref['path']
+        if (Path(owner_ref['path']).is_absolute()
+                or owner_ref['path']!=f"jobs/{source['job']['step']:03d}.json"
+                or source['seal']['job_ref']!={'path':str(owner_path)}
+                or 'origin_identity' in owner_ref and owner_ref['origin_identity']!=owner_source.origin_identity):
+            raise ValueError('Author compiler changed its exact loaded task owner')
+        owner_key=(owner_source.origin_identity['goal_id'],str(owner_path))
+        if owner_key not in compiler_owners:
+            compiler_owners[owner_key]=handoff_state.material_inputs(root,source['job'],
+                sources=inputs['sources'],base=input_policy['base'],source=owner_source)
+        owner=compiler_owners[owner_key]
         for item in compiler['inputs']:
             original=execution_inputs.resolve_native_original(root,item['original'],compiler_job=owner)
             destination=public/item['alias']

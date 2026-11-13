@@ -213,15 +213,31 @@ def _observation_facts(facts):
     return facts['observation']
 
 
-def source_facts(root, step, *, base=None, owner=None, resolve_choices=True):
+def source_facts(root, step, *, head, base=None, owner=None, resolve_choices=True):
     """Produce original and control views from one parsed author response."""
     return source_facts_from_sealed(root,sealed_facts(root,step,base=base,owner=owner),
-        resolve_choices=resolve_choices)
+        head=head,resolve_choices=resolve_choices)
 
 
-def source_facts_from_sealed(root, facts, *, resolve_choices=True):
+def _source_input_mapping(facts, *, head):
+    """Load only addressed accepted candidates at the operation's produced head."""
+    from . import accepted_search, candidate_refs
+    owner, job = facts['owner'], facts['job']
+    mapping = facts.setdefault('input_mapping', {})
+    identities = candidate_refs.source_input_ids(facts.get('observation') or {}, facts.get('payload') or {})
+    rows = {}
+    for identity in identities - mapping.keys():
+        canonical = candidate_refs.origin_candidate(owner.origin_identity, identity)
+        rows[identity] = (head.row(accepted_search.key('candidate', canonical))
+            if canonical != identity else None)
+    mapping.update(candidate_refs.source_input_mapping_from_rows(owner, job, rows))
+    return mapping
+
+
+def source_facts_from_sealed(root, facts, *, head, resolve_choices=True):
     """Complete the owner's existing sealed facts without reopening metadata."""
     from . import contracts as c, candidate_refs
+    facts['accepted_head'] = head
     if 'payload' not in facts:
         original = c.read_scientific_source(facts['raw_path'])
         facts.update(payload=original['payload'], raw_text=original['raw_text'])
@@ -232,16 +248,14 @@ def source_facts_from_sealed(root, facts, *, resolve_choices=True):
             isinstance(row, dict) and isinstance(row.get('candidate'), dict)
             for field in ('representatives', 'extras')
             for row in (nominations.get(field, []) if isinstance(nominations.get(field, []), list) else []))
-        if dict_choices or owner.inherited and job['role'] == 'W':
+        if dict_choices or owner.inherited:
             _observation_facts(facts)
         with loading():
             control = candidate_refs.control_payload(job, payload, root=root,
                 source=owner if owner.inherited else None, source_facts=facts)
             projected_job = job
             if owner.inherited:
-                if 'input_mapping' not in facts:
-                    facts['input_mapping'] = candidate_refs.source_input_mapping(owner, job)
-                mapping = facts['input_mapping']
+                mapping = _source_input_mapping(facts, head=head)
                 projected_job = candidate_refs.source_job_view(owner, job, input_mapping=mapping)
                 science_mapping = dict(mapping)
                 if job['role'] == 'W':
@@ -260,7 +274,10 @@ def source_from_facts(facts, *, resolve_choices=True):
 
 
 def source(root, step, *, resolve_choices=True):
-    return source_from_facts(source_facts(root, step, resolve_choices=resolve_choices),
+    from . import accepted_budget
+    head = accepted_budget.read(root)
+    return source_from_facts(source_facts(root, step, base=head.base, head=head,
+        resolve_choices=resolve_choices),
         resolve_choices=resolve_choices)
 
 
@@ -268,14 +285,16 @@ def observation(root, job, seal):
     receipt = seal.get('observations')
     if receipt is None:
         return None
+    from . import accepted_budget
+    head = accepted_budget.read(root)
     step = job['step']
-    facts = sealed_facts(root, step)
+    facts = sealed_facts(root, step, base=head.base)
     if facts['seal'] != seal:
         raise ValueError('Observation belongs to another sealed source')
-    return observation_from_facts(root, facts)
+    return observation_from_facts(root, facts, head=head)
 
 
-def observation_from_facts(root, facts):
+def observation_from_facts(root, facts, *, head):
     """Load the saved observation using this owner's already accepted source."""
     if facts['seal'].get('observations') is None:return None
     from . import candidate_refs
@@ -287,10 +306,8 @@ def observation_from_facts(root, facts):
         owner = facts['owner']
         value = _observation_facts(facts)
         if owner.inherited:
-            if 'input_mapping' not in facts:
-                facts['input_mapping'] = candidate_refs.source_input_mapping(owner, facts['job'])
             value = candidate_refs.source_observation(owner, facts['job'], value,
-                input_mapping=facts['input_mapping'])
+                input_mapping=_source_input_mapping(facts, head=head))
     facts['observation_view'] = value
     if state is not None:
         state.observations[step] = value

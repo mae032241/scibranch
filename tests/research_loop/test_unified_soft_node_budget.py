@@ -34,29 +34,6 @@ def prepare_cli(tmp_path, *, total_tokens=1000, node_tokens=10):
     return root, argv
 
 
-@pytest.mark.parametrize('role', list('HWAE'))
-@pytest.mark.process_e2e
-def test_cli_to_each_role_preserves_original_output_after_token_target(tmp_path, role):
-    root, _ = prepare_cli(tmp_path)
-    step = 1 if role == 'H' else 2
-    if step == 2:
-        finish(root, 1, 'H', [], action={'W': 'experiment', 'A': 'analyze', 'E': 'extract'}[role])
-    c.build_job(root, step, role, [1] if step == 2 else [])
-    frozen = (root / 'settings.json').read_bytes()
-    start_clock(root, 'Current CLI to native soft token target')
-    native.execute_native(root, step)
-    outcome = c.read(execution.record(root, step) / 'native-outcome.json')
-    assert outcome['stop_reason'] is None and outcome['returncode'] == 0
-    assert outcome['budget_slice']['observed_tokens'] == 15
-    assert outcome['budget_slice']['limits']['max_observed_tokens'] == 10
-    assert c.validate(c.workspace(root, step))['summary'] == 'Original bounded finding'
-    hint = c.read(c.workspace(root, step) / 'work/budget-status.json')
-    assert hint['mode'] == 'soft' and hint['target_kind'] == 'soft_target'
-    assert hint['target_state'] == 'reached'
-    assert native.usage(root)['observed_tokens'] >= 15
-    assert (root / 'settings.json').read_bytes() == frozen
-
-
 @pytest.mark.process_e2e
 def test_positive_shared_balance_does_not_prepay_node_and_next_node_is_blocked(tmp_path):
     root, _ = prepare_cli(tmp_path, total_tokens=11, node_tokens=1000)

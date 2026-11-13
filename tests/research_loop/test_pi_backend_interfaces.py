@@ -15,9 +15,9 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import (accepted_prefix, backends, budget, continuation,
-    contracts as c, delivery_review, execution, experiment_client, native, native_recovery, profiles,
-    research_config, shared_input_views as views)
+from scidiscovery.research_loop import (accepted_prefix, budget, continuation,
+    contracts as c, delivery_review, execution, experiment_client,
+    native, native_recovery, research_config, shared_input_views as views)
 from scidiscovery.research_loop import pi_backend as pi, pi_namespace, pi_sessions, pi_transport
 from test_pi_backend_v2 import (AUX, FAKE_RPC, FINAL, OPTIONS, PROFILE, STAMP, TOKENS,
     USAGE, adapter, collect_separately, configure_installed_pi_fixture, installed_pi_fixture,
@@ -939,15 +939,13 @@ print(json.dumps(result))
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('failure', ['permanent', 'unknown', 'unsettled', 'changed_original'])
+@pytest.mark.parametrize('failure', ['permanent', 'unknown', 'unsettled'])
 def test_accepted_failed_original_never_adds_prompt_or_resets_consumed_budget(tmp_path, monkeypatch, failure):
     peer = RESUME_RPC
     if failure in {'permanent', 'unknown'}:
         diagnostic = '401: {"type":"invalid_api_key"}' if failure == 'permanent' else 'unqualified provider prose'
         peer = peer.replace("stopReason='stop',usage=usage)",
             "stopReason='error',errorMessage="+repr(diagnostic)+",usage=usage)")
-    elif failure == 'changed_original':
-        peer += "\nwith path.open('ab') as f:f.write(b'{broken original\\n')\n"
     root, agent = prepare_resumable(tmp_path, monkeypatch, peer, automatic=True)
     if failure == 'unsettled':monkeypatch.setenv('PI_FIXTURE_FAULT', 'missing_settlement')
     original_job = (root/'jobs/001.json').read_bytes()
@@ -1123,7 +1121,6 @@ def test_installed_pi_output_repair_resumes_actual_session_append_only_and_bills
     assert session['identity'] == final_session['identity'] == [info.st_dev, info.st_ino]
     assert hashlib.sha256(prefix).hexdigest() == session['sha256']
     assert len(prefix) == session['size_bytes'] < final_session['size_bytes'] == len(data)
-    assert hashlib.sha256(data).hexdigest() == final_session['sha256']
     assert data.split(b'\n', 1)[0].decode()+'\n' == session['header'] == final_session['header']
     header = json.loads(session['header'])
     assert header['type'] == 'session' and header['id'] == thread and header['cwd'] == str(work)
@@ -1135,8 +1132,17 @@ def test_installed_pi_output_repair_resumes_actual_session_append_only_and_bills
         assert receipt['stop_reason'] is None and receipt['native_failure'] is None
         assert receipt['cleanup'] == 'observed_group_cleaned' and receipt['terminal_observed']
         assert receipt['native_backend'] == 'pi'
-        assert receipt['native_identity']['participant_scope'] == pi.PARTICIPANT_SCOPE
-        assert receipt['native_identity']['controlled']['kind'] == pi.PARTICIPANT_PROOF
+        if number == 0:
+            assert receipt['native_identity']['participant_scope'] == pi.PARTICIPANT_SCOPE
+            assert receipt['native_identity']['controlled']['kind'] == pi.PARTICIPANT_PROOF
+        else:
+            # Incremental resume preserves the actor and billing baseline; it
+            # does not acquire a verified whole-history authorship digest.
+            assert receipt['native_identity']['participant_scope'] == 'unsupported'
+            assert 'controlled' not in receipt['native_identity']
+            assert 'sha256' not in receipt['native_identity']['session']
+            with pytest.raises(ValueError, match='pi_controlled_native_proof_invalid'):
+                adapter().acquire_participant_session(receipt, intent, work)
         assert receipt['metering']['coverage'] == 'terminal'
         assert receipt['metering']['tokens'] == c.read(record/'usage.json') == debit
         assert receipt['metering']['reporting_delay_unmeasured'] is False

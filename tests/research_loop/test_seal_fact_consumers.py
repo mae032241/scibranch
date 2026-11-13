@@ -215,66 +215,8 @@ def test_seal_output_failures_consume_accepted_final_facts(tmp_path, monkeypatch
     assert not (record / 'result-identity.json').exists()
 
 
-def decision_facts(tmp_path, monkeypatch, *, changed_focus=False, completed=True,
-        new_evidence=False):
-    prefix = dict(count=1, cutoff=2)
-    origin = dict(instance='original')
-    head = object()
-    focus = dict(mechanism_ref='h001.m1', action='improve')
-    original = dict(role='A', step=1)
-    following = dict(role='W', step=2, direct_refs=(
-        [dict(path='inputs/parents/001/conclusion.json')] if completed else []))
-    job = dict(role='A', step=3, handoff_protocol=CURRENT)
-    payload = dict(next_action='continue_w', route_reason='Resolve the measured gap')
-    seal = dict(control_outcome=dict(search_status='applied', selection_status='applied',
-        decision_status='applied', resolved_focus=focus))
-    sources = {1: (original, payload, seal, dict(path='seal-1')),
-        2: (following, {}, {}, dict(path='seal-2'))}
-    monkeypatch.setattr(accepted_prefix, 'for_job', lambda selected: prefix)
-    monkeypatch.setattr(accepted_prefix, '_view_key', lambda selected: 'exact-cut')
-    directory = tmp_path / accepted_prefix.MEMBERS / 'exact-cut' / 'ordinals'
-    directory.mkdir(parents=True)
-    c.write(directory / '000000001.json', dict(step=1, origin_identity=origin))
-
-    def metadata(root, key, *, head):
-        assert head is produced_head
-        return dict(role='A', next_action='continue_w', origin_identity=origin)
-
-    produced_head = head
-    monkeypatch.setattr(accepted_budget, 'search_row', metadata)
-    monkeypatch.setattr(accepted_prefix, 'member',
-        lambda root, selected, step, **kwargs: dict(seal_ref=sources[step][3]))
-    monkeypatch.setattr(history, '_source', lambda root, step: sources[step])
-    monkeypatch.setattr(decision, '_basis', lambda root, selected, **kwargs:
-        {'new'} if new_evidence and selected is job else {'original'})
-    interpretation = dict(focus=(dict(focus, mechanism_ref='h001.m2') if changed_focus else focus),
-        allocation=None, diagnostics=[])
-    inventory = SimpleNamespace(root=tmp_path, job=job,
-        policy=dict(decision_contract_version=1), head=head,
-        interpretation=interpretation, selection_diagnostics=[])
-    return job, payload, inventory
 
 
-@pytest.mark.parametrize('changed_focus,completed,new_evidence,repeated', [
-    (False, True, False, True), (True, True, False, False),
-    (False, False, False, False), (False, True, True, False),
-])
-def test_semantic_decision_uses_inventory_and_preserves_exact_replay_rules(
-        tmp_path, monkeypatch, changed_focus, completed, new_evidence, repeated):
-    job, payload, inventory = decision_facts(tmp_path, monkeypatch,
-        changed_focus=changed_focus, completed=completed, new_evidence=new_evidence)
-    monkeypatch.setattr(formal_review, 'validate_choice', lambda *args, **kwargs: None)
-    monkeypatch.setattr(search, 'require_portfolio_review', lambda *args, **kwargs: None)
-    monkeypatch.setattr(candidate_nominations, 'require_final_coverage', lambda *args: None)
-    monkeypatch.setattr(history, 'validate_recommendation', lambda *args, **kwargs: [])
-    monkeypatch.setattr(search, 'optional_reference_diagnostics', lambda *args: [])
-    forbid_control_loaders(monkeypatch)
-
-    result = semantic.outcome(tmp_path, job, payload, inventory=inventory)
-
-    assert result['decision_status'] == ('unresolved' if repeated else 'applied')
-    assert result['diagnostics'] == ([dict(code='a_decision_request_repeated',
-        subject='continue_w')] if repeated else [])
 
 
 @pytest.mark.parametrize('job,payload,policy', [

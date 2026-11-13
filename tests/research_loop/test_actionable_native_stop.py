@@ -84,10 +84,9 @@ def test_saved_stop_and_attention_use_loaded_facts_without_reading_private_strea
 @pytest.mark.process_e2e
 def test_owner_retains_neutral_process_diagnosis_usage_and_same_original(tmp_path,monkeypatch):
     root,record=_scene(tmp_path,monkeypatch,'closed')
-    # The older fixture predates accepted-intent publication. Admit this exact
-    # prepared job through the real publisher before exercising the owner.
+    # Admit this exact prepared job through the real publisher while retaining
+    # the original intent; acceptance does not recreate its source file.
     intent=c.read(record/'native-intent.json')
-    (record/'native-intent.json').unlink()
     accepted_budget.accept_native(root,1,record,intent)
     # Reuse the existing deterministic protocol-launch fixture and real owner;
     # the backend publishes a small diagnosis instead of private stderr prose.

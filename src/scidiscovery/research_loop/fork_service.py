@@ -215,9 +215,12 @@ def _operation(child, operation_id, request_binding):
         if path.exists() or path.is_symlink():
             record = c.read(c.regular(files.check_path(path)))
             if (not isinstance(record, dict) or any(record.get(key) != value for key, value in expected.items())
-                    or set(record) != set(expected) | {'phase', 'transaction_identity', 'stage_identity', 'settings_ref', 'receipt'}
+                    or set(record) - {'retained_settings'} != set(expected) | {'phase', 'transaction_identity', 'stage_identity', 'settings_ref', 'receipt'}
                     or record.get('phase') not in {'reserved', 'staging', 'prepared', 'published'}):
                 raise ForkError('fork_operation_conflict', 'Operation ID already names another request or unsupported record')
+            if 'retained_settings' in record:
+                from . import instance_delete as deletion
+                deletion._validate_retained_settings(record['retained_settings'])
             identities = [record['transaction_identity'], record['stage_identity']]
             if any(value is not None and (not isinstance(value, dict) or set(value) != {'dev', 'ino'}
                     or any(type(number) is not int or number < 0 for number in value.values())) for value in identities):
@@ -267,11 +270,23 @@ def _clean_transaction(path, record):
         if any((origins / name).exists() for name in ('settings.json', 'settings-identity.json', 'instance-owner.json')):
             raise ForkError('fork_transaction_changed', 'Fork originals directory contains an independent instance')
         deletion._check_mounts(transaction)
+        if 'retained_settings' not in record:
+            retained_settings = deletion._retained_settings(transaction,
+                [origins, stage / originals.FORK_DIRECTORY])
+            if retained_settings:
+                record['retained_settings'] = retained_settings
+                # Cleanup may remove the manifest before another unlink fails.
+                # Retrying this operation consumes these exact inode bindings.
+                files.durable_json(path, record)
         for item in transaction.iterdir():
-            deletion._preflight_tree(item, _directory_identity(item))
+            retained_settings = [dict(row, path=Path(row['path']).relative_to(item.name).as_posix())
+                for row in record.get('retained_settings', [])
+                if Path(row['path']).is_relative_to(item.name)]
+            deletion._preflight_owned_tree(item, _directory_identity(item), retained_settings)
         deletion._remove_tree(transaction, record['transaction_identity'])
     if record['phase'] in {'reserved', 'staging'}:
         record.update(phase='reserved', transaction_identity=None, stage_identity=None, settings_ref=None)
+        record.pop('retained_settings', None)
         files.durable_json(path, record)
 
 

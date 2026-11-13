@@ -9,8 +9,6 @@ def test_r8_wait_native_seals_supplied_inventory_with_referenced_materials(tmp_p
     stopped_seals(monkeypatch)
     finish(root,1,'H',[],action='experiment')
     finish(root,2,'W',[1],files={'model.bin':'one exact original model'})
-    finish(root,3,'A',[1,2],action='revise_h',files={'report.json':'{}'})
-    finish(root,4,'H',[1,2,3],action='experiment')
     captured=[]
     with monkeypatch.context() as waiting:
         def accept(selected,step):
@@ -18,9 +16,9 @@ def test_r8_wait_native_seals_supplied_inventory_with_referenced_materials(tmp_p
             captured.append(inventory)
             return inventory
         waiting.setattr(c,'seal_result',accept)
-        job,work,record=finish(root,5,'W',[4],files={'next-model.bin':'one new original model'})
+        job,work,record=finish(root,3,'W',[2],files={'next-model.bin':'one new original model'})
     inventory=captured[0]
-    canonical=c.read(root/'jobs/005.json')
+    canonical=c.read(root/'jobs/003.json')
     assert inventory.job==job and inventory.job!=canonical
     assert c.job_record(inventory.job)==canonical
     assert inventory.job['direct_materials']
@@ -34,9 +32,9 @@ def test_r8_wait_native_seals_supplied_inventory_with_referenced_materials(tmp_p
         raise AssertionError('Terminal waiting attempted another native launch')
     monkeypatch.setattr(runtime,'start',forbidden)
 
-    result=native.wait_native(root,5,inventory=inventory)
+    result=native.wait_native(root,3,inventory=inventory)
 
-    assert result['stage_intent']=='review'
+    assert result['stage_intent']=='decision'
     assert (record/'result-identity.json').is_file()
     assert c.validate(work)['scientific_result']==result['scientific_result']
     assert all(path.read_bytes()==raw for path,raw in originals.items())

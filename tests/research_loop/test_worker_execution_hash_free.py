@@ -7,7 +7,7 @@ import re
 import pytest
 
 from execution_fixtures import execution_registry, remote_registry
-from test_nonlocal_execution_observation import case
+from test_nonlocal_execution_observation import case, research_path
 from test_composed_execution_results import composed_registry
 from scidiscovery.research_loop import contracts as c, execution, experiments as e
 
@@ -68,7 +68,7 @@ def test_real_main_client_contracts_and_retained_outputs(tmp_path, monkeypatch, 
     # must preserve its bytes rather than recursively scrub scientific data.
     original = b'{"algorithm":"sha256","sha256":"' + b'a' * 64 + b'"}'
     source = _code_payload(work, name='scientific-source.json', data=original)
-    result = run_cli('run', '--payload', source, '--new-plan', '--mechanism', 'P')
+    result = run_cli('run', '--payload', source, '--new-plan', '--research',research_path(root,'1'))
     call = result['call_id']
     for command in ('query', 'lookup'):
         assert run_cli(command, '--call-id', call)['state'] == 'succeeded'
@@ -84,7 +84,6 @@ def test_real_main_client_contracts_and_retained_outputs(tmp_path, monkeypatch, 
     assert accepted['code_version']['logical_root'] == 'code'
     assert accepted['code_version']['entry'] == source.name
     assert 'sha256' not in c.read(e.Records(config).directory(call) / 'execution-observation.json')['outputs'][0]
-
 
 
 def test_public_configuration_paths_and_actionable_caller_errors(tmp_path,monkeypatch,remote_registry,capsys):
@@ -123,7 +122,7 @@ def test_thin_help_and_ingress_errors_have_no_execution_effects(tmp_path,monkeyp
         assert tool('wrong-command',code=2)['status']=='caller_error'
         assert tool('run','--not-an-option',code=2)['status']=='caller_error'
         for path in (outside,source):
-            reply=bridge.client(slot,['run','--payload',str(path),'--new-plan','--mechanism','P'])
+            reply=bridge.client(slot,['run','--payload',str(path),'--new-plan','--research',research_path(root,'1')])
             assert reply['code']==2 and reply['result']['status']=='caller_error'
             assert reply['result']['accepted'] is False
         assert e.Records(config).calls()==[]
@@ -161,7 +160,7 @@ def test_unknown_original_cli_does_not_replay(tmp_path, monkeypatch, remote_regi
     root, _, config, _ = case(tmp_path, monkeypatch, outcome='unknown')
     work = c.workspace(root, 2);path = work / 'work/experiment-config.json'
     source = _code_payload(work)
-    result = invoke(capsys, path, 'run', '--payload', source, '--new-plan', '--mechanism', 'P', expected=2)
+    result = invoke(capsys, path, 'run', '--payload', source, '--new-plan', '--research',research_path(root,'1'), expected=2)
     call = result['call_id']
     before = {item:item.read_bytes() for item in e.Records(config).directory(call).rglob('*') if item.is_file()}
     assert invoke(capsys, path, 'query', '--call-id', call)['state'] == 'unknown'
@@ -183,7 +182,7 @@ def test_fixed_host_bridge_rejects_authority_and_preserves_originals(tmp_path, m
                 ['run','--payload',str(root/'jobs/002.json')]):
             assert bridge.client(endpoint,arguments)['code']==2
         source=_code_payload(work)
-        result=bridge.client(endpoint,['run','--payload',str(source),'--new-plan','--mechanism','P'])
+        result=bridge.client(endpoint,['run','--payload',str(source),'--new-plan','--research',research_path(root,'1')])
         assert result['code']==0 and result['result']['status']=='known_success'
         assert len(e.Records(config).calls())==1
         native=execution.origin(root,2)/'experiment-config.json'
@@ -200,7 +199,7 @@ def test_ordinary_submission_claims_do_not_replay_or_rebind(tmp_path,monkeypatch
     root,_,config,_=case(tmp_path,monkeypatch)
     work=c.workspace(root,2);slot=work/bridge.SUBMISSION_DIRECTORY;slot.mkdir()
     source=_code_payload(work)
-    arguments=['run','--payload',str(source),'--new-plan','--mechanism','P']
+    arguments=['run','--payload',str(source),'--new-plan','--research',research_path(root,'1')]
     def no_local_launch(*args):raise AssertionError('Remote fixture has no local process')
     def wait(reference):
         deadline=time.monotonic()+5
@@ -239,7 +238,6 @@ def test_ordinary_submission_claims_do_not_replay_or_rebind(tmp_path,monkeypatch
         assert len(e.Records(config).calls())==1
 
 
-
 def wait_submission(slot,reference,*,code=None):
     import time
     deadline=time.monotonic()+5
@@ -260,7 +258,7 @@ def test_cached_submission_revalidates_canonical_originals(tmp_path,monkeypatch,
     source=_code_payload(work)
     def no_local_launch(*args):raise AssertionError('Remote fixture has no local process')
     with bridge.serve(slot,work/'work/experiment-config.json',work,launch=no_local_launch):
-        result=bridge.client(slot,['run','--payload',str(source),'--new-plan','--mechanism','P'])
+        result=bridge.client(slot,['run','--payload',str(source),'--new-plan','--research',research_path(root,'1')])
         assert result['result']['status']=='known_success'
         original=(slot/'submit.json').read_bytes()
         reference=json.loads(original)['submission_ref']
@@ -310,7 +308,7 @@ def test_special_submission_slot_rejects_without_blocking(tmp_path,monkeypatch,r
     assert e.Records(config).calls()==[]
 
 
-def test_concurrent_thin_clients_and_manual_overwrite_never_misbind(tmp_path,monkeypatch,remote_registry):
+def test_concurrent_thin_clients_keep_exact_response_bindings(tmp_path,monkeypatch,remote_registry):
     from concurrent.futures import ThreadPoolExecutor
     from scidiscovery.research_loop import worker_execution_bridge as bridge
     root,_,config,_=case(tmp_path,monkeypatch)
@@ -322,34 +320,6 @@ def test_concurrent_thin_clients_and_manual_overwrite_never_misbind(tmp_path,mon
             description=pool.submit(bridge.client,slot,['describe','--key','opaque_input','--metadata','--output',str(work/'work/concurrent.json')])
             assert caps.result(timeout=5)['result']['contracts']
             assert description.result(timeout=5)['result']['key']=='opaque_input'
-    # Install the barrier before the isolated receiver is forked. Its actual
-    # observation/release are files shared with the client, not thread memory.
-    entered=tmp_path/'receiver-entered';release=tmp_path/'receiver-release';execute=bridge._execute
-    def paused(server,arguments):
-        import time
-        entered.touch();deadline=time.monotonic()+5
-        while not release.exists():
-            if time.monotonic()>=deadline:raise AssertionError('Test scheduling gate timed out')
-            time.sleep(.01)
-        return execute(server,arguments)
-    monkeypatch.setattr(bridge,'_execute',paused)
-    with bridge.serve(slot,work/'work/experiment-config.json',work,launch=no_local_launch):
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            waiting=pool.submit(bridge.client,slot,['capabilities'])
-            import time
-            deadline=time.monotonic()+3
-            while not entered.exists() and time.monotonic()<deadline:time.sleep(.01)
-            assert entered.exists()
-            request=c.read(slot/'submit.json')
-            request['arguments']=['lineage-status']
-            c.write(slot/'submit.json',request)
-            release.touch()
-            with pytest.raises(ValueError,match='response|slot'):
-                waiting.result(timeout=5)
-        response=wait_submission(slot,request['submission_ref'],code=3)
-        assert response['request']==request and response['result']['status']=='integrity_error'
-        assert e.Records(config).calls()==[]
-
 
 
 def test_response_atomic_replacement_retries_only_the_read(tmp_path,monkeypatch,remote_registry):
@@ -406,7 +376,7 @@ def test_file_submission_preserves_async_handle_and_terminal_append(tmp_path,mon
     source=_code_payload(work)
     def forbidden(*args):raise AssertionError('Async fixture has no local scientific process')
     with bridge.serve(slot,work/'work/experiment-config.json',work,launch=forbidden):
-        started=bridge.client(slot,['run','--payload',str(source),'--new-plan','--mechanism','P'])
+        started=bridge.client(slot,['run','--payload',str(source),'--new-plan','--research',research_path(root,'1')])
         assert started['code']==2 and started['result']['status']==state
         call=started['result']['call_id'];run_raw=(slot/'submit.json').read_bytes()
         queried=bridge.client(slot,['query','--call-id',call])

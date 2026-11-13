@@ -254,7 +254,7 @@ def test_explicit_required_worker_windows_admit_without_changing_defaults(tmp_pa
     monkeypatch.setattr(c, 'write', forbidden)
     monkeypatch.setattr(c.atomic_files, 'publish_bytes', forbidden)
     normalized = research_config.normalize(value)
-    assert normalized['worker_fragment_policy'] == value['worker_fragment_policy']
+    assert normalized['worker_fragment_policy'] == dict(value['worker_fragment_policy'],context_handoff_version=2)
     assert adapter().default_experiment_mode() == 'local'
     assert pi.DEFAULT_RESUME_POLICY == dict(max_attempts=2, protocol='pi_rpc_v1', usage_scope='turn',
         output_repair=True, output_only=True, execution_wake=True)
@@ -386,7 +386,7 @@ def test_configuration_form_and_toml_share_registered_backend(tmp_path):
     assert normalized['launcher'] == ['pi'] and normalized['service_tier'] is None
     assert normalized['native_options'] == OPTIONS
     assert normalized['resume_policy'] == NO_REPAIR
-    assert normalized['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1)
+    assert normalized['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1,context_handoff_version=2)
     assert normalized['search_policy'] is not None  # Generic defaults were not erased.
 
 

@@ -116,17 +116,19 @@ def test_compact_receipt_regression_and_attempt_reuse_are_rejected(tmp_path):
     assert reader.snapshot()['context_windows']['windows_started'] == 2
 
 
-def test_exact_session_inode_workspace_and_append_only_size_remain_bound(tmp_path):
+def test_exact_session_workspace_and_path_remain_bound_across_native_maintenance(tmp_path):
     reader, home, work, path, _ = metadata(tmp_path)
     report(work, path)
     binding = reader.poll()['session_binding']
     assert validate_session_binding(binding, THREAD, work, home) == binding
     with pytest.raises(ValueError): validate_session_binding(binding, THREAD, tmp_path / 'other', home)
+    with pytest.raises(ValueError): validate_session_binding(binding, 'another-thread', work, home)
     path.write_bytes(b'')
-    with pytest.raises(ValueError, match='truncated'): validate_session_binding(binding, THREAD, work, home)
+    assert validate_session_binding(binding, THREAD, work, home) == binding
     replacement = path.with_name('replacement'); replacement.write_bytes(b'opaque native original\n')
     path.unlink(); replacement.rename(path)
-    assert reader.poll()['context_windows']['coverage'] == 'unknown'
+    assert validate_session_binding(binding, THREAD, work, home) == binding
+    assert reader.poll()['context_windows']['coverage'] == 'live'
 
 
 def test_missing_compact_producer_is_explicit_unknown_not_a_fabricated_window(tmp_path):

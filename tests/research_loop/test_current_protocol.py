@@ -90,7 +90,7 @@ def test_current_instance_cannot_accept_old_retained_job_from_current_caller_cop
     c.write(root / 'settings-identity.json', dict(path='settings.json'))
     caller = dict(job, handoff_protocol=protocol.CURRENT)
     before = tree(root)
-    with pytest.raises(protocol.UnsupportedProtocol, match='Retained scientific job'):
+    with pytest.raises(protocol.UnsupportedProtocol, match='requires current research-loop protocol'):
         protocol.require_current(root, caller)
     assert tree(root) == before
 

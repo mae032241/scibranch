@@ -138,7 +138,8 @@ def _completed(directory, *, verify_assets=True, verify_source=True):
     temporary=None
     if 'code_version' in accepted:
         from scidiscovery.research_loop import experiments
-        root=experiments._code_version_binding(accepted.get('config_record'),accepted)
+        frozen_config=dict(accepted['config_record'],execution_interface=accepted['interface'])
+        root=experiments._code_version_binding(frozen_config,accepted)
         temporary=experiments._code_export_entry(root,accepted)
     model=Path(result['model']['path']) if result['model'] is not None else None
     for proof in result['proofs']:
@@ -266,7 +267,8 @@ def _receipt(directory, accepted, rows, returncode, cleanup, transport_complete=
         raise IntegrityError('Executed source snapshot changed')
     if 'code_version' in accepted:
         from scidiscovery.research_loop import experiments
-        root=experiments._code_version_binding(accepted.get('config_record'),accepted)
+        frozen_config=dict(accepted['config_record'],execution_interface=accepted['interface'])
+        root=experiments._code_version_binding(frozen_config,accepted)
         if experiments._code_export_entry(root,accepted) is None:
             raise IntegrityError('Executed code lost its accepted export binding')
     elif any(_proof(Path(accepted['source_script']),context=context).get(key)!=value for key,value in

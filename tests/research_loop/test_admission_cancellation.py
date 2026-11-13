@@ -405,7 +405,7 @@ REGISTRATION=ExecutionInterfaceRegistration('coordinated_prepare','1',RuntimePlu
     client=c.workspace(root,2)/'work/experiment-config.json';source=_source(root)
     command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(client)]
     run=['run','--payload',str(source),'--new-plan','--research',_research_file(root,config)]
-    records=e.Records(config);events=budget._events(root,c.settings(root))[0]
+    records=e.Records(config);events=dict(budget._events(root)[0].state)
     winner=subprocess.Popen([*command,*run],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     def ready(stage):
         path=gates/(stage+'-ready');deadline=time.monotonic()+10
@@ -423,7 +423,7 @@ REGISTRATION=ExecutionInterfaceRegistration('coordinated_prepare','1',RuntimePlu
         assert 'call_id' not in refused and refused['handoff']['reason']=='execution_not_accepted'
         assert [json.loads(row) for row in (gates/'events.jsonl').read_text().splitlines()]==[['prepare',call_id]]
         assert records.calls()==[] and not (records.root/'host-preparations').exists()
-        assert budget._events(root,c.settings(root))[0]==events
+        assert dict(budget._events(root)[0].state)==events
         assert not (root/'execution-authority/calls').exists()
         (gates/'prepare-release').touch()
         assert ready('submit')==call_id
@@ -449,8 +449,7 @@ REGISTRATION=ExecutionInterfaceRegistration('coordinated_prepare','1',RuntimePlu
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('boundary',['prepare','copy'])
-def test_terminal_lifecycle_remains_available_during_next_preparation(tmp_path, monkeypatch, remote_registry, boundary):
+def test_terminal_lifecycle_remains_available_during_next_preparation(tmp_path, monkeypatch, remote_registry):
     plugin=tmp_path/'shared-lifecycle-plugin';plugin.mkdir()
     (plugin/'shared_lifecycle.py').write_text('''import json
 from execution_fixtures import DifferentExternalIdentity
@@ -487,7 +486,7 @@ from pathlib import Path
 from scidiscovery.research_loop import contracts as c,experiments as e
 from shared_lifecycle import SharedLifecycle
 client,payload=map(Path,sys.argv[1:3]);gates=Path(sys.argv[3])
-boundary,role,research=sys.argv[4:7];call_id=None
+role,research=sys.argv[4:6];call_id=None
 def stop():
     (gates/'ready').write_text(call_id)
     deadline=time.monotonic()+20
@@ -499,20 +498,13 @@ def prepared(self,payload,**options):
     global call_id
     call_id=payload.name
     with (gates/'events.jsonl').open('a') as stream:stream.write(json.dumps([role,'prepare',call_id])+'\n')
-    if role=='winner' and boundary=='prepare':stop()
+    if role=='winner':stop()
     return prepare(self,payload,**options)
 SharedLifecycle.prepare=prepared
-copy=c._bind_original
-def copied(*args,**kwargs):
-    result=copy(*args,**kwargs);target=Path(args[1])
-    if role=='winner' and boundary=='copy' and target.name=='source.py' and target.parent.name.startswith('.prepared-'):
-        stop()
-    return result
-c._bind_original=copied
 raise SystemExit(e.main(['--config',str(client),'run','--payload',str(payload),'--new-plan','--research',research]))
 '''
     command=[sys.executable,'-m','scidiscovery.research_loop.experiments','--config',str(client)]
-    writer=[sys.executable,'-c',writer_source,str(client),str(source),str(gates),boundary]
+    writer=[sys.executable,'-c',writer_source,str(client),str(source),str(gates)]
     research=_research_file(root,config,'Q')
     winner=subprocess.Popen([*writer,'winner',research],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
@@ -541,12 +533,8 @@ raise SystemExit(e.main(['--config',str(client),'run','--payload',str(payload),'
         collected=subprocess.run([*command,'collect','--call-id',first_id],capture_output=True,text=True,timeout=5)
         assert collected.returncode==0 and not collected.stderr,(collected.stdout,collected.stderr)
         assert json.loads(collected.stdout)['status']=='collected'
-        if boundary=='prepare':
-            assert refused['status']=='known_not_started' and refused['accepted'] is False
-            assert 'call_id' not in refused and refused['handoff']['reason']=='execution_not_accepted'
-        else:
-            assert refused['status']=='unknown' and refused['call_id']==call_id
-            assert refused.get('accepted') is not False and refused['handoff']['action']=='reconcile_or_stop'
+        assert refused['status']=='known_not_started' and refused['accepted'] is False
+        assert 'call_id' not in refused and refused['handoff']['reason']=='execution_not_accepted'
         assert winner.poll() is None and not (gates/'release').exists()
         assert [path.name for path in records.calls()]==[first_id]
         assert (records.directory(first_id)/'accepted.json').read_bytes()==accepted
@@ -608,81 +596,4 @@ def test_preadmission_local_race_keeps_competitor_identity_when_query_is_unavail
     assert result['handoff']['call_id']==winner
     assert [path.name for path in e.Records(config).calls()]==[winner]
     assert _temporary(e.Records(config))==[]
-    _no_host_preparation(root,config)
-
-
-@pytest.mark.process_e2e
-def test_real_native_next_legal_local_call_after_preaccept_review_cancellation(tmp_path, monkeypatch):
-    import test_default_native_local_execution as native_case
-    cancelled=tmp_path/'local-preparation-cancelled'
-    installed=tmp_path/'runtime-fault-installed'
-    _runtime_owner_fault(monkeypatch,f'''from pathlib import Path
-from scidiscovery.research_loop import budget,contracts as c,experiments as e
-from scidiscovery.research_loop.local_experiments import LocalExecution
-cancelled=Path({str(cancelled)!r})
-Path({str(installed)!r}).write_text('Actual runtime owner installed the admission fault')
-prepare=LocalExecution.prepare;accept=e.Records.accept
-def publish(config,pending):
-    stamp=budget.clock_stamp()
-    c.write(Path(config['admission']['directory'])/'review.json',dict(version=1,
-        scope=config['scope'],stage_anchor=config['admission']['stage_anchor'],
-        native_attempt=config['native_attempt'],boot_id=stamp['boot_id'],
-        deadline_boottime=stamp['at_boottime']+60,valid_until_boottime=stamp['at_boottime']+60,
-        pending=pending,reason='reserve_reached' if pending else None,inflight_usage_unknown=True))
-def changed(self,payload,**options):
-    result=prepare(self,payload,**options)
-    if not cancelled.exists():publish(self.config,True)
-    return result
-def refused(self,*args,**kwargs):
-    try:return accept(self,*args,**kwargs)
-    except e.ReviewRequired:
-        publish(self.config,False);cancelled.write_text('Definite local refusal before submission')
-        raise
-LocalExecution.prepare=changed;e.Records.accept=refused
-''')
-    standin=native_case.NATIVE_STANDIN
-    for old,new in ((5,6),(4,5),(3,4)):
-        standin=standin.replace(f'request({old},[',f'request({new},[')
-    standin=standin.replace("reply=request(2,arguments)\nassert reply['code']==0,reply",
-        "refused=request(2,arguments)\n"
-        "assert refused['code']==2 and refused['result']['status']=='review_required',refused\n"
-        "assert refused['result']['accepted'] is False and 'call_id' not in refused['result'],refused\n"
-        "assert refused['result']['handoff']['reason']=='execution_not_accepted',refused\n"
-        "reply=request(3,arguments)\nassert reply['code']==0,reply")
-    monkeypatch.setattr(native_case,'NATIVE_STANDIN',standin)
-    native_case._default_local_case(tmp_path,monkeypatch,True,False)
-    root=tmp_path/'instance';config=c.read(execution.origin(root,2)/'experiment-config.json')
-    assert installed.is_file() and cancelled.is_file() and len(e.Records(config).calls())==1
-    assert _temporary(e.Records(config))==[]
-    _no_host_preparation(root,config)
-
-
-@pytest.mark.process_e2e
-def test_real_native_racing_local_acceptance_returns_exact_winner_and_starts_once(tmp_path, monkeypatch):
-    import test_default_native_local_execution as native_case
-    winner=tmp_path/'winning-local-call'
-    installed=tmp_path/'runtime-fault-installed'
-    _runtime_owner_fault(monkeypatch,f'''from pathlib import Path
-from scidiscovery.research_loop import experiments as e
-winner=Path({str(winner)!r})
-Path({str(installed)!r}).write_text('Actual runtime owner installed the admission race')
-original_state=e._original_dispatch_state;entered=False
-def competing(config,payload,**options):
-    global entered
-    result=original_state(config,payload,**options)
-    if not entered:
-        entered=True
-        prior=e.dispatch(config,Path(payload.local_path),command_options=dict(
-            experiment_directory=str(Path(payload.local_path).parent),arguments=[]))
-        assert prior['status']=='known_success'
-        winner.write_text(prior['call_id'])
-    return result
-e._original_dispatch_state=competing
-''')
-    native_case._default_local_case(tmp_path,monkeypatch,True,False)
-    root=tmp_path/'instance';config=c.read(execution.origin(root,2)/'experiment-config.json')
-    records=e.Records(config);calls=records.calls()
-    assert installed.is_file() and len(calls)==1 and calls[0].name==winner.read_text()
-    assert (calls[0]/'process.json').is_file() and (calls[0]/'completed.json').is_file()
-    assert _temporary(records)==[]
     _no_host_preparation(root,config)

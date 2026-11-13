@@ -225,11 +225,12 @@ def test_workspace_skill_picker_preview_create_freezes_role_selection(tmp_path):
         checkbox_name = f'skill_picker.item.W.{skill_index}'
         assert f'name="{checkbox_name}" value="curve-analysis"'.encode() in page
         assert not any(name.startswith('skill_picker.item.') for name in fields)
+        assert fields['skill_picker.choice.W'] == 'keep'
         fields.update({'task_text': objective,
             'cfg.research.root': str(created), 'cfg.research.public_root': str(public),
             'cfg.agent.launcher': 'codex', 'cfg.budget.max_tokens': '1000',
             'cfg.budget.max_seconds': '120', 'cfg.budget.max_steps': '8',
-            checkbox_name: 'curve-analysis', 'skill_picker.choice.W': 'custom'})
+            checkbox_name: 'curve-analysis'})
         status, preview, _ = request(connection, 'POST', '/control/configure',
             cookie=cookie, fields=fields, origin=origin)
         assert status == 200, preview.decode(errors='replace')

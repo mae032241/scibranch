@@ -41,7 +41,7 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
     def execute(root,step):
         assert step==2
         job=c.read(root/'jobs/002.json')
-        assert job['role']=='W' and job['search']['focus']['action']=='improve'
+        assert job['role']=='W'
         assert not job.get('final_only') and budget.node_admission(root,job) is None
         anchor=budget.accept_node(root,job)
         record=execution.origin(root,step)
@@ -54,30 +54,38 @@ def test_ordinary_improve_below_old_reserve_can_accept_first_managed_call(tmp_pa
         hint=feedback.budget_hint(c.workspace(root,step))
         assert hint['reserve_state']=='within'
         assert hint['current_work_observed_tokens_remaining_upper_bound']==remaining
-        config_path=tmp_path/'execution-config.json'
-        experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),config_path)
-        config=c.read(config_path)
+        config_path=c.workspace(root,step)/'work/execution-config.json'
+        config=experiments.configure(root,step,'local_execution:command',dict(run_argv=[sys.executable]),config_path)
         assert not experiments.review_status(config)['requested']
-        script=c.workspace(root,step)/'work/adaptation.py';script.write_text('print("mechanical admission fixture only")\n')
-        result=experiments.dispatch(config,script,new=True,mechanism='Adaptation')
+        script=c.workspace(root,step)/'code/adaptation.py'
+        script.parent.mkdir(exist_ok=True)
+        script.write_text('print("mechanical admission fixture only")\n')
+        from test_native_execution_inputs import research_file
+        from scidiscovery.research_loop import worker_execution_bridge as bridge
+        # Only budget admission is under test; the component owns a trusted host receiver.
+        token=bridge._LOCAL_LAUNCH.set(lambda config,accepted,command,cwd:(command,cwd,None))
+        try:
+            result=experiments.dispatch(config,script,new=True,mechanism=c.read(research_file(config_path,step)))
+        finally:
+            bridge._LOCAL_LAUNCH.reset(token)
         assert result['status']=='known_success',result
         accepted.extend(experiments.Records(config).calls())
         payload=dict(summary='Returned the authorized observation',scientific_result='Mechanical admission only; no scientific qualification.',
             limitations=['Deterministic fixture'],implementation_selection=None,mechanism_findings=None,stage_intent='decision',
             candidate_nominations=dict(representatives=[],extras=[],gaps=[dict(
                 mechanism_ref=row['mechanism_ref'],reason='The mechanical command produces no scientifically suitable model candidate.')
-                for row in job['candidate_nomination_mechanisms'] if row['status']!='waived']))
+                for row in job.get('candidate_nomination_mechanisms',[]) if row['status']!='waived']))
         c.write(record/'science-output.json',payload)
         c.write(record/'usage.json',dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))
-        c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,
+        c.write(record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,
             usage=native.usage(root),raw_ref=c.file_ref(record/'science-output.json')))
         c.seal_result(root,step)
         (root/'pause.request').write_text('Pause after the accepted original')
-    monkeypatch.setattr(native,'execute_native',execute)
-    result=controller.run(root)
-    assert result['status']=='paused' and result['completed_steps']==2,result
+    c.build_job(root,2,'W',[1])
+    execute(root,2)
+    assert budget.used_steps(root)==2
     assert len(accepted)==1 and budget.final_a_barrier(root) is None
-    assert c.read(accepted[0]/'accepted.json')['mechanism_binding']['mechanism_ref']=='h001.m1'
+    assert c.read(accepted[0]/'accepted.json')['mechanism_binding']['mechanism_ref']=='w002.inputs'
     assert (execution.origin(root,2)/'result-identity.json').is_file()
     assert native.usage(root)['observed_tokens']==20
     assert (root/'settings.json').read_bytes()==settings

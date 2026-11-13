@@ -2678,8 +2678,10 @@ def exploration_stop(root, job, limits):
 
 def _validate_action_result(intent, result):
     binding = intent['binding']
-    if (set(result) - {'failure_phase','diagnostic'} != {'status', 'operation_id', 'candidate_id', 'artifact_ref', 'note', 'cleanup_confirmed'}
+    if (set(result) - {'failure_phase','diagnostic','recovery'} != {'status', 'operation_id', 'candidate_id', 'artifact_ref', 'note', 'cleanup_confirmed'}
             or 'failure_phase' in result and (result['status'] not in {'failed', 'rejected', 'engineering_error', 'unclassified', 'unknown'} or result['failure_phase'] not in {'audit', 'promote', 'confirm'})
+            or 'recovery' in result and (result.get('failure_phase') != 'audit'
+                or not isinstance(result['recovery'], str) or result['recovery'] not in {'none', 'author_repair', 'control_retry'})
             or 'diagnostic' in result and (not isinstance(result['diagnostic'],str) or len(result['diagnostic'].encode())>4096)
             or result['status'] not in {'confirmed', 'failed', 'unknown', 'rejected', 'engineering_error', 'unclassified'}
             or type(result['cleanup_confirmed']) is not bool

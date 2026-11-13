@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from scidiscovery.research_loop import budget,configuration_updates,contracts as c,controller,execution,native,profiles,runtime
+from scidiscovery.research_loop import accepted_budget, budget,configuration_updates,contracts as c,controller,execution,native,profiles,runtime
 from test_history_handoff import finish
 
 
@@ -59,7 +59,7 @@ def _transport_guard(seconds=15):
         signal.signal(signal.SIGALRM,previous)
 
 
-def _scene(tmp_path,monkeypatch,mode='backpressure',*,final=False):
+def _scene(tmp_path,monkeypatch,mode='backpressure',*,final=False,interrupt_support=False):
     public=tmp_path/'public';public.mkdir()
     goal=public/'goal';goal.write_text('Exercise deterministic native transport.')
     root=tmp_path/'instance'
@@ -81,8 +81,12 @@ def _scene(tmp_path,monkeypatch,mode='backpressure',*,final=False):
     step=job['step']
     anchor=budget.accept_node(root,job)
     record=execution.origin(root,step)
-    c.write(record/'native-intent.json',dict(step=step,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
-        **profiles.binding(configuration_updates.for_job(root,job),job),budget_slice=anchor))
+    intent=dict(step=step,task_ref=c.record_ref(root/'jobs'/f'{step:03d}.json'),
+        **profiles.binding(configuration_updates.for_job(root,job),job),budget_slice=anchor)
+    if interrupt_support:
+        intent['operator_interrupt_version']=native.OPERATOR_INTERRUPT_VERSION
+    c.write(record/'native-intent.json',intent)
+    accepted_budget.accept_native(root,step,record,intent)
     render=native.render_scientific_request
     def padded(*args,**kwargs):
         prompt,instruction,schema=render(*args,**kwargs)

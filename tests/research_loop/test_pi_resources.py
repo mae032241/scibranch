@@ -135,8 +135,9 @@ def test_public_form_toml_and_named_worker_keep_shared_selection_and_current_def
     assert value['skills'] == document['skills']
     assert value['role_profiles'] == {'W': {'worker': 'selected'}}
     assert value['worker_profiles'] == {'selected': {'skill_set': 'chosen'}}
-    assert value['resume_policy'] == pi_backend.DEFAULT_RESUME_POLICY
-    assert value['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1)
+    assert {key:value['resume_policy'][key] for key in pi_backend.DEFAULT_RESUME_POLICY} == pi_backend.DEFAULT_RESUME_POLICY
+    assert value['resume_policy']['automatic_recovery']['max_attempts'] == 8
+    assert value['worker_fragment_policy'] == dict(context='same_session', max_context_windows=1,context_handoff_version=2)
     assert set(value['node_budget_policy']) == set('HWAE')
     assert adapter().default_experiment_mode() == 'local'
 
@@ -682,8 +683,9 @@ def test_transport_requires_owner_admitted_runtime_profile_before_native_popen(t
         *[part for row in resources for part in ('--skill', row['path'])]]
     def forbidden(*a, **kw): pytest.fail('Missing owner resource profile reached native Popen')
     events = []
-    assert pi_transport.run(args, 'scope', events.append, popen=forbidden) == 1
-    assert events == [dict(type='pi_transport_fault')]
+    with pytest.raises(pi_transport.TransportFault,match='resource_policy_missing_or_changed'):
+        pi_transport.run(args, 'scope', events.append, popen=forbidden)
+    assert events == []
 
 
 @pytest.mark.parametrize('selected', [False, True])

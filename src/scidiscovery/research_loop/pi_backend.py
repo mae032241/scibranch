@@ -1024,10 +1024,15 @@ class Pi(Backend):
         sessions.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._binding = dict(home=str(home), workspace=str(work), path=str(path))
         import secrets
+        from . import checkpoint
+        # Freeze the bound job's requirement before the readonly observer source
+        # is staged. Later launch/configuration consumers use this same proof.
+        required = bool((self.settings.get('worker_fragment_policy') or {}).get('max_context_windows')
+            is not None and self._job is not None and checkpoint.ordinary_worker(self._job))
         nonce = secrets.token_hex(32)
         self._observation_proof = dict(nonce=nonce, path=str(path), workspace=str(work),
             metadata=str(sessions / ('.pi-observation-' + nonce + '.json')),
-            extension=str(sessions / ('.scid-pi-observation-' + nonce + '.ts')), required=False)
+            extension=str(sessions / ('.scid-pi-observation-' + nonce + '.ts')), required=required)
         self.engine.binding = MappingProxyType(dict(self._binding))
     def launch(self, profile, work, pending, schema, instruction):
         validate_configuration(self.settings.get('native_options')); validate_profile(profile)
@@ -1186,15 +1191,11 @@ class Pi(Backend):
         if list(args) != self._args: raise ValueError('Pi accepted launch argv changed')
         return pi_namespace.wrap_from_facts(view_facts, args)
     def prepare_launch(self, args, work, attempt, env, view_facts, context, *, diagnostic=None):
-        from . import checkpoint
         from .pi_transport import runtime_resource_mode
         mode = runtime_resource_mode(view_facts.get('resource_policy'))
         if mode != self.settings['native_options'].get('resource_mode', 'closed'):
             raise ValueError('Pi launch resource profile changed from its frozen declaration')
         if self._observer_staged:
-            required = bool((self.settings.get('worker_fragment_policy') or {}).get('max_context_windows')
-                is not None and self._job is not None and checkpoint.ordinary_worker(self._job))
-            self._observation_proof['required'] = required
             view_facts = dict(view_facts, observation=dict(self._observation_proof))
             self._launch_evidence = dict(kind=('pi_cli_closed_resources_v1' if mode == 'closed'
                 else 'pi_cli_configured_extensions_v1'),

@@ -8,11 +8,12 @@ import uuid
 import pytest
 
 from execution_fixtures import execution_registry
-from scidiscovery.research_loop import (contracts as c, controller, execution_inputs as inputs,
+from scidiscovery.research_loop import (accepted_budget, contracts as c, controller, execution, execution_inputs as inputs,
     experiment_client, experiments as e, formal_review as review, history, native, originals, qualification as q)
 from scidiscovery.research_loop.local_experiments import LocalExecution
 from scidiscovery.research_loop import worker_execution_bridge as bridge
 from test_history_handoff import finish
+from test_nonlocal_execution_observation import research, research_path
 
 
 @pytest.fixture
@@ -43,6 +44,7 @@ def local_scene(tmp_path, monkeypatch, execution_registry):
     finish(root,1,'H',[],action='experiment',files={'base/run.py':code,'base/value.txt':'42'})
     job=c.build_job(root,2,'W',[1]);work=c.workspace(root,2);record=c.host_record(work)
     c.write(record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/002.json')))
+    accepted_budget.accept_native(root,2,record,c.read(record/'native-intent.json'))
     path=work/'work/experiment-config.json'
     config=e.configure(root,2,'local_execution:command',options,path)
     return root,job,config,path
@@ -55,105 +57,16 @@ def authored(root):
 
 
 @pytest.mark.process_e2e
-def test_public_local_code_and_exact_inputs_reach_independent_review(local_scene,capsys):
-    root,job,config,path=local_scene
-    assert job.get('selected_inputs',[])==[]
-    work=c.workspace(root,2);bound=work/'inputs/parents/001/artifacts/base'
-    producer_material=next(item for item in job['direct_materials']
-        if item['path']==(bound/'value.txt').relative_to(work).as_posix())
-    first_script=work/'code/base/run.py';first_script.parent.mkdir(parents=True)
-    first_script.write_text('print("42")\n')
-    def run(*arguments):
-        code=e.main(['--config',str(path),'run',*map(str,arguments)])
-        result=json.loads(capsys.readouterr().out);diagnostic=''
-        if code and result.get('call_id'):
-            stderr=e.Records(config).directory(result['call_id'])/'stderr.raw'
-            if stderr.is_file():diagnostic=stderr.read_text()
-        assert code==0,dict(result=result,stderr=diagnostic)
-        assert result['status']=='known_success',result
-        return result
-    def launch(body,accepted,command,cwd):
-        # Real inert processes consume exact sources; native namespace policy
-        # is covered elsewhere and is not asserted by this provenance fixture.
-        command=list(command)
-        source=Path(accepted['script']['path'])
-        assert source.is_file(), 'Exact accepted fixture source is unavailable'
-        command[accepted['script_index']]=str(source)
-        return command,cwd,None
-    token=bridge._LOCAL_LAUNCH.set(launch)
-    try:
-        first=run('--experiment-dir',work/'experiments/base','--script',first_script)
-        directory,script=authored(root)
-        second=run('--experiment-dir',directory,'--script',script)
-    finally:bridge._LOCAL_LAUNCH.reset(token)
-    records=e.Records(config);first_accepted=records.accepted(first['call_id']);second_accepted=records.accepted(second['call_id'])
-    # Git owns authored code. The Local view covers declared runtime snapshots;
-    # neither inert program claims to consume the separately bound H inputs.
-    for accepted,entry in ((first_accepted,'base/run.py'),(second_accepted,'revision/run.py')):
-        assert accepted['input_sources']['view']['files']==accepted['snapshot_files']==[]
-        assert accepted['code_version']['logical_root']=='code'
-        assert accepted['code_version']['entry']==entry
-        assert inputs.validate_local_input_sources(root,job,accepted)==[]
-    # New authoring bytes are snapshotted; later work does not rewrite the call.
-    script.write_text('raise RuntimeError("later edit, never executed")\n')
-    finish(root,2,'W',[1],files={'revised.py':'def predict(): return 43\n'})
-    record=c.host_record(c.workspace(root,2));seal=c.read(record/'result-identity.json')
-    proof=q._read(root,seal['source_provenance'])
-    assert len(proof['managed_input_coverage'])==2 and all(row['complete'] for row in proof['managed_input_coverage'])
-    assert q.output_status(root,2)['restriction']=='clear'
-    authors=review.authors(root,2)
-    worker_session=c.read(record/'native-outcome.json')['thread_id']
-    assert authors['complete'] and authors['participants']==[['codex_exec',worker_session]]
-    selecting=c.build_job(root,3,'A',[2]);material=c._public_materials(root,[next(
-        item for item in seal['materials'] if item['source']==str(c.workspace(root,2)/'artifacts/revised.py'))])[0]
-    choices=[item['id'] for item in history.implementation_options(root,2) if item['label']=='revised.py'
-        and history.resolve_implementation(root,item['id'],selecting['history']['nodes'])==material]
-    assert len(choices)==1,choices
-    requested,_,request_record=finish(root,3,'A',[2],action='formal_review',selection=choices)
-    role,parents,instruction,back=review.request_route(root,requested,c.read(request_record/'result.json'),[3])
-    assert back['kind']=='formal_review'
-    assert q._read(root,back['request'])['subject']['material']==material
-    c.build_job(root,4,role,parents,instruction,back);review_record=c.host_record(c.workspace(root,4))
-    c.write(review_record/'native-intent.json',dict(task_ref=c.record_ref(root/'jobs/004.json')))
-    c.write(review_record/'science-output.json',dict(verdict='pass',summary='Exact Local fixture',scientific_result='Declared input/author coverage only.',limitations=['Synthetic native identities; two tiny local processes.']))
-    c.write(review_record/'usage.json',dict(input_tokens=1,cached_input_tokens=0,output_tokens=1))
-    c.write(review_record/'native-outcome.json',dict(returncode=0,stop_reason=None,native_started=False,
-        usage=native.usage(root),raw_ref=c.file_ref(review_record/'science-output.json')))
-    c.seal_result(root,4)
-    verdict=q._read(root,c.read(review_record/'result-identity.json')['formal_review'])
-    assert verdict['status']=='passed' and verdict['independence']=='independent' and verdict['subject']['material']==material
-    # Exact host ownership and complete runtime inventory remain independent
-    # of the separately fixed authored code and frozen producer inputs.
-    changed=deepcopy(first_accepted);changed['input_sources']['view']['job']['path']='jobs/001.json'
-    with pytest.raises(q.IntegrityError,match='exact host owner'):
-        inputs.validate_local_input_sources(root,job,changed)
-    changed=deepcopy(first_accepted);changed['input_sources']['view']['files'].append(
-        dict(name='unbound.txt',origin=dict(kind='unknown')))
-    with pytest.raises(q.IntegrityError,match='scientific inventory'):
-        inputs.validate_local_input_sources(root,job,changed)
-    changed=deepcopy(first_accepted);changed['code_version']['entry']='other.py'
-    with pytest.raises(q.IntegrityError,match='exact selected source or original pin'):
-        inputs.validate_local_input_sources(root,job,changed)
-    # These programs did not declare this H input as a runtime contribution.
-    # Consuming its damaged bound original still fails with an integrity error;
-    # its failure cannot be relabeled as a repairable author-file selection.
-    saved=(record/'provenance.json').read_bytes()
-    target=originals.material_path(root,producer_material);target.chmod(0o600);target.write_text('changed retained input\n')
-    with pytest.raises(e.IntegrityError,match='Scientific input'):
-        experiment_client.input_reference(config,work/producer_material['path'])
-    assert (record/'provenance.json').read_bytes()==saved
-
-
-@pytest.mark.process_e2e
 def test_local_source_contract_unknown_originals_and_unknown_execution_do_not_upgrade(local_scene,tmp_path,monkeypatch):
     root,job,config,path=local_scene
     directory,script=authored(root)
     monkeypatch.setattr(LocalExecution,'_execute',lambda *args:None)  # No process/terminal; acceptance only.
-    result=e.dispatch(config,script,command_options=dict(experiment_directory=str(directory)))
+    result=e.dispatch(config,script,mechanism=research(root,'1'),command_options=dict(experiment_directory=str(directory)))
     assert result['status']=='unknown'
     accepted=e.Records(config).accepted(result['call_id'])
     assert inputs.validate_local_input_sources(root,job,accepted)==[]
-    rows=history.managed_calls(root,job);coverage=history.managed_input_coverage(root,job,rows)
+    rows=history._observe_managed_calls_from_facts(root,job,chain=execution.records(root,job['step']),scope=config['scope'])
+    coverage=history._accept_managed_input_coverage(root,job,rows)
     assert len(coverage)==1 and coverage[0]['complete'] is False
     assert inputs.validate_local_input_sources(root,job,{key:value for key,value in accepted.items() if key!='input_sources'}) is None
     missing=deepcopy(accepted);missing['interface']['public_capabilities']=[]

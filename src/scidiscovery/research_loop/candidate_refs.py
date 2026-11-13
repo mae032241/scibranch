@@ -42,6 +42,45 @@ def in_instance(root, step, raw_id):
     return origin_candidate(originals.node(root, step).origin_identity, raw_id) if originals.inherited(root, step) else raw_id
 
 
+def source_input_ids(value, payload):
+    """Select only typed references in the already loaded scientific facts."""
+    identities = set()
+    for field in ('current_candidate', 'actual_submission'):
+        identity = (value.get(field) or {}).get('candidate_id')
+        if isinstance(identity, str):identities.add(identity)
+    for context in value.get('contexts', []):
+        identity = context.get('candidate_id')
+        if isinstance(identity, str):identities.add(identity)
+        parent = context.get('parent') or {}
+        identity = parent.get('candidate_id')
+        if parent.get('source') != 'same_node_completed_call' and isinstance(identity, str):
+            identities.add(identity)
+    identity = payload.get('candidate_recommendation')
+    if isinstance(identity, str):identities.add(identity)
+    return identities - {row['id'] for row in value.get('candidates', [])}
+
+
+def source_input_mapping_from_rows(source, job, rows):
+    """Bind addressed inputs from produced accepted rows, without loading history."""
+    prefix = job['history']['prefix']
+    result = {}
+    for raw, row in rows.items():
+        canonical = origin_candidate(source.origin_identity, raw)
+        if _MACHINE_CANDIDATE.fullmatch(raw) or _ORIGIN_CANDIDATE.fullmatch(raw):
+            result[raw] = raw
+            continue
+        if row is None:
+            result[raw] = raw
+            continue
+        if (row.get('origin_identity') != source.origin_identity
+                or row.get('observation', {}).get('id') != canonical
+                or not 0 < row.get('first_step', 0) < job['step']
+                or prefix['count'] == 0 or row['first_step'] > prefix['cutoff']):
+            raise ValueError('Candidate input differs from its exact frozen original')
+        result[raw] = canonical
+    return result
+
+
 def source_input_mapping(source, job, *, _active=None):
     """Resolve input IDs by exact observed producers, never equal raw labels."""
     from . import originals, contracts as c

@@ -372,7 +372,7 @@ def test_fork_creation_and_outer_disposal_are_mutually_fenced(instance, tmp_path
             assert error.value.code == 'delete_nested_instance'
         def forbidden(*args):
             pytest.fail('An exact published receipt must not repeat creation admission')
-        monkeypatch.setattr(owner, 'creation', forbidden)
+        monkeypatch.setattr(fork_service, '_prepare', forbidden)
         assert fork_service.create(source, 2, child, **options) == receipt
     else:
         preflight = deletion._preflight_tree

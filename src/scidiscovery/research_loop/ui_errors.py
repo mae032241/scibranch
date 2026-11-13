@@ -177,6 +177,7 @@ _REQUEST_ERRORS = {
     'Reading settings form required', 'Reading settings contain invalid or duplicate fields',
     'Translation JSON required', 'Exact translation request required', 'Exact instance control or decision form required',
     'Control form contains missing or duplicate fields', 'Decision form contains missing or duplicate fields',
+    'Control form contains missing or duplicate credentials',
     'Exact execution decision form required', 'Exact explicit instance route required', 'Unknown instance control',
     'Select an explicit configuration action', 'Select an explicit TOML action',
     'Exact reading settings route required', 'Exact live workbench route required', 'Exact workspace page required',

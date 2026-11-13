@@ -234,7 +234,7 @@ def _load_selected_base_facts(root, selected, *, base, policy, head, bind_inputs
         if owner is None:
             owner=originals.dependency(source,step)
         facts=handoff_state.sealed_facts(root,step,base=base,owner=owner,known=known)
-        sources[step]=handoff_state.source_facts_from_sealed(root,facts,resolve_choices=False)
+        sources[step]=handoff_state.source_facts_from_sealed(root,facts,head=head,resolve_choices=False)
         delivery_review.validate_parent(job,sources)
     if policy.get('execution_authority_policy') is not None:
         for reference in job['direct_refs']:

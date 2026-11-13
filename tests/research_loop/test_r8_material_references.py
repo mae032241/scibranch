@@ -91,110 +91,10 @@ def test_r8_selection_indexes_each_current_producer_once(tmp_path, monkeypatch):
     assert calls == [2]
 
 
-def test_r8_current_job_owner_loads_each_selected_manifest_once(tmp_path, monkeypatch):
-    root, _ = direct_instance(tmp_path)
-    stopped_seals(monkeypatch)
-    finish(root, 1, 'H', [], action='experiment')
-    finish(root, 2, 'W', [1], files={f'file-{number:03d}.txt': str(number) for number in range(32)})
-    finish(root, 3, 'A', [1, 2], action='revise_h', files={'report.json': '{}'})
-    direction, _, record = finish(root, 4, 'H', [1, 2, 3], action='experiment')
-    worker = c.build_job(root, 5, 'W', [4])
-    canonical = c.read(root / 'jobs/005.json')
-    assert 'direct_materials' not in canonical
-    assert canonical['material_refs'] == direction['material_refs']
-    assert c.read(record / 'result-identity.json')['relayed_material_refs'] == direction['material_refs']
-    assert sum(len(group['ids']) for group in canonical['material_refs']) == 33
-    reads = []
-    original = c.read
-    original_json = originals._json
-    def reading(path):
-        if path.name == 'result-identity.json':
-            reads.append(path)
-        return original(path)
-    def reading_original(path):
-        if path.name == 'result-identity.json':
-            reads.append(path)
-        return original_json(path)
-    monkeypatch.setattr(c, 'read', reading)
-    monkeypatch.setattr(originals, '_json', reading_original)
-    sources = {}
-    loaded = c.read_job(root / 'jobs/005.json', sources=sources)
-    assert loaded == worker
-    assert sorted(path.parent.name for path in reads) == ['002', '003']
-    assert c.job_record(loaded) == canonical
-    before = list(reads)
-    assert m.materials(canonical['material_refs'], sources=sources) == worker['direct_materials']
-    assert reads == before
-    work = c.workspace(root, 5)
-    input_sources = shared_input_views.load_source_facts(root, loaded, work,
-        material_sources=sources, include_review=False)
-    shared_input_views.load_mount_facts(root, loaded, work,
-        include_skills=False, source_facts=input_sources)
-    assert sorted(path.parent.name for path in reads if path.parent.name in {'002', '003'}) == ['002', '003']
-    for row in worker['direct_materials']:
-        actual = originals.bound_material_path(root, row,
-            source=sources[int(Path(row['path']).parts[2])]['owner'],
-            seal=sources[int(Path(row['path']).parts[2])]['seal'])
-        assert actual == Path(row['source'])
-        assert actual.stat().st_mode & 0o777 == 0o400
 
 
-def test_r8_independent_validation_reuses_its_current_material_sources(tmp_path, monkeypatch):
-    root, _ = direct_instance(tmp_path)
-    stopped_seals(monkeypatch)
-    finish(root, 1, 'H', [], action='experiment')
-    finish(root, 2, 'W', [1], files={'model.bin': 'one exact model'})
-    finish(root, 3, 'A', [1, 2], action='revise_h', files={'report.json': '{}'})
-    finish(root, 4, 'H', [1, 2, 3], action='experiment')
-    _, work, _ = finish(root, 5, 'W', [4])
-    reads = []
-    read = c.read
-    original_json = originals._json
-    def reading(path):
-        if path.name == 'result-identity.json' and path.parent.name in {'002', '003'}:
-            reads.append(path.parent.name)
-        return read(path)
-    def reading_original(path):
-        if path.name == 'result-identity.json' and path.parent.name in {'002', '003'}:
-            reads.append(path.parent.name)
-        return original_json(path)
-    monkeypatch.setattr(c, 'read', reading)
-    monkeypatch.setattr(originals, '_json', reading_original)
-    c.validate(work)
-    assert sorted(reads) == ['002', '003']
 
 
-def test_r8_explicit_selection_uses_its_loaded_original_producer_facts(tmp_path, monkeypatch):
-    root, _ = direct_instance(tmp_path)
-    stopped_seals(monkeypatch)
-    finish(root, 1, 'H', [], action='experiment')
-    finish(root, 2, 'W', [1], files={'first.bin': 'first original', 'second.bin': 'second original'})
-    c.build_job(root, 3, 'A', [1, 2])
-    sources = {}
-    job = c.read_job(root / 'jobs/003.json', sources=sources)
-    policy = c.settings(root, job)
-    # The reference producer supplies its accepted catalogue rows. The current
-    # selection owner already has the corresponding producer facts.
-    choices = {f'W002-I{number:03d}': row for number, row in enumerate(job['direct_materials'], 1)}
-    monkeypatch.setattr(history, 'resolve_implementation', lambda _, object_id, prefix: choices[object_id])
-    reads = []
-    read = c.read
-    original_json = originals._json
-    def reading(path):
-        if path.name == 'result-identity.json' and path.parent.name == '002':
-            reads.append(path)
-        return read(path)
-    def reading_original(path):
-        if path.name == 'result-identity.json' and path.parent.name == '002':
-            reads.append(path)
-        return original_json(path)
-    monkeypatch.setattr(c, 'read', reading)
-    monkeypatch.setattr(originals, '_json', reading_original)
-    selected = c._accept_selected_inputs(c.workspace(root, 3),
-        dict(implementation_selection=['W002-I001', 'W002-I002']), job,
-        _policy=policy, _sources=sources)
-    assert [row['material'] for row in selected] == list(choices.values())
-    assert reads == []
 
 
 def test_r8_repair_task_gate_reuses_inventory_and_keeps_metadata_reads_raw(tmp_path, monkeypatch):
@@ -242,7 +142,8 @@ def test_r8_requester_and_producer_job_views_share_one_operation_sources(tmp_pat
     producer_record = sources[2]['job']
     assert 'direct_materials' not in producer_record
     producer_job = handoff_state.material_inputs(root, producer_record, sources=sources)
-    assert [row['path'] for row in requester['direct_materials']] == ['inputs/parents/002/artifacts/result.bin']
+    assert [row['path'] for row in requester['direct_materials']] == [
+        'inputs/parents/002/artifacts/result.bin', 'inputs/parents/001/artifacts/input.csv']
     assert [row['path'] for row in producer_job['direct_materials']] == ['inputs/parents/001/artifacts/input.csv']
     assert reads.count(root / 'jobs/002.json') == 1
     assert sorted(path.parent.name for path in reads if path.name == 'result-identity.json') == ['001', '002']

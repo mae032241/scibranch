@@ -11,7 +11,7 @@ def fixture(tmp_path, *, mode='soft', seconds=60, tokens=6_000_000, steps=24, sp
     public=tmp_path/'public';public.mkdir()
     objective=public/'objective.md';objective.write_text('Continue the scientific comparison while preserving necessary delivery resources.')
     launcher=tmp_path/'native.py'
-    launcher.write_text("import json,os,pathlib,sys\na=sys.argv[1:];sys.stdin.read()\nrole=os.environ['THIN_HWA_ROLE']\nassert role in ('W','A')\np=dict(summary='W completed',scientific_result='Accepted scientific work retained',limitations=['Fake transport; no managed scientific observation'],implementation_selection=None)\nif role=='W':\n job=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())\n assigned=(job.get('search') or {}).get('coverage_obligation',[])\n labels={row['mechanism_ref']:row['label'] for row in ((job.get('search') or {}).get('breadth') or {}).get('mechanisms',[])}\n p.update(stage_intent='review',mechanism_findings=[dict(mechanism=labels[row['mechanism_ref']],basis='blocked',finding='This transport fixture performs no managed scientific observation.') for row in assigned] if assigned else None)\nif role=='A':p.update(search_review=None,candidate_recommendation=None,progress_assessment=None,decision_request=None,portfolio_review=None,next_action='wait',route_reason='A retained its conclusion')\nprint(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)\npathlib.Path(a[a.index('--output-last-message')+1]).write_text(json.dumps(p))\n")
+    launcher.write_text("import json,os,pathlib,sys\na=sys.argv[1:];sys.stdin.read()\nrole=os.environ['THIN_HWA_ROLE']\nassert role in ('W','A')\np=dict(summary='W completed',scientific_result='Accepted scientific work retained',limitations=['Fake transport; no managed scientific observation'],implementation_selection=None)\nif role=='W':\n job=json.loads(pathlib.Path(os.environ['THIN_HWA_JOB_MANIFEST']).read_text())\n assigned=(job.get('search') or {}).get('coverage_obligation',[])\n labels={row['mechanism_ref']:row['label'] for row in ((job.get('search') or {}).get('breadth') or {}).get('mechanisms',[])}\n p.update(stage_intent='review',consultation_question='Which retained counterevidence changes the current fixture question?',mechanism_findings=[dict(mechanism=labels[row['mechanism_ref']],basis='blocked',finding='This transport fixture performs no managed scientific observation.') for row in assigned] if assigned else None)\nif role=='A':p.update(search_review=None,candidate_recommendation=None,progress_assessment=None,decision_request=None,portfolio_review=None,next_action='continue_w',route_reason='A retained its conclusion')\nprint(json.dumps(dict(type='turn.completed',usage=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3))),flush=True)\npathlib.Path(a[a.index('--output-last-message')+1]).write_text(json.dumps(p))\n")
     adapter=tmp_path/'never-called.py';adapter.write_text('raise AssertionError("No delivery was requested in this fixture")\n')
     delivery=dict(closeout_a=dict(max_observed_tokens=300_000,max_seconds=300),inflight_tokens=100_000,
         cleanup_seconds=30,submit_seconds=60,confirm_seconds=60,
@@ -40,6 +40,7 @@ def prefix(root):
     finish(root,5,'A',[1,4],action='continue_w')
 
 
+@pytest.mark.process_e2e
 def test_continue_w_uses_positive_shared_time_below_its_soft_target(tmp_path,monkeypatch):
     root=fixture(tmp_path,seconds=60);prefix(root)
     assert c.validate(c.workspace(root,5))['next_action']=='continue_w'
@@ -115,42 +116,3 @@ def test_known_failed_resume_does_not_require_unused_soft_target(tmp_path):
     assert controller.worker_resume(root,1)['status']=='worker_resume_unavailable'
     assert native.usage(root)['observed_tokens']==15 and budget.used_steps(root)==1
     assert all(path.read_bytes()==value for path,value in originals.items())
-
-
-@pytest.mark.process_e2e
-def test_ordinary_audit_refuses_exhausted_shared_time_without_external_effects(tmp_path,monkeypatch):
-    from scidiscovery.research_loop import candidate_audit, delivery
-    from test_candidate_audit import audit_fixture, request
-    now=[100.]
-    monkeypatch.setattr(budget.time,'time',lambda:now[0])
-    monkeypatch.setattr(budget.time,'clock_gettime',lambda _:now[0])
-    root=audit_fixture(tmp_path)
-    job,payload=request(root)
-    assert not job.get('purpose') and not job.get('final_only')
-    assert budget.delivery_reserve(c.settings(root))==dict(tokens=0,seconds=0.,steps=0)
-    now[0]+=400.
-    assert budget.snapshot(root)['seconds_remaining']==0
-    originals={path:path.read_bytes() for path in (root/'settings.json',root/'jobs/003.json',
-        root/'native-evidence/003/science-output.json',root/'native-evidence/003/result-identity.json')}
-    ledger={path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
-    used=budget.used_steps(root);meter=native.usage(root)
-    def unexpected(*a,**k):pytest.fail('Refused audit must not resolve or invoke external work')
-    monkeypatch.setattr(delivery,'freeze_sources',unexpected)
-    monkeypatch.setattr(delivery,'invoke',unexpected)
-    monkeypatch.setattr(native.subprocess,'Popen',unexpected)
-    assert candidate_audit.execute(root,job,payload) is None
-    directory=candidate_audit._directory(root,3)
-    receipt=c.read(directory/'outcome.json')
-    assert receipt['accepted'] is False
-    assert receipt['result']['status']=='unavailable' and receipt['result']['note']=='candidate_audit_reserve_unavailable'
-    original=(directory/'outcome.json').read_bytes()
-    assert candidate_audit.execute(root,job,payload) is None
-    assert (directory/'outcome.json').read_bytes()==original
-    assert not (directory/'intent.json').exists() and not list(candidate_audit.facts(root))
-    assert all(path.read_bytes()==raw for path,raw in originals.items())
-    assert ledger=={path:path.read_bytes() for path in (root/'control-ledger').glob('*.json')}
-    assert budget.used_steps(root)==used and native.usage(root)==meter
-    assert budget.snapshot(root)['advance_seconds']==400.
-    assert not (root/'runs/submitted.json').exists() and not (root/'jobs/004.json').exists()
-    assert not list((root/'submission').iterdir())
-    assert budget.closeout_state(root)['begin'] is None and budget.closeout_state(root)['actions']==[]

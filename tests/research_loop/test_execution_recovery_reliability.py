@@ -347,14 +347,14 @@ def _terminal_recovery_subject(row,monkeypatch,*,existing):
     config=row['config'];call=row['accepted']['call_id'];root=row['root'];step=row['job']['step']
     observed=e.record_observation(config,row['adapter'],call)
     tree=code_versions.materialize(root,step=step,call_id=call,code_version=row['accepted']['code_version'])
-    accepted=dict(snapshot=(row['directory']/'accepted.json').relative_to(root).as_posix())
-    old=dict(call_id=call,scope=row['accepted']['scope'],status='unknown',accepted=accepted)
-    current=dict(old,status=observed['status'])
+    # Use the current producer over the fixture's real accepted call controls.
+    # Only the older scientific source seal below is synthetic component data.
+    current=c.accept_recovery_call(root,row['job'],call)
+    old=dict(call_id=call,scope=row['accepted']['scope'],status='unknown',accepted=current['accepted'])
     old_path=root/'sealed-unknown-observation.json';c.write(old_path,dict(managed_calls=[old]))
     seal=dict(observations=dict(path=old_path.relative_to(root).as_posix()))
     seal_ref=dict(path='original-seal.json')
     monkeypatch.setattr(history,'_source',lambda *args:(row['job'],None,seal,seal_ref))
-    monkeypatch.setattr(history,'managed_calls',lambda *args,**options:[current])
     monkeypatch.setattr(execution_recovery,'validate',lambda *args,**options:[])
     monkeypatch.setattr(e,'load',lambda *args,**options:pytest.fail('Terminal recovery loaded an execution provider'))
     recovery_path=root/execution_recovery.DIRECTORY/f'{step:03d}'/(call+'.json')
@@ -362,44 +362,25 @@ def _terminal_recovery_subject(row,monkeypatch,*,existing):
     return observed,tree,recovery_path
 
 
-@pytest.mark.parametrize('existing',[False,True])
-def test_original_terminal_recovery_retries_exact_export_cleanup(terminal_code,fixed_code,monkeypatch,existing):
-    row=terminal_code();observed,tree,path=_terminal_recovery_subject(row,monkeypatch,existing=existing)
-    originals={name:(row['directory']/name).read_bytes() for name in
-        ('accepted.json','completed.json','submission.json','terminal.json','execution-observation.json')}
-    row['output'].unlink()
-    fixed_code['cleaned'].clear()
-    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
-    assert not tree.exists() and fixed_code['cleaned']==[row['key']]
-    saved=path.read_bytes()
-    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
-    assert path.read_bytes()==saved
-    assert all((row['directory']/name).read_bytes()==raw for name,raw in originals.items())
+@pytest.fixture
+def terminal_create_publication(monkeypatch):
+    """Cleanup component only; spy on unrelated budget/index publication.
 
-
-def test_original_terminal_recovery_cleanup_failure_keeps_fact_and_retries(terminal_code,fixed_code,monkeypatch):
-    from scidiscovery.research_loop import code_versions
-    row=terminal_code();_,tree,path=_terminal_recovery_subject(row,monkeypatch,existing=True)
-    before=path.read_bytes();cleanup=code_versions.cleanup_export
-    def denied(*args,**options):raise OSError('fixture cleanup denied')
-    monkeypatch.setattr(code_versions,'cleanup_export',denied)
-    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
-    assert tree.exists() and path.read_bytes()==before
-    diagnostic,=(Path(row['config']['record_dir']).parent/'execution-diagnostics').iterdir()
-    note=c.read(diagnostic)['note']
-    assert str(tree) in note and row['accepted']['call_id'] in note and 'fixture cleanup denied' in note
-    monkeypatch.setattr(code_versions,'cleanup_export',cleanup)
-    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
-    assert not tree.exists() and path.read_bytes()==before
-
-
-def test_original_terminal_recovery_retains_export_without_replay_stop(terminal_code,fixed_code,monkeypatch):
-    from scidiscovery.research_loop import replay_check
-    row=terminal_code(replay=True);_,tree,_=_terminal_recovery_subject(row,monkeypatch,existing=True)
-    outcome=row['directory']/replay_check.OUTCOME;value=c.read(outcome)
-    value['result']['cleanup_confirmed']=False;c.write(outcome,value);fixed_code['cleaned'].clear()
-    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
-    assert tree.exists() and fixed_code['cleaned']==[]
+    The live owner and call controls are real fixture originals. Its sealed
+    scientific source is synthetic; this does not test a complete lifecycle or
+    grant a scientific verdict, launch permission, new call or restored budget.
+    """
+    published=[]
+    def publish(root,state,step,call_id,ref,value):
+        assert state.current_job['step']==step
+        assert value['source_step']==step and value['row']['call_id']==call_id
+        assert value['row']['status'] in {'known_success','known_failed'}
+        assert value['old_row']['status']=='unknown'
+        assert value['old_row']['accepted']==value['row']['accepted']
+        assert (Path(root)/ref['path']).read_bytes()
+        published.append((ref,dict(value)))
+    monkeypatch.setattr(execution_recovery,'_publish_fact',publish)
+    return published
 
 
 def test_original_unknown_recovery_retains_export_without_repeating_submission(terminal_code,fixed_code,monkeypatch):
@@ -450,3 +431,44 @@ def test_recorded_resume_only_cleans_saved_original_terminal_export(terminal_cod
     assert all(path.read_bytes()==raw for path,raw in originals.items())
     assert not operations.exists()
     if ledger.exists():assert set(ledger.iterdir())=={path for path in originals if path.parent==ledger}
+
+
+@pytest.mark.parametrize('existing',[False,True])
+def test_original_terminal_recovery_retries_exact_export_cleanup(terminal_code,fixed_code,monkeypatch,terminal_create_publication,existing):
+    row=terminal_code();observed,tree,path=_terminal_recovery_subject(row,monkeypatch,existing=existing)
+    originals={name:(row['directory']/name).read_bytes() for name in
+        ('accepted.json','completed.json','submission.json','terminal.json','execution-observation.json')}
+    fixed_code['cleaned'].clear()
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert not tree.exists() and fixed_code['cleaned']==[row['key']]
+    saved=path.read_bytes()
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert path.read_bytes()==saved
+    assert all((row['directory']/name).read_bytes()==raw for name,raw in originals.items())
+    assert terminal_create_publication
+    assert all(value['row']['call_id']==row['accepted']['call_id'] for _,value in terminal_create_publication)
+
+
+def test_original_terminal_recovery_cleanup_failure_keeps_fact_and_retries(terminal_code,fixed_code,monkeypatch,terminal_create_publication):
+    from scidiscovery.research_loop import code_versions
+    row=terminal_code();_,tree,path=_terminal_recovery_subject(row,monkeypatch,existing=True)
+    before=path.read_bytes();cleanup=code_versions.cleanup_export
+    def denied(*args,**options):raise OSError('fixture cleanup denied')
+    monkeypatch.setattr(code_versions,'cleanup_export',denied)
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert tree.exists() and path.read_bytes()==before
+    diagnostic,=(Path(row['config']['record_dir']).parent/'execution-diagnostics').iterdir()
+    note=c.read(diagnostic)['note']
+    assert str(tree) in note and row['accepted']['call_id'] in note and 'fixture cleanup denied' in note
+    monkeypatch.setattr(code_versions,'cleanup_export',cleanup)
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert not tree.exists() and path.read_bytes()==before
+
+
+def test_original_terminal_recovery_retains_export_without_replay_stop(terminal_code,fixed_code,monkeypatch,terminal_create_publication):
+    from scidiscovery.research_loop import replay_check
+    row=terminal_code(replay=True);_,tree,_=_terminal_recovery_subject(row,monkeypatch,existing=True)
+    outcome=row['directory']/replay_check.OUTCOME;value=c.read(outcome)
+    value['result']['cleanup_confirmed']=False;c.write(outcome,value);fixed_code['cleaned'].clear()
+    assert execution_recovery.create(row['root'],row['job']['step'])['status']=='execution_recovered'
+    assert tree.exists() and fixed_code['cleaned']==[]

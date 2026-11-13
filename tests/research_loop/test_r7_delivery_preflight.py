@@ -207,7 +207,7 @@ def accepted_scene(tmp_path, monkeypatch, spec):
         decision=decision, binding=bound, action_kind='submit', advance_seconds=0, max_seconds=10)
     actions = [dict(intent=intent, outcome=None)]
     monkeypatch.setattr(protocol, 'require_current', lambda root: None)
-    monkeypatch.setattr(budget, 'closeout_state', lambda root: dict(actions=actions))
+    monkeypatch.setattr(budget, 'closeout_state', lambda root: dict(begin=None, actions=actions))
     monkeypatch.setattr(budget, 'snapshot', lambda root: dict(advance_seconds=0, seconds_remaining=10))
     monkeypatch.setattr(c, 'workspace', lambda root, step: record)
     monkeypatch.setattr(c, 'host_record', lambda work: record)

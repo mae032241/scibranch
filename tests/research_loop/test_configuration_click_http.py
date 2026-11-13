@@ -49,9 +49,10 @@ def test_current_configuration_click_and_save_preserve_null_plugin_limits(tmp_pa
         status, page, _ = request(connection, 'GET', target, cookie=cookie)
         assert status == 200 and '当前研究配置'.encode() in page
         fields = controls(page, action='configuration-update')
-        nulls = [name[:-5] for name, value in fields.items() if name.endswith('.kind') and value == 'null']
-        assert {fields[prefix+'.key'] for prefix in nulls} == set(limits)
-        assert all(fields[prefix+'.value'] == '' for prefix in nulls)
+        fixed = json.loads(fields['advanced_fixed'])
+        retained = {path[-1]: value for path, value in fixed
+            if path[:-1] == ['executor', 'config', 'configuration']}
+        assert retained == limits
         fields['cfg.agent.model'] = 'next-node-model'
         status, _, headers = request(connection, 'POST', '/control/configuration-update', cookie=cookie,
             fields=fields, origin='http://' + url.netloc)

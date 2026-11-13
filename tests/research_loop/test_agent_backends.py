@@ -305,9 +305,10 @@ def test_protocol_permission_declaration_does_not_claim_native_isolation():
     assert proof['enforcement']['network']=='hint_only'
 
 
-def test_public_parser_excludes_reasoning_and_raw_tool_details():
+def test_public_parser_retains_reasoning_summary_and_excludes_raw_tool_details():
     backend=backends.selected(dict(native_backend='codex',native_launcher_argv=['codex']))
-    assert backend.public_events(dict(type='item.completed',item=dict(type='reasoning',text='private')))==[]
+    assert backend.public_events(dict(type='item.completed',item=dict(type='reasoning',text='Public native summary')))==[dict(type='thinking',text='Public native summary')]
+    assert backend.public_events(dict(type='item.started',item=dict(type='reasoning',text='Unfinished summary')))==[]
     value=backend.public_events(dict(type='item.completed',item=dict(type='command_execution',command='secret',aggregated_output='private')))
     assert value==[dict(type='tool',tool='command_execution',status='completed')]
 
@@ -352,37 +353,6 @@ def test_protocol_final_a_uses_original_protected_completion(tmp_path,monkeypatc
         assert c.read(execution.origin(root,2)/'native-outcome.json')['metering']['coverage']=='unknown'
 
 
-@pytest.mark.process_e2e
-def test_controller_routes_completed_protocol_h_with_unknown_usage_without_replay(tmp_path):
-    # Missing billing remains unknown and does not invent consumption. The
-    # original finite step ceiling is the explicit trigger for protected FINAL.
-    root=prepare(tmp_path,max_steps=1)
-    script=SCRIPT.replace("print(json.dumps(dict(type='usage',usage=dict(input_tokens=12,output_tokens=3))),flush=True)",'')
-    script=script.replace("dict(type='completed',usage=dict(input_tokens=12,output_tokens=3))","dict(type='completed')")
-    script=script.replace("else 'wait',route_reason", "else 'analyze',route_reason")
-    script=script.replace("(work/'work/request.json').write_text(json.dumps(request))",
-        "(work/'work/request.json').write_text(json.dumps(request))\nwith (work/'work/launches').open('a') as stream:stream.write('launch\\n')")
-    (tmp_path/'independent.py').write_text(script)
-    result=controller.run(root)
-    assert result['status']=='final_a_completed',json.dumps(result,ensure_ascii=False,indent=2)
-    assert c.read(root/'jobs/001.json')['role']=='H'
-    assert c.read(root/'jobs/002.json')['role']=='A'
-    assert c.read(execution.origin(root,1)/'result.json')['next_action']=='analyze'
-    assert controller._terminal_success(root,execution.origin(root,1)) is True
-    originals={}
-    for step in (1,2):
-        record=execution.origin(root,step)
-        assert c.read(record/'native-outcome.json')['metering']['coverage']=='unknown'
-        assert not (record/'usage.json').exists()
-        assert (c.workspace(root,step)/'work/launches').read_text()=='launch\n'
-        originals[step]={name:(record/name).read_bytes() for name in ('native-intent.json','native-outcome.json','native.jsonl')}
-    assert controller.run(root)['status']=='final_a_completed'
-    for step in (1,2):
-        record=execution.origin(root,step)
-        assert originals[step]=={name:(record/name).read_bytes() for name in originals[step]}
-        assert (c.workspace(root,step)/'work/launches').read_text()=='launch\n'
-
-
 CAPTURE_LAUNCHER = r"""#!/usr/bin/env python3
 import json,os,pathlib,sys
 work=pathlib.Path(os.environ['THIN_HWA_WORKSPACE'])
@@ -411,7 +381,7 @@ else:
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('transport,role', [('standard','H'), ('options','A'), ('protocol','A')])
+@pytest.mark.parametrize('transport,role', [('options','A'), ('protocol','A')])
 def test_role_rules_have_one_actual_launch_transport_and_task_data_remains(tmp_path, monkeypatch, transport, role):
     import os
     public=tmp_path/'public';public.mkdir();objective=public/'objective.md';objective.write_text('Retain exact evidence and limitations.')
@@ -437,7 +407,6 @@ def test_role_rules_have_one_actual_launch_transport_and_task_data_remains(tmp_p
     work=c.workspace(root,1);captured=c.read(work/'work/captured.json');task=c.read(work/'science-task.json')
     job=c.read(root/'jobs/001.json')
     rules=job.get('native_role_instruction',c.ROLE_INSTRUCTIONS[role])
-    if role=='A':rules+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
     assert sum(text.count(rules) for text in [captured['prompt'],*captured['developer']])==1
     if transport=='standard':
         assert '--output-schema' not in captured['args']

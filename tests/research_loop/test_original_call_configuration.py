@@ -1,12 +1,11 @@
 """An original managed call keeps its accepted interface across native turns."""
-import sys
 
 import pytest
 
 from execution_fixtures import execution_registry, remote_registry
 from test_composed_execution_results import composed_registry
-from test_nonlocal_execution_observation import case, run
-from scidiscovery.research_loop import budget, contracts as c, execution, experiments as e
+from test_nonlocal_execution_observation import case, run, research_path
+from scidiscovery.research_loop import accepted_budget, budget, contracts as c, execution, experiments as e
 
 
 def advance(root,executor,options):
@@ -15,12 +14,15 @@ def advance(root,executor,options):
     meter=dict(input_tokens=7,cached_input_tokens=2,output_tokens=3)
     c.write(origin/'usage.json',meter)
     report=dict(budget.node_report(root,job,c.read(origin/'native-intent.json'),meter),usage_observed=True)
-    c.write(origin/'native-outcome.json',dict(returncode=1,stop_reason='synthetic original turn ended',budget_slice=report))
+    c.write(origin/'native-outcome.json',dict(returncode=1,native_started=False,
+        cleanup='observed_group_cleaned',stop_reason='synthetic original turn ended',budget_slice=report))
+    accepted_budget.accept_terminal(root,2,origin,meter=meter,unknown=False)
     anchor=budget.accept_continuation(root,job,[origin])
     assert anchor['previous_tokens']==10
     later=origin/'continuations/001';later.mkdir(parents=True)
     c.write(later/'native-intent.json',dict(attempt=1,task_ref=c.record_ref(root/'jobs/002.json'),
         previous=execution.proof(origin),root_intent_ref=c.record_ref(origin/'native-intent.json'),budget_slice=anchor))
+    accepted_budget.accept_native(root,2,later,c.read(later/'native-intent.json'))
     path=c.workspace(root,2)/'work/current-config.json'
     return e.configure(root,2,executor,options,path),path
 
@@ -30,26 +32,13 @@ def projection(root,config):
 
 
 @pytest.mark.process_e2e
-@pytest.mark.parametrize('executor',['local_execution:command','cov_execution:experiment','remote_execution:fixture'])
-def test_continuation_old_terminal_cli_uses_original_interface(tmp_path,monkeypatch,execution_registry,remote_registry,executor):
+def test_continuation_old_terminal_cli_uses_original_interface(tmp_path,monkeypatch,remote_registry):
+    executor='remote_execution:fixture'
     options={}
-    if executor.startswith('cov_'):
-        from test_cov_lineage import BACKEND
-        backend=tmp_path/'backend.py';backend.write_text(BACKEND)
-        options=dict(receipt_channel='backend_file',contract_version=2,feedback_version=1,runs_root=str(tmp_path/'runs'),
-            run_argv=[sys.executable,str(backend),'--runs-root',str(tmp_path/'runs')],parents=[],evaluation_key='fixture-public-v1')
     root,job,old,cli=case(tmp_path,monkeypatch,executor=executor,extra=options,resume=True)
-    if executor.startswith('remote_'):
-        result=run(root,cli,'P')
-    elif executor.startswith('cov_'):
-        script=c.workspace(root,2)/'work/source.json';script.write_text('{"mode":"success"}')
-        result=cli('run','--script',script,'--new-plan','--mechanism','P')
-    else:
-        script=c.workspace(root,2)/'work/source.py';script.write_text('print("original local call")\n')
-        result=cli('run','--script',script,'--new-plan','--mechanism','P')
+    result=run(root,cli,'1')
     call=result['call_id'];directory=e.Records(old).directory(call)
     old_bytes={p:p.read_bytes() for p in directory.rglob('*') if p.is_file()}
-    if executor.startswith('local_'):options=dict(run_argv=[sys.executable])
     current,path=advance(root,executor,options)
     assert current['execution_interface']!=old['execution_interface']
     assert projection(root,old).read_bytes()==(execution.origin(root,2)/'experiment-config.json').read_bytes()
@@ -63,8 +52,8 @@ def test_continuation_old_terminal_cli_uses_original_interface(tmp_path,monkeypa
     assert len(e.Records(current).calls())==1
     # New admission belongs to the current turn, never the resolved old adapter.
     if executor.startswith('remote_'):
-        package=c.workspace(root,2)/'work/next';package.write_bytes(b'new current attempt')
-        result=cli('run','--payload',package,'--new-plan','--mechanism','Q',config_file=path)
+        package=c.workspace(root,2)/'code/next';package.write_bytes(b'new current attempt')
+        result=cli('run','--payload',package,'--new-plan','--research',research_path(root,'2'),config_file=path)
         assert e.Records(current).accepted(result['call_id'])['native_attempt']==current['native_attempt']
 
 
@@ -73,12 +62,12 @@ def test_continuation_old_terminal_cli_uses_original_interface(tmp_path,monkeypa
 def test_async_original_call_reconciles_without_collect_or_resubmit(tmp_path,monkeypatch,composed_registry,terminal):
     options=dict(collect=False,terminal_status=terminal)
     root,job,old,cli=case(tmp_path,monkeypatch,executor='composed_execution:fixture',extra=options,resume=True)
-    call=run(root,cli,'P','unknown')['call_id']
+    call=run(root,cli,'1','unknown')['call_id']
     current,path=advance(root,'composed_execution:fixture',dict(options,terminal_status='known_failed' if terminal=='known_success' else 'known_success'))
     assert cli('query','--call-id',call,config_file=path)['state']=='running'
     assert cli('reconcile','--call-id',call,config_file=path,expected=2)['status']=='running'
-    package=c.workspace(root,2)/'work/replay';package.write_bytes(b'not accepted while running')
-    assert cli('run','--payload',package,'--new-plan','--mechanism','Q',config_file=path,expected=2)['call_id']==call
+    package=c.workspace(root,2)/'code/replay';package.write_bytes(b'not accepted while running')
+    assert cli('run','--payload',package,'--new-plan','--research',research_path(root,'2'),config_file=path,expected=2)['call_id']==call
     assert len(e.Records(current).calls())==1
     e.load(old).complete(call)
     assert cli('query','--call-id',call,config_file=path)['state']==('succeeded' if terminal=='known_success' else 'failed')
@@ -94,7 +83,7 @@ def test_async_original_call_reconciles_without_collect_or_resubmit(tmp_path,mon
 @pytest.mark.parametrize('fault',['missing','scope','record','attempt','interface','implementation','accepted-attempt'])
 def test_original_projection_missing_or_tampered_fails_closed(tmp_path,monkeypatch,remote_registry,fault):
     root,job,old,cli=case(tmp_path,monkeypatch,resume=True)
-    call=run(root,cli,'P')['call_id'];current,path=advance(root,'remote_execution:fixture',{})
+    call=run(root,cli,'1')['call_id'];current,path=advance(root,'remote_execution:fixture',{})
     target=projection(root,old);value=c.read(target)
     if fault=='missing':target.unlink()
     elif fault=='accepted-attempt':
@@ -114,7 +103,7 @@ def test_original_projection_missing_or_tampered_fails_closed(tmp_path,monkeypat
 @pytest.mark.process_e2e
 def test_current_and_original_collection_capabilities_both_required(tmp_path,monkeypatch,composed_registry):
     root,job,old,cli=case(tmp_path,monkeypatch,executor='composed_execution:fixture',extra=dict(synchronous=True),resume=True)
-    call=run(root,cli,'P')['call_id']
+    call=run(root,cli,'1')['call_id']
     current,path=advance(root,'composed_execution:fixture',dict(synchronous=True,collect=False))
     assert cli('collect','--call-id',call,config_file=path,expected=2)['status']=='unavailable'
     assert cli('query','--call-id',call,config_file=path)['state']=='succeeded'

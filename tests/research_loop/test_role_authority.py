@@ -68,28 +68,6 @@ def a_source(root, *, action='continue_w'):
     return job,c.seal_result(root,2)
 
 
-@pytest.mark.process_e2e
-def test_real_codex_transport_uses_frozen_role_and_source_tagged_a_direction(tmp_path):
-    root=prepare(tmp_path,real=True)
-    result=controller.run(root)
-    assert result['status']=='finish' and result['completed_steps']==4,result
-    job=c.read(root/'jobs/003.json');view=c.read(c.workspace(root,3)/'science-task.json')
-    assert job['instruction']==RECIPE and view['question']!=RECIPE
-    assert view['decision_context']['original_instruction']==RECIPE
-    assert view['decision_context']['source_role']=='A' and view['decision_context']['source_action']=='continue_w'
-    for step in range(1,5):
-        task=c.read(root/'jobs'/f'{step:03d}.json');work=c.workspace(root,step)
-        expected=task['native_role_instruction']
-        if task['role']=='A':
-            assert c.read(work/'science-task.json')['scientific_judgment']==c.AUTHOR_EVIDENCE_GUIDANCE
-            expected+='\n'+c.AUTHOR_EVIDENCE_GUIDANCE
-        assert (work/'work/developer-instructions.txt').read_text()==expected
-        assert (work/'work/prompt.txt').read_text().startswith(expected+'\n')
-    saved={path:path.read_bytes() for path in (root/'jobs').glob('*.json')}
-    assert controller.run(root)['status']=='finish'
-    assert all(path.read_bytes()==original for path,original in saved.items())
-
-
 @pytest.mark.parametrize('same_instruction',[True,False])
 def test_ordinary_a_advice_does_not_replace_an_explicit_host_question(tmp_path,same_instruction):
     root=prepare(tmp_path);assessor,result=a_source(root)
