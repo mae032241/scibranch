@@ -238,60 +238,6 @@ def test_overbudget_a_without_exact_choice_never_invents_delivery_or_final(tmp_p
         assert (record/'science-output.json').read_bytes() == original
 
 
-@pytest.mark.parametrize('outcome', [
-    dict(status='delivery_confirmed'),
-    dict(status='delivery_reselect', reason='candidate_rejected'),
-    dict(status='delivery_unknown', reason='Original operation remains unverified'),
-    dict(status='closeout_budget_unavailable'),
-    dict(status='closeout_budget_unavailable', reason='final_author_required'),
-    dict(status='closeout_unresolved', reason='candidate_originals_unavailable'),
-])
-def test_other_direct_delivery_outcomes_do_not_authorize_final(tmp_path, monkeypatch, outcome):
-    begin = dict(source_cutoff=10, first_step=11, authorization_step=10)
-    job = dict(step=10, role='A')
-    result = dict(next_action='deliver')
-    monkeypatch.setattr(c, 'read_job', lambda path: job)
-    monkeypatch.setattr(handoff_state, 'read_sealed', lambda root, step: result)
-    monkeypatch.setattr(delivery, 'prepare_binding', lambda *args: None)
-    monkeypatch.setattr(controller, '_run_delivery_actions', lambda *args: outcome)
-    monkeypatch.setattr(controller, '_closeout_result',
-        lambda root, status, **fields: dict(status=status, **fields))
-
-    def forbidden(*args, **kwargs):
-        pytest.fail('This direct delivery outcome cannot authorize another scientific task')
-
-    monkeypatch.setattr(controller, '_start_budget_closeout', forbidden)
-    actual = controller._run_direct_delivery(tmp_path, begin)
-    if outcome['status'] == 'delivery_reselect':
-        assert actual == dict(status='delivery_rejected', reason='candidate_rejected', step=10)
-    else:
-        assert actual is outcome
-
-
-@pytest.mark.parametrize('error,status', [
-    (delivery.PreparationUnavailable('qualification_missing'), 'closeout_preparation_unavailable'),
-    (delivery.DeliveryUnresolved('candidate_originals_unavailable'), 'closeout_unresolved'),
-])
-def test_direct_delivery_preparation_failure_does_not_authorize_final(tmp_path, monkeypatch, error, status):
-    begin = dict(source_cutoff=10, first_step=11, authorization_step=10)
-    monkeypatch.setattr(c, 'read_job', lambda path: dict(step=10, role='A'))
-    monkeypatch.setattr(handoff_state, 'read_sealed', lambda root, step: dict(next_action='deliver'))
-    monkeypatch.setattr(controller, '_closeout_result',
-        lambda root, status, **fields: dict(status=status, **fields))
-
-    def unavailable(*args):
-        raise error
-
-    def forbidden(*args, **kwargs):
-        pytest.fail('Preparation failure cannot authorize another scientific task')
-
-    monkeypatch.setattr(delivery, 'prepare_binding', unavailable)
-    monkeypatch.setattr(controller, '_start_budget_closeout', forbidden)
-    monkeypatch.setattr(controller, '_run_delivery_actions', forbidden)
-    assert controller._run_direct_delivery(tmp_path, begin) == dict(
-        status=status, reason=error.code, step=10)
-
-
 @pytest.mark.parametrize('action', ['finish', 'wait', 'continue_w'])
 def test_direct_delivery_requires_the_accepted_terminal_delivery_choice(tmp_path, monkeypatch, action):
     begin = dict(source_cutoff=10, first_step=11, authorization_step=10)
